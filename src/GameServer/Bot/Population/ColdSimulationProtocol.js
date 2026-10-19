@@ -1,3 +1,5 @@
+const InventorySummary = require('./InventorySummary');
+
 const PROTOCOL_VERSION = 1;
 const MAX_BATCH = 64;
 const MAX_MESSAGE_BYTES = 256 * 1024;
@@ -401,6 +403,9 @@ function sameSafetyCheckpoint(left, right) {
 }
 
 const COMMAND_CHECKPOINT_FIELDS = CHECKPOINT_FIELDS.filter(key => key !== 'simulationLeaseUntil');
+// The steps a `review` command runs after a far bot's commit: main names them
+// on the commit ack, the worker sends the command with their inputs.
+const REVIEW_STEPS = Object.freeze(['plan', 'buff', 'training']);
 
 function commandCheckpoint(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -455,8 +460,11 @@ function commandIdentity(value) {
     if (!checkpoint || checkpoint.characterId !== value.characterId || checkpoint.phase !== 'cold'
         || (value.state !== undefined && (!value.state || typeof value.state !== 'object'
             || Array.isArray(value.state) || value.state.characterId !== value.characterId))) return null;
-    if (value.kind !== undefined && (value.kind !== 'lifecycle'
-        || !value.state || !sameCommandCheckpoint(value.state, checkpoint))) return null;
+    // A lifecycle request carries the state it was computed on; a review (the
+    // far bot's own actions after its commit) carries none, main reads its cache.
+    if (value.kind !== undefined && !(value.kind === 'lifecycle'
+        ? value.state && sameCommandCheckpoint(value.state, checkpoint)
+        : value.kind === 'review' && value.state === undefined)) return null;
     return { characterId: value.characterId, commandId: value.commandId, checkpoint };
 }
 
@@ -494,6 +502,21 @@ function leaseAckIdentity(result, type) {
     return { token, key };
 }
 
+// The state main cached for an ok commit ack that carries the commit's numbers
+// instead of the state (ColdSimulationCoordinator ackNumbers): the proposal's
+// own state with the bag main committed (ColdSimulationOwner canonicalizes it),
+// released to main, with the row's clock and revisions. The ack
+// names the bag's revision as the row does; the state calls it bagRevision
+// (Database.stateRevisions, main-only). Null when a number is not one.
+function committedState(proposed, ack) {
+    const numbers = ['revision', 'updatedAt', 'inventoryRevision', 'skillsRevision', 'hennaRevision'];
+    if (!proposed || !ack || !numbers.every(key => Number.isSafeInteger(ack[key]) && ack[key] >= 0)) return null;
+    return { ...proposed, inventory: InventorySummary.canonicalize(proposed.inventory),
+        simulation: { ownerId: 'legacy_main', revision: ack.revision, leaseId: null, leaseUntil: 0 },
+        bagRevision: ack.inventoryRevision, skillsRevision: ack.skillsRevision, hennaRevision: ack.hennaRevision,
+        updatedAt: ack.updatedAt };
+}
+
 // A refused commit is stale when its reason or, for an aborted atomic group,
 // its detail names a stale fence (e.g. party_revision_stale).
 function staleRefusal(result) {
@@ -513,12 +536,14 @@ module.exports = {
     validateToken,
     leaseRenewalToken,
     leaseAckIdentity,
+    committedState,
     staleRefusal,
     safetyCheckpoint,
     sameSafetyCheckpoint,
     commandCheckpoint,
     sameCommandCheckpoint,
     commandIdentity,
+    REVIEW_STEPS,
     meetingIdentity,
     byteLength,
     omitPlannedStates,

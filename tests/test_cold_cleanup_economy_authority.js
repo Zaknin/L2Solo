@@ -32,7 +32,9 @@ function stub(object, key, value) { const original = object[key]; restores.push(
         const coordinator = new ColdSimulationCoordinator();
         coordinator.population = { realPlayerSessions: () => [],
             prepareInventoryCleanupProposal: (...args) => Population.prepareInventoryCleanupProposal(...args) };
-        coordinator.worker = { postMessage() {} }; coordinator.workerEpoch = 'cleanup:fixture';
+        const acks = [];
+        coordinator.worker = { postMessage: message => message.type === 'commit_ack' && acks.push(...message.payload.results) };
+        coordinator.workerEpoch = 'cleanup:fixture';
         coordinator.reviewCommittedEconomy = async value => value;
         const refreshes = [];
         coordinator.requestEconomyRefresh = actorId => { refreshes.push(actorId); return true; };
@@ -53,9 +55,14 @@ function stub(object, key, value) { const original = object[key]; restores.push(
         assert.equal(prepared.stats.travel.paid.fee, 11000, 'the real Giran-to-Oren route charges its fare');
         assert.equal(prepared.adena, 9000, 'cleanup replaces the planner wallet after its bid was sized');
         const committed = await Life.upsertState(prepared, 'cleanup_trip_commit_fixture');
-        await coordinator.afterCommit({ nextState: committed, proposal });
-        assert.equal(warnings.some(line => line.includes('economy_plan_bid_unfunded')), false,
-            'a superseded worker bid waits for new preparation instead of failing after the paid cleanup commit');
+        const result = { ok: true, characterId: id, nextState: committed, proposal: { ...proposal, proposalId: 'cleanup:1',
+            token: { characterId: id, ownerId: 'cold_simulation_owner', revision: 1, leaseId: 'cleanup:lease', leaseUntil: Date.now() + 60000 } } };
+        await coordinator.afterCommit(result);
+        await coordinator.handleCommitResults([result]);
+        assert.equal(acks[0]?.ok, true);
+        assert.equal((acks[0].review || []).includes('plan'), false,
+            'a superseded worker bid is not reviewed after the paid cleanup commit: it waits for new preparation');
+        assert.equal(warnings.some(line => line.includes('economy_plan_bid_unfunded')), false);
         assert.deepEqual(refreshes, [id], 'the final native state requests one fresh worker decision');
         const after = Afk.ownerRecords(id).find(row => row.kind === 'buy_ad');
         assert.equal(after.id, standing.id); assert.equal(after.lines[0].count, 2,

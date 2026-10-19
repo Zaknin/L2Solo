@@ -1497,6 +1497,130 @@ function claimAck(kernel, payload) {
     await marketKernel.shutdown();
     assert.strictEqual(marketKernel.lookSeen.size, 0);
 
+    {
+        // A commit ack naming a review: the bot waits for the review command
+        // (no step starts), which carries the plan the proposal had and no
+        // state; its answer gives the bot back to its schedule. An ack naming
+        // nothing sends no command.
+        const at = 50000;
+        const reviewKernel = recordingKernel({ resolveSolo: () => null, now: () => at });
+        const plan = { sell: [], withdraw: [7], buyAds: [], travel: null };
+        const committed = {};
+        for (const id of [60, 61]) {
+            const base = state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
+            const token = { characterId: id, ownerId: 'cold_simulation_owner', revision: 4, leaseId: `review-${id}`, leaseUntil: at + 30000 };
+            reviewKernel.upsert({ state: base });
+            reviewKernel.inFlight.set(id, { state: base, grant: token });
+            reviewKernel.dirty.set(id, { proposalId: `review:${id}`, characterId: id, token, priority: 'P1', enqueuedAt: at,
+                nextState: base, result: { events: [] }, economyPlan: plan });
+            committed[id] = state(id, { simulation: { ...base.simulation, revision: 5 }, timing: { lastResolvedAt: at, nextResolveAt: at } });
+        }
+        reviewKernel.flush(null, true);
+        commitAck(reviewKernel, { results: [
+            { ok: true, characterId: 60, revision: 5, state: committed[60], review: ['plan'] },
+            { ok: true, characterId: 61, revision: 5, state: committed[61] }] });
+        const request = sentCommands.get(reviewKernel).get(60);
+        assert.strictEqual(request?.kind, 'review');
+        assert.deepStrictEqual(request.economyPlan, plan, 'the review carries the committed proposal plan');
+        assert.strictEqual(request.state, undefined, 'main reads its own committed state');
+        assert.strictEqual(sentCommands.get(reviewKernel).has(61), false, 'an ack naming nothing sends no review');
+        reviewKernel.tick();
+        assert.strictEqual(claimRequestIds.get(reviewKernel).has(60), false, 'no step starts while the review runs');
+        assert.strictEqual(claimRequestIds.get(reviewKernel).has(61), true);
+        commandAck(reviewKernel, { characterId: 60, state: committed[60] });
+        reviewKernel.tick();
+        assert.strictEqual(claimRequestIds.get(reviewKernel).has(60), true, 'the answered review gives the bot back to its schedule');
+    }
+
+    {
+        // An ok ack with the commit's numbers and no state: the bot holds its
+        // own proposed state released to main with the row's clock and
+        // revisions, the same state main cached, and the review main named runs.
+        const at = 55000;
+        const numbersKernel = recordingKernel({ resolveSolo: () => null, now: () => at });
+        const base = state(62, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
+        const next = state(62, { activity: 'resting', timing: { lastResolvedAt: at, nextResolveAt: at + 9000 } });
+        const token = { characterId: 62, ownerId: 'cold_simulation_owner', revision: 4, leaseId: 'numbers-62', leaseUntil: at + 30000 };
+        numbersKernel.upsert({ state: base });
+        numbersKernel.inFlight.set(62, { state: base, grant: token });
+        numbersKernel.dirty.set(62, { proposalId: 'numbers:62', characterId: 62, token, priority: 'P1', enqueuedAt: at,
+            nextState: next, result: { events: [] } });
+        numbersKernel.flush(null, true);
+        const ack = { ok: true, characterId: 62, revision: 5, updatedAt: at + 1, inventoryRevision: 3, skillsRevision: 2,
+            hennaRevision: 1, review: ['training'] };
+        commitAck(numbersKernel, { results: [ack] });
+        const held = numbersKernel.states.get(62).state;
+        assert.deepStrictEqual(held, Protocol.committedState(next, ack));
+        assert.deepStrictEqual(held.simulation, { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 });
+        assert.deepStrictEqual([held.activity, held.timing, held.updatedAt, held.bagRevision, held.skillsRevision, held.hennaRevision],
+            ['resting', next.timing, at + 1, 3, 2, 1], 'the proposal and the ack numbers make the held state');
+        assert.strictEqual(numbersKernel.inFlight.has(62), false, 'the proposed state goes with the in-flight record');
+        assert.strictEqual(sentCommands.get(numbersKernel).get(62)?.kind, 'review', 'a numbers ack still sends the named review');
+        assert.strictEqual(Protocol.committedState(next, { ...ack, updatedAt: undefined }), null, 'a missing number builds nothing');
+        // An ok ack whose state cannot be rebuilt is no refusal: counted, the bot
+        // keeps its plan as sent and waits for its due.
+        const plan = { sell: [], withdraw: [8], buyAds: [], travel: null };
+        const unbuiltToken = { ...token, characterId: 63, leaseId: 'numbers-63' };
+        numbersKernel.upsert({ state: state(63, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } }) });
+        Object.assign(numbersKernel.states.get(63), { economyPlanHash: 4321 });
+        numbersKernel.inFlight.set(63, { state: numbersKernel.states.get(63).state, grant: unbuiltToken });
+        numbersKernel.dirty.set(63, { proposalId: 'numbers:63', characterId: 63, token: unbuiltToken, priority: 'P1',
+            enqueuedAt: at, nextState: next, result: { events: [] }, economyPlan: plan });
+        numbersKernel.flush(null, true);
+        commitAck(numbersKernel, { results: [{ ...ack, characterId: 63, updatedAt: undefined, review: ['plan'] }] });
+        assert.strictEqual(numbersKernel.ackUnbuilt, 1);
+        assert.strictEqual(numbersKernel.inFlight.has(63), false);
+        assert.strictEqual(numbersKernel.states.get(63).state.simulation.revision, 3, 'nothing is upserted');
+        assert.strictEqual(numbersKernel.states.get(63).economyPlanHash, 4321, 'the plan main named stays sent');
+        assert.strictEqual(sentCommands.get(numbersKernel).has(63), false, 'no review on an unbuilt state');
+    }
+
+    {
+        // A plan the step stamped as sent that no review runs (refused, skipped
+        // on a full window, its send failed, or not named after a forced
+        // cleanup) is forgotten as sent, so the refresh reproducing it sends it
+        // again; the bot's next state still asks for that refresh.
+        const at = 60000;
+        const plan = { sell: [], withdraw: [9], buyAds: [], travel: null };
+        let sendFails = false;
+        const planKernel = recordingKernel({ resolveSolo: () => null, now: () => at,
+            emit: type => !(sendFails && type === 'command_request') });
+        const commitWithPlan = (id, review, inFlightOnly = false) => {
+            const base = state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
+            const token = { characterId: id, ownerId: 'cold_simulation_owner', revision: 4, leaseId: `plan-${id}`, leaseUntil: at + 30000 };
+            planKernel.upsert({ state: base });
+            Object.assign(planKernel.states.get(id), { economyPending: 2, economyPlanHash: 1234 });
+            planKernel.inFlight.set(id, { state: base, grant: token });
+            planKernel.dirty.set(id, { proposalId: `plan:${id}`, characterId: id, token, priority: 'P1', enqueuedAt: at,
+                nextState: base, result: { events: [] }, economyPlan: plan });
+            planKernel.flush(null, true);
+            if (inFlightOnly) return;
+            commitAck(planKernel, { results: [{ ok: true, characterId: id, revision: 5, review,
+                state: state(id, { simulation: { ...base.simulation, revision: 5 }, timing: { lastResolvedAt: at, nextResolveAt: at } }) }] });
+        };
+        const sent = id => planKernel.states.get(id).economyPlanHash;
+        commitWithPlan(70, ['plan']);
+        assert.strictEqual(sent(70), 1234, 'a review on its way keeps the plan as sent');
+        commandAck(planKernel, { characterId: 70, ok: false, reason: 'stale_command', state: planKernel.states.get(70).state });
+        assert.strictEqual(sent(70), null, 'a refused review forgets its plan as sent');
+        assert.strictEqual(planKernel.states.get(70).economyPending, 2, 'the next state still asks for a refresh');
+        commitWithPlan(71, ['buff']);
+        assert.strictEqual(sent(71), null, 'a plan main did not name is forgotten as sent');
+        commitWithPlan(75, undefined);
+        assert.strictEqual(sent(75), null, 'a plan of an ack naming no review is forgotten as sent');
+        sendFails = true;
+        commitWithPlan(72, ['plan']);
+        assert.strictEqual(sent(72), null, 'a review whose send failed forgets its plan as sent');
+        assert.strictEqual(planKernel.reviewsSkipped, 1, 'a review whose send failed counts as skipped');
+        assert.strictEqual(planKernel.commanding.has(72), false, 'a review whose send failed frees its slot');
+        sendFails = false;
+        planKernel.setMaxInFlight(1);
+        commitWithPlan(73, ['plan'], true);
+        commitWithPlan(74, ['plan']);
+        assert.strictEqual(sent(74), null, 'a review skipped on a full window forgets its plan as sent');
+        assert.strictEqual(planKernel.reviewsSkipped, 2);
+    }
+
     // A party run with no member result (no spot): the whole roster commits
     // the party row, fenced on the revision the run read, with the resolver's
     // next due and a goal review; every member stays claimed until the ACK.

@@ -25,6 +25,8 @@ const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwne
 const RaidEncounterScope = invoke('GameServer/RaidBoss/RaidEncounterScope');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const CraftWorkshopService = invoke('GameServer/Bot/Economy/CraftWorkshopService');
+const AfkMarket = invoke('GameServer/Bot/Economy/BotAfkMarketService');
+const ColdBuffService = invoke('GameServer/Bot/Economy/ColdBuffService');
 const Protocol = require('./ColdSimulationProtocol');
 const { ColdEconomyDecisions, wireAdvisory, echoHolds } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
@@ -256,8 +258,12 @@ class ColdSimulationCoordinator {
         // counted always (cheap): the live read of how often a main write
         // lands under a step or leaves the cached copy behind the row.
         this.refusals = { claimRejected: {}, commitRefused: {}, staleCommand: 0 };
-        this.economyPlanCount = 0;
-        this.economyPlanTimes = [];
+        // Review commands answered (always counted, like the refusals): how many
+        // came, how they ended (refused by reason) and which steps they carried.
+        this.reviews = { sent: 0, ok: 0, refused: {}, plan: 0, buff: 0, training: 0 };
+        // Ok commit acks with the state and with the commit's numbers only
+        // (ackNumbers), always counted.
+        this.ackState = { with: 0, without: 0 };
         this.queue = new ColdCommitQueue({
             targetMs: Config.coldWorkerOrdinaryFlushMs || 2000,
             hardMs: Config.coldWorkerOrdinaryHardMaxMs || 5000,
@@ -799,7 +805,7 @@ class ColdSimulationCoordinator {
                         || !echoHolds(state, decision.echo)) break;
                     this.economyDecisions.hold(id, decision);
                     try {
-                        const result = await invoke('GameServer/Bot/Economy/BotAfkMarketService').executePlan(state, payload.economyPlan, { beforeWrite, preparedState: state })
+                        const result = await AfkMarket.executePlan(state, payload.economyPlan, { beforeWrite, preparedState: state })
                             .catch(error => { this.recordError(error); return null; });
                         if (result?.buyPending) this.requestEconomyRefresh(id);
                     } finally { this.economyDecisions.release(id); }
@@ -947,7 +953,7 @@ class ColdSimulationCoordinator {
         const timestamp = Number(options.timestamp || Date.now());
         const replyBy = Date.now() + Math.max(50, Math.min(5000, Number(options.timeoutMs) || 5000));
         const expected = Calculation.sources(members);
-        const escrowFor = member => invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(member.characterId);
+        const escrowFor = member => AfkMarket.buyOrderEscrow(member.characterId);
         const escrows = members.map(escrowFor);
         const recipeKnowledge = members.map(recipeKnowledgeFor);
         const msgId = randomUUID();
@@ -1782,7 +1788,6 @@ class ColdSimulationCoordinator {
             }
         });
         let state = LifeState.cachedState(id) || entry.nextState;
-        const trained = { done: false };
         if (sourceCurrent()) await step('economyDecision',
             () => this.economyDecisions.accept(id, entry.proposal.economyDecision, committed, state));
         if (sourceCurrent() && entry.proposal.market) {
@@ -1797,39 +1802,17 @@ class ColdSimulationCoordinator {
                     && Number(actual.revision || 0) === coldAuthority.revision
                     && (actual.leaseId || null) === coldAuthority.leaseId;
             };
-            await step('board', () => invoke('GameServer/Bot/Economy/BotAfkMarketService')
+            await step('board', () => AfkMarket
                 .applyReview(id, entry.proposal.market, { coldAuthority, canCommitReview }));
         }
         await step('equipment', () => LifeState.enqueueEquipmentGoalAdvanceForState(state));
-        // Main can replace the worker's resolved state with a paid forced
-        // cleanup trip. Its old optional actions were prepared before that
-        // fare and activity change; the accepted resolve is not fresh consent.
-        if (sourceCurrent() && entry.proposal.economyPlan && !entry.proposal.inventoryCleanupForced) {
-            const started = Config.developerDiagnostics ? performance.now() : 0;
-            const decision = await step('improvement', () => this.economyDecisions.decided(state));
-            // Native moves publish a new timestamp. Hold the worker's one
-            // decision across this plan exactly as the town command does.
-            this.economyDecisions.hold(id, decision);
-            const preparedState = state;
-            try {
-                state = await step('improvement', () => this.reviewCommittedEconomy(state, beforeWrite, decision || null, trained)) || state;
-                const applied = await step('economyPlan', () => invoke('GameServer/Bot/Economy/BotAfkMarketService')
-                    .executePlan(state, entry.proposal.economyPlan,
-                        { beforeWrite, preparedState, step: work => this.step('economyPlan', id, work) }));
-                state = LifeState.cachedState(id) || applied?.state || state;
-                if (applied?.buyPending) this.requestEconomyRefresh(id);
-            } finally {
-                this.economyDecisions.release(id);
-                if (Config.developerDiagnostics) this.economyPlanCount++;
-                if (Config.developerDiagnostics) this.economyPlanTimes.push(performance.now() - started);
-                if (this.economyPlanTimes.length > 256) this.economyPlanTimes.shift();
-            }
-        }
-        // The native plan may have just started a trip or changed the money
-        // packet. Correct only this owner's standing bids against that final
-        // state, even when wish preparation or a board write was deferred.
+        // The bot's own plan, buff and training run in the review command the
+        // worker sends on this commit's ack (reviewSteps, executeReviewCommand).
+        // Correct only this owner's standing bids against the committed state,
+        // even when wish preparation or a board write was deferred; a review
+        // that runs a plan corrects them again after it.
         if (sourceCurrent()) await step('boardLimits', async () => {
-            const checked = await invoke('GameServer/Bot/Economy/BotAfkMarketService')
+            const checked = await AfkMarket
                 .reviewPurchaseLimits(state, { beforeWrite });
             state = checked.state || state;
         });
@@ -1905,26 +1888,21 @@ class ColdSimulationCoordinator {
             later('partyJoin', () => this.population.applyWorkerPartyJoin(entry.proposal.partyResolution.partyId,
                 entry.proposal.partyResolution.recruitCheck));
         }
-        if (entry.proposal.buffOffer) {
-            await step('buff', () => invoke('GameServer/Bot/Economy/ColdBuffService')
-                .applyOffer(entry.proposal.buffOffer, { beforeWrite }));
-        }
-        // Hunts and party rewards can raise a level without producing any
-        // market work. Train after the prepared actions so their committed
-        // revision remains valid until they finish.
-        if (sourceCurrent() && !trained.done) state = await step('training', () => LifeState.reviewTrainingAfterCommit(
-            LifeState.cachedState(id) || state, { beforeWrite })) || LifeState.cachedState(id) || state;
         if (Config.developerDiagnostics) await step('metrics', () => {
             Metrics.recordBackgroundResolve();
             Metrics.recordCombat(entry.proposal.result?.debug);
             Metrics.recordResolveDuration(Math.max(0, Date.now() - Number(entry.proposal.enqueuedAt || Date.now())));
         });
+        // Main replaced the worker's resolved state with a paid forced cleanup
+        // trip: the plan was prepared before that fare and activity change, so
+        // no review runs it (reviewSteps) and the worker plans afresh.
         if (sourceCurrent() && entry.proposal.inventoryCleanupForced && entry.proposal.economyPlan)
             this.requestEconomyRefresh(id);
         await step('announce', () => GlobalChat.maybeAnnounce(state, entry.proposal.result?.events || []));
-        // onResults starts it after the flush, so the review reads the trained state of
-        // every member of the batch and the plans it writes are not overwritten by it.
-        // A replaced worker or a stop skips the rest: its kernel no longer holds these
+        // onResults starts it after the flush. A member's own review command (its
+        // training, buff, plan) runs meanwhile: a party write holds on the revision
+        // it read (LifeState.writePartyRequirementPlan), so a member write landing
+        // in between wins and the party write is skipped. A replaced worker or a stop skips the rest: its kernel no longer holds these
         // members inFlight.
         if (deferred.length) entry.deferred = async () => {
             for (const work of deferred) {
@@ -1935,7 +1913,7 @@ class ColdSimulationCoordinator {
         return state;
     }
 
-    // `trained.done` tells afterCommit this commit's training review already ran.
+    // `trained.done` tells the review command its training step already ran.
     async reviewCommittedEconomy(state, beforeWrite, decisionOverride, trained = {}) {
         if (invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(state.characterId)) return LifeState.cachedState(state.characterId) || state;
         // The native commit has released its lease before these actions.
@@ -1946,7 +1924,7 @@ class ColdSimulationCoordinator {
         const source = LifeState.cachedState(state.characterId) === state;
         const reviewed = await this.step('training', state.characterId, () => LifeState.reviewTrainingAfterCommit(state, { beforeWrite }));
         // Done only when the review saw the cached state and had nothing to train. A stale source (it returns the newer
-        // state untrained), a failed step or a new row from training leaves the review at the end of afterCommit to run.
+        // state untrained), a failed step or a new row from training leaves the review command's training step to run.
         trained.done = source && reviewed === state;
         state = reviewed || LifeState.cachedState(state.characterId) || state;
         const improved = await this.step('improvement', state.characterId, () => invoke('GameServer/Bot/Economy/BotImprovementService')
@@ -2008,6 +1986,8 @@ class ColdSimulationCoordinator {
             if (!inputToken || inputToken.characterId !== Number(result.characterId)
                 || typeof proposalId !== 'string' || !proposalId || proposalId.length > 240) return [];
             const state = LifeState.cachedState(result.characterId) || result.nextState || result.proposal?.baseState || null;
+            const numbers = result.ok ? this.ackNumbers(result, state) : null;
+            if (result.ok) this.ackState[numbers ? 'without' : 'with'] += 1;
             return [{
                 ok: !!result.ok,
                 characterId: Number(result.characterId),
@@ -2018,13 +1998,46 @@ class ColdSimulationCoordinator {
                 ...(result.detail ? { detail: result.detail } : {}),
                 revision: result.revision,
                 raidStepId: result.proposal?.raidStepId,
-                state
+                ...(numbers || { state }),
+                ...(result.ok ? this.reviewSteps(result.proposal, state) : {})
             }];
         });
         // Table changes reach the worker before the commits that made them.
         this.tableChannel.flush();
         const sent = this.postCollections('commit_ack', { results: acknowledgements });
         this.finishCommitAcknowledgements(results, sent > 0);
+    }
+
+    // An ok ack carries the commit's numbers, not the state, when main's cache
+    // is the commit's own entry built from the worker's proposal: the worker
+    // rebuilds it (Protocol.committedState). Otherwise main changed what it
+    // committed and the state goes: a forced cleanup trip or a state main
+    // resolved itself (prepareProposal), a later write over the entry (an
+    // afterCommit step, the party work), a row the commit re-read (a board
+    // settlement, a PvP tally, a PK drop, a party payment: SQL wrote its bag or
+    // stats), or the economy leaf the row kept over the proposal's.
+    ackNumbers(result, cached) {
+        const proposal = result.proposal, row = result.row, stats = proposal?.nextState?.stats;
+        if (!proposal?.nextState || proposal.inventoryCleanupForced
+            || !result.cached || cached !== result.cached
+            || result.settled || result.pkDrops?.length || result.partyPayment
+            || !row || typeof row.statsJson === 'string'
+            || row.economyCommit != null || stats && Object.hasOwn(stats, 'economyCommit')) return null;
+        // The ack's revision is already the commit's (result.revision, the cache's too).
+        return { updatedAt: cached.updatedAt, inventoryRevision: cached.bagRevision,
+            skillsRevision: cached.skillsRevision, hennaRevision: cached.hennaRevision };
+    }
+
+    // The steps of the review command the worker sends on this ok ack, decided
+    // here where the facts are: the plan unless main forced a cleanup trip over
+    // it, the buff offer, training when the committed state needs it (a level,
+    // a class or a skill book in the bag). None: no review.
+    reviewSteps(proposal, state) {
+        const review = [];
+        if (proposal?.economyPlan && !proposal.inventoryCleanupForced) review.push('plan');
+        if (proposal?.buffOffer) review.push('buff');
+        if (LifeState.trainingNeeded(state)) review.push('training');
+        return review.length ? { review } : {};
     }
 
     async handleReleaseRequest(message) {
@@ -2058,8 +2071,8 @@ class ColdSimulationCoordinator {
             const parsed = Protocol.commandIdentity(request);
             const identity = parsed && { characterId: parsed.characterId, commandId: parsed.commandId,
                 commandCheckpoint: parsed.checkpoint };
-            if (!identity || request.kind !== 'lifecycle'
-                || !Protocol.sameCommandCheckpoint(identity.commandCheckpoint, request.state)) return [];
+            if (!identity || (request.kind !== 'lifecycle' && request.kind !== 'review')
+                || request.kind === 'lifecycle' && !Protocol.sameCommandCheckpoint(identity.commandCheckpoint, request.state)) return [];
             return [{ request, identity }];
         });
         this.commandTail = this.commandTail.then(async () => {
@@ -2085,7 +2098,8 @@ class ColdSimulationCoordinator {
                         continue;
                     }
                     let result;
-                    const operation = this.executeLifecycleCommand(request, identity, sourceCurrent);
+                    const operation = request.kind === 'review' ? this.executeReviewCommand(request, identity, sourceCurrent)
+                        : this.executeLifecycleCommand(request, identity, sourceCurrent);
                     this.commandInflight.set(id, operation);
                     try { result = await operation; } finally {
                         if (this.commandInflight.get(id) === operation) this.commandInflight.delete(id);
@@ -2111,7 +2125,17 @@ class ColdSimulationCoordinator {
                 await new Promise((resolve) => setImmediate(resolve));
             }
             if (!sourceCurrent()) return;
+            // Each request answered once, in order.
+            requests.forEach(({ request }, index) => request.kind === 'review' && this.countReview(request, results[index]));
             this.postCollections('command_ack', { results }, message.msgId);
+            // A refused review ran no plan and its ack made the worker forget it
+            // as sent (ColdSimulationKernel.forgetSentPlan): it plans afresh, as
+            // after a forced cleanup. A hot or fenced bot plans on its own side.
+            requests.forEach(({ request }, index) => {
+                const id = Number(request.characterId);
+                if (request.kind === 'review' && request.economyPlan && !results[index]?.ok
+                    && LifeState.cachedState(id)?.phase === 'cold' && !this.fencedBots.has(id)) this.requestEconomyRefresh(id);
+            });
         }).catch((error) => { if (sourceCurrent()) this.recordError(error); });
     }
 
@@ -2123,21 +2147,38 @@ class ColdSimulationCoordinator {
         return await LifeState.reloadRow(characterId).catch(() => null) || LifeState.cachedState(characterId);
     }
 
-    async executeLifecycleCommand(request, identity, sourceCurrent) {
-        // A previous native writer can hold the character beyond the worker
-        // lifetime. Own this entire promise and admit the computation only
-        // after the existing writer has settled against the current cache.
+    countReview(request, result) {
+        this.reviews.sent += 1;
+        if (request.economyPlan) this.reviews.plan += 1;
+        if (request.buffOffer) this.reviews.buff += 1;
+        if (request.training) this.reviews.training += 1;
+        if (result?.ok) this.reviews.ok += 1;
+        else this.reviews.refused[result?.reason] = (this.reviews.refused[result?.reason] || 0) + 1;
+    }
+
+    // A worker command's admission on main: { refused } or { state, owned }.
+    // A previous native writer can hold the character beyond the worker
+    // lifetime. Own this entire promise and admit the computation only
+    // after the existing writer has settled against the current cache.
+    async admitWorkerCommand(identity, sourceCurrent) {
         await LifeState.settleWrites([identity.characterId]);
-        if (!sourceCurrent()) return { ok: false, reason: 'stale_worker_source' };
+        if (!sourceCurrent()) return { refused: { ok: false, reason: 'stale_worker_source' } };
         const state = LifeState.cachedState(identity.characterId);
-        const refusal = reason => ({ ok: false, reason, retryAfterMs: 1000, ...(state ? { state } : {}) });
-        const staleCommand = async () => ({ ...refusal('stale_command'), state: await this.reloadStaleCommand(identity.characterId) });
+        const refusal = reason => ({ refused: { ok: false, reason, retryAfterMs: 1000, ...(state ? { state } : {}) } });
+        const staleCommand = async () => ({ refused: { ...refusal('stale_command').refused,
+            state: await this.reloadStaleCommand(identity.characterId) } });
         if (this.stopping) return refusal('coordinator_stopping');
         if (!state) return refusal('missing_state');
         if (this.fencedBots.has(identity.characterId) || state.phase !== 'cold') return refusal('hot_handoff_fenced');
         if (!Protocol.sameCommandCheckpoint(identity.commandCheckpoint, state)) return staleCommand();
         const owned = this.commandInflight.get(identity.characterId);
         if (!(owned instanceof Promise)) return staleCommand();
+        return { state, owned };
+    }
+
+    async executeLifecycleCommand(request, identity, sourceCurrent) {
+        const { refused, state, owned } = await this.admitWorkerCommand(identity, sourceCurrent);
+        if (refused) return refused;
         const checkpoint = Object.freeze({ ...Protocol.commandCheckpoint(identity.commandCheckpoint) });
         const workerAdmission = Object.freeze({
             characterId: identity.characterId, commandId: identity.commandId, commandCheckpoint: checkpoint,
@@ -2161,6 +2202,53 @@ class ColdSimulationCoordinator {
             })) || current;
         }
         return result;
+    }
+
+    // The far bot's own actions after its commit, in this order: improvement
+    // and the worker's economy plan (its standing bids corrected after it), the
+    // buff it bought, its class training. Admitted once on the commit's
+    // checkpoint; each step then validates the row inside its own writer (the
+    // plan's writes move the revision), so the guard is only the source.
+    async executeReviewCommand(request, identity, sourceCurrent) {
+        const id = identity.characterId;
+        const admitted = await this.admitWorkerCommand(identity, sourceCurrent);
+        if (admitted.refused) return admitted.refused;
+        let state = admitted.state;
+        const beforeWrite = () => {
+            if (!sourceCurrent() || this.stopping || this.commandInflight.get(id) !== admitted.owned)
+                throw Error('cold_postcommit_source_retired');
+        };
+        const trained = { done: false };
+        if (request.economyPlan) {
+            const decision = await this.step('improvement', id, () => this.economyDecisions.decided(state));
+            // Native moves publish a new timestamp. Hold the worker's one
+            // decision across this plan exactly as the town command does.
+            this.economyDecisions.hold(id, decision);
+            const preparedState = state;
+            try {
+                state = await this.step('improvement', id, () => this.reviewCommittedEconomy(state, beforeWrite, decision || null, trained)) || state;
+                const applied = await this.step('economyPlan', id, () => AfkMarket
+                    .executePlan(state, request.economyPlan,
+                        { beforeWrite, preparedState, step: work => this.step('economyPlan', id, work) }));
+                state = LifeState.cachedState(id) || applied?.state || state;
+                if (applied?.buyPending) this.requestEconomyRefresh(id);
+            } finally {
+                this.economyDecisions.release(id);
+            }
+            // The plan may have just started a trip or changed the money packet.
+            await this.step('boardLimits', id, async () => {
+                const checked = await AfkMarket
+                    .reviewPurchaseLimits(state, { beforeWrite });
+                state = checked.state || state;
+            });
+        }
+        if (request.buffOffer) await this.step('buff', id, () => ColdBuffService
+            .applyOffer(request.buffOffer, { beforeWrite }));
+        // Hunts and party rewards can raise a level without any market work.
+        // Train after the prepared actions so their checked revision holds.
+        if (request.training && !trained.done) state = await this.step('training', id, () => LifeState.reviewTrainingAfterCommit(
+            LifeState.cachedState(id) || state, { beforeWrite })) || state;
+        return { ok: true, state: LifeState.cachedState(id) || state };
     }
 
     async fenceBot(characterId, timeoutMs = 500) {
@@ -2567,12 +2655,13 @@ class ColdSimulationCoordinator {
             worker: { ...this.lastWorkerSnapshot },
             refusals: { claimRejected: { ...this.refusals.claimRejected }, commitRefused: { ...this.refusals.commitRefused },
                 staleCommand: this.refusals.staleCommand },
+            reviews: { ...this.reviews, refused: { ...this.reviews.refused } },
             heldAcks: this.heldAcks.size,
+            ackState: { ...this.ackState },
             soloHolds: invoke('GameServer/Bot/Population/PartyIncomeComparison').soloHoldStats(),
             competitionActions: Config.developerDiagnostics ? this.competitionActions.snapshot() : null,
             economyDecisions: Config.developerDiagnostics ? { hits: this.economyDecisions.hits, misses: this.economyDecisions.misses, held: this.economyDecisions.byId.size } : null,
             partyReviews: Config.developerDiagnostics ? this.partyReviews : null,
-            economyPlans: Config.developerDiagnostics ? { count: this.economyPlanCount, perCommit: this.economyPlanCount / Math.max(1, this.queue.snapshot().committed || 0), p95Ms: [...this.economyPlanTimes].sort((a, b) => a - b)[Math.max(0, Math.ceil(this.economyPlanTimes.length * .95) - 1)] || 0 } : null,
             queue: this.queue.snapshot(),
             snapshots: {
                 ...this.snapshotQueue.snapshot(),

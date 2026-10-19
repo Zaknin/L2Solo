@@ -1575,6 +1575,13 @@ const PopulationService = {
         if (this.partyRequirementRefreshDue.delete(String(partyId))) BackgroundPartyState.publish(partyId);
     },
 
+    // A member's plan write a concurrent write beat: the party row carries the
+    // mark to the worker, whose leader step re-plans (run.requirementRefresh).
+    markPartyRequirementReplan(partyId) {
+        this.partyRequirementRefreshDue.add(String(partyId));
+        BackgroundPartyState.publish(partyId);
+    },
+
     // Trigger 1 of the party re-plan (the second is a member's kit, at the
     // party's step in the background thread): a published party row whose
     // members or objective moved against the previous row. A pending join
@@ -2461,16 +2468,26 @@ const PopulationService = {
             this.clearPartyRequirementDue(party.partyId);
             return [];
         }
-        let changed = false;
+        let changed = false, skipped = false;
         for (const { characterId, plan } of resolution.memberPlans || []) {
             const member = LifeState.cachedState(characterId);
             if (!member || member.phase !== 'cold' || member.party?.partyId !== party.partyId) continue;
             if (acquisitionRequirementKey(member.stats?.equipmentPlan) === acquisitionRequirementKey(plan)) continue;
-            changed = !!await LifeState.upsertState({ ...member, stats: { ...(member.stats || {}), equipmentPlan: plan } },
-                'party_requirement_refresh') || changed;
+            // Held on the revision of the copy read above: the member's own
+            // review runs meanwhile; a write it beat is skipped and the
+            // party's re-plan is marked due again below.
+            const written = await LifeState.writePartyRequirementPlan(member, plan);
+            if (written === false) {
+                skipped = true;
+                Config.developerDiagnostics && Diagnostics.count('party_requirement', 'member_write', 'skipped');
+            }
+            changed = !!written || changed;
         }
         // ARCH-NOTE: A bounded worker refresh may span resolves; release members only after its complete projection.
-        if (!resolution.requirementRefreshedAt) return [];
+        if (!resolution.requirementRefreshedAt) {
+            if (skipped) this.markPartyRequirementReplan(party.partyId);
+            return [];
+        }
         const members = (await LifeState.cachedStatesForParties([party])).get(String(party.partyId)) || [];
         const refreshedMembers = members;
         const releasable = party.stats?.objective?.priority === 'required'
@@ -2513,7 +2530,8 @@ const PopulationService = {
         await BackgroundPartyState.createOrUpdate(nextParty);
         // After the last write: it also erases the marks of this apply's own
         // writes (leaveParty, createOrUpdate publish inside their awaits).
-        this.clearPartyRequirementDue(party.partyId);
+        if (skipped) this.markPartyRequirementReplan(party.partyId);
+        else this.clearPartyRequirementDue(party.partyId);
         return changed || departures.length ? [party.partyId] : [];
     },
 

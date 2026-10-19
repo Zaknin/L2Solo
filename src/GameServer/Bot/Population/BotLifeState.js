@@ -1053,6 +1053,11 @@ function classProgressionNeeded(state, classId, level) {
         || invoke('GameServer/Skills/SkillBookCatalog').needsTraining(state);
 }
 
+// The far bots main trains after a commit: cold, its own, alive.
+function mainTrainsFar(state) {
+    return !!state && state.phase === 'cold' && state.simulation?.ownerId === 'legacy_main' && state.activity !== 'dead';
+}
+
 function refreshColdCombatProfile(state) {
     return Database.fetchSkills(state.characterId).then((skills) => ({
         ...state,
@@ -2921,8 +2926,14 @@ const BotLifeState = {
         });
     },
 
+    // A far bot main owns has class training to do (level, class or a skill book
+    // in its bag): the commit ack names a `training` review from it.
+    trainingNeeded(state) {
+        return mainTrainsFar(state) && classProgressionNeeded(state, state.stats?.classId, state.level);
+    },
+
     reviewTrainingAfterCommit(state, options = {}) {
-        if (!state || state.phase !== 'cold' || state.simulation?.ownerId !== 'legacy_main' || state.activity === 'dead') return Promise.resolve(state);
+        if (!mainTrainsFar(state)) return Promise.resolve(state);
         return this.serializeClanLevelUp(state.characterId, async () => {
             if (cache.get(state.characterId) !== state) return cache.get(state.characterId) || state;
             if (!classProgressionNeeded(state, state.stats?.classId, state.level)) return state;
@@ -3516,6 +3527,38 @@ const BotLifeState = {
         });
         pendingWrites.set(id, tracked);
         return next;
+    },
+
+    // One member's plan from its party's requirement refresh
+    // (PopulationService.applyWorkerPartyRequirements), built on the copy main
+    // read before: only the plan is written, held on that copy's revision, and
+    // the write moves it. A write that moved the row in between (the member's
+    // own review: its training, buff or plan) wins and nothing is written:
+    // false, and the caller marks the party's re-plan due again. A clan-locked
+    // plan or a foreign clan's goal is not replaced, as the full save would
+    // not replace it (null: nothing to write).
+    writePartyRequirementPlan(member, plan = null) {
+        const id = Number(member?.characterId), reason = 'party_requirement_refresh';
+        if (!id) return Promise.resolve(null);
+        const next = preserveClanOwnedEquipmentState({ ...member, stats: { ...(member.stats || {}), equipmentPlan: plan } },
+            reason, member);
+        if (next.stats.equipmentPlan !== plan || ClanMembershipPolicy.reconcileState(next).stats.equipmentPlan !== plan) {
+            return Promise.resolve(null);
+        }
+        return this.serializeClanLevelUp(id, () => Database.execute([`UPDATE ${TABLE}
+            SET statsJson = json_set(COALESCE(statsJson, '{}'), '$.equipmentPlan', json(?), '$.lastReason', ?),
+                simulationRevision = simulationRevision + 1, updatedAt = ?
+            WHERE characterId = ? AND phase = 'cold' AND simulationRevision = ?
+            RETURNING *`, [JSON.stringify(plan), reason, now(), id, Number(member.simulation?.revision || 0)], { read: true }]))
+            .then(([row] = []) => {
+                if (!row) return false;
+                const snapshot = this.acceptNewerLifecycleRow(row);
+                if (snapshot) notifyColdSnapshot(snapshot, reason, { critical: true });
+                return snapshot;
+            }).catch((error) => {
+                utils.infoWarn('BotLife', 'failed party requirement plan for %s: %s', id, error.message);
+                return null;
+            });
     },
 
     acceptClanLevelSpState(row) {

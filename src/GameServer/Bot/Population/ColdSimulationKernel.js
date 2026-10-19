@@ -655,6 +655,12 @@ class ColdSimulationKernel {
         this.commanding = new Set();
         this.commandStartedAt = new Map();
         this.nextCommandRequest = 1;
+        // Reviews a commit ack named that found no command slot (always counted:
+        // the plan is re-planned at the bot's next step, its buff or training waits).
+        this.reviewsSkipped = 0;
+        // Ok commit acks with numbers only whose state this thread could not
+        // rebuild (no proposal kept, a bad number): always counted.
+        this.ackUnbuilt = 0;
         this.paused = false;
         this.stopping = false;
         this.resolveChain = Promise.resolve();
@@ -1415,7 +1421,7 @@ class ColdSimulationKernel {
 
     beginCommand(characterId, kind = 'lifecycle') {
         const id = Number(characterId), current = this.states.get(id);
-        if (!Number.isSafeInteger(id) || id <= 0 || kind !== 'lifecycle'
+        if (!Number.isSafeInteger(id) || id <= 0 || (kind !== 'lifecycle' && kind !== 'review')
             || this.stopping || !current || current.state.phase !== 'cold' || this.busy(id)
             || this.claiming.size + this.inFlight.size + this.commanding.size >= this.maxInFlight) return null;
         const checkpoint = Protocol.commandCheckpoint(current.state);
@@ -2317,12 +2323,15 @@ class ColdSimulationKernel {
         let itemBytes = 0;
         const oversized = [];
         const visited = new Set();
+        // Each sent proposal's own next state (a transport copy may carry a delta
+        // instead): the in-flight record keeps it for a numbers-only commit ack.
+        const proposed = new Map();
         for (const proposal of eligible) {
             if (visited.has(proposal.characterId)) continue;
             const group = proposal.atomicGroup?.id
                 ? eligible.filter(entry => entry.atomicGroup?.id === proposal.atomicGroup.id) : [proposal];
             if (proposals.length + group.length > limit) break;
-            group.forEach(entry => visited.add(entry.characterId));
+            group.forEach(entry => { visited.add(entry.characterId); proposed.set(Number(entry.characterId), entry.nextState); });
             let transportGroup = group;
             let transportSizes = proposalSizes(group);
             if (DiagnosticConfig.developerDiagnostics === true && groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
@@ -2408,6 +2417,12 @@ class ColdSimulationKernel {
             if (this.sameLease(active?.grant, proposal.token)) {
                 active.pendingCommitId = proposal.proposalId;
                 active.pendingRaidStepId = proposal.raidStepId;
+                // The inputs of the review the commit ack may name (onCommitAck).
+                active.economyPlan = proposal.economyPlan;
+                active.buffOffer = proposal.buffOffer;
+                // What main commits unless it changes it: an ok ack with numbers
+                // only rebuilds main's cached state from it (Protocol.committedState).
+                active.proposed = proposed.get(Number(proposal.characterId));
             }
         }
         this.emit('proposal_batch', { proposals, ...tail }, null, payloadBytes);
@@ -2464,7 +2479,7 @@ class ColdSimulationKernel {
     }
 
     onCommitAck(payload = {}) {
-        const accepted = [], refused = [];
+        const accepted = [], requeued = [], reviews = [];
         if (this.stopping) return accepted;
         (payload.results || []).forEach((result) => {
             const identity = Protocol.leaseAckIdentity(result, 'commit_ack');
@@ -2478,10 +2493,24 @@ class ColdSimulationKernel {
             if (active.pendingCommitId !== identity.key || this.states.get(id)?.state.phase !== 'cold') return;
             if (active.pendingRaidStepId) require('./ColdRaidEncounter').acknowledge(active.pendingRaidStepId, id, result.ok);
             this.inFlight.delete(id);
-            if (result.ok && result.state) {
-                this.upsert({ state: result.state });
+            // An ok ack without the state carries the commit's numbers: main's
+            // cache is the proposal's state with them.
+            const committed = result.ok ? result.state || Protocol.committedState(active.proposed, result) : null;
+            if (committed) {
+                this.upsert({ state: committed });
+                // The commit's slot is free and the kernel holds main's committed
+                // state: the review main named takes the bot before any step does.
+                const review = this.beginReview(id, result.review, active);
+                if (review) reviews.push(review);
+            } else if (result.ok) {
+                // Committed, but the held state is the claim's: the bot waits for
+                // its due and its next claim, refused as stale, hands back the row.
+                this.ackUnbuilt += 1;
+                requeued.push(id);
             } else {
                 this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || ''));
+                // No review runs the plan this step stamped as sent.
+                if (active?.economyPlan) this.forgetSentPlan(id);
                 if (DiagnosticConfig.developerDiagnostics && Protocol.staleRefusal(result)) this.stats.stale += 1;
                 EconomyDiagnostics.count('commit_ack', 'refused', result.detail || result.reason);
                 if (result.state) this.upsert({
@@ -2493,14 +2522,55 @@ class ColdSimulationKernel {
                         }
                     }
                 });
-                refused.push(id);
+                requeued.push(id);
             }
             accepted.push(result);
         });
         // After the whole ACK: a follower's state in it moves its leader to the
         // party row's due, which an unchanged row has in the past.
-        refused.forEach(id => this.requeueAtDue(id));
+        requeued.forEach(id => this.requeueAtDue(id));
+        if (reviews.length && this.emit('command_request', { requests: reviews.map(review => review.request) }) === false) {
+            for (const { request, attempt } of reviews) {
+                if (!this.cancelCommand(request.characterId, attempt)) continue;
+                this.reviewsSkipped += 1;
+                if (attempt.economyPlan) this.forgetSentPlan(request.characterId);
+                this.ensureScheduled(request.characterId);
+            }
+        }
         return accepted;
+    }
+
+    // The plan the step stamped as sent (ColdSimulationWorker economyPlanHash)
+    // that no review ran: a refresh reproducing it sends it again instead of
+    // dropping it as already sent. economyPending stays: the bot's next state
+    // still asks for that refresh.
+    forgetSentPlan(characterId) {
+        const record = this.states.get(Number(characterId));
+        if (record) record.economyPlanHash = null;
+    }
+
+    // A `review` command for the steps main named on the commit ack (Protocol
+    // REVIEW_STEPS), with the plan and offer this thread kept from the proposal.
+    // No state on the wire: main runs the steps on its own cache.
+    beginReview(characterId, named, active) {
+        const steps = new Set(Array.isArray(named) ? named.filter(step => Protocol.REVIEW_STEPS.includes(step)) : []);
+        const economyPlan = steps.has('plan') ? active.economyPlan : undefined;
+        const buffOffer = steps.has('buff') ? active.buffOffer : undefined;
+        // A plan main did not name (a forced cleanup replaced it) runs nowhere.
+        if (active.economyPlan && !economyPlan) this.forgetSentPlan(characterId);
+        if (!economyPlan && !buffOffer && !steps.has('training')) return null;
+        const attempt = this.beginCommand(characterId, 'review');
+        if (!attempt) {
+            this.reviewsSkipped += 1;
+            if (economyPlan) this.forgetSentPlan(characterId);
+            return null;
+        }
+        attempt.sent = true;
+        attempt.economyPlan = !!economyPlan;
+        return { attempt, request: { characterId, kind: 'review', commandId: attempt.commandId,
+            commandCheckpoint: attempt.checkpoint,
+            ...(economyPlan ? { economyPlan } : {}), ...(buffOffer ? { buffOffer } : {}),
+            ...(steps.has('training') ? { training: true } : {}) } };
     }
 
     onReleaseAck(payload = {}) {
@@ -2536,6 +2606,8 @@ class ColdSimulationKernel {
             || attempt.commandId !== identity.commandId
             || !Protocol.sameCommandCheckpoint(attempt.checkpoint, identity.checkpoint)) return false;
         this.cancelCommand(id, attempt);
+        // A refused review did not run its plan; main asks for a refresh.
+        if (attempt.kind === 'review' && payload.ok === false && attempt.economyPlan) this.forgetSentPlan(id);
         let output = payload.state;
         if (output) {
             const outputCheckpoint = Protocol.commandCheckpoint(output), latest = Protocol.commandCheckpoint(current.state);
@@ -2654,6 +2726,8 @@ class ColdSimulationKernel {
             dirtyAgeMs: this.dirty.size ? Math.max(0, now - oldestDirtyAt) : 0,
             commanding: this.commanding.size,
             commandingAgeMs: this.commanding.size ? Math.max(0, now - oldestCommandAt) : 0,
+            reviewsSkipped: this.reviewsSkipped,
+            ackUnbuilt: this.ackUnbuilt,
             maxInFlight: this.maxInFlight,
             maxAtomicPartySize: this.maxAtomicPartySize,
             paused: this.paused,
@@ -2671,12 +2745,6 @@ class ColdSimulationKernel {
         const oldestDueAt = due.reduce((oldest, entry) => (
             Math.min(oldest, this.dueAt(entry.state, now))
         ), now);
-        const oldestDirtyAt = [...this.dirty.values()].reduce((oldest, proposal) => (
-            Math.min(oldest, Number(proposal.enqueuedAt || now))
-        ), now);
-        const oldestCommandAt = [...this.commandStartedAt.values()].reduce((oldest, startedAt) => (
-            Math.min(oldest, Number((typeof startedAt === 'object' ? startedAt.startedAt : startedAt) || now))
-        ), now);
         const dueFences = due.reduce((counts, entry) => {
             const id = Number(entry.state.characterId);
             if (this.claiming.has(id)) counts.claiming += 1;
@@ -2687,22 +2755,10 @@ class ColdSimulationKernel {
             return counts;
         }, { scheduled: 0, claiming: 0, inFlight: 0, commanding: 0, orphaned: 0 });
         return {
-            ...(DiagnosticConfig.developerDiagnostics ? this.stats : { diagnosticsEnabled: false }),
-            states: this.states.size,
-            heap: this.heap.size,
+            ...this.heartbeatSnapshot(),
             due: due.length,
             dueAgeMs: due.length ? Math.max(0, now - oldestDueAt) : 0,
-            dueFences,
-            claiming: this.claiming.size,
-            inFlight: this.inFlight.size,
-            dirty: this.dirty.size,
-            dirtyAgeMs: this.dirty.size ? Math.max(0, now - oldestDirtyAt) : 0,
-            commanding: this.commanding.size,
-            commandingAgeMs: this.commanding.size ? Math.max(0, now - oldestCommandAt) : 0,
-            maxInFlight: this.maxInFlight,
-            maxAtomicPartySize: this.maxAtomicPartySize,
-            paused: this.paused,
-            stopping: this.stopping
+            dueFences
         };
     }
 }
