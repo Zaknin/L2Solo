@@ -2912,7 +2912,7 @@ const BotLifeState = {
                     .then(() => syncInventorySummary(row.characterId, profiledState.inventory, newDeath ? 'resolve_death' : 'resolve', nativeWriteOptions))
                     .then((deathDrop) => {
                         if (deathDrop?.inventory) {
-                            // The drop moved a far row's revision; the published state carries it.
+                            // The published state carries the row the drop read back.
                             row.simulationRevision = deathDrop.revision;
                             row.inventorySummary = safeJson(deathDrop.inventory);
                             row.statsJson = safeJson({ ...parseJson(row.statsJson, {}), pkDropDeathSequence: deathDrop.deathSequence });
