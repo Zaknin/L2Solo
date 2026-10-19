@@ -4433,7 +4433,10 @@ const Database = {
             return { ok: true, buyerAdena, sellerAdena, nextMp,
                 buyerRevision: Number(buyer.simulationRevision) + 1,
                 sellerRevision: Number(seller.simulationRevision) + 1,
-                buyerStats, sellerStats, buyerInventory, sellerInventory };
+                // The cache takes these as the whole stats: the body written
+                // above with each row's mind (SavedStats.MIND_KEYS) over it.
+                buyerStats: SavedStats.merge(buyerStats, buyer.mindJson),
+                sellerStats: SavedStats.merge(sellerStats, seller.mindJson), buyerInventory, sellerInventory };
         }, 'buff-service:cold')));
     },
 
