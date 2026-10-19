@@ -88,16 +88,12 @@ async function main() {
         resolveParty: options => Resolver.resolve(options),
         emit: (type, payload) => messages.push({ type, payload }),
         projectResolve: (state, result) => ({ ...state, ...result.patch }) });
-    const requestId = 'assembly-claim';
-    const held = new Map(scattered.map(s => [s.characterId, { characterId: s.characterId,
-        ownerId: 'cold_simulation_owner', leaseId: `assembly-${s.characterId}`, revision: 1, leaseUntil: at + 30000 }]));
     for (const state of scattered) {
         kernel.upsert({ state });
-        kernel.inFlight.set(state.characterId, { state, grant: held.get(state.characterId),
-            partyId: party.partyId, claimRequestId: requestId });
+        kernel.inFlight.set(state.characterId, { state, startedAt: at, partyId: party.partyId });
     }
-    kernel.partyRuns.set(party.partyId, { party, members: scattered, spot, requestId, grants: held });
-    await kernel.resolvePartyGrant(party.partyId);
+    kernel.partyRuns.set(party.partyId, { party, members: scattered, spot, startedAt: at });
+    await kernel.resolvePartyStep(party.partyId);
     const batch = messages.find(m => m.type === 'proposal_batch');
     assert(batch, JSON.stringify(messages));
     assert(batch.payload.proposals.every(p => p.result.materialize.exp === 0));
@@ -151,10 +147,6 @@ async function main() {
         send('table_page', { tables: [{ name: 'parties', from: null, to: 0, full: true,
             rows: [[workerParty.partyId, workerParty]], removed: [], last: true }] });
         send('snapshot_page', { done: true, rows: workerMembers.map(state => ({ state })) });
-        const claim = await until(m => m.type === 'claim_request');
-        send('claim_ack', { grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,
-            ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,
-            leaseId: `worker-assembly-${c.characterId}`, leaseUntil: Date.now() + 30000, purpose: c.purpose })) }, claim.msgId);
         const proposal = await until(m => m.type === 'proposal_batch');
         assert(proposal.payload.proposals.every(p => p.result.materialize.exp === 0));
         assert(proposal.payload.proposals.every(p => !p.result.memoryEvents?.length));

@@ -34,9 +34,9 @@ function state(characterId = 1, overrides = {}) {
 }
 
 
-// Capture the actual emitted request id; manual ACKs use the same wire
-// correlation as the worker instead of a missing-id compatibility path.
-const claimRequestIds = new WeakMap();
+// The steps each tick started (new inFlight entries, in start order): a step
+// starts from the kernel's own copy at the tick, with no message to main.
+const startedSteps = new WeakMap();
 const sentProposals = new WeakMap();
 const sentCommands = new WeakMap();
 // The spot the worker finds a bot standing at (its spotOf), as the fixture states it.
@@ -47,18 +47,25 @@ function standOn(kernel, entry, spot) {
 }
 function recordingKernel(options) {
     let kernel;
-    const requests = new Map();
+    const steps = [];
     const proposals = new Map();
     const commands = new Map();
     const spots = new Map();
     kernel = new ColdSimulationKernel({ spotOf: value => spots.get(Number(value?.characterId)) || null,
         ...options, emit: (type, payload, msgId, ...rest) => {
-        if (type === 'claim_request') for (const candidate of payload.candidates) requests.set(candidate.characterId, msgId);
         if (type === 'proposal_batch') for (const proposal of payload.proposals) proposals.set(proposal.characterId, proposal);
         if (type === 'command_request') for (const request of payload.requests) commands.set(request.characterId, request);
         return options.emit?.(type, payload, msgId, ...rest);
     } });
-    claimRequestIds.set(kernel, requests);
+    const tick = kernel.tick.bind(kernel);
+    kernel.tick = (...args) => {
+        const before = new Set(kernel.inFlight.keys());
+        const result = tick(...args);
+        const started = [...kernel.inFlight.keys()].filter(id => !before.has(id));
+        if (started.length) steps.push(started);
+        return result;
+    };
+    startedSteps.set(kernel, steps);
     standing.set(kernel, spots);
     sentProposals.set(kernel, proposals);
     sentCommands.set(kernel, commands);
@@ -74,19 +81,16 @@ function commitAck(kernel, payload) {
     kernel.onCommitAck({ results: payload.results.map(result => {
         const proposal = sentProposals.get(kernel).get(result.characterId);
         assert(proposal, 'fixture commit ACK echoes an actual sent proposal');
-        return { ...result, inputToken: proposal.token, proposalId: proposal.proposalId };
+        return { ...result, proposalId: proposal.proposalId };
     }) });
 }
-function claimAck(kernel, payload) {
-    const rows = [...(payload.grants || []), ...(payload.rejected || [])];
-    const ids = rows.map(row => claimRequestIds.get(kernel).get(row.characterId));
-    assert(ids.length && ids.every(id => typeof id === 'string' && id === ids[0]), 'fixture ACK echoes one captured request id');
-    kernel.onClaimAck(payload, ids[0]);
-}
+// The bots the last stepping tick started, and whether a bot ever stepped.
+const lastSteps = kernel => startedSteps.get(kernel).at(-1) || [];
+const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.includes(id));
 
 (async () => {
     {
-        // Developer diagnostics: every scheduler tick is counted as claimed or
+        // Developer diagnostics: every scheduler tick is counted as stepped or
         // as empty with its reason; a not-yet-due head records its distance.
         const PopulationConfig = require('../src/GameServer/Bot/Population/PopulationConfig');
         const Diagnostics = require('../src/GameServer/Bot/Economy/EconomyDiagnostics');
@@ -105,19 +109,19 @@ function claimAck(kernel, payload) {
         assert.strictEqual(added('worker_tick_gap:lt1s:unknown'), 1);
         at = 2000;
         probe.tick();
-        assert.strictEqual(added('worker_tick:claimed:unknown'), 1);
+        assert.strictEqual(added('worker_tick:stepped:unknown'), 1);
         probe.tick();
         assert.strictEqual(added('worker_tick:empty:no_capacity'), 1);
         probe.paused = true;
         probe.tick();
         assert.strictEqual(added('worker_tick:empty:paused'), 1);
         // A due bot inside a PvP encounter is requeued past it: the tick took due
-        // work but sent no claim, so it is not idle even though the head is not due.
+        // work but started no step, so it is not idle even though the head is not due.
         const encounter = recordingKernel({ resolveSolo: () => null, now: () => at, maxInFlight: 1 });
         encounter.upsert({ state: state(93, { stats: { pvpEncounter: { expiresAt: at + 5000 } },
             timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }) });
         encounter.tick();
-        assert.strictEqual(added('worker_tick:empty:no_claim'), 1);
+        assert.strictEqual(added('worker_tick:empty:no_step'), 1);
         assert.strictEqual(added('worker_tick:empty:not_due'), 1, 'a requeued bot is not counted as an idle tick');
         const off = { ...counts() };
         PopulationConfig.developerDiagnostics = false;
@@ -128,15 +132,14 @@ function claimAck(kernel, payload) {
         PopulationConfig.developerDiagnostics = wasOn;
     }
 
-    const valid = Protocol.validateEnvelope(Protocol.envelope('claim_request', 'epoch', { candidates: [] }), 'worker', { workerEpoch: 'epoch' });
+    const valid = Protocol.validateEnvelope(Protocol.envelope('command_request', 'epoch', { requests: [] }), 'worker', { workerEpoch: 'epoch' });
     assert.strictEqual(valid.ok, true);
     assert.strictEqual(Protocol.validateEnvelope(null, 'worker').reason, 'invalid_envelope');
     assert.strictEqual(Protocol.validateEnvelope({
         version: 999, type: 'ready', msgId: 'x', workerEpoch: 'epoch', payload: {}
     }, 'worker').reason, 'protocol_version');
-    assert.strictEqual(Protocol.validateEnvelope(Protocol.envelope('claim_request', 'epoch', {
-        candidates: Array.from({ length: 65 }, (_, index) => ({ characterId: index + 1 }))
-    }), 'worker').reason, 'batch_size');
+    assert.strictEqual(Protocol.validateEnvelope(Protocol.envelope('claim_request', 'epoch', {}), 'worker').reason,
+        'message_type', 'no claim message exists: a step needs nothing from main to start');
     assert.strictEqual(Protocol.validateEnvelope(Protocol.envelope('command_request', 'epoch', {
         requests: Array.from({ length: 65 }, (_, index) => ({ characterId: index + 1 }))
     }), 'worker').reason, 'batch_size');
@@ -159,17 +162,8 @@ function claimAck(kernel, payload) {
     });
     kernel.upsert(standOn(kernel, { state: state() }, { id: 'spot', rewards: {} }));
     kernel.tick();
-    const claimRequest = emitted.shift();
-    assert.strictEqual(claimRequest.type, 'claim_request');
-    assert.strictEqual(claimRequest.payload.candidates[0].expectedRevision, 3);
-    claimAck(kernel, { grants: [{
-        ok: true,
-        characterId: 1,
-        ownerId: 'cold_simulation_owner',
-        revision: 4,
-        leaseId: 'lease-1',
-        leaseUntil: 33000
-    }] });
+    assert.deepStrictEqual(emitted, [], 'a step goes out without a claim: the tick sends main nothing');
+    assert.deepStrictEqual(lastSteps(kernel), [1]);
     await kernel.resolveChain;
     assert.strictEqual(kernel.snapshot().resolved, 1);
     kernel.flushDue();
@@ -183,7 +177,9 @@ function claimAck(kernel, payload) {
         'a partial ownership window must not request early commit admission');
     const proposal = proposalMessage.payload.proposals[0];
     assert.strictEqual(proposal.priority, 'P2');
-    assert.strictEqual(proposal.token.revision, 4);
+    assert.strictEqual(proposal.revision, 3, 'the proposal carries the revision its step started from');
+    assert.strictEqual(proposal.proposalId, '1:3000', 'the step is named by its bot and start');
+    assert.strictEqual(proposal.token, undefined);
 
     const first = deterministicRandom(state());
     const second = deterministicRandom(state());
@@ -192,10 +188,7 @@ function claimAck(kernel, payload) {
     const staleLeaderRun = {
         party: { partyId: 'bgp_stale_leader', leaderId: 99, memberIds: [99, 1, 2] },
         members: [state(1), state(2)],
-        grants: new Map([
-            [1, { leaseId: 'stale-1', revision: 4 }],
-            [2, { leaseId: 'stale-2', revision: 4 }]
-        ])
+        startedAt: 4000
     };
     const staleLeaderProposals = partyTransitionProposals(
         staleLeaderRun,
@@ -319,10 +312,6 @@ function claimAck(kernel, payload) {
         })
     }, { id: 'starter-field' }));
     routeKernel.tick();
-    claimAck(routeKernel, { grants: [{
-        ok: true, characterId: 71, ownerId: 'cold_simulation_owner', revision: 4,
-        leaseId: 'route-lease', leaseUntil: 35000
-    }] });
     await routeKernel.resolveChain;
     assert.strictEqual(routeStates.length, 1);
     assert.strictEqual(routeStates[0].activity, 'traveling', 'worker resolve must execute the route transition before combat');
@@ -367,8 +356,6 @@ function claimAck(kernel, payload) {
             activityPick: { activity: 'hunting', npcId: 20101, spotId: 'worker-ground' } }) });
     pickKernel.upsert(standOn(pickKernel, { state: state(79) }, { id: 'worker-ground' }));
     pickKernel.tick();
-    claimAck(pickKernel, { grants: [{ ok: true, characterId: 79, ownerId: 'cold_simulation_owner', revision: 4,
-        leaseId: 'pick-lease', leaseUntil: 35000 }] });
     await pickKernel.resolveChain;
     assert.strictEqual(pickedTarget, 20101, 'native solo resolve uses the worker activityPick');
 
@@ -429,7 +416,7 @@ function claimAck(kernel, payload) {
     commandPressureKernel.partyPut(waitingParty.partyId, waitingParty);
     commandPressureKernel.tick();
     assert.strictEqual(commandPressureKernel.commanding.size, 2,
-        'lifecycle commands must share the ownership limit with combat claims');
+        'lifecycle commands must share the in-flight limit with combat steps');
     await commandPressureKernel.resolveChain;
     for (const s of blockedCommands.slice(0, 2)) {
         commandAck(commandPressureKernel, { characterId: s.characterId, ok: false,
@@ -443,8 +430,7 @@ function claimAck(kernel, payload) {
     commandAck(commandPressureKernel, { characterId: 712, ok: false, reason: 'missing_spot',
         retryAfterMs: 30000, state: blockedCommands[2] });
     commandPressureKernel.tick();
-    const resumedParty = commandPressureMessages.find(m => m.type === 'claim_request');
-    assert.deepStrictEqual(resumedParty?.payload.candidates.map(c => c.characterId), [720, 721, 722],
+    assert.deepStrictEqual(lastSteps(commandPressureKernel), [720, 721, 722],
         'rejected commands must drain so an overdue atomic party can progress');
 
     const transitionKernel = recordingKernel({
@@ -477,39 +463,50 @@ function claimAck(kernel, payload) {
     assert.strictEqual(memberOnlyKernel.snapshot().due, 0,
         'party members must not inflate independent worker due-age telemetry');
 
+    // A step whose commit ack never comes is requeued 30 s after its start;
+    // the ack arriving later misses its proposal and is dropped.
     let recoveryNow = now;
-    const recoveryKernel = recordingKernel({
-        resolveSolo: resolver,
-        emit: () => {},
-        now: () => recoveryNow,
-        claimAckTimeoutMs: 5000
-    });
+    const recoveryKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => recoveryNow });
     recoveryKernel.upsert(standOn(recoveryKernel, { state: state(6) }, { id: 'spot' }));
     recoveryKernel.tick();
-    assert.strictEqual(recoveryKernel.snapshot().claiming, 1);
-    recoveryNow += 5001;
-    recoveryKernel.tick();
-    assert.strictEqual(recoveryKernel.snapshot().claiming, 0,
-        'a lost claim ACK must not leave a bot permanently claiming');
-    assert.strictEqual(recoveryKernel.snapshot().claimRecoveries, 1);
-    assert.strictEqual(recoveryKernel.scheduleTokens.has(6), true);
-
-    recoveryNow += 1000;
-    recoveryKernel.tick();
-    claimAck(recoveryKernel, { grants: [{
-        ok: true, characterId: 6, ownerId: 'cold_simulation_owner', revision: 4,
-        leaseId: 'lost-commit-ack', leaseUntil: recoveryNow + 1000
-    }] });
+    const stalledAt = recoveryNow;
     await recoveryKernel.resolveChain;
+    recoveryKernel.flush(null, true);
     assert.strictEqual(recoveryKernel.snapshot().inFlight, 1);
-    recoveryNow += 1001;
+    assert.strictEqual(recoveryKernel.nextWakeAt(), stalledAt + 30000, 'the oldest step\'s stall is the next wake');
+    recoveryNow = stalledAt + 29999;
+    recoveryKernel.tick();
+    assert.strictEqual(recoveryKernel.snapshot().inFlight, 1, 'a step within its 30 s waits for its commit ack');
+    assert.strictEqual(recoveryKernel.snapshot().inFlightAgeMs, 29999);
+    recoveryNow = stalledAt + 30000;
     recoveryKernel.tick();
     assert.strictEqual(recoveryKernel.snapshot().inFlight, 0,
-        'an expired lease after a lost commit ACK must release the worker busy fence');
-    assert.strictEqual(recoveryKernel.snapshot().dirty, 0,
-        'an expired proposal must never be retried outside its lease CAS boundary');
-    assert.strictEqual(recoveryKernel.snapshot().leaseRecoveries, 1);
-    assert.strictEqual(recoveryKernel.scheduleTokens.has(6), true);
+        'a step with no commit ack 30 s after its start frees its slot');
+    assert.strictEqual(recoveryKernel.snapshot().dirty, 0);
+    assert.strictEqual(recoveryKernel.snapshot().stallRecoveries, 1);
+    assert.strictEqual(recoveryKernel.scheduleTokens.get(6).dueAt, recoveryNow + 1000, 'the stalled bot is requeued');
+    commitAck(recoveryKernel, { results: [{ ok: true, characterId: 6, state: state(6) }] });
+    assert.strictEqual(recoveryKernel.snapshot().lateAcks, 1, 'the late ack is dropped');
+    assert.strictEqual(recoveryKernel.states.get(6).state.simulation.revision, 3, 'a dropped ack changes no state');
+
+    // A stalled party step frees every member and requeues the party by its leader.
+    let partyStallNow = now;
+    const partyStallKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => partyStallNow,
+        resolveParty: ({ timestamp }) => ({ memberResults: [], events: [], partyPatch: {}, nextResolveAt: timestamp + 60000 }) });
+    [260, 261].forEach(id => partyStallKernel.upsert({ state: state(id, { party: { partyId: 'stall-party', leaderId: 260 } }) }));
+    partyStallKernel.partyPut('stall-party', { partyId: 'stall-party', leaderId: 260, memberIds: [260, 261], stats: {},
+        status: 'active', nextResolveAt: partyStallNow - 1000, revision: 4 });
+    partyStallKernel.tick();
+    assert.deepStrictEqual(lastSteps(partyStallKernel), [260, 261]);
+    await partyStallKernel.resolveChain;
+    partyStallKernel.flush(null, true);
+    partyStallNow += 30000;
+    partyStallKernel.tick();
+    assert.strictEqual(partyStallKernel.inFlight.size, 0, 'a stalled party step frees every member');
+    assert.strictEqual(partyStallKernel.partyRuns.size, 0);
+    assert.strictEqual(partyStallKernel.snapshot().stallRecoveries, 2, 'each freed member counts');
+    assert.strictEqual(partyStallKernel.scheduleTokens.get(260).dueAt, partyStallNow + 1000, 'the leader requeues the party');
+    assert.notStrictEqual(partyStallKernel.scheduleTokens.get(261)?.dueAt, partyStallNow + 1000, 'a member is not requeued alone');
 
     const orphanKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => recoveryNow });
     orphanKernel.upsert(standOn(orphanKernel, {
@@ -538,10 +535,6 @@ function claimAck(kernel, payload) {
         timing: { lastResolvedAt: recoveryNow - 1000, nextResolveAt: recoveryNow }
     }) }, { id: 'spot' }));
     ackRaceKernel.tick();
-    claimAck(ackRaceKernel, { grants: [{
-        ok: true, characterId: 8, ownerId: 'cold_simulation_owner', revision: 4,
-        leaseId: 'catalog-before-ack', leaseUntil: recoveryNow + 30000
-    }] });
     await ackRaceKernel.resolveChain;
     ackRaceKernel.flush(null, true);
     ackRaceKernel.upsert(standOn(ackRaceKernel, { state: state(8, {
@@ -593,26 +586,15 @@ function claimAck(kernel, payload) {
         }
     });
     partyKernel.tick();
-    const partyClaim = partyMessages.shift();
-    assert.strictEqual(partyClaim.type, 'claim_request');
-    assert.deepStrictEqual(partyClaim.payload.candidates.map((candidate) => candidate.characterId), [20, 21]);
-    assert.deepStrictEqual(partyClaim.payload.candidates.map((candidate) => candidate.expectedRevision), [3, 9],
-        'party claims must use current member revisions instead of the leader snapshot');
-    assert(partyClaim.payload.candidates.every((candidate) => candidate.purpose.kind === 'party'));
-    claimAck(partyKernel, {
-        grants: partyClaim.payload.candidates.map((candidate) => ({
-            ok: true,
-            characterId: candidate.characterId,
-            ownerId: 'cold_simulation_owner',
-            revision: candidate.expectedRevision + 1,
-            leaseId: `party-lease-${candidate.characterId}`,
-            leaseUntil: now + 30000,
-            purpose: candidate.purpose
-        }))
-    });
+    assert.deepStrictEqual(partyMessages, [], 'a party step goes out without a claim');
+    assert.deepStrictEqual(lastSteps(partyKernel), [20, 21]);
     await partyKernel.resolveChain;
     const partyProposal = partyMessages.find((entry) => entry.type === 'proposal_batch');
-    assert.strictEqual(partyProposal.payload.proposals.length, 2, 'party compute must produce one CAS proposal per claimed member');
+    assert.strictEqual(partyProposal.payload.proposals.length, 2, 'party compute must produce one CAS proposal per member');
+    assert.deepStrictEqual(partyProposal.payload.proposals.map(entry => entry.revision), [3, 9],
+        'each member commits on its own current revision, not the leader snapshot');
+    assert.deepStrictEqual(partyProposal.payload.proposals.map(entry => entry.proposalId), [`20:${now}`, `21:${now}`],
+        'party members share the step start');
     assert(partyProposal.payload.proposals.every((proposalEntry) => proposalEntry.options.allowParty === true));
     assert(partyProposal.payload.proposals.find((proposalEntry) => proposalEntry.characterId === 20).partyResolution,
         'the leader proposal must carry the party durable update');
@@ -632,10 +614,6 @@ function claimAck(kernel, payload) {
     refreshKernel.upsert(standOn(refreshKernel, { state: refreshMembers[0] }, { id: 'refresh-spot' }));
     refreshKernel.upsert({ state: refreshMembers[1] });
     refreshKernel.partyPut(refreshParty.partyId, { ...refreshParty, requirementRefresh: true }); refreshKernel.tick();
-    const refreshClaim = refreshMessages.find(message => message.type === 'claim_request');
-    claimAck(refreshKernel, { grants: refreshClaim.payload.candidates.map(candidate => ({ ok: true,
-        characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
-        leaseId: `refresh-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
     await refreshKernel.resolveChain;
     const refreshProposal = refreshMessages.find(message => message.type === 'proposal_batch').payload.proposals.find(proposal => proposal.partyResolution);
     assert.deepStrictEqual(refreshed, [120, 121], 'the party resolve refreshes each member after its projection');
@@ -656,10 +634,6 @@ function claimAck(kernel, payload) {
         kitKernel.upsert(standOn(kitKernel, { state: refreshMembers[0] }, { id: 'refresh-spot' }));
         kitKernel.upsert({ state: refreshMembers[1] });
         kitKernel.partyPut(refreshParty.partyId, refreshParty); kitKernel.tick();
-        const kitClaim = kitMessages.find(message => message.type === 'claim_request');
-        claimAck(kitKernel, { grants: kitClaim.payload.candidates.map(candidate => ({ ok: true,
-            characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
-            leaseId: `kit-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
         await kitKernel.resolveChain;
         assert.deepStrictEqual(kitPlanned, moved ? [121] : [], 'a moved kit opens the re-plan at that member');
         assert.strictEqual(kitKernel.partyRequirementProgress.has('refresh-party'), moved,
@@ -689,16 +663,11 @@ function claimAck(kernel, payload) {
         joinKernel.upsert(standOn(joinKernel, { state: joinMembers[0] }, { id: 'refresh-spot' }));
         joinKernel.upsert({ state: joinMembers[1] });
         joinKernel.partyPut(joinParty.partyId, joinParty);
-        // The recruit is not due: it waits idle, not claimed by this tick.
+        // The recruit is not due: it waits idle, not started by this tick.
         if (outcome !== 'gone') joinKernel.upsert({ state: state(122, { timing: { lastResolvedAt: now, nextResolveAt: now + 3600000 } }) });
         if (outcome === 'unavailable') { const busy = joinKernel.busy.bind(joinKernel);
             joinKernel.busy = id => Number(id) === 122 || busy(id); }
         joinKernel.tick();
-        const joinClaim = joinMessages.find(message => message.type === 'claim_request');
-        claimAck(joinKernel, { grants: joinClaim.payload.candidates.filter(candidate => candidate.characterId !== 122)
-            .map(candidate => ({ ok: true, characterId: candidate.characterId, ownerId: 'cold_simulation_owner',
-                revision: candidate.expectedRevision + 1, leaseId: `join-${candidate.characterId}`,
-                leaseUntil: now + 30000, purpose: candidate.purpose })) });
         await joinKernel.resolveChain;
         const leader = joinMessages.find(message => message.type === 'proposal_batch').payload.proposals
             .find(proposal => proposal.partyResolution);
@@ -734,10 +703,6 @@ function claimAck(kernel, payload) {
         materialKernel.upsert(standOn(materialKernel, { state: materialMembers[0] }, { id: objective.spotId }));
         materialKernel.upsert({ state: materialMembers[1] });
         materialKernel.partyPut(materialParty.partyId, { ...materialParty, requirementRefresh: true }); materialKernel.tick();
-        const claim = materialMessages.find(message => message.type === 'claim_request');
-        claimAck(materialKernel, { grants: claim.payload.candidates.map(candidate => ({ ok: true,
-            characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
-            leaseId: `material-${complete}-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
         await materialKernel.resolveChain;
         const proposals = materialMessages.find(message => message.type === 'proposal_batch')?.payload.proposals;
         assert(proposals?.length === 2, 'material progress and completion both publish all members without a generic requirement refresh');
@@ -749,80 +714,6 @@ function claimAck(kernel, payload) {
         if (complete) assert(proposals.every(proposal => !proposal.nextState.party?.partyId
             && proposal.nextState.activity === 'hunting'), 'native completion releases every physical state');
     }
-
-    const stalePartyMessages = [];
-    let stalePartyNow = now;
-    const stalePartyMembers = [
-        state(220, { party: { partyId: 'stale-party-220', leaderId: 220 } }),
-        state(221, { party: { partyId: 'stale-party-220', leaderId: 220 } })
-    ];
-    const staleParty = {
-        partyId: 'stale-party-220',
-        leaderId: 220,
-        memberIds: [220, 221],
-        stats: {},
-        nextResolveAt: stalePartyNow
-    };
-    const stalePartyKernel = recordingKernel({
-        resolveSolo: resolver,
-        resolveParty: () => { throw new Error('partial stale party claim must not resolve'); },
-        emit: (type, payload, msgId) => stalePartyMessages.push({ type, payload, msgId }),
-        now: () => stalePartyNow
-    });
-    stalePartyKernel.upsert(standOn(stalePartyKernel, { state: stalePartyMembers[0] }, { id: 'stale-party-spot' }));
-    stalePartyKernel.upsert({ state: stalePartyMembers[1] });
-    stalePartyKernel.partyPut(staleParty.partyId, staleParty);
-    stalePartyKernel.tick();
-    const stalePartyClaim = stalePartyMessages.shift();
-    const leaderCandidate = stalePartyClaim.payload.candidates.find((candidate) => candidate.characterId === 220);
-    const memberCandidate = stalePartyClaim.payload.candidates.find((candidate) => candidate.characterId === 221);
-    const refreshedMember = {
-        ...stalePartyMembers[1],
-        simulation: { ownerId: 'legacy_main', revision: 9, leaseId: null, leaseUntil: 0 }
-    };
-    claimAck(stalePartyKernel, {
-        grants: [{
-            ok: true,
-            characterId: 220,
-            ownerId: 'cold_simulation_owner',
-            revision: leaderCandidate.expectedRevision + 1,
-            leaseId: 'stale-party-leader-lease',
-            leaseUntil: stalePartyNow + 30000,
-            purpose: leaderCandidate.purpose
-        }],
-        rejected: [{
-            ok: false,
-            characterId: 221,
-            reason: 'stale_revision',
-            expectedRevision: memberCandidate.expectedRevision,
-            actualRevision: 9,
-            actualOwner: 'legacy_main',
-            state: refreshedMember,
-            purpose: memberCandidate.purpose
-        }]
-    });
-    assert.strictEqual(stalePartyKernel.states.get(221).state.simulation.revision, 9,
-        'a stale party claim must refresh the member revision before retrying');
-    const partialRelease = stalePartyMessages.find((entry) => entry.type === 'release_request');
-    assert(partialRelease, 'a partial party claim must release grants accepted before the rejection');
-    stalePartyKernel.onReleaseAck({ results: [{
-        ok: true,
-        characterId: 220,
-        inputToken: partialRelease.payload.releases[0].token,
-        releaseRequestId: partialRelease.msgId,
-        state: {
-            ...stalePartyMembers[0],
-            simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
-        }
-    }] });
-    stalePartyNow += 1000;
-    stalePartyKernel.tick();
-    const retriedPartyClaim = stalePartyMessages.find((entry) => entry.type === 'claim_request');
-    assert.deepStrictEqual(
-        retriedPartyClaim.payload.candidates.map((candidate) => candidate.expectedRevision),
-        [5, 9],
-        'the next party claim must use revisions returned by release and stale ACKs'
-    );
 
     const expiredPartyMessages = [];
     const expiredPartyMembers = [
@@ -858,19 +749,7 @@ function claimAck(kernel, payload) {
     expiredPartyKernel.upsert({ state: expiredPartyMembers[1] });
     expiredPartyKernel.partyPut(expiredParty.partyId, expiredParty);
     expiredPartyKernel.tick();
-    const expiredClaim = expiredPartyMessages.shift();
-    assert.strictEqual(expiredClaim.type, 'claim_request');
-    claimAck(expiredPartyKernel, {
-        grants: expiredClaim.payload.candidates.map((candidate) => ({
-            ok: true,
-            characterId: candidate.characterId,
-            ownerId: 'cold_simulation_owner',
-            revision: candidate.expectedRevision + 1,
-            leaseId: `expired-party-lease-${candidate.characterId}`,
-            leaseUntil: now + 30000,
-            purpose: candidate.purpose
-        }))
-    });
+    assert.deepStrictEqual(lastSteps(expiredPartyKernel), [22, 23]);
     await expiredPartyKernel.resolveChain;
     const expiryProposal = expiredPartyMessages.find((entry) => entry.type === 'proposal_batch');
     assert.strictEqual(expiryProposal.payload.proposals.length, 2, 'expired party release must include every member');
@@ -916,8 +795,8 @@ function claimAck(kernel, payload) {
         'a valid party must remain scheduled until its earliest resolve or expiry');
     expiryScheduleNow += 5001;
     expiryScheduleKernel.tick();
-    assert.strictEqual(expiryScheduleMessages[0].type, 'claim_request',
-        'a valid party must be claimed at session expiry even when nextResolveAt is later');
+    assert.deepStrictEqual(lastSteps(expiryScheduleKernel), [25, 26],
+        'a valid party must step at session expiry even when nextResolveAt is later');
 
     const partyDue = expiryScheduleNow + 3000;
     const partyDueLeader = state(27, {
@@ -953,7 +832,7 @@ function claimAck(kernel, payload) {
     partyCapacityKernel.upsert({ state: partyDueMember });
     partyCapacityKernel.partyPut(priorityParty.partyId, priorityParty);
     assert.deepStrictEqual(partyCapacityKernel.dueCandidates(expiryScheduleNow, 1), [],
-        'an atomic party claim must wait when the current capacity cannot fit every member');
+        'an atomic party step must wait when the current capacity cannot fit every member');
     assert.strictEqual(partyCapacityKernel.dueCandidates(expiryScheduleNow, 2).length, 2,
         'a capacity-blocked party must retain priority instead of moving behind overdue solo work');
 
@@ -981,21 +860,9 @@ function claimAck(kernel, payload) {
     singletonKernel.upsert(standOn(singletonKernel, { state: singletonMember }, { id: 'singleton-spot' }));
     singletonKernel.partyPut(singletonParty.partyId, singletonParty);
     singletonKernel.tick();
-    const singletonClaim = singletonMessages.shift();
-    assert.strictEqual(singletonClaim.type, 'claim_request', 'invalid singleton must enter the cleanup path immediately');
-    assert.deepStrictEqual(singletonClaim.payload.candidates.map((candidate) => candidate.characterId), [24]);
-    assert.strictEqual(singletonClaim.payload.candidates[0].purpose.invalidReason, 'party_min_size');
-    claimAck(singletonKernel, {
-        grants: singletonClaim.payload.candidates.map((candidate) => ({
-            ok: true,
-            characterId: candidate.characterId,
-            ownerId: 'cold_simulation_owner',
-            revision: candidate.expectedRevision + 1,
-            leaseId: 'singleton-party-lease',
-            leaseUntil: singletonNow + 30000,
-            purpose: candidate.purpose
-        }))
-    });
+    assert.strictEqual(singletonMessages.length, 0, 'a step sends nothing before its proposal');
+    assert.deepStrictEqual(lastSteps(singletonKernel), [24], 'invalid singleton must enter the cleanup path immediately');
+    assert.strictEqual(singletonKernel.partyRuns.get('singleton-party').purpose.invalidReason, 'party_min_size');
     await singletonKernel.resolveChain;
     const singletonProposal = singletonMessages.find((entry) => entry.type === 'proposal_batch');
     assert(singletonProposal, 'invalid singleton must produce a durable release proposal');
@@ -1054,25 +921,14 @@ function claimAck(kernel, payload) {
     partyRouteKernel.upsert({ state: partyRouteMembers[1] });
     partyRouteKernel.partyPut(partyRouteParty.partyId, partyRouteParty);
     // A member's kept solo route: a new state keeps it, the party run's
-    // claim takes the member and drops it.
+    // step takes the member and drops it.
     partyRouteKernel.states.get(31).route = { spotId: 'solo-kept' };
     partyRouteKernel.upsert({ state: { ...partyRouteMembers[1], level: 17,
         simulation: { ...partyRouteMembers[1].simulation, revision: Number(partyRouteMembers[1].simulation?.revision || 0) + 1 } } });
     assert.deepStrictEqual(partyRouteKernel.states.get(31).route, { spotId: 'solo-kept' }, 'a committed state keeps the bot\'s route');
     partyRouteKernel.tick();
-    assert.strictEqual(partyRouteKernel.states.get(31).route, null, 'the party claim drops the member\'s solo route');
-    const partyRouteClaim = partyRouteMessages.shift();
-    claimAck(partyRouteKernel, {
-        grants: partyRouteClaim.payload.candidates.map((candidate) => ({
-            ok: true,
-            characterId: candidate.characterId,
-            ownerId: 'cold_simulation_owner',
-            revision: candidate.expectedRevision + 1,
-            leaseId: `route-party-lease-${candidate.characterId}`,
-            leaseUntil: now + 30000,
-            purpose: candidate.purpose
-        }))
-    });
+    assert.strictEqual(partyRouteKernel.states.get(31).route, null, 'the party step drops the member\'s solo route');
+    assert.deepStrictEqual(lastSteps(partyRouteKernel), [30, 31]);
     await partyRouteKernel.resolveChain;
     const partyRouteProposal = partyRouteMessages.find((entry) => entry.type === 'proposal_batch');
     assert.strictEqual(partyRouteProposal.payload.proposals.length, 2);
@@ -1094,7 +950,7 @@ function claimAck(kernel, payload) {
     compactFallbackKernel.upsert({ state: compactLeader });
     compactFallbackKernel.partyPut('compact-party', { partyId: 'compact-party', leaderId: 35, memberIds: [35, 36] });
     compactFallbackKernel.tick();
-    assert(!compactFallbackMessages.some((entry) => entry.type === 'claim_request'),
+    assert.deepStrictEqual(lastSteps(compactFallbackKernel), [],
         'a compact party reference must wait until its full authoritative state is loaded');
 
     const burstMessages = [];
@@ -1109,55 +965,8 @@ function claimAck(kernel, payload) {
         state: state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: now - 1 } })
     }, { id: 'spot' }));
     burstKernel.tick();
-    const burstClaim = burstMessages.find((entry) => entry.type === 'claim_request');
-    assert.strictEqual(burstClaim.payload.candidates.length, 3,
+    assert.strictEqual(lastSteps(burstKernel).length, 3,
         'a catch-up tick must honor the smaller in-flight burst even when the protocol batch is larger');
-
-    const renewalKernel = recordingKernel({ resolveSolo: resolver, now: () => now });
-    const renewalGrant = {
-        ok: true,
-        characterId: 90,
-        ownerId: 'cold_simulation_owner',
-        revision: 4,
-        leaseId: 'renewal-lease',
-        leaseUntil: now + 1000
-    };
-    renewalKernel.upsert({ state: state(90) });
-    renewalKernel.inFlight.set(90, {
-        grant: renewalGrant,
-        state: state(90),
-        startedAt: now
-    });
-    renewalKernel.onLeaseRenewal({ renewals: [{
-        ...renewalGrant,
-        leaseUntil: now + 10000
-    }] });
-    assert.strictEqual(renewalKernel.snapshot().leaseRenewals, 1,
-        'worker must accept a matching lease renewal for an active claim');
-    renewalKernel.recoverStalled(now + 2000);
-    assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 0,
-        'a renewed claim must not be recovered using its old deadline');
-    assert.strictEqual(renewalKernel.inFlight.get(90).grant.leaseUntil, now + 10000);
-    // The tick skips the expiry scan until the earliest lease can be due; a
-    // lease added later with an earlier deadline lowers that bound.
-    assert.strictEqual(renewalKernel.inFlight.checkAt, now + 10000);
-    renewalKernel.upsert({ state: state(92) });
-    renewalKernel.inFlight.set(92, {
-        grant: { ...renewalGrant, characterId: 92, leaseId: 'early-lease', leaseUntil: now + 4000 },
-        state: state(92),
-        startedAt: now
-    });
-    assert.strictEqual(renewalKernel.inFlight.checkAt, now + 4000);
-    renewalKernel.recoverStalled(now + 3999);
-    assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 0);
-    renewalKernel.recoverStalled(now + 4000);
-    assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 1, 'the early lease expires at its own deadline');
-    assert.deepStrictEqual([...renewalKernel.inFlight.keys()], [90]);
-    assert.strictEqual(renewalKernel.inFlight.checkAt, now + 10000);
-    renewalKernel.recoverStalled(now + 10000);
-    assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 2, 'the renewed lease expires at its new deadline');
-    assert.strictEqual(renewalKernel.inFlight.size, 0);
-    assert.strictEqual(renewalKernel.inFlight.checkAt, Infinity);
 
     const oversizedInventory = Object.fromEntries(Array.from({ length: 1200 }, (_, index) => [
         String(index), {
@@ -1170,7 +979,7 @@ function claimAck(kernel, payload) {
     const oversizedState = state(91, {
         inventory: oversizedInventory,
         stats: { equipmentPlan: { status: 'active' } },
-        simulation: { ownerId: 'cold_simulation_owner', revision: 5, leaseId: 'oversized-lease', leaseUntil: now + 30000 }
+        simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
     });
     const oversizedEmitted = [];
     const oversizedKernel = recordingKernel({
@@ -1179,18 +988,11 @@ function claimAck(kernel, payload) {
         now: () => now + 10000
     });
     const oversizedProposal = {
-        proposalId: 'oversized-lease:5',
+        proposalId: `91:${now}`,
         characterId: 91,
         priority: 'P2',
         enqueuedAt: now,
-        token: {
-            ok: true,
-            characterId: 91,
-            ownerId: 'cold_simulation_owner',
-            revision: 5,
-            leaseId: 'oversized-lease',
-            leaseUntil: now + 30000
-        },
+        revision: 5,
         baseState: oversizedState,
         nextState: oversizedState,
         durable: null,
@@ -1203,11 +1005,7 @@ function claimAck(kernel, payload) {
         },
         options: { allowLifecycle: true }
     };
-    oversizedKernel.inFlight.set(91, {
-        grant: oversizedProposal.token,
-        state: oversizedState,
-        startedAt: now
-    });
+    oversizedKernel.inFlight.set(91, { state: oversizedState, startedAt: now });
     oversizedKernel.dirty.set(91, oversizedProposal);
     oversizedKernel.flushDue();
     const compactedMessage = oversizedEmitted.find((entry) => entry.type === 'proposal_batch');
@@ -1229,10 +1027,10 @@ function claimAck(kernel, payload) {
     for (let id = 200; id < 209; id++) {
         const before = state(id, { stats: { history: 'h'.repeat(40000), removed: 1, list: [1, 2] } });
         const next = { ...before, stats: { history: before.stats.history, list: [3], added: null }, hp: 8 };
-        const entry = { ...oversizedProposal, characterId: id, token: { ...oversizedProposal.token, characterId: id },
+        const entry = { ...oversizedProposal, characterId: id, proposalId: `${id}:${now}`,
             baseState: { ...before, hp: 8 }, nextState: next,
             atomicGroup: { id: 'large-clan', memberIds: Array.from({ length: 9 }, (_, i) => 200 + i) } };
-        oversizedKernel.inFlight.set(id, { state: before, grant: entry.token });
+        oversizedKernel.inFlight.set(id, { state: before, startedAt: now });
         oversizedKernel.dirty.set(id, entry);
         largeGroup.push({ before, next });
     }
@@ -1244,7 +1042,7 @@ function claimAck(kernel, payload) {
     sparse.payload.proposals.forEach((p, i) => {
         assert(p.nextStateDelta && !p.nextState);
         assert.deepStrictEqual(Delta.apply(largeGroup[i].before, p.nextStateDelta), largeGroup[i].next,
-            'transport retains planning changes, deletions, arrays and nulls against the claimed state');
+            'transport retains planning changes, deletions, arrays and nulls against the step base state');
         assert.strictEqual(largeGroup[i].before.stats.removed, 1, 'applying transport must not mutate its base');
     });
     assert.strictEqual(oversizedKernel.snapshot().proposalOversizeRejected, 0);
@@ -1264,18 +1062,7 @@ function claimAck(kernel, payload) {
         state: entry
     }, { id: 'spot', rewards: {} })));
     capacityFlushKernel.tick();
-    const capacityFlushClaim = capacityFlushMessages.shift();
-    assert.strictEqual(capacityFlushClaim.payload.candidates.length, 8);
-    claimAck(capacityFlushKernel, {
-        grants: capacityFlushStates.map((entry) => ({
-            ok: true,
-            characterId: entry.characterId,
-            ownerId: 'cold_simulation_owner',
-            revision: 4,
-            leaseId: `capacity-flush-${entry.characterId}`,
-            leaseUntil: now + 30000
-        }))
-    });
+    assert.strictEqual(lastSteps(capacityFlushKernel).length, 8);
     await capacityFlushKernel.resolveChain;
     assert.strictEqual(capacityFlushKernel.snapshot().dirty, 8);
     const readyProposals = [...capacityFlushKernel.dirty.entries()];
@@ -1308,9 +1095,9 @@ function claimAck(kernel, payload) {
     partialKernel.partyPut('nine', { partyId: 'nine', leaderId: 500, memberIds: clanMembers.map(m => m.characterId) });
     for (let id = 600; id < 605; id++) {
         const pending = { ...oversizedProposal, characterId: id, enqueuedAt: now,
-            token: { ...oversizedProposal.token, characterId: id }, baseState: state(id), nextState: state(id), result: { events: [], debug: {} } };
+            proposalId: `${id}:${now}`, revision: 3, baseState: state(id), nextState: state(id), result: { events: [], debug: {} } };
         partialKernel.upsert({ state: pending.baseState });
-        partialKernel.inFlight.set(id, { state: pending.baseState, grant: pending.token });
+        partialKernel.inFlight.set(id, { state: pending.baseState, startedAt: now });
         partialKernel.dirty.set(id, pending);
     }
     partialKernel.tick();
@@ -1346,13 +1133,12 @@ function claimAck(kernel, payload) {
     throttledPartyKernel.partyPut(throttledParty.partyId, throttledParty);
     throttledPartyKernel.upsert(standOn(throttledPartyKernel, { state: state(100) }, { id: 'spot' }));
     throttledPartyKernel.tick();
-    const throttledClaim = throttledPartyMessages.find((entry) => entry.type === 'claim_request');
-    assert.deepStrictEqual(throttledClaim.payload.candidates.map((candidate) => candidate.characterId), [39],
+    assert.deepStrictEqual(lastSteps(throttledPartyKernel), [39],
         'a valid atomic party must drain earlier owners instead of letting newer solo work refill the window');
     assert.strictEqual(throttledPartyKernel.snapshot().partyCapacityDeferrals, 1);
-    assert(throttledPartyMembers.every((member) => !throttledPartyKernel.claiming.has(member.characterId)),
-        'a throttled atomic party must remain unclaimed until the ownership window recovers');
-    throttledPartyKernel.claiming.delete(39);
+    assert(throttledPartyMembers.every((member) => !throttledPartyKernel.inFlight.has(member.characterId)),
+        'a throttled atomic party must not step until the window recovers');
+    throttledPartyKernel.inFlight.delete(39);
     assert.deepStrictEqual(throttledPartyKernel.dueCandidates(now, 4).map(c => c.characterId), [40, 41, 42, 43, 44]);
 
     const atomicBurstMessages = [];
@@ -1370,9 +1156,8 @@ function claimAck(kernel, payload) {
     ));
     atomicBurstKernel.partyPut(throttledParty.partyId, throttledParty);
     atomicBurstKernel.tick();
-    const atomicBurstClaim = atomicBurstMessages.find((entry) => entry.type === 'claim_request');
     assert.deepStrictEqual(
-        atomicBurstClaim.payload.candidates.map((candidate) => candidate.characterId),
+        lastSteps(atomicBurstKernel),
         [40, 41, 42, 43, 44],
         'an empty throttled ownership window must admit one bounded atomic party'
     );
@@ -1402,8 +1187,7 @@ function claimAck(kernel, payload) {
     boundedBurstKernel.partyPut(oversizedParty.partyId, oversizedParty);
     boundedBurstKernel.upsert(standOn(boundedBurstKernel, { state: state(100) }, { id: 'spot' }));
     boundedBurstKernel.tick();
-    const boundedBurstClaim = boundedBurstMessages.find((entry) => entry.type === 'claim_request');
-    assert.deepStrictEqual(boundedBurstClaim.payload.candidates.map((candidate) => candidate.characterId), [100],
+    assert.deepStrictEqual(lastSteps(boundedBurstKernel), [100],
         'a party above the configured atomic bound must defer without blocking solo work');
     assert.strictEqual(boundedBurstKernel.snapshot().partyCapacityBursts, 0);
     assert.strictEqual(boundedBurstKernel.snapshot().partyCapacityDeferrals, 1);
@@ -1423,23 +1207,20 @@ function claimAck(kernel, payload) {
         index === 0 ? standOn(capacityKernel, { state: member }, { id: 'spot' }) : { state: member }
     ));
     capacityKernel.partyPut(capacityParty.partyId, capacityParty);
-    for (let id = 1000; id < 1062; id++) capacityKernel.claiming.add(id);
+    for (let id = 1000; id < 1062; id++) capacityKernel.inFlight.set(id, { startedAt: now });
     capacityKernel.tick();
-    assert(!capacityMessages.some((entry) => entry.type === 'claim_request'), 'a party must wait when remaining capacity cannot admit every member');
-    assert(capacityMembers.every((member) => !capacityKernel.claiming.has(member.characterId)),
-        'capacity deferral must not mark unsent party members as claiming');
-    capacityKernel.claiming.clear();
+    assert.deepStrictEqual(lastSteps(capacityKernel), [], 'a party must wait when remaining capacity cannot admit every member');
+    assert(capacityMembers.every((member) => !capacityKernel.inFlight.has(member.characterId)),
+        'capacity deferral must not start unsent party members');
+    capacityKernel.inFlight.clear();
     now += 100;
     capacityKernel.tick();
-    assert.strictEqual(capacityMessages.find((entry) => entry.type === 'claim_request').payload.candidates.length, 5,
+    assert.strictEqual(lastSteps(capacityKernel).length, 5,
         'the next eligible tick must admit the entire party atomically');
 
     const fenceKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => now });
     fenceKernel.upsert(standOn(fenceKernel, { state: state(9) }, { id: 'spot' }));
     fenceKernel.tick();
-    claimAck(fenceKernel, { grants: [{
-        ok: true, characterId: 9, ownerId: 'cold_simulation_owner', revision: 4, leaseId: 'fence-lease', leaseUntil: now + 30000
-    }] });
     await fenceKernel.resolveChain;
     const fenced = fenceKernel.fence(9);
     assert.strictEqual(fenced.characterId, 9);
@@ -1454,13 +1235,10 @@ function claimAck(kernel, payload) {
     });
     errorKernel.upsert(standOn(errorKernel, { state: state(30) }, { id: 'spot' }));
     errorKernel.tick();
-    claimAck(errorKernel, { grants: [{
-        ok: true, characterId: 30, ownerId: 'cold_simulation_owner', revision: 4,
-        leaseId: 'error-lease', leaseUntil: now + 30000
-    }] });
     await errorKernel.resolveChain;
-    const release = errorMessages.find((entry) => entry.type === 'release_request');
-    assert.strictEqual(release.payload.releases[0].token.leaseId, 'error-lease', 'resolver errors must release the exact lease');
+    assert.deepStrictEqual(errorMessages.map(entry => entry.type), ['fault'], 'a resolver error sends no proposal');
+    assert.strictEqual(errorKernel.inFlight.size, 0, 'a resolver error ends the step');
+    assert.strictEqual(errorKernel.scheduleTokens.get(30).dueAt, now + 1000, 'a resolver error requeues the bot');
     assert.strictEqual(errorKernel.snapshot().errors, 1);
 
     // The bot's look at its board lines (group E) leaves the worker with its
@@ -1476,9 +1254,6 @@ function claimAck(kernel, payload) {
     });
     marketKernel.upsert(standOn(marketKernel, { state: state(40) }, { id: 'spot', rewards: {} }));
     marketKernel.tick();
-    claimAck(marketKernel, { grants: [{
-        ok: true, characterId: 40, ownerId: 'cold_simulation_owner', revision: 4, leaseId: 'market-lease', leaseUntil: now + 30000
-    }] });
     await marketKernel.resolveChain;
     marketKernel.flush(null, true);
     const marketProposal = marketMessages.find((entry) => entry.type === 'proposal_batch').payload.proposals[0];
@@ -1508,10 +1283,9 @@ function claimAck(kernel, payload) {
         const committed = {};
         for (const id of [60, 61]) {
             const base = state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
-            const token = { characterId: id, ownerId: 'cold_simulation_owner', revision: 4, leaseId: `review-${id}`, leaseUntil: at + 30000 };
             reviewKernel.upsert({ state: base });
-            reviewKernel.inFlight.set(id, { state: base, grant: token });
-            reviewKernel.dirty.set(id, { proposalId: `review:${id}`, characterId: id, token, priority: 'P1', enqueuedAt: at,
+            reviewKernel.inFlight.set(id, { state: base, startedAt: at });
+            reviewKernel.dirty.set(id, { proposalId: `${id}:${at}`, characterId: id, revision: 3, priority: 'P1', enqueuedAt: at,
                 nextState: base, result: { events: [] }, economyPlan: plan });
             committed[id] = state(id, { simulation: { ...base.simulation, revision: 5 }, timing: { lastResolvedAt: at, nextResolveAt: at } });
         }
@@ -1525,11 +1299,11 @@ function claimAck(kernel, payload) {
         assert.strictEqual(request.state, undefined, 'main reads its own committed state');
         assert.strictEqual(sentCommands.get(reviewKernel).has(61), false, 'an ack naming nothing sends no review');
         reviewKernel.tick();
-        assert.strictEqual(claimRequestIds.get(reviewKernel).has(60), false, 'no step starts while the review runs');
-        assert.strictEqual(claimRequestIds.get(reviewKernel).has(61), true);
+        assert.strictEqual(everStepped(reviewKernel, 60), false, 'no step starts while the review runs');
+        assert.strictEqual(everStepped(reviewKernel, 61), true);
         commandAck(reviewKernel, { characterId: 60, state: committed[60] });
         reviewKernel.tick();
-        assert.strictEqual(claimRequestIds.get(reviewKernel).has(60), true, 'the answered review gives the bot back to its schedule');
+        assert.strictEqual(everStepped(reviewKernel, 60), true, 'the answered review gives the bot back to its schedule');
     }
 
     {
@@ -1540,10 +1314,9 @@ function claimAck(kernel, payload) {
         const numbersKernel = recordingKernel({ resolveSolo: () => null, now: () => at });
         const base = state(62, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
         const next = state(62, { activity: 'resting', timing: { lastResolvedAt: at, nextResolveAt: at + 9000 } });
-        const token = { characterId: 62, ownerId: 'cold_simulation_owner', revision: 4, leaseId: 'numbers-62', leaseUntil: at + 30000 };
         numbersKernel.upsert({ state: base });
-        numbersKernel.inFlight.set(62, { state: base, grant: token });
-        numbersKernel.dirty.set(62, { proposalId: 'numbers:62', characterId: 62, token, priority: 'P1', enqueuedAt: at,
+        numbersKernel.inFlight.set(62, { state: base, startedAt: at });
+        numbersKernel.dirty.set(62, { proposalId: `62:${at}`, characterId: 62, revision: 3, priority: 'P1', enqueuedAt: at,
             nextState: next, result: { events: [] } });
         numbersKernel.flush(null, true);
         const ack = { ok: true, characterId: 62, revision: 5, updatedAt: at + 1, inventoryRevision: 3, skillsRevision: 2,
@@ -1560,11 +1333,10 @@ function claimAck(kernel, payload) {
         // An ok ack whose state cannot be rebuilt is no refusal: counted, the bot
         // keeps its plan as sent and waits for its due.
         const plan = { sell: [], withdraw: [8], buyAds: [], travel: null };
-        const unbuiltToken = { ...token, characterId: 63, leaseId: 'numbers-63' };
         numbersKernel.upsert({ state: state(63, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } }) });
         Object.assign(numbersKernel.states.get(63), { economyPlanHash: 4321 });
-        numbersKernel.inFlight.set(63, { state: numbersKernel.states.get(63).state, grant: unbuiltToken });
-        numbersKernel.dirty.set(63, { proposalId: 'numbers:63', characterId: 63, token: unbuiltToken, priority: 'P1',
+        numbersKernel.inFlight.set(63, { state: numbersKernel.states.get(63).state, startedAt: at });
+        numbersKernel.dirty.set(63, { proposalId: `63:${at}`, characterId: 63, revision: 3, priority: 'P1',
             enqueuedAt: at, nextState: next, result: { events: [] }, economyPlan: plan });
         numbersKernel.flush(null, true);
         commitAck(numbersKernel, { results: [{ ...ack, characterId: 63, updatedAt: undefined, review: ['plan'] }] });
@@ -1587,11 +1359,10 @@ function claimAck(kernel, payload) {
             emit: type => !(sendFails && type === 'command_request') });
         const commitWithPlan = (id, review, inFlightOnly = false) => {
             const base = state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
-            const token = { characterId: id, ownerId: 'cold_simulation_owner', revision: 4, leaseId: `plan-${id}`, leaseUntil: at + 30000 };
             planKernel.upsert({ state: base });
             Object.assign(planKernel.states.get(id), { economyPending: 2, economyPlanHash: 1234 });
-            planKernel.inFlight.set(id, { state: base, grant: token });
-            planKernel.dirty.set(id, { proposalId: `plan:${id}`, characterId: id, token, priority: 'P1', enqueuedAt: at,
+            planKernel.inFlight.set(id, { state: base, startedAt: at });
+            planKernel.dirty.set(id, { proposalId: `${id}:${at}`, characterId: id, revision: 3, priority: 'P1', enqueuedAt: at,
                 nextState: base, result: { events: [] }, economyPlan: plan });
             planKernel.flush(null, true);
             if (inFlightOnly) return;
@@ -1623,7 +1394,7 @@ function claimAck(kernel, payload) {
 
     // A party run with no member result (no spot): the whole roster commits
     // the party row, fenced on the revision the run read, with the resolver's
-    // next due and a goal review; every member stays claimed until the ACK.
+    // next due and a goal review; every member stays in flight until the ACK.
     // Main publishes the row before the commit ACK, and the leader is due at
     // that row's time. A refused commit (no new row) puts the leader no
     // sooner than a second away, not at the row's past due.
@@ -1641,19 +1412,17 @@ function claimAck(kernel, payload) {
         nextResolveAt: emptyNow - 5000, updatedAt: emptyNow - 5000, revision: 4 };
     emptyMembers.forEach(member => emptyKernel.upsert({ state: member }));
     emptyKernel.partyPut(emptyParty.partyId, emptyParty);
-    const emptyRound = async (lease) => {
+    const emptySteps = startedSteps.get(emptyKernel);
+    const emptyRound = async () => {
         emptyMessages.length = 0;
+        const stepped = emptySteps.length;
         emptyKernel.tick();
-        const claim = emptyMessages.find(entry => entry.type === 'claim_request');
-        assert.deepStrictEqual(claim.payload.candidates.map(candidate => candidate.characterId), [250, 251]);
-        claimAck(emptyKernel, { grants: claim.payload.candidates.map(candidate => ({ ok: true,
-            characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
-            leaseId: `${lease}-${candidate.characterId}`, leaseUntil: emptyNow + 30000, purpose: candidate.purpose })) });
+        assert.strictEqual(emptySteps.length, stepped + 1);
+        assert.deepStrictEqual(lastSteps(emptyKernel), [250, 251]);
         await emptyKernel.resolveChain;
-        assert(!emptyMessages.some(entry => entry.type === 'release_request'), 'a run with no result releases no member');
         return emptyMessages.find(entry => entry.type === 'proposal_batch').payload.proposals;
     };
-    const emptyCommits = await emptyRound('empty');
+    const emptyCommits = await emptyRound();
     assert.deepStrictEqual(emptyCommits.map(proposal => proposal.characterId), [250, 251], 'the whole roster commits');
     const emptyChange = emptyCommits[0].atomicGroup.partyChanges[0];
     assert(emptyCommits.every(proposal => proposal.atomicGroup.id === emptyCommits[0].atomicGroup.id), 'one group');
@@ -1662,18 +1431,18 @@ function claimAck(kernel, payload) {
     const emptyLeaderCommit = emptyCommits.find(proposal => proposal.partyResolution);
     assert.strictEqual(emptyLeaderCommit.characterId, 250);
     assert.strictEqual(emptyLeaderCommit.partyResolution.reviewGoals, true, 'main reviews the party\'s goals');
-    assert(emptyKernel.busy(250) && emptyKernel.busy(251), 'every member stays claimed until the commit ACK');
+    assert(emptyKernel.busy(250) && emptyKernel.busy(251), 'every member stays in flight until the commit ACK');
     emptyKernel.partyPut(emptyParty.partyId, { ...emptyParty, nextResolveAt: emptyNow + 60000, revision: 5 });
     commitAck(emptyKernel, { results: emptyCommits.map(proposal => ({ ok: true, characterId: proposal.characterId,
         state: { ...proposal.nextState, simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 } } })) });
     assert.strictEqual(emptyKernel.busy(250), false);
     assert.strictEqual(emptyKernel.scheduleTokens.get(250).dueAt, emptyNow + 60000, 'the leader is due at the row\'s next due');
     emptyNow += 1000;
-    emptyMessages.length = 0;
+    const steppedBeforeDue = emptySteps.length;
     emptyKernel.tick();
-    assert(!emptyMessages.some(entry => entry.type === 'claim_request'), 'no claim before the row\'s next due');
+    assert.strictEqual(emptySteps.length, steppedBeforeDue, 'no step before the row\'s next due');
     emptyNow += 60000;
-    const refusedCommits = await emptyRound('refused');
+    const refusedCommits = await emptyRound();
     commitAck(emptyKernel, { results: refusedCommits.map(proposal => ({ ok: false, characterId: proposal.characterId,
         reason: 'party_group_aborted', detail: 'party_revision_stale',
         state: { ...proposal.baseState, simulation: { ownerId: 'legacy_main', revision: 6, leaseId: null, leaseUntil: 0 } } })) });

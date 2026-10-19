@@ -29,7 +29,7 @@ async function run() {
     let reachedParty, finishParty;
     const entered = new Promise(resolve => { reachedParty = resolve; });
     const parked = new Promise(resolve => { finishParty = resolve; });
-    const requests = [], published = [];
+    const published = [];
     const kernel = new ColdSimulationKernel({ now: () => now, maxInFlight: 10,
         resolveSolo: resolution,
         resolveParty: async ({ members }) => {
@@ -37,8 +37,7 @@ async function run() {
             await parked;
             return { memberResults: members.map(member => ({ state: member, result: resolution() })),
                 events: [], partyPatch: {}, nextResolveAt: now + 60000 };
-        }, emit: (type, payload, requestId) => {
-            if (type === 'claim_request') requests.push({ payload, requestId });
+        }, emit: (type, payload) => {
             if (type === 'proposal_batch') published.push(payload);
         } });
     kernel.buyerEvents = new MarketBuyerWaiters({ stateFor: id => kernel.states.get(id)?.state,
@@ -59,29 +58,18 @@ async function run() {
     Economy.forGroup({ ...party, adena: 10000 }, members, dependencies);
     assert.equal(Economy.size().groups, 1, 'the active native party context is also owned by its members');
     kernel.tick();
-    assert.equal(requests.length, 1);
-    const { payload, requestId } = requests[0];
-    assert.equal(payload.candidates.length, 10, 'the scheduler claims eight solo bots and one two-member party');
-    kernel.onClaimAck({ grants: payload.candidates.map(candidate => ({ ok: true,
-        characterId: candidate.characterId, purpose: candidate.purpose,
-        ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
-        leaseId: `release-${candidate.characterId}`, leaseUntil: now + 30000 })) }, requestId);
+    assert.equal(kernel.inFlight.size, 10, 'the scheduler steps eight solo bots and one two-member party');
     await entered;
-    assert.equal(kernel.inFlight.size, 10);
     assert.equal(kernel.dirty.size, 8);
     assert.equal(kernel.partyRuns.size, 1, 'party state is retained while its actual resolver waits');
-    kernel.requestRelease(payload.candidates.slice(0, 8).map(candidate => ({
-        token: kernel.inFlight.get(candidate.characterId).grant, reason: 'release-test' })));
-    assert.equal(kernel.pendingReleases.size, 8);
     for (let id = 1; id <= 10; id++) kernel.lookSeen.set(id, new SeenLines().set(id, { deals: 1, at: now }));
-    const fixedAlarms = kernel.operationalAlarms.has('worker_safety:0') ? 1 : 0;
     for (let id = 1; id <= 10; id++) {
         if (id % 2) {
             const fenced = kernel.fence(id);
-            assert.equal(fenced.token.characterId, id, 'fencing returns the actual native grant before releasing its stores');
+            assert.equal(fenced.characterId, id, 'fencing names the bot before releasing its stores');
         } else kernel.remove(id);
     }
-    assert.equal(kernel.inFlight.size, 0, 'release removes accepted native grants in the same call');
+    assert.equal(kernel.inFlight.size, 0, 'release removes the steps in flight in the same call');
     assert.equal(kernel.dirty.size, 0, 'release removes uncommitted proposals in the same call');
     assert.equal(kernel.partyRuns.size, 0, 'release invalidates the retained party resolver');
     for (const [name, count] of Object.entries(kernel.storeSizes())) assert.equal(count, 0, `${name} retains no released owner`);
@@ -91,7 +79,7 @@ async function run() {
     assert.equal(Economy.size().context, 0); assert.equal(Economy.size().engine, 0);
     assert.equal(Economy.size().groups, 0);
     assert.equal(kernel.versions.size, 10, 'numeric revisions intentionally survive to fence old proposals');
-    assert.equal(kernel.heap.size, fixedAlarms, 'no released owner has a heap node');
+    assert.equal(kernel.heap.size, 0, 'no released owner has a heap node');
     finishParty();
     await kernel.resolveChain;
     assert.equal(published.length, 0, 'a resolver completing after release cannot publish its obsolete party result');
@@ -101,12 +89,12 @@ async function run() {
     const future = { ...state(11), timing: { nextResolveAt: now + 3600000 } };
     kernel.upsert({ state: future });
     for (let n = 0; n < 100; n++) kernel.requeue(11, now + 3600000 + n);
-    assert.equal(kernel.heap.size, fixedAlarms + 1, 'one future node per owner');
+    assert.equal(kernel.heap.size, 1, 'one future node per owner');
     const command = kernel.beginCommand(11);
     assert(command, 'a real lifecycle attempt owns the future bot');
     kernel.remove(11);
     assert.equal(kernel.commandStartedAt.size, 0); assert.equal(kernel.commanding.size, 0);
-    assert.equal(kernel.heap.size, fixedAlarms, 'release removes the actual future heap node');
+    assert.equal(kernel.heap.size, 0, 'release removes the actual future heap node');
     console.log('test_cold_store_release: ok');
 }
 run().then(() => { fs.rmSync(directory, { recursive: true, force: true }); process.exit(0); })

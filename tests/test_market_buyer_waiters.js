@@ -52,7 +52,7 @@ async function main() {
             { workerEpoch: 'buyer-events' }).ok, true, 'wakeups follow the actual command wire contract');
         assert(requests.every(request => request.state.timing.nextResolveAt === now + 3600000),
             'the event wakes native commands without falsifying persisted deadlines');
-        assert.equal(kernel.claiming.size, 0, 'the wakeup plans a purchase rather than an extra combat claim');
+        assert.equal(kernel.inFlight.size, 0, 'the wakeup plans a purchase rather than an extra combat step');
         assert.deepEqual(publish(record(1)), [], 'metadata refresh is not new stock');
         assert.deepEqual(publish(record(1, 100, 9)), [], 'a sale cannot wake buyers again');
         assert.deepEqual(publish(record(1, 90, 9)), [6, 7, 8, 9, 10], 'a cheaper quote is new useful evidence');

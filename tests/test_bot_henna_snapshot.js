@@ -36,14 +36,12 @@ async function run() {
 
         state = await Life.upsertState({ ...state, stats: { ...state.stats, hennas: [] } }, 'stale_actor_snapshot');
         assert.deepEqual(state.stats.hennas, slots, 'a generic lifecycle save cannot erase physical symbols');
-        const claim = await Owner.claim(state, { allowLifecycle: true });
-        assert(claim.ok);
-        const leased = Life.cachedState(id);
-        // The worker writes the kit of the row it claimed: a henna writer moves
-        // the revision, so a proposal with older symbols is refused, not merged.
-        const committed = await Owner.commitBatch([{ revision: claim.revision,
-            nextState: { ...leased, stats: { ...leased.stats } },
-            proposal: { baseState: leased }, options: { allowLifecycle: true } }]);
+        const stepped = Life.cachedState(id);
+        // The worker writes the kit of the row it stepped from: a henna writer
+        // moves the revision, so a proposal with older symbols is refused, not merged.
+        const committed = await Owner.commitBatch([{ revision: stepped.simulation.revision,
+            nextState: { ...stepped, stats: { ...stepped.stats } },
+            proposal: { baseState: stepped }, options: { allowLifecycle: true } }]);
         assert(committed[0].ok);
         state = Life.cachedState(id);
         assert.deepEqual(state.stats.hennas, slots, 'an accepted worker round preserves native symbols');

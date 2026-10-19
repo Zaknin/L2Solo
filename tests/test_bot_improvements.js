@@ -152,10 +152,9 @@ async function main() {
         assert.equal(Crystals.tryCast(fighter,mob,50,1000),true);assert.equal(fighter.vitals.mp,74);assert.equal(fighter.readyAt,1200);
         assert.equal(Crystals.outcome(fighter,mob,0,{at:2199}),null);
         const step=Crystals.outcome(fighter,mob,0,{at:2200});assert.equal(step.toId,4630);
-        const token=await Owner.claim(state,{allowLifecycle:true});assert.equal(token.ok,true);
-        const leased=Life.cachedState(state.characterId);
-        const committed=await Owner.commitBatch([{revision:token.revision,nextState:{...leased,inventory:fighter.state.inventory},
-            proposal:{baseState:leased,durable:{soulCrystals:[step]}},options:{allowLifecycle:true}}]);
+        const stepped=Life.cachedState(state.characterId);
+        const committed=await Owner.commitBatch([{revision:stepped.simulation.revision,nextState:{...stepped,inventory:fighter.state.inventory},
+            proposal:{baseState:stepped,durable:{soulCrystals:[step]}},options:{allowLifecycle:true}}]);
         assert.equal(committed[0].ok,true);state=Life.cachedState(state.characterId);
         assert.equal((await DB.fetchItems(state.characterId)).find(row=>row.id===step.objectId).selfId,4630);
         assert.equal(state.simulation.ownerId,'legacy_main');
@@ -175,9 +174,8 @@ async function main() {
         console.log('PASS actual party Drain Soul outcome aggregation');
 
         state=await seed([{selfId:1049,name:'Spellbook: Ice Bolt',amount:1}],{classId:10,level:14});
-        const paidToken=await Owner.claim(state,{allowLifecycle:true});assert(paidToken.ok);
         const current=Life.cachedState(state.characterId);
-        const accepted=await Owner.commitBatch([{revision:paidToken.revision,nextState:{...current,sp:100000},proposal:{baseState:current,durable:{classId:10}},options:{allowLifecycle:true}}]);
+        const accepted=await Owner.commitBatch([{revision:current.simulation.revision,nextState:{...current,sp:100000},proposal:{baseState:current,durable:{classId:10}},options:{allowLifecycle:true}}]);
         assert(accepted[0].ok);state=Life.cachedState(state.characterId);
         assert.equal((await DB.fetchSkills(state.characterId)).length,0,'accepted proposal cannot synthesize tree ranks');
         const paid=await Life.reviewTrainingAfterCommit(state);

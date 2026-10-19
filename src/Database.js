@@ -2393,14 +2393,14 @@ function checkEconomyMaterialProtectionUnsafe(characterId, step, selfId, used) {
     if (available - reserve < used) throw Error('economy_material_protected');
 }
 
-// An AFK fill changes the items of a bot whose row the cold worker may lease;
+// An AFK fill changes the items of a far bot the cold worker may be stepping;
 // the worker would later commit its older summary over them. Fence it as clan
 // writes do: the same transaction writes the new amounts into the summary and
 // advances simulationRevision, so the worker's commit fails its CAS and the
 // bot is resolved again from this row. Returns the row when it was fenced.
-function fenceLeasedColdInventoryUnsafe(characterId, changedIds) {
-    const row = one('SELECT simulationOwner, inventorySummary FROM bot_life_state WHERE characterId = ?', [Number(characterId)]);
-    if (!row || row.simulationOwner !== COLD_SIMULATION_OWNER) return null;
+function fenceColdInventoryUnsafe(characterId, changedIds) {
+    const row = one('SELECT phase, inventorySummary FROM bot_life_state WHERE characterId = ?', [Number(characterId)]);
+    if (!row || row.phase !== 'cold') return null;
     return writeColdInventorySnapshotUnsafe(characterId, row, changedIds);
 }
 
@@ -3563,12 +3563,12 @@ function closeBoardRecordUnsafe(shop, { ownMove = true, at = now() } = {}) {
 }
 
 // An AFK shop write (a fill, close, reprice or publish) moves adena and the
-// items selfIds into or out of each party's backpack. Fences each party whose
-// lifecycle row the cold worker leases; by characterId.
+// items selfIds into or out of each party's backpack. Fences each far party
+// (phase cold); by characterId.
 function fenceAfkTradePartiesUnsafe(characterIds, selfIds) {
     const rows = {};
     for (const characterId of characterIds) {
-        const row = fenceLeasedColdInventoryUnsafe(characterId, selfIds);
+        const row = fenceColdInventoryUnsafe(characterId, selfIds);
         if (row) rows[Number(characterId)] = row;
     }
     return rows;
@@ -4846,15 +4846,14 @@ const Database = {
         }, 'board:leave'));
     },
 
-    // A main-thread save of what waits for a bot on the board: merged unless
-    // the worker leases the bot (its commit merges it). Returns the bot's
-    // row when its cold state changed, and its bag.
+    // A main-thread save of what waits for a bot on the board, merged at once;
+    // the merge moves the revision, so a far bot's step under way is refused
+    // and rebases on this row. Returns the bot's row when its cold state
+    // changed, and its bag.
     settleBoardOwner(ownerId) {
         const characterId = Number(ownerId);
         if (!characterId || !pendingSettlementOwners.has(characterId)) return Promise.resolve({ settled: false });
         return withCharacterFlush(characterId, () => inTransaction(() => {
-            const life = one('SELECT simulationOwner FROM bot_life_state WHERE characterId = ?', [characterId]);
-            if (life?.simulationOwner === COLD_SIMULATION_OWNER) return { settled: false, leased: true };
             const merged = mergeBoardSettlementsUnsafe(characterId, { advance: true });
             if (!merged) return { settled: false };
             return { settled: true, row: merged.row, ownerInventory: afkTradeInventoryUnsafe(characterId) };
@@ -6430,18 +6429,17 @@ const Database = {
             if (!row) return { ok: false, reason: 'missing_state' };
             const revision = Number(row.simulationRevision || 0);
             if (expectedRevision !== null && revision !== expectedRevision) return { ok: false, reason: 'stale_revision' };
-            const ownerId = String(row.simulationOwner || LEGACY_SIMULATION_OWNER);
-            if (!Object.keys(patch).length && ownerId === LEGACY_SIMULATION_OWNER) {
-                return { ok: true, characterId, ownerId, leaseId: null, revision, leaseUntil: 0, reason: 'already_main' };
-            }
-            if (![LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER].includes(ownerId)) return { ok: false, reason: 'owner_changed' };
-            if (Object.keys(patch).length) {
+            // A main thread taking a far bot is a main write: it always moves the
+            // revision, so a worker step begun before it is refused stale_revision.
+            const patched = Object.keys(patch).length > 0;
+            if (patched) {
                 const proposed = { ...row, ...patch, phase: patch.phase || row.phase, activity: patch.activity || row.activity };
                 const partition = coldSimulationPartition(proposed, request);
                 if (!partition.ok) return { ok: false, reason: 'partition_rejected', detail: partition.reason };
             }
             const nextRevision = revision + 1;
-            const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? request.timestamp ?? now() });
+            // Without a patch only the revision moves: updatedAt stays the cached state's.
+            const entries = patched ? Object.entries({ ...patch, updatedAt: patch.updatedAt ?? request.timestamp ?? now() }) : [];
             const assignments = entries.map(([column]) => `${escapeIdentifier(column)} = ?`);
             assignments.push(
                 'simulationOwner = ?',
@@ -6451,9 +6449,9 @@ const Database = {
             );
             const result = write(`UPDATE bot_life_state
                 SET ${assignments.join(', ')}
-                WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ?`, [
+                WHERE characterId = ? AND simulationRevision = ?`, [
                 ...entries.map(([, value]) => value),
-                LEGACY_SIMULATION_OWNER, nextRevision, characterId, ownerId, revision
+                LEGACY_SIMULATION_OWNER, nextRevision, characterId, revision
             ]);
             if (result.affectedRows !== 1) return { ok: false, reason: 'cas_failed' };
             return {
@@ -6463,7 +6461,7 @@ const Database = {
                 leaseId: null,
                 revision: nextRevision,
                 leaseUntil: 0,
-                reason: Object.keys(patch).length ? 'main_transition' : 'hot_handoff',
+                reason: patched ? 'main_transition' : 'hot_handoff',
                 row: coldSimulationRow(characterId)
             };
         }, 'bot-life:hot-owner-handoff');
@@ -10070,11 +10068,9 @@ const Database = {
         return inTransaction(() => {
             const row = one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]);
             if (!row || row.phase !== 'cold' || Number(row.simulationRevision) !== Number(expectedRevision)) return false;
-            if (row.simulationOwner === COLD_SIMULATION_OWNER) {
-                const inventory = jsonObject(row.inventorySummary);
-                const supplies = Object.fromEntries(itemIds.slice(0, 128).filter(id => inventory[id]).map(id => [id, inventory[id]]));
-                syncInventorySummaryUnsafe(characterId, supplies);
-            }
+            const inventory = jsonObject(row.inventorySummary);
+            const supplies = Object.fromEntries(itemIds.slice(0, 128).filter(id => inventory[id]).map(id => [id, inventory[id]]));
+            syncInventorySummaryUnsafe(characterId, supplies);
             return true;
         }, 'clan-supplies:materialize');
     },

@@ -23,12 +23,10 @@ const id = 730093;
             vitals: { hp: 187, maxHp: 187, mp: 74, maxMp: 74 }
         }, 'exhausted_inventory_fixture');
         const timestamp = Date.now();
-        const token = await Owner.claim(state, { timestamp, leaseMs: 60000 });
-        assert(token.ok);
         const nextState = { ...state, inventory: { ...state.inventory,
             1463: { ...state.inventory[1463], amount: 0 } } };
         delete nextState.inventory[1060];
-        const entry = { revision: token.revision, nextState, proposal: { baseState: state } };
+        const entry = { revision: state.simulation.revision, nextState, proposal: { baseState: state } };
         const [result] = await Owner.commitBatch([entry], { timestamp: timestamp + 1 });
         assert(result.ok);
         assert.equal(await world.amount(id, 1463), 0, 'the last consumed shots must be removed physically');
