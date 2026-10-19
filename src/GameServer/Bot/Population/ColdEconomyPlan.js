@@ -162,7 +162,19 @@ function* prepareNative(state, economy, options) {
         try { batch = buyBatch(lines); }
         catch (_) { batch = { buyAds: [null] }; }
         Object.assign(plan, batch, { travel: goal?.plan?.marketTown ? goal.plan.wishKey || null : null });
-        if (economy.intentPending || plan.buyAds.some(row => row === null)) { delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps; plan.d = 1; }
+        // A buy part not prepared (the held build's intent pending, or a
+        // line buyBatch refused) is absent from the packet, not a page: a
+        // refresh on main's next state copy reads the same build, so only
+        // the bot's next step, which rebuilds, can prepare it. An incoming
+        // delivery still pending is main's: its settlement is a state copy
+        // that rebuilds, so it stays a page.
+        const unprepared = !economy.intentPending ? (plan.buyAds.some(row => row === null) ? 'buy_error' : null)
+            : state.incomingPending ? 'intent_incoming' : 'intent_root';
+        if (unprepared) {
+            delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps;
+            if (unprepared === 'intent_incoming') plan.d = 1;
+            if (Diagnostics.active()) Diagnostics.count('economy_plan', 'deferred', unprepared);
+        }
         const shot = decideShot(state, economy, { ...options, ownLines: own });
         if (shot) plan.shot = shot;
     }
@@ -171,6 +183,7 @@ function* prepareNative(state, economy, options) {
     if (Buffer.byteLength(JSON.stringify({ buyAds: plan.buyAds, buyKit: plan.buyKit, buyCaps: plan.buyCaps,
         bidLimits: plan.bidLimits })) > MAX_PLAN_PAYLOAD_BYTES) {
         delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps; plan.d = (plan.d || 0) | 1;
+        if (Diagnostics.active()) Diagnostics.count('economy_plan', 'deferred', 'bytes');
     }
     while (Buffer.byteLength(JSON.stringify(plan)) > MAX_PLAN_PAYLOAD_BYTES) {
         if (plan.sell.length) {
@@ -186,6 +199,7 @@ function* prepareNative(state, economy, options) {
         else if (plan.shot) { delete plan.shot; plan.d = (plan.d || 0) | 16; }
         else throw Error('economy_plan_payload_overflow');
     }
+    if (plan.d > 1 && Diagnostics.active()) Diagnostics.count('economy_plan', 'deferred', `bytes_${plan.d & ~1}`);
     if (Diagnostics.active() && Diagnostics.enabled(state.characterId)) {
         const trace = { owner: state.characterId, caller: options.caller || 'cold_plan',
             trigger: options.trigger || 'plan_request', phase: 'plan_compute',

@@ -53,6 +53,20 @@ board.heads = (id, side, options) => { assert.equal(options.maxInspected, 20); i
 Choice.purchase(state, economy, board);
 assert.equal(inspected, 1, 'one indexed query for the already selected item');
 assert(Buffer.byteLength(JSON.stringify(prepared(state))) < 256);
+{
+    // A buy part not prepared is absent from the packet, not a page (no d):
+    // main's next state copy holds the same build, so a refresh cannot prepare it.
+    const iterator = Plan.prepare({ ...state, activity: 'hunting', stats: {} }, { network: {}, intentPending: true }, { board });
+    let next; do { next = iterator.next(); } while (!next.done);
+    assert.equal(next.value.buyAds, undefined);
+    assert.equal(next.value.d, undefined);
+    // A pending incoming delivery is main's: its settlement continues the page.
+    const incoming = Plan.prepare({ ...state, activity: 'hunting', stats: {}, incomingPending: true },
+        { network: {}, intentPending: true }, { board });
+    do { next = incoming.next(); } while (!next.done);
+    assert.equal(next.value.buyAds, undefined);
+    assert.equal(next.value.d, 1);
+}
 const Survival = invoke('GameServer/Bot/Population/SurvivalFloor');
 const oldFloor = Survival.forState;
 const oldEvaluate = invoke('GameServer/Bot/Economy/MarketListingPolicy').evaluate;
