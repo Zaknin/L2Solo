@@ -1846,6 +1846,16 @@ const BotLifeState = {
         return snapshot;
     },
 
+    // The clan's market demand lives in its leader's row; the write moves that
+    // row, so the cached copy takes it back (else the leader's next claim is
+    // refused once on the old revision).
+    syncClanMarketDemandSignal(signal) {
+        return Database.syncClanMarketDemandSignal(signal).then((result) => {
+            if (result?.row) this.acceptNewerLifecycleRow(result.row);
+            return result;
+        });
+    },
+
     acceptWarehouseWithdrawal(row) {
         const current = cache.get(Number(row?.characterId));
         if (!current) return null;

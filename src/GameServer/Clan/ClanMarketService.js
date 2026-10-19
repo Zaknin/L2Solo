@@ -180,7 +180,7 @@ async function deposit(clan, goal, itemId, buyer, purchase, offer, { playerContr
         goalKey: demandKey,
         status: playerControlled && number(goal.progress) + 1 < number(goal.required) ? 'open' : 'fulfilled'
     });
-    await Database.syncClanMarketDemandSignal({
+    await LifeState.syncClanMarketDemandSignal({
         clanId: clan.id,
         itemId,
         amount: remaining,

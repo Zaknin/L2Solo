@@ -2575,9 +2575,12 @@ const COLD_SIMULATION_OWNER = 'cold_simulation_owner';
 // A main write to a far bot's row moves its revision in the same statement,
 // so a worker proposal built before it is refused (stale_revision) and rebases
 // on the row. A near bot's row keeps its number (its saves check otherwise).
-// One move per transaction: a statement whose transaction already moves the
-// same row (writeColdInventorySnapshotUnsafe, a trade meeting's fence, the
-// commit itself) does not add a second one. Writers that do not take it on
+// A proposal needs one move to be refused; a second move in the same
+// transaction changes nothing for it. Where a moved row's exact number is read
+// (the commit's own UPDATE with its ack's expectedRevision + 1), a statement
+// in the same transaction does not move again (dropPkDeathItemsUnsafe in the
+// commit); elsewhere a writer that may run next to another mover (the party
+// payment inside commitBackgroundPartyMembership) can move twice. Writers that do not take it on
 // purpose: the BotLifeState startup recovery UPDATEs (they run before the
 // cache and any claim), its `save` upsert (a near bot's write), the hot branch
 // of completeEconomyStepUnsafe, and the karma/PK write inside the commit.
@@ -3030,8 +3033,8 @@ function dropPkDeathItemsUnsafe(characterId, { moveRevision }) {
     for (const item of drops) write('DELETE FROM items WHERE id=? AND characterId=?', [item.id, characterId]);
     const summary = invoke('GameServer/Bot/Population/BotLifeState').inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId=? ORDER BY id', [characterId]));
     const moved = one(`UPDATE bot_life_state SET inventorySummary=?, statsJson=json_set(statsJson,'$.pkDropDeathSequence',?)${moveRevision ? `, ${MOVE_FAR_REVISION}` : ''}
-        WHERE characterId=? RETURNING simulationRevision`, [JSON.stringify(summary), death, characterId]);
-    return { drops, inventory: summary, deathSequence: death, revision: Number(moved.simulationRevision) };
+        WHERE characterId=? RETURNING ${NativeWriteCheckpoint.columns.join(', ')}`, [JSON.stringify(summary), death, characterId]);
+    return { drops, inventory: summary, deathSequence: death, revision: Number(moved.simulationRevision), checkpoint: moved };
 }
 
 // `parsedStats`, when given, is parsedObject(row.statsJson) computed earlier.
@@ -6864,8 +6867,13 @@ const Database = {
                 const result = syncInventorySummaryUnsafe(characterId, inventory);
                 // A new ordinary cold death consumes its ordered bag once, in
                 // the same transaction that reconciles the physical inventory.
-                if (reason === 'resolve_death') return dropPkDeathItemsUnsafe(characterId, { moveRevision: true });
-                return result;
+                if (reason !== 'resolve_death') return result;
+                const dropped = dropPkDeathItemsUnsafe(characterId, { moveRevision: true });
+                // The drop moved the row a worker command is writing; the
+                // command's next write (its publish) checks the row against its
+                // proof, so the proof moves with the row, as the save ROW does.
+                if (dropped.checkpoint && admission.nativeProof) NativeWriteCheckpoint.advance(admission.nativeProof, dropped.checkpoint);
+                return dropped;
             },
             reason ? `inventory:sync-summary:${reason}` : 'inventory:sync-summary'
         ));
@@ -9978,7 +9986,8 @@ const Database = {
             write(`UPDATE bot_life_state SET statsJson = ?, updatedAt = ?, ${MOVE_FAR_REVISION} WHERE characterId = ?`, [
                 JSON.stringify(stats), now(), Number(leader.characterId)
             ]);
-            return { ok: true, characterId: Number(leader.characterId), itemId: selfId, status: String(status) };
+            return { ok: true, characterId: Number(leader.characterId), itemId: selfId, status: String(status),
+                row: coldSimulationRow(leader.characterId) };
         }, 'clan-market:signal');
     },
     fetchClanMarketDemands({ clanId = null, itemId = null, status = 'open', limit = 100 } = {}) {

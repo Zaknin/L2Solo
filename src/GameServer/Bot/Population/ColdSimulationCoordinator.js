@@ -262,9 +262,10 @@ class ColdSimulationCoordinator {
                 board: 0, boardLimits: 0, equipment: 0, training: 0, improvement: 0, party: 0, metrics: 0, announce: 0,
                 economyPlan: 0, clanEvents: 0, partyGoals: 0, partyPlans: 0, buff: 0 }
         };
-        // Refused commits by reason and stale_command answers, counted always
-        // (cheap): the live read of how often a main write lands under a step.
-        this.refusals = { commitRefused: {}, staleCommand: 0 };
+        // Refused claims and commits by reason and stale_command answers,
+        // counted always (cheap): the live read of how often a main write
+        // lands under a step or leaves the cached copy behind the row.
+        this.refusals = { claimRejected: {}, commitRefused: {}, staleCommand: 0 };
         this.economyPlanCount = 0;
         this.economyPlanTimes = [];
         this.queue = new ColdCommitQueue({
@@ -1625,6 +1626,9 @@ class ColdSimulationCoordinator {
             leaseMs: Math.max(2000, Number(Config.coldOwnerLeaseMs) || 30000)
         });
         this.noteLeaseGrants(claimed.grants || []);
+        for (const result of claimed.rejected || []) {
+            this.refusals.claimRejected[result.reason] = (this.refusals.claimRejected[result.reason] || 0) + 1;
+        }
         const index = this.contextIndex();
         const rebaseIds = [...new Set((claimed.rejected || [])
             .filter((result) => OWNERSHIP_REBASE_REASONS.has(String(result.reason || '')))
@@ -2644,7 +2648,8 @@ class ColdSimulationCoordinator {
             epoch: this.workerEpoch,
             heartbeatAgeMs: this.worker ? Math.max(0, Date.now() - this.lastHeartbeatAt) : null,
             worker: { ...this.lastWorkerSnapshot },
-            refusals: { commitRefused: { ...this.refusals.commitRefused }, staleCommand: this.refusals.staleCommand },
+            refusals: { claimRejected: { ...this.refusals.claimRejected }, commitRefused: { ...this.refusals.commitRefused },
+                staleCommand: this.refusals.staleCommand },
             heldAcks: this.heldAcks.size,
             soloHolds: invoke('GameServer/Bot/Population/PartyIncomeComparison').soloHoldStats(),
             competitionActions: Config.developerDiagnostics ? this.competitionActions.snapshot() : null,

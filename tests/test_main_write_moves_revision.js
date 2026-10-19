@@ -9,6 +9,9 @@ require('../src/Global');
 const Database = invoke('Database');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const Data = invoke('GameServer/DataCache');
+const Population = invoke('GameServer/Bot/Population/PopulationService');
+const PkDeathDrop = invoke('GameServer/Actor/Generics/PkDeathDrop');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
@@ -17,13 +20,13 @@ const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l2solo-main-write-revis
 const ACCOUNT = 'bot_main_write_revision';
 let sequence = 0;
 
-async function create(phase) {
+async function create(phase, stats = {}) {
     const name = `MainWrite${++sequence}`;
     const id = Number((await Database.createCharacter(ACCOUNT, { name,
         race: 0, classId: 0, maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0,
         locX: 1, locY: 1, locZ: 0 })).insertId);
     await Life.upsertState({ characterId: id, accountName: ACCOUNT, name,
-        phase, activity: 'resting', level: 1, inventory: {}, stats: { classId: 0, generatedCold: true },
+        phase, activity: 'resting', level: 1, inventory: {}, stats: { classId: 0, generatedCold: true, ...stats },
         loc: { locX: 1, locY: 1, locZ: 0 }, vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
         timing: { nextResolveAt: Date.now() + 86400000 } }, 'main_write_revision_fixture');
     return id;
@@ -49,6 +52,7 @@ function coordinatorProbe() {
         options.default.Database.historyPath = path.join(directory, 'history.sqlite');
         Config.knowledgeErrorsEnabled = false;
         await new Promise(resolve => Database.init(resolve));
+        Data.init();
         await Database.createAccount(ACCOUNT, 'fixture');
         await Life.init();
         const far = await create('cold');
@@ -109,6 +113,41 @@ function coordinatorProbe() {
         assert.equal(answer.state.simulation.revision, Number(latest.simulationRevision));
         assert.equal(Life.cachedState(far).simulation.revision, Number(latest.simulationRevision), 'the reload moves the cache');
         assert.equal(commands.coordinator.snapshot().refusals.staleCommand, 1);
+
+        // A far karma bot that dies under a worker command drops its PK items
+        // in a write that moves the row; the command still publishes its death.
+        const pk = await create('cold', { restUntil: Date.now() + 30000 });
+        await Database.execute(['UPDATE characters SET karma = 100, pk = 6 WHERE id = ?', [pk]]);
+        const dying = Life.snapshot(pk);
+        const pkRevision = Number((await row(pk)).simulationRevision);
+        const deaths = coordinatorProbe();
+        deaths.coordinator.population = Population;
+        PkDeathDrop.spawn = () => {};
+        deaths.coordinator.handleCommandRequest({ payload: { requests: [{ characterId: pk, kind: 'lifecycle',
+            commandId: `command:${pk}:1`, commandCheckpoint: Protocol.commandCheckpoint(dying), state: dying,
+            precomputedResult: { patch: { activity: 'dead', deathCount: 1, vitals: { ...dying.vitals, hp: 0 } },
+                debug: { died: true, fights: 1, wins: 0 }, events: [], materialize: {}, nextResolveAt: Date.now() + 60000 } }] } });
+        await deaths.coordinator.commandTail;
+        const [died] = deaths.sent.find(message => message.type === 'command_ack').results;
+        const dead = await row(pk);
+        assert.equal(died.ok, true, `the death command publishes after the drop moved the row: ${died.reason}`);
+        assert.equal(JSON.parse(dead.statsJson).pkDropDeathSequence, 1, 'the PK drop ran');
+        assert.equal(Number(dead.simulationRevision), pkRevision + 1, 'the drop moved the far row once');
+        assert.equal(Life.cachedState(pk).stats.pkDropDeathSequence, 1);
+        assert.equal(Life.cachedState(pk).simulation.revision, pkRevision + 1, 'the cache carries the moved revision');
+
+        // A clan demand written into its leader's row moves the cached copy too,
+        // so the leader's next claim is not refused on the old revision.
+        const leader = await create('cold');
+        await Database.execute(['INSERT INTO clans(id,name,leaderId) VALUES(?,?,?)', [820900, 'RevisionClan', leader]]);
+        const leaderRevision = Life.cachedState(leader).simulation.revision;
+        const signal = await Life.syncClanMarketDemandSignal({ clanId: 820900, itemId: 1419, amount: 1, maxPrice: 100,
+            goalKey: 'revision-demand', status: 'open' });
+        assert.equal(signal.ok, true);
+        assert.equal(Number((await row(leader)).simulationRevision), leaderRevision + 1);
+        assert.equal(Life.cachedState(leader).simulation.revision, leaderRevision + 1, 'the leader cache takes the moved row');
+        assert.equal(Life.cachedState(leader).stats.clanMarketDemand.goalKey, 'revision-demand');
+        assert((await Owner.claim(Life.cachedState(leader), {})).ok, 'the leader claims on the cached copy');
         console.log('PASS main writes move the revision; refusals rebase on the row');
     } finally {
         fs.rmSync(directory, { recursive: true, force: true });
