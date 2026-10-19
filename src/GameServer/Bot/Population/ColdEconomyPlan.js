@@ -162,7 +162,15 @@ function* prepareNative(state, economy, options) {
         try { batch = buyBatch(lines); }
         catch (_) { batch = { buyAds: [null] }; }
         Object.assign(plan, batch, { travel: goal?.plan?.marketTown ? goal.plan.wishKey || null : null });
-        if (economy.intentPending || plan.buyAds.some(row => row === null)) { delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps; plan.d = 1; }
+        // A buy part not prepared (the held build's intent pending, or a
+        // line buyBatch refused) is absent from the packet, not a page: a
+        // refresh on main's next state copy reads the same build, so only
+        // the bot's next step, which rebuilds, can prepare it.
+        const unprepared = economy.intentPending ? 'intent' : plan.buyAds.some(row => row === null) ? 'buy_error' : null;
+        if (unprepared) {
+            delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps;
+            if (Diagnostics.active()) Diagnostics.count('economy_plan', 'deferred', unprepared);
+        }
         const shot = decideShot(state, economy, { ...options, ownLines: own });
         if (shot) plan.shot = shot;
     }
@@ -171,6 +179,7 @@ function* prepareNative(state, economy, options) {
     if (Buffer.byteLength(JSON.stringify({ buyAds: plan.buyAds, buyKit: plan.buyKit, buyCaps: plan.buyCaps,
         bidLimits: plan.bidLimits })) > MAX_PLAN_PAYLOAD_BYTES) {
         delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps; plan.d = (plan.d || 0) | 1;
+        if (Diagnostics.active()) Diagnostics.count('economy_plan', 'deferred', 'bytes');
     }
     while (Buffer.byteLength(JSON.stringify(plan)) > MAX_PLAN_PAYLOAD_BYTES) {
         if (plan.sell.length) {
