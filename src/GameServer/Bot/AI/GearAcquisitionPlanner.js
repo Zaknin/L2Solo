@@ -2085,12 +2085,15 @@ function writeReadySourceFact(fact, kind, spotId, npcId, itemId, units, expected
 // step's sections hit COMPUTED.sourceGround); kept = that record, or null.
 // The reads no section of that mask names are checked by each reader against
 // the copies beside the bits: the list's length, the economic hunt (the
-// bot's wish focus), the recovery level penalty (SpotRiskPolicy, its clean
-// wins move no section) and the party ground flag (BotHuntingGroundPolicy).
+// bot's wish focus), the matchup's highest target level (LevelingRoutes
+// safetyOptions: the recovery penalty, whose clean wins move no section, and
+// the route mode), the party ground flag (BotHuntingGroundPolicy) and the
+// solo profile key (BotTargetMatchup.profileKey: alive, the summon beside it).
 // The spot exclusions (step-counted marks, no section) are never kept.
 const GROUND_ALLOWED = 1, GROUND_REFUSED = 2;
 function sourceGround(spots = [], kept = null) {
-    return kept?.spots === spots ? kept : { spots, length: -1, economicHunt: null, penalty: -1, grouped: null, cells: null };
+    return kept?.spots === spots ? kept : { spots, length: -1, economicHunt: null, targetLevel: -1, grouped: null,
+        solo: null, cells: null };
 }
 // Diagnostics only: one reused reader in 64 also checks its kept cells
 // against a fresh verdict (source_route:ground:checked|disagree).
@@ -2104,15 +2107,21 @@ function sourceRouteReader(state, options = {}) {
     const excluded = SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp);
     const Spots = invoke('GameServer/Bot/AI/SpotService');
     const economicHunt = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state);
-    const penalty = Number(SpotRiskPolicy.recoveryFor(state)?.levelPenalty) || 0;
+    const soloOptions = { timestamp, mode: 'solo' };
+    const targetLevel = LevelingRoutes.safetyOptions(state, soloOptions).maxTargetLevel ?? 0;
     // The hunting-ground clause admits party-only ground to a grouped bot.
     const grouped = BotHuntingGroundPolicy.isParty(state, { mode: 'solo' });
     const level = Number(state.level || 1);
+    // The solo profiles, read once per reader: up front for a kept record
+    // (their key is one of its copies), else at the first matchup clause.
+    let profiles = options.matchupProfiles || (options.ground ? BotTargetMatchup.stateProfiles(state, soloOptions) : null);
+    const solo = profiles && BotTargetMatchup.profileKey(profiles);
     const ground = options.ground || sourceGround(options.spots || []);
     const spots = ground.spots;
     const reused = ground.cells !== null && ground.length === spots.length
-        && ground.economicHunt === economicHunt && ground.penalty === penalty && ground.grouped === grouped;
-    if (!reused) Object.assign(ground, { length: spots.length, economicHunt, penalty, grouped,
+        && ground.economicHunt === economicHunt && ground.targetLevel === targetLevel
+        && ground.grouped === grouped && ground.solo === solo;
+    if (!reused) Object.assign(ground, { length: spots.length, economicHunt, targetLevel, grouped, solo,
         cells: new Uint8Array((spots.length + 3) >> 2) });
     const cells = ground.cells, diagnostic = Diagnostics.active();
     if (diagnostic && options.ground) Diagnostics.count('source_route', 'ground', reused ? 'reuse' : 'build');
@@ -2121,15 +2130,13 @@ function sourceRouteReader(state, options = {}) {
         ? new Set() : null;
     // An excluded spot counts once per reader, as each refusal used to.
     const countedExcluded = diagnostic ? new Set() : null;
-    let profiles = null;
     // The first kept clause that refuses the spot, cheap ones first: the
     // matchup verdict (profiles, NPC verdicts) is the costly one.
     const refusal = spot => {
         if (spot.raidBoss === true) return 'raid';
-        const soloOptions = { timestamp, mode: 'solo' };
         if (!Spots.isSuitable(spot, level, soloOptions)
             && !(economicHunt && Number(spot.avgLevel || spot.minLevel || 1) >= level - 15)) return 'level';
-        profiles ||= options.matchupProfiles || BotTargetMatchup.stateProfiles(state, soloOptions);
+        profiles ||= BotTargetMatchup.stateProfiles(state, soloOptions);
         if (!LevelingRoutes.isSpotAllowedForState(spot, state, { ...soloOptions, matchupProfiles: profiles })) return 'matchup';
         return null;
     };

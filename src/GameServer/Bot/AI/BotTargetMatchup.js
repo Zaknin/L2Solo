@@ -80,6 +80,16 @@ function coldProfiles(profile, state = {}, timestamp = Date.now()) {
     return profiles;
 }
 
+// What of a bot's solo profile array (stateProfiles) moves with no build
+// section: whether the bot is alive (a dead bot has no profiles) and the
+// summon beside it (coldProfiles: its live cold summon, or the servitor a
+// summoner can cast now). -1 dead, 0 alone, else the summon's npc id (1 for
+// a live summon whose profile names none, the hot path's actorProfile).
+function profileKey(profiles) {
+    if (!profiles.length) return -1;
+    return profiles.length > 1 ? Number(profiles[1].npcId) || 1 : 0;
+}
+
 function profileStats(profiles) {
     return [...new Set((profiles || []).flatMap(profile => [weaponStat(profile.equipment?.weaponKind),
         ...(profile.skills || []).map(skill => {
@@ -393,5 +403,5 @@ function damageRate(profiles, target = {}) {
         .map(attack => (attack.survivalWeight ?? attack.weight) * attack.modifier)), 0);
 }
 
-module.exports = { MIN_EFFICIENCY, actorProfiles, coldProfiles, targetView, skillModifier, damageRate,
+module.exports = { MIN_EFFICIENCY, actorProfiles, coldProfiles, profileKey, targetView, skillModifier, damageRate,
     profileStats, skillStats, evaluate, soloSurvival, soloCanHunt, soloSpotUpperBound, stateProfiles, spotMatchup, speciesVerdict };
