@@ -2598,8 +2598,8 @@ const COLD_SIMULATION_OWNER = 'cold_simulation_owner';
 // commit); elsewhere a writer that may run next to another mover (the party
 // payment inside commitBackgroundPartyMembership) can move twice. Writers that do not take it on
 // purpose: the BotLifeState startup recovery UPDATEs (they run before the
-// cache and any claim), its `save` upsert (a near bot's write), the hot branch
-// of completeEconomyStepUnsafe, and the karma/PK write inside the commit.
+// cache and the worker), the hot branch of completeEconomyStepUnsafe, and the
+// karma/PK write inside the commit. BotLifeState `save` takes it in its upsert.
 const MOVE_FAR_REVISION = "simulationRevision = simulationRevision + CASE WHEN phase = 'cold' THEN 1 ELSE 0 END";
 const SIMPLE_COLD_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const COLD_SIMULATION_PATCH_COLUMNS = new Set([
@@ -4139,6 +4139,9 @@ function publishClanMembership(result) {
 
 
 const Database = {
+    // BotLifeState.save builds its upsert with it.
+    MOVE_FAR_REVISION,
+
     openClanRaidPartyAtImpact(request) {
         // The offensive callback cannot await our queue: its registered roster
         // could change meanwhile. Abort this native action when another write
@@ -4235,8 +4238,8 @@ const Database = {
                 if (admission.nativeProof) NativeWriteCheckpoint.checkRow(admission.nativeProof, statement);
                 phase = 'write_admission';
                 checkCapturedWriteAdmission(admission, admission.nativeProof ? statement[1][0] : null);
-                // The upsert never writes simulationRevision; it hands back the
-                // row's own, which a main write may have moved meanwhile.
+                // The upsert moves a far row's revision (MOVE_FAR_REVISION) and
+                // hands back the row's own, the number the caller's cache takes.
                 const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson` : 'simulationRevision, statsJson';
                 let params = statement[1] || [];
                 if (characterId !== undefined) {
