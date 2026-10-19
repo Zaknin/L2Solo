@@ -4,9 +4,7 @@ const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const Governor = invoke('GameServer/Bot/Population/BackgroundWorkGovernor');
 
-const COLUMNS = ['characterId', 'phase', 'activity', 'simulationOwner', 'simulationRevision',
-    'simulationLeaseId', 'simulationLeaseUntil', 'activityStartedAt', 'nextResolveAt',
-    'lastResolvedAt', 'lastHotAt', 'updatedAt'];
+const { CHECKPOINT_FIELDS: COLUMNS } = require('./ColdSimulationProtocol');
 
 function createLifecycleSafetyRuntime(population, coordinator) {
     const { LifecycleSafetySweep } = require('./LifecycleSafetySweep');
