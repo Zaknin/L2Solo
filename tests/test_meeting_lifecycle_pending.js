@@ -7,7 +7,7 @@ const Population = invoke('GameServer/Bot/Population/PopulationService');
 const Shopping = invoke('GameServer/Bot/AI/States/ShoppingState');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const state = { characterId: 1, phase: 'cold', activity: 'shopping', simulation: { revision: 0 }, stats: {} };
-const party = { phase: 'cold', ownerId: 'legacy_main', revision: 0, leaseId: null, hotAt: 0,
+const party = { phase: 'cold', revision: 0, hotAt: 0,
     sequence: 1, needRevision: 0, route: { fee: 0, scroll: false, method: 'walk', durationMs: 0 } };
 const originalCached = Life.cachedState;
 (async () => {

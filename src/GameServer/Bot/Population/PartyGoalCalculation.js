@@ -6,9 +6,7 @@ function source(state) {
     return { characterId: Number(state.characterId),
         updatedAt: Number(state.updatedAt || 0), phase: state.phase,
         partyId: String(state.party?.partyId || state.partyId || ''),
-        ownerId: String(state.simulation?.ownerId || 'legacy_main'),
-        revision: Number(state.simulation?.revision || 0),
-        leaseId: String(state.simulation?.leaseId || '') };
+        revision: Number(state.simulation?.revision || 0) };
 }
 
 function sources(members) {

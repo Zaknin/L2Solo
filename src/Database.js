@@ -2249,8 +2249,7 @@ function economyOwnerUnsafe(characterId, authority, fresh = false) {
     const row = one('SELECT life.*, c.username FROM bot_life_state life JOIN characters c ON c.id=life.characterId WHERE life.characterId=?',
         [Number(characterId)]);
     if (!row || !BoardRules.isBotAccount(row.username) || !authority
-        || row.phase !== authority.phase || row.simulationOwner !== authority.ownerId
-        || (row.simulationLeaseId || null) !== (authority.leaseId || null)
+        || row.phase !== authority.phase
         || Number(row.lastHotAt || 0) !== Number(authority.hotAt || 0)
         || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.simulationLeaseId
         || (fresh && Number(row.simulationRevision) !== authority.revision)) throw Error('economy_owner_changed');
@@ -4714,11 +4713,9 @@ const Database = {
         }
         return withCharacterFlush(characterId, () => inTransaction(() => {
             if (expectedAuthority) {
-                const row = one('SELECT phase,simulationOwner,simulationRevision,simulationLeaseId,lastHotAt FROM bot_life_state WHERE characterId=?',
-                    [characterId]);
-                if (!row || row.phase !== expectedAuthority.phase || row.simulationOwner !== expectedAuthority.ownerId
+                const row = one('SELECT phase,simulationRevision,lastHotAt FROM bot_life_state WHERE characterId=?', [characterId]);
+                if (!row || row.phase !== expectedAuthority.phase
                     || Number(row.simulationRevision) !== expectedAuthority.revision
-                    || (row.simulationLeaseId || null) !== expectedAuthority.leaseId
                     || Number(row.lastHotAt || 0) !== expectedAuthority.hotAt) throw Error('economy_plan_need_changed');
             }
             const timestamp = now();
@@ -4923,11 +4920,9 @@ const Database = {
             if (coldAuthority && hotAuthority) throw new Error('invalid_market_review_authority');
             const authority = coldAuthority || hotAuthority;
             if (authority) {
-                const life = one(`SELECT phase, simulationOwner, simulationRevision, simulationLeaseId
-                    FROM bot_life_state WHERE characterId = ?`, [characterId]);
-                if (!life || life.phase !== (coldAuthority ? 'cold' : 'hot') || life.simulationOwner !== authority.ownerId
-                    || Number(life.simulationRevision) !== authority.revision
-                    || (life.simulationLeaseId || null) !== authority.leaseId) {
+                const life = one('SELECT phase, simulationRevision FROM bot_life_state WHERE characterId = ?', [characterId]);
+                if (!life || life.phase !== (coldAuthority ? 'cold' : 'hot')
+                    || Number(life.simulationRevision) !== authority.revision) {
                     throw new Error('stale_market_review');
                 }
             }
@@ -5390,17 +5385,14 @@ const Database = {
             if (party?.status !== 'active' || Number(party.revision) !== expectedPartyRevision
                 || Number(party.leaderId) !== leaderId || party.memberIdsJson !== JSON.stringify(ids))
                 return { ok: false, reason: 'party_goals_changed' };
-            const rows = all(`SELECT characterId, phase, partyId, updatedAt, simulationOwner,
-                simulationRevision, simulationLeaseId FROM bot_life_state
+            const rows = all(`SELECT characterId, phase, partyId, updatedAt, simulationRevision FROM bot_life_state
                 WHERE characterId IN (${ids.map(() => '?').join(',')})`, ids);
             const byId = new Map(rows.map(row => [Number(row.characterId), row]));
             if (sources.some(source => {
                 const row = byId.get(source.characterId);
                 return !row || row.phase !== source.phase || row.partyId !== source.partyId
                     || Number(row.updatedAt) !== source.updatedAt
-                    || String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== source.ownerId
-                    || Number(row.simulationRevision || 0) !== source.revision
-                    || String(row.simulationLeaseId || '') !== source.leaseId;
+                    || Number(row.simulationRevision || 0) !== source.revision;
             })) return { ok: false, reason: 'party_goal_member_changed' };
             write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                 [statsJson, updatedAt, partyId]);
@@ -5458,7 +5450,7 @@ const Database = {
                     return { ok: false, reason: 'party_recruitment_changed' };
             }
             const placeholders = characterIds.map(() => '?').join(', ');
-            const currentRows = all(`SELECT characterId, phase, simulationOwner, simulationRevision, simulationLeaseId, partyId, updatedAt, statsJson
+            const currentRows = all(`SELECT characterId, phase, simulationOwner, simulationRevision, partyId, updatedAt, statsJson
                 FROM bot_life_state WHERE characterId IN (${placeholders})`, characterIds);
             const currentById = new Map(currentRows.map((row) => [Number(row.characterId), row]));
             const conflicts = batch.filter((entry) => {
@@ -5470,9 +5462,7 @@ const Database = {
                     || String(current.partyId || '') !== String(entry.expectedPartyId || '')
                     || Number(current.updatedAt || 0) !== Number(entry.expectedUpdatedAt || 0)
                     || entry.expectedSimulationRevision !== undefined
-                        && Number(current.simulationRevision || 0) !== entry.expectedSimulationRevision
-                    || entry.expectedSimulationLeaseId !== undefined
-                        && String(current.simulationLeaseId || '') !== entry.expectedSimulationLeaseId;
+                        && Number(current.simulationRevision || 0) !== entry.expectedSimulationRevision;
             }).map((entry) => Number(entry.row.characterId));
             if (conflicts.length) return { ok: false, reason: 'membership_conflict', conflicts };
 
@@ -11056,8 +11046,7 @@ Object.assign(Database, {
             const slot = TradeMeetings.participant(Number(id)), row = one("SELECT *, json_extract(statsJson,'$.playerPartyTakeover.playerId') playerPartyId FROM bot_life_state WHERE characterId=?", [id]);
             return { sequence: slot.nextSequence, meetingId: slot.meetingId, anchor: TradeMeetings.anchor(Number(id)), revision: Number(row?.simulationRevision || 0),
                 partyId: row?.partyId || null, playerPartyId: row?.playerPartyId || null,
-                phase: row?.phase || 'player', ownerId: row?.simulationOwner || null,
-                leaseId: row?.simulationLeaseId || null, hotAt: Number(row?.lastHotAt || 0),
+                phase: row?.phase || 'player', hotAt: Number(row?.lastHotAt || 0),
                 needRevision: Number(row?.simulationRevision || 0),
                 inventory: afkTradeInventoryUnsafe(id), acceptedIncoming: acceptedTradeIncomingUnsafe(Number(id), row),
                 position: tradeMeetingPositionUnsafe(Number(id)) };

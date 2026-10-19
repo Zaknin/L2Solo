@@ -39,6 +39,7 @@ const ColdNpcPlanningCatalog = require('./ColdNpcPlanningCatalog');
 const TableChannel = require('./ColdTableChannel');
 const TownNpcCatalog = require('../Economy/TownNpcCatalog');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
+const EconomyCommit = require('../Economy/EconomyCommit');
 const RecomputeGeneration = require('./RecomputeGeneration');
 
 const ClanRaidRoster = require('../../Clan/ClanRaidRoster');
@@ -451,7 +452,7 @@ class ColdSimulationCoordinator {
         const request = invoke('GameServer/AfkTrade/TradeMeeting').canonical(input);
         const immutable = [request.token, request.actorA, request.actorB, request.seqA, request.seqB, request.town,
             [request.point.locX, request.point.locY, request.point.locZ],
-            request.parties.map(party => [party.phase, party.ownerId, party.leaseId, party.hotAt, party.revision, party.sequence]),
+            request.parties.map(party => [party.phase, party.hotAt, party.revision, party.sequence]),
             request.lines.map(line => [line.payer, line.itemId, line.selfId, line.enchant, line.count, line.price, line.adId, line.adRevision])];
         return require('node:crypto').createHash('sha256').update(JSON.stringify(immutable)).digest('hex');
     }
@@ -531,8 +532,7 @@ class ColdSimulationCoordinator {
     meetingPreparationCurrent(proof, request) {
         if (!proof || proof.epoch !== this.workerEpoch || proof.worker !== this.worker || this.stopping) return false;
         const state = LifeState.cachedState(proof.characterId);
-        const authority = state && invoke('GameServer/Bot/Economy/EconomyCommit').authority(state), expected = proof.authority;
-        if (!authority || !expected || !['phase', 'ownerId', 'leaseId', 'hotAt', 'revision'].every(key => authority[key] === expected[key])) return false;
+        if (!state || !EconomyCommit.sameAuthority(EconomyCommit.authority(state), proof.authority)) return false;
         const board = invoke('GameServer/AfkTrade/AfkTradeService').boardIndex();
         const Counters = invoke('GameServer/Bot/Economy/MarketCounters');
         if (!proof.dependencies?.every(([id, boardToken, marketToken, workshopToken]) => {
@@ -567,7 +567,7 @@ class ColdSimulationCoordinator {
                     const side = result.actorA === identity.characterId ? 0 : 1;
                     const own = result.parties[side];
                     const proof = { token: result.token, characterId: identity.characterId, sequence: own.sequence,
-                        authority: { phase: own.phase, ownerId: own.ownerId, leaseId: own.leaseId, hotAt: own.hotAt, revision: own.revision },
+                        authority: { phase: own.phase, hotAt: own.hotAt, revision: own.revision },
                         route: own.route, certificates: result.lines.map(line => line.payer === side ? line.certificate : null),
                         dependencies: result.dependencies || [], sources: result.lines.map(line => [line.adId, line.adRevision]), epoch, worker, approved: true };
                     this.finishMeetingPreparation(identity.characterId, held, proof);
@@ -754,8 +754,7 @@ class ColdSimulationCoordinator {
                 }
             } else if (payload.phase === 'economy_plan_ready' && !this.stopping) {
                 const id = Number(payload.characterId), state = LifeState.cachedState(id);
-                const current = state && invoke('GameServer/Bot/Economy/EconomyCommit').authority(state);
-                if (current && payload.authority && Object.keys(current).every(key => current[key] === payload.authority[key])) {
+                if (state && EconomyCommit.sameAuthority(EconomyCommit.authority(state), payload.authority)) {
                     const beforeWrite = () => {
                         if (this.worker !== worker || this.workerEpoch !== epoch) throw Error('economy_refresh_source_retired');
                     };
@@ -1435,7 +1434,7 @@ class ColdSimulationCoordinator {
             this.economyRoutes.forget(Number(state.characterId));
             const current = LifeState.cachedState(state.characterId);
             if (entry.wishAdvisory && this.worker === worker && this.workerEpoch === epoch
-                && current?.phase === 'cold' && current.simulation?.ownerId === state.simulation?.ownerId)
+                && current?.phase === 'cold')
                 this.economyDecisions.releaseAdvisory(state.characterId, advice);
             return { ok: true, reason: 'accepted', ...payload };
         } catch (error) {
@@ -1632,14 +1631,11 @@ class ColdSimulationCoordinator {
         if (sourceCurrent() && entry.proposal.market) {
             // The resolve has already advanced native ownership. Capture its
             // accepted authority after commit, never the worker's old revision.
-            const coldAuthority = { ownerId: state.simulation?.ownerId || 'legacy_main',
-                revision: Number(state.simulation?.revision || 0), leaseId: state.simulation?.leaseId || null };
+            const coldAuthority = { revision: Number(state.simulation?.revision || 0) };
             const canCommitReview = () => {
-                const current = LifeState.cachedState(id), actual = current?.simulation || {};
+                const current = LifeState.cachedState(id);
                 return sourceCurrent() && current?.phase === 'cold'
-                    && (actual.ownerId || 'legacy_main') === coldAuthority.ownerId
-                    && Number(actual.revision || 0) === coldAuthority.revision
-                    && (actual.leaseId || null) === coldAuthority.leaseId;
+                    && Number(current.simulation?.revision || 0) === coldAuthority.revision;
             };
             await step('board', () => AfkMarket
                 .applyReview(id, entry.proposal.market, { coldAuthority, canCommitReview }));
