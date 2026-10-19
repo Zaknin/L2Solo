@@ -3543,10 +3543,10 @@ const BotLifeState = {
     // (PopulationService.applyWorkerPartyRequirements), built on the copy main
     // read before: only the plan is written, held on that copy's revision, and
     // the write moves it. A write that moved the row in between (the member's
-    // own review: its training or buff) wins and nothing is written; the
-    // party's next requirement refresh (a kit move, a party event) plans this
-    // member again (ColdSimulationKernel partyRequirementProgress). A clan-locked plan or a foreign
-    // clan's goal is not replaced, as the full save would not replace it.
+    // own review: its training, buff or plan) wins and nothing is written:
+    // false, and the caller marks the party's re-plan due again. A clan-locked
+    // plan or a foreign clan's goal is not replaced, as the full save would
+    // not replace it (null: nothing to write).
     writePartyRequirementPlan(member, plan = null) {
         const id = Number(member?.characterId), reason = 'party_requirement_refresh';
         if (!id) return Promise.resolve(null);
@@ -3561,7 +3561,8 @@ const BotLifeState = {
             WHERE characterId = ? AND phase = 'cold' AND simulationRevision = ?
             RETURNING *`, [JSON.stringify(plan), reason, now(), id, Number(member.simulation?.revision || 0)], { read: true }]))
             .then(([row] = []) => {
-                const snapshot = row ? this.acceptNewerLifecycleRow(row) : null;
+                if (!row) return false;
+                const snapshot = this.acceptNewerLifecycleRow(row);
                 if (snapshot) notifyColdSnapshot(snapshot, reason, { critical: true });
                 return snapshot;
             }).catch((error) => {
