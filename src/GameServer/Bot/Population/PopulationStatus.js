@@ -81,6 +81,14 @@ const PopulationStatus = {
         return heaps;
     },
 
+    // bag/equip/level/death/revive/near_spot/activated: near bots' fact posts
+    // queued since start. Always on: logSummary prints it without diagnostics.
+    nearFactsText(snapshots) {
+        const nearFacts = snapshots?.nearFacts || {};
+        return ['bag', 'equip', 'level', 'death', 'revive', 'near_spot', 'activated']
+            .map(reason => nearFacts[reason] || 0).join('/');
+    },
+
     summary() {
         if (!Config.developerDiagnostics) return { enabled: false };
         const counts = this.counts();
@@ -300,10 +308,7 @@ const PopulationStatus = {
         const soloHolds = coldWorker.soloHolds || {};
         summary.line += ` soloHolds=${soloHolds.hits || 0}/${soloHolds.misses || 0}/${soloHolds.size || 0}`;
         summary.line += ` snapshot=${snapshots.dirty || 0}/${snapshots.critical || 0}/${snapshots.inFlight ? 1 : 0} snapshotLast=${lastSnapshot.mode || 'none'}/${lastSnapshot.rows || 0}/${lastSnapshot.pages || 0}/${lastSnapshot.durationMs || 0}ms snapshotRuns=${snapshots.fullRuns || 0}/${snapshots.dirtyRuns || 0}/${snapshots.criticalRuns || 0} snapshotDeferrals=${snapshots.deferrals || 0} snapshotYields=${snapshots.yields || 0}`;
-        // nearFacts=bag/equip/level/death/revive/near_spot/activated: near bots' fact posts queued since start.
-        const nearFacts = snapshots.nearFacts || {};
-        summary.line += ` nearFacts=${['bag', 'equip', 'level', 'death', 'revive', 'near_spot', 'activated']
-            .map(reason => nearFacts[reason] || 0).join('/')}`;
+        summary.line += ` nearFacts=${this.nearFactsText(snapshots)}`;
         return summary;
     }
 };

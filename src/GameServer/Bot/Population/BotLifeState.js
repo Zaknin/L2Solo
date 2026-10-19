@@ -2008,7 +2008,8 @@ const BotLifeState = {
             setSessionSnapshotsPhase(session, 'hot');
             notifyMarketReviewState(snapshot, current);
             // The kernel's fence removed the far record: this post gives the
-            // near bot its slot back at once.
+            // near bot its slot back at the next snapshot page ('activated'
+            // is not critical, so it waits for the page, not a flush).
             notifyNearFacts(session, 'activated');
             return snapshot;
         }).catch((err) => {
