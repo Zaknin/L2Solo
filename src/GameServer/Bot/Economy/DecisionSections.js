@@ -82,14 +82,21 @@ function sectionMask(names) {
 // record: kit and level (build), party and clan (relations), the ground and
 // the exclusion and "was full" marks (occupation, sources). The matchup it
 // filters with reads the kit, so build covers it; buffs and night are read-time.
+const FOUNDATION = sectionMask(['build', 'combat', 'supply', 'occupation', 'relations']);
 const COMPUTED = Object.freeze({
-    foundation: sectionMask(['build', 'combat', 'supply', 'occupation', 'relations']),
+    foundation: FOUNDATION,
     sources: sectionMask(['build', 'relations', 'occupation', 'sources', 'money']),
     weighing: sectionMask(SECTIONS),
     route: sectionMask(['build', 'relations', 'occupation', 'sources']),
     // The source walk's per-spot ground verdict (GearAcquisitionPlanner.sourceGround):
     // level and kit matchup; its other reads are checked beside it.
-    sourceGround: sectionMask(['build'])
+    sourceGround: sectionMask(['build']),
+    // The crafter's workshop (its best recipe and income per hour, the
+    // occupation planner's answer), kept with the held build: the planner
+    // reads the money packet (stats.money: hour adena, trip value, craft
+    // labour), which the foundation writes every build, and the kept
+    // recipe's market (its watch rows raise money).
+    workshop: FOUNDATION | sectionMask(['money'])
 });
 // The one table of what a moved fact touches, for near and far bots alike
 // (factEvents over factsOf). build: the kit (class, level, gear, hennas,

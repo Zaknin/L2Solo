@@ -45,11 +45,6 @@ class ColdOccupationPlanner {
         return awaitResult ? promise : null;
     }
 
-    valueFor(id, state) {
-        const entry = this.slots.get(Number(id));
-        return entry?.done && !entry.dirty && entry.input.mode !== 'action' && entry.input.state === state ? entry.value : null;
-    }
-
     kick() {
         if (this.scheduled || this.stopped || !this.waiting.size && !this.ready.size) return;
         this.scheduled = true;

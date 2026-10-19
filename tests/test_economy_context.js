@@ -421,6 +421,76 @@ async function run() {
         }
         console.log('PASS card verdict handed to the build of its step');
     }
+    // The crafter's workshop is kept with its held build: on the same route,
+    // known, with a finite income and no workshop section moved (the
+    // foundation's or money); otherwise it is asked again. The step keeps it
+    // only when its build reuses the card's collected verdict. A build with a
+    // productive workshop watches its product's buyers and its materials'
+    // sellers.
+    {
+        const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+        const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
+        const workshop = { known: true, recipeId: 2, productId: 3, incomePerHour: 1200, cycleHours: 2 };
+        const state = { ...base, characterId: 990031 };
+        const heldOf = (value, routeKey = Trip.key(state)) => ({ plan: { workshop: value, routeKey } });
+        assert.equal(Economy.heldWorkshopOf(heldOf(workshop), 0, state), workshop, 'a held workshop on its route is kept');
+        assert.equal(Economy.heldWorkshopOf(heldOf({ ...workshop, incomePerHour: 0 }), 0, state)?.incomePerHour, 0,
+            'a known zero income is kept');
+        for (const name of ['build', 'combat', 'supply', 'occupation', 'relations', 'money'])
+            assert.equal(Economy.heldWorkshopOf(heldOf(workshop), Sections.sectionBit(name), state), null, `a moved ${name} section asks again`);
+        for (const name of ['benefits', 'sources'])
+            assert.equal(Economy.heldWorkshopOf(heldOf(workshop), Sections.sectionBit(name), state), workshop, `a moved ${name} section keeps it`);
+        assert.equal(Economy.heldWorkshopOf(heldOf(workshop, 'elsewhere'), 0, state), null, 'another route asks again');
+        assert.equal(Economy.heldWorkshopOf(heldOf({ ...workshop, known: false }), 0, state), null, 'an unknown workshop asks again');
+        assert.equal(Economy.heldWorkshopOf(heldOf({ ...workshop, incomePerHour: NaN }), 0, state), null, 'no income asks again');
+        assert.equal(Economy.heldWorkshopOf(null, 0, state), null, 'no held build asks');
+        const diagnosticsBefore = Config.developerDiagnostics;
+        Config.developerDiagnostics = true;
+        try {
+            const counts = () => invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics().counts || {};
+            const unknown = () => counts()['occupation:workshop:unknown'] || 0;
+            let before = unknown();
+            assert.equal(Economy.keptWorkshop(null, 0, state).known, false, 'nothing kept is an unknown workshop');
+            assert.equal(unknown(), before, 'a bot without workshop entries is not counted');
+            const crafter = { ...state, stats: { ...state.stats, workshop: { entries: [{ recipeId: 2 }] } } };
+            before = unknown();
+            Economy.keptWorkshop(heldOf(workshop), Sections.sectionBit('build'), crafter);
+            assert.equal(unknown(), before + 1, 'a crafter without a kept workshop is counted');
+        } finally { Config.developerDiagnostics = diagnosticsBefore; }
+        // The step: a held build and full route rows, but no collected card verdict.
+        const routeRows = Trip.prepared(state);
+        const built = Economy.forState(state, { routeRows, workshop });
+        assert.equal(built.plan.workshop, workshop, 'fixture: the build holds its workshop');
+        assert.equal(Economy.heldWorkshop(state, { routeRows }), null, 'no collected card verdict asks');
+        assert.equal(Economy.heldWorkshop(state, { routeRows: [] }), null, 'route rows the build replaces ask');
+        const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(workshop.recipeId);
+        const watched = built.statsPacket.wishSections.marketWatch || [];
+        const watches = (id, storeType) => watched.some(row => row[0] === id && row[1] === storeType);
+        assert(watches(recipe.productId, 3), 'the product\'s buyers are watched');
+        assert(watched.length < Sections.MARKET_WATCH, 'fixture: a short queue, every row fits under the cap');
+        assert(recipe.materials.every(row => watches(row.selfId, 1)), 'the materials\' sellers are watched');
+        Economy.forget(state.characterId);
+        // The keep: a crafter's card refused only by its MP (sources), its
+        // collected verdict handed to the step's build on the same deps.
+        const Card = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+        const T = Date.now(), crafter = { ...base, characterId: 990032, craftLevel: 1 };
+        const deps = { timestamp: T, routeRows: Trip.prepared(crafter) };
+        const held = Economy.forState(crafter, { ...deps, workshop });
+        const published = { ...crafter, stats: { ...crafter.stats, ...held.statsPacket } };
+        const accepted = Card.advisory(held, published, published.activity, deps);
+        const tired = { ...published, vitals: { ...published.vitals, mp: published.vitals.mp - 1 } };
+        const prepared = {};
+        assert.equal(Card.refreshAdvisory(tired, accepted, deps, { prepared, collect: true }), null, 'fixture: the MP refuses the card');
+        const handed = { ...deps, eventVerdict: prepared.eventVerdict };
+        assert(prepared.eventVerdict.collected, 'fixture: the refusal is collected');
+        assert(!(prepared.eventVerdict.collected.verdict.touchedSections & Sections.COMPUTED.workshop),
+            'fixture: the refusal names no workshop section');
+        assert.equal(Economy.heldWorkshop(tired, handed), held.plan.workshop, 'the held workshop is kept for the build');
+        assert.equal(Economy.heldWorkshop(tired, { ...handed, routeRows: Trip.prepared(crafter).slice() }), null,
+            'other route rows than the verdict judged ask');
+        Economy.forget(crafter.characterId);
+    }
+    console.log('PASS workshop kept with the held build / asked when it moved');
     // The cheap check by kind of leaf: an enchant or special-ability decision
     // names its object: it holds while that object is in the bag at the
     // enchant level read; one without an object (an exchange) holds by its

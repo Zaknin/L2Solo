@@ -488,7 +488,6 @@ const occupationPlanner = new ColdOccupationPlanner({
                 if (input.pending && hash === entry.economyPlanHash) { entry.economyPending = 0; input.economy = null; return; }
                 entry.economyPlanHash = hash;
                 entry.economyPending = workshop.economyPlan.d || 0;
-                if (workshop.economyDecision) entry.published = workshop.economyDecision;
                 send('ready', { phase: 'economy_plan_ready', characterId: id,
                     authority: EconomyCommit.authority(input.state), economyPlan: workshop.economyPlan,
                     economyDecision: workshop.economyDecision });
@@ -509,15 +508,13 @@ const occupationPlanner = new ColdOccupationPlanner({
         const owner = kernel?.states.get(id);
         if (shuttingDown || owner?.state !== input.sourceState) return;
         if (meta.stale) {
-            // The same mark main's staleWorkshop sets on its copy. A near row's
-            // slot recomputes on its next post; main's copy is current by nearSeq.
-            if (owner?.published && ColdEconomyDecision.current(input.state, owner.published)) owner.published.workshopStale = true;
+            // Main marks its copy stale (staleWorkshop). A near row's slot
+            // recomputes on its next post; main's copy is current by nearSeq.
             if (input.state.phase !== 'hot') send('ready', { phase: 'economy_workshop_stale', characterId: id,
                 updatedAt: Number(input.state.updatedAt || 0), echo: ColdEconomyDecision.stateEcho(input.state) });
         } else if (input.mode === 'near' && workshop?.decision) {
             // The near bot's decision on its post: the card, and beside it the
             // mind keys the body takes and the post and raise it answers.
-            owner.published = workshop.decision;
             // The published packet moves the record's mind, as the far step's merge does,
             // so the next post's events compare against it and a raise is taken once.
             Object.assign(owner.state.stats ||= {}, workshop.statsPacket);
@@ -572,6 +569,21 @@ function occupationFor(state, timestamp, options = {}, mode = 'occupation') {
         knownShotRecipes: recipes.knownShotRecipes || [], recipeBook: recipes.recipeBook, stock: options.stock || null, economy,
         sourceReady: tables.ready('board') && tables.ready('market'), mode, routeKey, routeRows });
 }
+// A build's workshop (the crafter's best recipe and its income per hour,
+// occupationFor mode occupation), counted by the caller that asks: only a
+// build reads it, a held card asks none.
+function askWorkshop(state, timestamp, routeRows, caller, options = {}) {
+    economyDiagnostics.count('occupation', 'ask', caller);
+    return occupationFor(state, timestamp, { ...options, routeRows, routeKey: EconomicTrip.key(state) });
+}
+// The step's build workshop: the held build's while its build keeps it
+// (EconomyContext.heldWorkshop), else asked.
+function lifecycleWorkshop(state, timestamp, deps) {
+    const kept = EconomyContext.heldWorkshop(state, deps);
+    if (!kept) return askWorkshop(state, timestamp, deps.routeRows, 'lifecycle');
+    economyDiagnostics.count('workshop', 'kept', 'lifecycle');
+    return kept;
+}
 async function refreshCraftPacket(state, timestamp, refreshed) {
     if (!refreshed || !CraftEligibility.isServiceCrafter(state)) return refreshed;
     const mp = Number(state.vitals?.mp), preparedMp = refreshed.advisory.preparedMp ?? refreshed.advisory.mp;
@@ -595,16 +607,6 @@ function assetsKey(state) {
     return `${PersonalWarehouseIndex.version(state)}:${ClanSupplyPolicy.version(state)}`;
 }
 const economyPlanHash = plan => require('../Fnv1a').fnv1a32(JSON.stringify(plan));
-// The workshop of the decision this thread published for the record's state
-// (main's economyDecisions.workshopFor, read on this thread's own copy), or
-// null. Main also marks its copy stale when a commit merged board deals or
-// PK drops into the bag, or the state is wishDirty (ColdEconomyDecisions
-// accept); that mark is not kept here: until the next decision a far bot
-// reads the workshop published for that same state and bag clock.
-function publishedWorkshop(entry) {
-    return entry?.state?.stats?.workshop?.entries?.length && ColdEconomyDecision.current(entry.state, entry.published)
-        ? entry.published.workshop : null;
-}
 // A service crafter's recipe book and packed known shot recipes, from main's
 // 'recipes' table (CraftWorkshopService); none for any other bot.
 const NO_RECIPES = Object.freeze({ knownShotRecipes: Object.freeze([]), recipeBook: undefined });
@@ -1188,8 +1190,7 @@ function requestPartyGoals(payload, msgId, admitted = false) {
             const options = { buyOrderEscrow: payload.escrows[at], recipeKnowledge: payload.recipeKnowledge?.[at] || {} };
             const routeRows = await occupationFor(member, timestamp, options, 'wish');
             if (!partyMembersAvailable(members)) throw Error('party_goal_member_busy');
-            const workshop = await occupationFor(member, timestamp,
-                { ...options, routeRows, routeKey: EconomicTrip.key(member) });
+            const workshop = await askWorkshop(member, timestamp, routeRows, 'party_goal', options);
             if (!partyMembersAvailable(members)) throw Error('party_goal_member_busy');
             return invoke('GameServer/Bot/Economy/EconomyContext').forState(member, {
                 timestamp, spots: planningSpots, board: boardReady(),
@@ -1366,13 +1367,9 @@ function startKernel(config = {}) {
                 // Merged before the event check, whose dirty bits follow it.
                 ? { ...base, statsPacket: lifecyclePlan.statsPacket, statsPacketBeforeResolve: true }
                 : { ...base,
-                    economyDepsFor: async projected => {
-                        const routeRows = await occupationFor(projected, timestamp, {}, 'wish');
-                        const workshop = await occupationFor(projected, timestamp,
-                            { routeRows, routeKey: EconomicTrip.key(projected) });
-                        return { spots: planningSpots, workshop, routeRows,
-                            board: boardReady(), buyOrderEscrow: escrowFor(state.characterId), goalRevision: goalRevision(state.characterId) };
-                    },
+                    // The workshop is asked by economyFor, only for a build.
+                    economyDepsFor: async projected => ({ spots: planningSpots, routeRows: await occupationFor(projected, timestamp, {}, 'wish'),
+                        board: boardReady(), buyOrderEscrow: escrowFor(state.characterId), goalRevision: goalRevision(state.characterId) }),
                     economyFor: async (projected, deps) => {
                         observedDeps = deps;
                         const prepared = {};
@@ -1389,6 +1386,8 @@ function startKernel(config = {}) {
                             { buyOrderEscrow: ownEscrow(), stockFor: (_state, kind) => (stock ||= prepared.basics = EconomyContext.basics(projected, deps)).stock(kind) });
                         if (refreshed) refreshed = await refreshCraftPacket(projected, timestamp, refreshed);
                         if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
+                        deps.workshop = await askWorkshop(projected, timestamp, deps.routeRows,
+                            projected.party?.partyId || projected.partyId ? 'party' : 'karma');
                         return EconomyContext.forState(projected, withIncomeRoute(withEventVerdict(deps, prepared), prepared.basics));
                     },
                     onEconomy: (built, seen) => {
@@ -1434,17 +1433,12 @@ function startKernel(config = {}) {
                 if (economyPlan.d) record.economyPlanHash = economyPlanHash(economyPlan);
             }
             const market = reviewMarket(projected, timestamp, economy);
-            // Main reads this instead of building the network again; the
-            // record keeps what it published (the workshop it reads below).
+            // Main reads this instead of building the network again.
             const economyDecision = economy && projected ? stepEconomy || refreshed
                 ? { ...(stepEconomy ? stepCard(lifecyclePlan.economyDecision, preparedAction?.economyPlan) : refreshed.decision),
                     updatedAt: Number(projected.updatedAt || 0), echo: seenEcho }
                 : { ...ColdEconomyDecision.capture({ ...economy,
                     shot: economyPlan?.shot || null }, projected), echo: seenEcho } : null;
-            // compact() writes the clock into the card's bytes: a copy, the
-            // posted card and its advice keep theirs.
-            if (economyDecision && record) record.published = ColdEconomyDecision.compact(economyDecision.data instanceof ArrayBuffer
-                ? { ...economyDecision, data: economyDecision.data.slice(0) } : economyDecision);
             return {
                 state: projected,
                 // A member's kit event, read by its party step (worker-local).
@@ -1486,11 +1480,10 @@ function startKernel(config = {}) {
             // GearPlanSelection uses EconomyContext's same prepared occupation
             // reader. No synchronous recipe scan can run through it.
             const routeRows = await occupationFor(state, timestamp, {}, 'wish');
-            const workshop = await occupationFor(state, timestamp,
-                { routeRows, routeKey: EconomicTrip.key(state) });
             const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+            // deps.workshop: asked below, only for a build.
             const deps = { spots, timestamp, board: boardReady(),
-                buyOrderEscrow: escrowFor(state.characterId), goalRevision: goalRevision(state.characterId), workshop, routeRows };
+                buyOrderEscrow: escrowFor(state.characterId), goalRevision: goalRevision(state.characterId), routeRows };
             const wishFocus = previousPlan?.status === 'deferred' && previousPlan.strategy === 'none'
                 && previousPlan.next == null && previousPlan.reason === 'wish_focus';
             const solo = !state.party?.partyId && !state.partyId && !state.stats?.partyRequest;
@@ -1536,6 +1529,9 @@ function startKernel(config = {}) {
             // A null intention takes its ordinary native selection there.
             if (refreshed?.economy.network.activity === null && GearAcquisitionPlanner.isClanOwnedPlan(previousPlan)) refreshed = null;
             const nullReuse = refreshed?.economy.network.activity === null;
+            // Both reuses (the card's leaf, a null intention) read the card's
+            // workshop. A build keeps the held one while its sections hold.
+            if (!refreshed) deps.workshop = await lifecycleWorkshop(state, timestamp, withEventVerdict(deps, prepared));
             // No later ask reaches the finalize: a solo bot under routeHeld
             // has its native facts holding, so the card path asked above.
             if (economyDiagnostics.active() && routeHeld && !finalized) economyDiagnostics.count('lifecycle', 'plan_holds', 'skipped');
@@ -1622,7 +1618,7 @@ function startKernel(config = {}) {
                 economy,
                 activityPick: economy.network.activity ? { activity: economy.network.activity.activity,
                     spotId: economy.network.activity.spotId, npcId: economy.network.activity.npcId } : null,
-                economyDecision: heldDecision || ColdEconomyDecision.capture({ ...economy, workshop }, routedState),
+                economyDecision: heldDecision || ColdEconomyDecision.capture({ ...economy, workshop: deps.workshop }, routedState),
                 previousPlan,
                 acquisitionPlan,
                 partyRequest,
@@ -1721,18 +1717,6 @@ function startKernel(config = {}) {
         },
         workshops: workshopsFor,
         npcOffersFor: OccupationSources.npcOffersFor,
-        workshop: id => {
-            const entry = kernel.states.get(Number(id));
-            const held = occupationPlanner.slots.get(Number(id));
-            const value = (held?.input.mode === 'occupation' ? occupationPlanner.valueFor(id, entry?.state)
-                : held?.input.mode === 'near' ? occupationPlanner.valueFor(id, entry?.state)?.workshop : null)
-                || publishedWorkshop(entry);
-            if (value) return value;
-            // Counts crafters only: a bot without workshop entries has no workshop to know.
-            Config.developerDiagnostics && entry?.state?.stats?.workshop?.entries?.length
-                && economyDiagnostics.count('occupation', 'workshop', 'unknown');
-            return ColdEconomyDecision.unknownWorkshop();
-        },
         buyOrderEscrow: escrowFor,
         spots: () => planningSpots,
         memory: (characterId) => kernel.interactionMemory.snapshot(characterId),
