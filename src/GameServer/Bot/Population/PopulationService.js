@@ -74,6 +74,8 @@ const SurvivalFloor = require('./SurvivalFloor');
 const CombinedErrands = require('./CombinedErrandPolicy');
 const TradeMeetingService = invoke('GameServer/AfkTrade/TradeMeetingService');
 const activationFailureLogAt = new Map();
+// The completion key a far bot already waited on in town, this visit (main only).
+const exchangeWaits = new Map();
 // Returned by a resolveColdState branch method that did not take its branch.
 const COLD_RESOLVE_NEXT = Symbol('cold_resolve_next');
 
@@ -3318,9 +3320,17 @@ const PopulationService = {
                 // A paid-for C piece waits for a fresh worker command in town.
                 // Returning to the field here loses the purchase -> break ->
                 // exchange handoff when the purchase retired the previous card.
+                // One wait per key a visit: a worker that does not answer with
+                // the improving card on it has chosen otherwise, and its later
+                // card brings the bot back (acquisitionTravel).
                 const crystals = invoke('GameServer/Bot/Economy/BotCrystallization');
-                if (restockedState.activity === 'shopping' && crystals.ready(restockedState)
-                    && crystals.completionKey(restockedState)) {
+                const id = Number(restockedState.characterId);
+                const exchangeKey = restockedState.activity === 'shopping' && crystals.ready(restockedState)
+                    && crystals.completionKey(restockedState);
+                const waited = exchangeWaits.get(id) === exchangeKey;
+                exchangeWaits.delete(id);
+                if (exchangeKey && !waited) {
+                    exchangeWaits.set(id, exchangeKey);
                     return LifeState.upsertState({ ...restockedState, timing: { ...restockedState.timing,
                         nextResolveAt: Date.now() + 1000 } }, 'equipment_exchange_continue').then(saved => {
                         if (saved) ColdSimulationCoordinator.requestEconomyRefresh(saved.characterId);
