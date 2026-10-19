@@ -576,19 +576,14 @@ function askWorkshop(state, timestamp, routeRows, caller, options = {}) {
     economyDiagnostics.count('occupation', 'ask', caller);
     return occupationFor(state, timestamp, { ...options, routeRows, routeKey: EconomicTrip.key(state) });
 }
-// The step's build workshop: the held build's while none of its sections
-// moved (EconomyContext.heldWorkshop under the card verdict's sections, the
-// same mask the build takes), else asked. No verdict (a refusal before the
-// event check) or one that stopped at its first refusal (a wish-focus step
-// does not collect) names no full mask: ask. Sampled owners also ask fresh
+// The step's build workshop: the held build's while its build keeps it
+// (EconomyContext.heldWorkshop), else asked. Sampled owners also ask fresh
 // and count whether the kept one was the same craft choice.
-async function lifecycleWorkshop(state, timestamp, routeRows, verdict) {
-    const mask = !verdict || !verdict.valid && !verdict.collected ? null : (Number(state.stats?.wishDirty) || 0)
-        | (Number(verdict.touchedSections) || 0) | (Number(verdict.collected?.verdict.touchedSections) || 0);
-    const kept = mask === null ? null : EconomyContext.heldWorkshop(state, mask);
-    if (!kept) return askWorkshop(state, timestamp, routeRows, 'lifecycle');
+async function lifecycleWorkshop(state, timestamp, deps) {
+    const kept = EconomyContext.heldWorkshop(state, deps);
+    if (!kept) return askWorkshop(state, timestamp, deps.routeRows, 'lifecycle');
     if (economyDiagnostics.enabled(state.characterId)) {
-        const fresh = await occupationFor(state, timestamp, { routeRows, routeKey: EconomicTrip.key(state) });
+        const fresh = await occupationFor(state, timestamp, { routeRows: deps.routeRows, routeKey: EconomicTrip.key(state) });
         economyDiagnostics.count('workshop', 'skip', fresh?.recipeId === kept.recipeId && fresh?.productId === kept.productId ? 'same' : 'new');
     }
     return kept;
@@ -1540,7 +1535,7 @@ function startKernel(config = {}) {
             const nullReuse = refreshed?.economy.network.activity === null;
             // Both reuses (the card's leaf, a null intention) read the card's
             // workshop. A build keeps the held one while its sections hold.
-            if (!refreshed) deps.workshop = await lifecycleWorkshop(state, timestamp, routeRows, prepared.eventVerdict);
+            if (!refreshed) deps.workshop = await lifecycleWorkshop(state, timestamp, withEventVerdict(deps, prepared));
             // No later ask reaches the finalize: a solo bot under routeHeld
             // has its native facts holding, so the card path asked above.
             if (economyDiagnostics.active() && routeHeld && !finalized) economyDiagnostics.count('lifecycle', 'plan_holds', 'skipped');

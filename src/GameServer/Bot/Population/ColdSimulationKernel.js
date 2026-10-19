@@ -524,7 +524,7 @@ class RetainedStateMap extends Map {
         const wishAdvisory = ColdEconomyDecision.advisoryPublicationHolds(record.state, incomingAdvice, previousAdvice)
             ? incomingAdvice : ColdEconomyDecision.advisoryPublicationHolds(record.state, previousAdvice) ? previousAdvice : null;
         if (this.#skillDtos && record && (wishAdvisory || record.wishAdvisory)) {
-            // A near record's decision is its published packet (no proof), never a card:
+            // A near record's decision is the packet it posts to main (no proof), never a card:
             // the far card is dropped here and none is built while the bot is near.
             record.wishAdvisory = record.state?.phase === 'cold' ? wishAdvisory : null;
         }
@@ -904,13 +904,13 @@ class ColdSimulationKernel {
         const version = Number(this.versions.get(characterId) || 0) + 1;
         this.versions.set(characterId, version);
         // The bot's one record: { state, version, route, materialMemo,
-        // economyPending, economyPlanHash, wishAdvisory, published, raiseSeq,
-        // nearRoute }. Every field but the state and version is this thread's
-        // own and survives a new state: the kept route (BotRoute.trip) until
-        // its step's drops, the material memo (partyRequestForPlan), the
-        // economy plan sent and its hash, the card it holds, the decision it
-        // published and, for a near bot, the last raise applied and the route
-        // rows of its last decision (ColdSimulationWorker nearEvents, publish).
+        // economyPending, economyPlanHash, wishAdvisory, raiseSeq, nearRoute }.
+        // Every field but the state and version is this thread's own and
+        // survives a new state: the kept route (BotRoute.trip) until its
+        // step's drops, the material memo (partyRequestForPlan), the economy
+        // plan sent and its hash, the card it holds and, for a near bot, the
+        // last raise applied and the route rows of its last decision
+        // (ColdSimulationWorker nearEvents, publish).
         this.states.set(characterId, { route: null, ...current, state, version }, ownOutput);
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);

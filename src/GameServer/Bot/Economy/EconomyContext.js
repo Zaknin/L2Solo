@@ -665,8 +665,11 @@ function watchedBoard(board, watch) {
 // saw (excluding the bot's own line): the head is one input of the price
 // belief, so a far cheaper ask stays below the believed price after the
 // rebuild and would cross at every step; the decision already weighed it.
-// Only a newer, clearly better line crosses.
-function marketWatchRows(queue, sales, board, ownerId, buyValue, sellValue, errorOf) {
+// Only a newer, clearly better line crosses. recipe: the build's productive
+// workshop recipe (a crafter's); its product's buy lines and its materials'
+// sell lines are watched too, so a crossing raises money and the kept
+// workshop is asked again (Sections.COMPUTED.workshop).
+function marketWatchRows(queue, sales, board, ownerId, buyValue, sellValue, errorOf, recipe = null) {
     const rows = [], exclude = { excludeOwner: ownerId };
     const add = (id, storeType, value) => {
         if (rows.length >= Sections.MARKET_WATCH || !(id > 0) || !(value > 0)
@@ -677,6 +680,10 @@ function marketWatchRows(queue, sales, board, ownerId, buyValue, sellValue, erro
         rows.push([id, storeType, Math.round(reference), Math.round(errorOf(id) * 1000) / 1000]);
     };
     for (const wish of queue) { const id = Number(wish.object?.itemId); if (id > 0) add(id, SELL, buyValue(id)); }
+    if (recipe) {
+        add(Number(recipe.productId), BUY, sellValue(Number(recipe.productId)));
+        for (const row of recipe.materials || []) add(Number(row.selfId), SELL, buyValue(Number(row.selfId)));
+    }
     for (const [id] of sales) add(Number(id), BUY, sellValue(id));
     return rows;
 }
@@ -985,6 +992,13 @@ function basics(state = {}, deps = {}) {
 function stockFor(state, kind, deps = {}) { return basics(state, deps).stock(kind); }
 // A route table with a row for every town (EconomicTrip.prepare).
 const fullRoute = rows => Array.isArray(rows) && rows.length === Trip.towns.length;
+// The sections a build rebuilds (forState's mask): the raised bits, the
+// prepared card's verdict (cardVerdict, its first refusal) and the held
+// build's own verdict (heldVerdict, collected).
+function verdictMask(state, cardVerdict, heldVerdict) {
+    return (Number(state.stats?.wishDirty) || 0) | (Number(cardVerdict?.touchedSections) || 0)
+        | (Number(heldVerdict?.touchedSections) || 0);
+}
 function forState(state = {}, deps = {}) {
     const diagnostic = Diagnostics.active();
     const inputSequence = Number(state.stats?.decisionSeq || 0);
@@ -1055,8 +1069,7 @@ function forState(state = {}, deps = {}) {
     // bits, the prepared card's verdict, this verdict's refusals). A computed
     // piece (Sections.COMPUTED) is rebuilt when one of its sections is in it,
     // else reused from the held build.
-    const mask = (Number(state.stats?.wishDirty) || 0) | (Number(deps.eventVerdict?.touchedSections) || 0)
-        | eventVerdict.touchedSections;
+    const mask = verdictMask(state, deps.eventVerdict, eventVerdict);
     // The foundation is reused with the prices and the horizon it was priced with.
     // Reads no section names, reused with it: the persona and the town-visit
     // rhythm. The walk's unnamed reads, reused with its memo until a source
@@ -1236,7 +1249,7 @@ function forState(state = {}, deps = {}) {
     context.choiceBagValue = mask === 0 && choiceBagValueHolds(state, choiceBands, acceptedSections, context.hourAdena, bagValue)
         ? acceptedSections.bagValue : bagValue;
     // An event re-weighs the held focus and step (WishNetwork reconsider): a
-    // section that moved (raised, or named by a refusal). A first build or an
+    // section that moved (raised, or named by a refusal), not verdictMask by intent. A first build or an
     // unproved held build (no section named, mask = every piece) keeps them.
     const moved = (Number(state.stats?.wishDirty) || 0) | (Number(deps.eventVerdict?.touchedSections) || 0)
         | (held ? eventVerdict.movedSections : 0);
@@ -1287,7 +1300,8 @@ function forState(state = {}, deps = {}) {
     const watchRows = marketWatchRows(network.queue, context.liquidationInputs?.rows || [], sourceBoard,
         // || (TradeIntent.project above keeps ??): a zero-usefulness item's
         // worth is 0, yet its sale is watched at its price.
-        Number(state.characterId), price, id => context.worth(id) || price(id), priceError);
+        Number(state.characterId), price, id => context.worth(id) || price(id), priceError,
+        workshop?.known !== false && workshop?.productId > 0 ? Recipes.resolveByRecipeId(workshop.recipeId) : null);
     // The build's facts for its baseline: the request's when they were read
     // over this state itself (no held leaf's field activity in between).
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
@@ -1674,13 +1688,19 @@ function heldWorkshopOf(held, mask, state) {
 function keptWorkshop(held, mask, state) {
     const workshop = heldWorkshopOf(held, mask, state);
     if (workshop) return workshop;
-    if (Diagnostics.active()) Diagnostics.count('occupation', 'workshop', 'unknown');
+    // Counts crafters only: a bot without workshop entries has no workshop to know.
+    if (Diagnostics.active() && state.stats?.workshop?.entries?.length) Diagnostics.count('occupation', 'workshop', 'unknown');
     return ColdEconomyDecision.unknownWorkshop();
 }
 // The worker's decision point (planLifecycle): the bot's held workshop under
-// the step's moved sections, or null (ask the occupation planner).
-function heldWorkshop(state, mask) {
-    return heldWorkshopOf(cache.get(`character:${Number(state.characterId)}`), mask, state);
+// the mask its build will take, or null (ask the occupation planner). Kept
+// only when that build reuses the card's collected verdict (handedVerdict,
+// the same deps: the route rows forState keeps), so both read one mask.
+function heldWorkshop(state, deps) {
+    if (!deps.tripCost && !fullRoute(deps.routeRows)) return null;
+    const held = cache.get(`character:${Number(state.characterId)}`);
+    const handed = handedVerdict(deps.eventVerdict?.collected, state, held, deps);
+    return handed ? heldWorkshopOf(held, verdictMask(state, deps.eventVerdict, handed), state) : null;
 }
 function preparedRouteRows(state) {
     const plan = cache.get(`character:${Number(state.characterId)}`)?.plan;
@@ -1717,5 +1737,5 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, preparedRouteRows, heldWorkshop, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, preparedRouteRows, heldWorkshop, heldWorkshopOf, keptWorkshop, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome };
