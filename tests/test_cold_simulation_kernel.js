@@ -224,6 +224,20 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     assert.strictEqual(kernel.upsert({ state: { ...currentState } }), true);
     assert.strictEqual(kernel.heap.size, heapBeforeRefresh,
         'same-revision catalog refresh must coalesce without growing the due heap');
+    // A near bot's fact post that crossed its cooldown: the cold row came
+    // first at the same revision (hot -> cold keeps it), the hot post is stale.
+    {
+        const nearKernel = recordingKernel({ resolveSolo: () => null, now: () => 1000 });
+        const cooled = state(95);
+        assert.strictEqual(nearKernel.upsert({ state: cooled }), true);
+        assert.strictEqual(nearKernel.upsert({ state: { ...cooled, phase: 'hot' } }), false,
+            'a hot row at the cold row\'s revision must not replace the cold row');
+        assert.strictEqual(nearKernel.states.get(95).state.phase, 'cold', 'the cooled bot stays a far bot that steps');
+        const activated = { ...cooled, phase: 'hot', simulation: { ...cooled.simulation, revision: cooled.simulation.revision + 1 } };
+        assert.strictEqual(nearKernel.upsert({ state: activated }), true,
+            'a hot row at a higher revision (the handoff moved it) is accepted');
+        assert.strictEqual(nearKernel.states.get(95).state.phase, 'hot');
+    }
 
     const route = {
         needed: true,
