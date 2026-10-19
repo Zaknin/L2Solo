@@ -468,31 +468,67 @@ async function run() {
         assert(watched.length < Sections.MARKET_WATCH, 'fixture: a short queue, every row fits under the cap');
         assert(recipe.materials.every(row => watches(row.selfId, 1)), 'the materials\' sellers are watched');
         Economy.forget(state.characterId);
-        // The step on a crafter's held build: a valid verdict keeps the
-        // workshop (no ask) and the build that follows serves the held
-        // decision; a refusal by its MP alone (sources) keeps it, with or
-        // without the card refused before; a wallet below the decision's
+        // The step on a crafter's held build: its verdict is judged once,
+        // before the workshop ask, and served to the build that follows. A
+        // valid verdict keeps the workshop (no ask) and the build serves the
+        // held decision, unless the held workshop is unknown or of another
+        // route (asked); a refusal by its MP alone (sources) keeps it, with
+        // or without the card refused before; a wallet below the decision's
         // bounds (money) asks.
         const Card = invoke('GameServer/Bot/Population/ColdEconomyDecision');
         const T = Date.now(), crafter = { ...base, characterId: 990032, craftLevel: 1, adena: 1000000 };
         const deps = { timestamp: T, routeRows: Trip.prepared(crafter) };
-        const held = Economy.forState(crafter, { ...deps, workshop });
-        const published = { ...crafter, stats: { ...crafter.stats, ...held.statsPacket } };
-        const step = { ...deps }, eventVerdict = {};
-        assert.equal(Economy.heldWorkshop(published, step, eventVerdict), held.plan.workshop, 'a valid held build keeps its workshop');
-        const served = Economy.forState(published, { ...step, workshop: held.plan.workshop, eventVerdict });
-        assert.deepEqual(served.statsPacket, held.statsPacket, 'the build that follows serves the held decision');
-        const accepted = Card.advisory(held, published, published.activity, deps);
-        const tired = { ...published, vitals: { ...published.vitals, mp: published.vitals.mp - 1 } };
-        assert.equal(Economy.heldWorkshop(tired, { ...deps }, {}), held.plan.workshop, 'a refusal by the MP alone keeps it');
-        const prepared = {};
-        assert.equal(Card.refreshAdvisory(tired, accepted, deps, { prepared, collect: true }), null, 'fixture: the MP refuses the card');
-        assert(!(prepared.eventVerdict.collected.verdict.touchedSections & Sections.COMPUTED.workshop),
-            'fixture: the refusal names no workshop section');
-        assert.equal(Economy.heldWorkshop(tired, { ...deps }, prepared.eventVerdict), held.plan.workshop,
-            'a refusal by the MP alone keeps it after the card refused');
-        assert.equal(Economy.heldWorkshop({ ...published, adena: 0 }, { ...deps }, {}), null, 'a moved wallet asks');
-        Economy.forget(crafter.characterId);
+        const counts = () => invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics().counts || {};
+        const delta = (before, key) => (counts()[key] || 0) - (before[key] || 0);
+        // The worker's step: the workshop, then the build on the same deps.
+        const stepOf = (state, eventVerdict = {}, before = counts()) => {
+            const step = { ...deps };
+            const kept = Economy.heldWorkshop(state, step, eventVerdict);
+            const built = Economy.forState(state, { ...step, workshop: kept, eventVerdict });
+            return { kept, built, verdicts: [delta(before, 'context:held_verdict:computed'), delta(before, 'context:held_verdict:reused')] };
+        };
+        Config.developerDiagnostics = true;
+        try {
+            // A refused step rebuilds the held entry: each case starts on a fresh one.
+            const fresh = () => {
+                Economy.forget(crafter.characterId);
+                const held = Economy.forState(crafter, { ...deps, workshop });
+                const published = { ...crafter, stats: { ...crafter.stats, ...held.statsPacket } };
+                return { held, published, tired: { ...published, vitals: { ...published.vitals, mp: published.vitals.mp - 1 } } };
+            };
+            let { held, published, tired } = fresh();
+            const valid = stepOf(published);
+            assert.equal(valid.kept, workshop, 'a valid held build keeps its workshop');
+            assert.deepEqual(valid.built.statsPacket, held.statsPacket, 'the build that follows serves the held decision');
+            assert.deepEqual(valid.verdicts, [1, 1], 'one verdict for the step\'s workshop and its build');
+            const plan = held.plan, routeKey = plan.routeKey;
+            plan.routeKey = 'elsewhere';
+            try { assert.equal(stepOf(published).kept, null, 'a held workshop of another route asks'); }
+            finally { plan.routeKey = routeKey; }
+            const refused = stepOf(tired);
+            assert.equal(refused.kept, workshop, 'a refusal by the MP alone keeps it');
+            assert.deepEqual(refused.verdicts, [1, 1], 'one verdict for a refused step');
+            ({ held, published, tired } = fresh());
+            const accepted = Card.advisory(held, published, published.activity, deps);
+            const before = counts(), prepared = {};
+            assert.equal(Card.refreshAdvisory(tired, accepted, deps, { prepared, collect: true }), null, 'fixture: the MP refuses the card');
+            assert(!(prepared.eventVerdict.collected.verdict.touchedSections & Sections.COMPUTED.workshop),
+                'fixture: the refusal names no workshop section');
+            const afterCard = stepOf(tired, prepared.eventVerdict, before);
+            assert.equal(afterCard.kept, workshop, 'a refusal by the MP alone keeps it after the card refused');
+            assert.deepEqual(afterCard.verdicts, [1, 1], 'one verdict for the card, the step\'s workshop and its build');
+            ({ published } = fresh());
+            assert.equal(stepOf({ ...published, adena: 0 }).kept, null, 'a moved wallet asks');
+            const unknownCrafter = { ...crafter, characterId: 990033 };
+            const unknownHeld = Economy.forState(unknownCrafter, { ...deps, workshop: { ...workshop, known: false } });
+            const unknown = stepOf({ ...unknownCrafter, stats: { ...unknownCrafter.stats, ...unknownHeld.statsPacket } });
+            assert.equal(unknown.kept, null, 'a held unknown workshop asks');
+            assert.deepEqual(unknown.built.statsPacket, unknownHeld.statsPacket, 'fixture: the verdict holds, the held decision is served');
+        } finally {
+            Config.developerDiagnostics = diagnosticsBefore;
+            Economy.forget(990033);
+            Economy.forget(crafter.characterId);
+        }
     }
     console.log('PASS workshop kept with the held build / asked when it moved');
     // The cheap check by kind of leaf: an enchant or special-ability decision

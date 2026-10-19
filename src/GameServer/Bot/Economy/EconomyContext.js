@@ -382,15 +382,17 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
 // refusal in collect mode (a card refused right before a build of the same
 // step on the same state) also hands the whole verdict on with what it
 // judged (`collected`, handedVerdict). A held card hands nothing: it is
-// executed, and a build after it follows an await.
+// executed. The step's own verdict on the held build (heldWorkshop) hands
+// itself, valid or not, to the build of its step, across the workshop ask.
 // The hand-off of a verdict (`collected`): only what handedVerdict compares,
 // no deps or options. leaf: the leaf the verdict judged (the card's compact
-// one, or the held leaf itself, heldWorkshop).
-function collectedOf(verdict, state, proof, options, deps) {
+// one, or the held leaf itself, heldWorkshop); reads: the held build's reads
+// it was judged with (heldReadsOf), handed by the step's own verdict only.
+function collectedOf(verdict, state, proof, options, deps, reads = null) {
     return { verdict, state, proof, baseline: options.baseline, activity: options.activity, mp: options.mp,
         units: options.heldUnits ?? options.leaf?.heldAtDecision ?? null,
         reservations: options.craftReservations ?? options.leaf?.craftReservations,
-        routeRows: deps.routeRows, tripCost: deps.tripCost, leaf: options.leaf };
+        routeRows: deps.routeRows, tripCost: deps.tripCost, leaf: options.leaf, reads };
 }
 function eventProofHolds(state, proof, deps = {}, options = {}) {
     const verdict = heldBuildVerdict(state, proof, deps, options);
@@ -1006,15 +1008,24 @@ function heldOptionsOf(held) {
         leaf: held?.plan.network?.activity, heldUnits: held?.heldUnits, craftReservations: held?.craftReservations,
         mp: held?.mp };
 }
+// What a build and its verdict read beside the held entry: the gear threat,
+// the facts, read once (the held leaf's own trip is read as the field
+// activity it ordered, fieldActivity), and the build's input name.
+function heldReadsOf(state, deps, held) {
+    const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
+    const current = fieldActivity(state, held?.activity, held?.plan.network?.activity);
+    const facts = requestFacts(current, deps);
+    return { gearThreat, current, facts, key: inputName(facts, gearThreat.mask) };
+}
 // The one verdict on the held build (heldBuildVerdict), collecting: the
 // sections of all its refusals, no held build or an unproved one = every
 // section. Over resolved deps, which it completes with the route rows and
-// the gear-threat mask the build reads. The facts it compares, read once:
-// the held leaf's own trip is read as the field activity it ordered
-// (fieldActivity). handed: the step's collected verdict, served when it
-// judged this entry on the same inputs (handedVerdict), else null and the
-// verdict is computed here. Read by the build (forState) and, before it, by
-// the worker step's workshop (heldWorkshop).
+// the gear-threat mask the build reads. handed: the step's collected
+// verdict, served when it judged this entry on the same inputs
+// (handedVerdict), else null and the verdict is computed here; the step's
+// own verdict also hands its reads, made on the same state and deps. Read
+// by the build (forState) and, before it, by the worker step's workshop
+// (heldWorkshop).
 function heldVerdictFor(state, deps) {
     if (typeof deps.routeRows === 'function') deps.routeRows = deps.routeRows(state);
     const held = cache.get(actorKeyOf(state, deps));
@@ -1033,14 +1044,13 @@ function heldVerdictFor(state, deps) {
         // cap refuses too often.
         if (Diagnostics.active()) Diagnostics.count('context', 'route', 'inline');
     }
-    const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
-    deps.gearThreatMask = gearThreat.mask;
-    const current = fieldActivity(state, held?.activity, held?.plan.network?.activity);
-    const facts = requestFacts(current, deps);
-    const key = inputName(facts, deps.gearThreatMask);
-    const handed = handedVerdict(deps.eventVerdict?.collected, state, held, deps);
-    const verdict = handed || heldBuildVerdict(state, held?.plan.eventProof, deps, { ...heldOptionsOf(held), facts, collect: true });
-    return { held, gearThreat, current, facts, key, verdict, handed };
+    const collected = deps.eventVerdict?.collected;
+    const handed = handedVerdict(collected, state, held, deps);
+    const reads = handed && collected.reads || heldReadsOf(state, deps, held);
+    deps.gearThreatMask = reads.gearThreat.mask;
+    const verdict = handed || heldBuildVerdict(state, held?.plan.eventProof, deps,
+        { ...heldOptionsOf(held), facts: reads.facts, collect: true });
+    return { held, reads, verdict, handed };
 }
 // The sections a build rebuilds (forState's mask): the raised bits, the
 // prepared card's verdict (cardVerdict, its first refusal) and the held
@@ -1058,7 +1068,8 @@ function forState(state = {}, deps = {}) {
     const actorKey = actorKeyOf(state, deps);
     // lazy: worker the board's owner lives on main; the worker passes its board.
     const sourceBoard = deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null);
-    const { held, gearThreat, current, facts, key, verdict: eventVerdict, handed } = heldVerdictFor(state, deps);
+    const { held, reads, verdict: eventVerdict, handed } = heldVerdictFor(state, deps);
+    const { gearThreat, current, facts, key } = reads;
     // Read once: the hand-off ends here, served or not.
     if (deps.eventVerdict?.collected) deps.eventVerdict.collected = null;
     if (diagnostic && handed) Diagnostics.count('context', 'held_verdict', 'reused');
@@ -1703,36 +1714,42 @@ function heldWorkshopOf(held, mask, state) {
     return workshop && !(Number(mask) & Sections.COMPUTED.workshop) && held.plan.routeKey === Trip.key(state)
         && workshop.known !== false && Number.isFinite(workshop.incomePerHour) ? workshop : null;
 }
-// A worker build given no workshop (forState): the held one, else an unknown
-// one, which the next build does not keep (it asks or stays unknown).
+// A crafter's build that keeps no known workshop. Counts crafters only: a
+// bot without workshop entries has no workshop to know.
+function countUnknownWorkshop(state) {
+    if (Diagnostics.active() && state.stats?.workshop?.entries?.length) Diagnostics.count('occupation', 'workshop', 'unknown');
+}
+// A worker build given no workshop (forState: a reader that builds without
+// the step's workshop, e.g. a stock check): the held one, else an unknown
+// one, which the step's next build does not keep (heldWorkshop: it asks).
 function keptWorkshop(held, mask, state) {
     const workshop = heldWorkshopOf(held, mask, state);
     if (workshop) return workshop;
-    // Counts crafters only: a bot without workshop entries has no workshop to know.
-    if (Diagnostics.active() && state.stats?.workshop?.entries?.length) Diagnostics.count('occupation', 'workshop', 'unknown');
+    countUnknownWorkshop(state);
     return ColdEconomyDecision.unknownWorkshop();
 }
 // The worker's decision point (planLifecycle), before its build on the same
 // state: the verdict on the held build is computed here (heldVerdictFor) and
 // handed to that build (eventVerdict, the step's: `collected`, handedVerdict);
 // the route rows it judged are written back on the step's deps, which the
-// build spreads. A valid verdict serves the held build: its workshop. Else
-// the held workshop under the mask the build will take, or null (ask the
-// occupation planner). No held proof: null, nothing judged.
+// build spreads. The held workshop (heldWorkshopOf) under the mask the build
+// will take (none for a valid verdict, which serves the held build), or null:
+// ask the occupation planner. A valid verdict is handed to the build either
+// way: the ask only renews the card's workshop. No held proof: null,
+// nothing judged.
 function heldWorkshop(state, deps, eventVerdict) {
     const held = cache.get(actorKeyOf(state, deps));
     if (!held?.plan.eventProof) return null;
     const own = resolved(state, { ...deps, eventVerdict });
-    const { verdict } = heldVerdictFor(state, own);
+    const { reads, verdict } = heldVerdictFor(state, own);
     deps.routeRows = own.routeRows;
-    eventVerdict.collected = collectedOf(verdict, state, held.plan.eventProof, heldOptionsOf(held), own);
-    const diagnostic = Diagnostics.active();
-    if (verdict.valid) {
-        if (diagnostic) Diagnostics.count('workshop', 'kept', 'held_valid');
-        return held.plan.workshop;
+    eventVerdict.collected = collectedOf(verdict, state, held.plan.eventProof, heldOptionsOf(held), own, reads);
+    const kept = heldWorkshopOf(held, verdict.valid ? 0 : verdictMask(state, eventVerdict, verdict), state);
+    if (Diagnostics.active()) {
+        if (kept) Diagnostics.count('workshop', 'kept', verdict.valid ? 'held_valid' : 'lifecycle');
+        // The served held build keeps an unknown or another route's workshop.
+        else if (verdict.valid) countUnknownWorkshop(state);
     }
-    const kept = heldWorkshopOf(held, verdictMask(state, eventVerdict, verdict), state);
-    if (kept && diagnostic) Diagnostics.count('workshop', 'kept', 'lifecycle');
     return kept;
 }
 function preparedRouteRows(state) {
