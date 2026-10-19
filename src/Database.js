@@ -28,6 +28,7 @@ const EconomyCommit = require('./GameServer/Bot/Economy/EconomyCommit');
 const Diagnostics = require('./GameServer/Bot/Economy/EconomyDiagnostics');
 const ColdCombatProfile = require('./GameServer/Bot/Population/ColdCombatProfile');
 const SavedStats = require('./GameServer/Bot/SavedStats');
+const PartyCandidateProjection = require('./DatabasePartyCandidateProjection');
 let nativeDiagnosticFacts = null;
 let nativeDiagnosticCounts = null;
 let nativeDiagnosticOverflow = 0;
@@ -1473,7 +1474,7 @@ function applySchemaMigrations() {
             );
             CREATE INDEX IF NOT EXISTS clan_social_memory_updated ON clan_social_memory(updatedAt, clanId);
         `)],
-        [39, () => require('./DatabasePartyCandidateProjection').install(connection)],
+        [39, () => PartyCandidateProjection.install(connection)],
         [40, () => {
             if (!connection.prepare('PRAGMA table_info(characters)').all().some(column => column.name === 'skillCooldowns'))
                 connection.exec("ALTER TABLE characters ADD COLUMN skillCooldowns TEXT NOT NULL DEFAULT '[]'");
@@ -1596,7 +1597,7 @@ function applySchemaMigrations() {
                     spotId
                 )) VIRTUAL;
         `);
-        require('./DatabasePartyCandidateProjection').createIndex(connection);
+        PartyCandidateProjection.createIndex(connection);
     }]);
     // Personas v2 (step 3.1, N6a): eleven types by class and share, clan
     // leaders through the author's founder gate, remembered listing prices reset.
@@ -1710,7 +1711,7 @@ function applySchemaMigrations() {
         const shops = connection.prepare('DELETE FROM afk_trade_shops WHERE id = ?');
         for (const { id } of empty) { lines.run(id); shops.run(id); }
     }]);
-    migrations.push([66, () => require('./DatabasePartyCandidateProjection').upgradeRecruitment(connection)]);
+    migrations.push([66, () => PartyCandidateProjection.upgradeRecruitment(connection)]);
     // The stale-goal and market-goal reconcile passes are gone (the worker
     // decides goals); their indexes only cost every goal and state write.
     migrations.push([67, () => connection.exec(`
@@ -1800,6 +1801,66 @@ function applySchemaMigrations() {
                 statsJson = json_remove(statsJson, ${SavedStats.MIND_KEYS.map((key) => `'$.${key}'`).join(', ')})
             WHERE json_valid(statsJson) AND mindJson = '{}';
         `);
+    }]);
+    // The phase says who runs a bot (cold: the background thread, hot: main);
+    // the row's ownership and loan columns, constant since the loan went,
+    // leave with the indexes and triggers that name them. A row a world
+    // saved while on loan is handed back first (its revision moves, as the
+    // startup reset did). DROP COLUMN refuses a column an index or a trigger
+    // still names: the known ones are dropped and created again without it,
+    // and an unknown one stops the migration by name.
+    migrations.push([72, () => {
+        const loanColumns = ['simulationOwner', 'simulationLeaseId', 'simulationLeaseUntil'];
+        const columns = new Set(connection.prepare('PRAGMA table_info(bot_life_state)').all().map((column) => column.name));
+        if (columns.has('simulationOwner')) connection.exec(`
+            UPDATE bot_life_state SET simulationOwner = 'legacy_main', simulationRevision = simulationRevision + 1,
+                simulationLeaseId = NULL, simulationLeaseUntil = 0
+            WHERE simulationOwner IS NOT 'legacy_main' OR simulationLeaseId IS NOT NULL OR simulationLeaseUntil <> 0;
+        `);
+        connection.exec(`
+            DROP TRIGGER IF EXISTS bot_party_candidate_insert;
+            DROP TRIGGER IF EXISTS bot_party_candidate_metadata;
+            DROP TRIGGER IF EXISTS bot_party_candidate_ordinary;
+            DROP INDEX IF EXISTS bot_life_state_simulation_owner_lease;
+            DROP INDEX IF EXISTS bot_life_state_party_owner_filter;
+            DROP INDEX IF EXISTS bot_life_state_party_request_expiry;
+            DROP INDEX IF EXISTS bot_life_state_warehouse_release;
+            DROP INDEX IF EXISTS bot_life_state_warehouse_demand;
+            DROP INDEX IF EXISTS bot_life_state_party_candidate_projection;
+        `);
+        const naming = connection.prepare(`SELECT type, name FROM sqlite_master
+            WHERE ${loanColumns.map(() => 'sql LIKE ?').join(' OR ')}`).all(...loanColumns.map((column) => `%${column}%`))
+            .filter((object) => !(object.type === 'table' && object.name === 'bot_life_state'));
+        if (naming.length) throw new Error(`migration 72: ${naming.map((object) => `${object.type} ${object.name}`).join(', ')} names a loan column`);
+        for (const column of loanColumns) {
+            if (columns.has(column)) connection.exec(`ALTER TABLE bot_life_state DROP COLUMN ${column}`);
+        }
+        connection.exec(`
+            CREATE INDEX bot_life_state_party_owner_filter
+                ON bot_life_state(phase, partyId, activity, spotId, updatedAt);
+            CREATE INDEX bot_life_state_party_request_expiry
+                ON bot_life_state(phase, partyRequestStatus, partyRequestedAt, partyRequestPriority);
+            CREATE INDEX bot_life_state_warehouse_release
+                ON bot_life_state(characterId, updatedAt)
+                WHERE phase = 'cold'
+                AND accountName NOT LIKE 'bot_craft_%'
+                AND (partyId IS NULL OR partyId = '')
+                AND activity IN ('hunting', 'resting');
+            CREATE INDEX bot_life_state_warehouse_demand
+                ON bot_life_state(updatedAt, characterId)
+                WHERE phase = 'cold'
+                AND accountName NOT LIKE 'bot_craft_%'
+                AND (partyId IS NULL OR partyId = '')
+                AND activity IN ('hunting', 'resting');
+        `);
+        PartyCandidateProjection.createIndex(connection);
+        const projection = connection.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_party_candidate_projection'").get();
+        const projectionColumns = projection
+            ? new Set(connection.prepare('PRAGMA table_info(bot_party_candidate_projection)').all().map((column) => column.name)) : new Set();
+        if (projectionColumns.has('joinAvailability')) {
+            PartyCandidateProjection.createAvailabilityTriggers(connection);
+            PartyCandidateProjection.refreshCandidates(connection);
+        }
     }]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
