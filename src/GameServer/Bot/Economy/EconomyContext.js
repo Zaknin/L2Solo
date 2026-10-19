@@ -409,6 +409,17 @@ function eventProofHolds(state, proof, deps = {}, options = {}) {
 // is GearThreat's answer for the same state and deps. Else null: computed.
 // The verdict lives with the step's deps, nothing keeps it.
 const reservedRows = rows => rows?.length ? JSON.stringify(rows) : '';
+// The card judged its leaf's compact form (ColdEconomyDecision.CompactActivity),
+// of the same identity as the held leaf; the held leaf reads as it only where
+// the compact form keeps what the verdict reads: the item (the compact one
+// falls back to the wish object's), the sale rows (cut to 8) and the funding
+// mark (made true).
+function readsAsCompact(leaf) {
+    if (!leaf) return true;
+    const object = typeof leaf.object === 'number' ? leaf.object : leaf.object?.itemId;
+    return (leaf.itemId ?? 0) === Number(leaf.itemId || object || 0) && !(leaf.items?.length > 8)
+        && (!leaf.funding || leaf.funding === true);
+}
 function handedVerdict(handed, state, held, deps) {
     if (!handed || !held || handed.state !== state || handed.proof !== held.plan.eventProof) return null;
     const leaf = held.plan.network?.activity;
@@ -416,7 +427,8 @@ function handedVerdict(handed, state, held, deps) {
         || !Object.is(handed.mp, held.mp) || handed.routeRows !== deps.routeRows || handed.tripCost !== deps.tripCost
         || handed.units !== (held.heldUnits ?? leaf?.heldAtDecision ?? null)
         || leaf?.activity === 'crafting' && reservedRows(handed.reservations)
-            !== reservedRows(held.craftReservations ?? leaf.craftReservations)) return null;
+            !== reservedRows(held.craftReservations ?? leaf.craftReservations)
+        || !readsAsCompact(leaf)) return null;
     return handed.verdict.leaf !== undefined && handed.verdict.leaf === activityIdentity(leaf) ? handed.verdict : null;
 }
 function restartEventProof(proof, accepted) {
