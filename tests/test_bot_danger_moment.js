@@ -58,7 +58,7 @@ const actor = {
 };
 const mob = { fetchId: () => 7001, fetchHp: () => 80, fetchMaxHp: () => 100, isDead: () => false,
     matchupTarget: { maxHp: 100, pAtk: 100, pDef: 100, atkSpd: 300, vulnerabilities: {} } };
-const session = { coldLifeState: { stats: { decisionSeq: 3 } }, economySeq: 3,
+const session = { coldLifeState: { stats: { decisionSeq: 3 } },
     heldEconomy: { deathHours: 0.5, riskWeight: 1.5, moneyPrice: 1 / 10000, network: { activity: null } } };
 
 assert.strictEqual(DangerMoment.forActor(session, actor, mob, { attackers: [mob] }).action, 'drink',
@@ -79,7 +79,7 @@ assert.strictEqual(DangerMoment.forActor({}, actor, mob, { attackers: [mob] }), 
 // the author's 0.35 rule decides.
 assert.strictEqual(DangerMoment.decide({ ...base, moneyPrice: null }), null);
 assert.strictEqual(DangerMoment.decide({ ...base, moneyPrice: undefined }), null);
-const noPrice = { coldLifeState: { stats: { decisionSeq: 3 } }, economySeq: 3,
+const noPrice = { coldLifeState: { stats: { decisionSeq: 3 } },
     heldEconomy: { deathHours: 0.5, riskWeight: 1.5, statsPacket: { money: [12000] }, network: { activity: null } } };
 assert.strictEqual(DangerMoment.forActor(noPrice, actor, mob, { attackers: [mob] }), null,
     'an unknown price of money leaves the author rule');

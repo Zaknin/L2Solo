@@ -18,6 +18,7 @@ const marketJson = createJsonResponseCache(() => marketSnapshot());
 const ActorEconomy = require('./ActorEconomyProjection');
 const { createActorCollections } = require('./ActorCollections');
 const BotBrainContext = invoke('GameServer/Bot/AI/BotBrainContext');
+const DecisionEvents = invoke('GameServer/Bot/AI/DecisionEvents');
 const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
 const BotServiceIdentity = invoke('GameServer/Bot/AI/BotServiceIdentity');
 const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -1688,11 +1689,11 @@ function observerWishName(kind, reference) {
 }
 
 function actorEconomy(state, session = null) {
-    const decisionStats = { ...state?.stats, ...session?.decisionStats };
-    const held = session && session.economySeq === Number(decisionStats.decisionSeq || 0) ? session.heldEconomy?.statsPacket : null;
-    const stats = { ...decisionStats, ...held };
+    // A near body's held decision (its stats packet and leaf), a far bot's card.
+    const held = session ? DecisionEvents.held(session) : null;
+    const stats = { ...state?.stats, ...session?.decisionStats, ...held?.statsPacket };
     const decision = !session && state ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.inspect(state) : null;
-    const activity = held ? session.heldEconomy.network?.activity : decision?.activity;
+    const activity = held ? held.network?.activity : decision?.activity;
     return ActorEconomy.project({ ...state, stats,
         adena: session?.actor?.backpack?.fetchTotalAdena?.() ?? state?.adena }, { itemFor: observerItem, wishName: observerWishName, activity });
 }

@@ -518,15 +518,6 @@ function publishedPacket(state, packet) {
     return !Sections.decisionRefusal(state, Number(packet.decisionSeq || 0), Number(packet.activityLeaf || 0),
         packet.wishFocus?.[0] ?? null);
 }
-function rememberPublished(economy, state, deps = {}) {
-    if (!publishedPacket(state, economy?.statsPacket)) return null;
-    const accepted = advisory(economy, state, economy.state?.activity ?? state.activity, deps);
-    if (accepted && isMainThread) {
-        // lazy: worker the main native owner receives hot advice only after publication.
-        invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.retainAdvisory(state, accepted);
-    }
-    return accepted;
-}
 function readAdvisoryCard(record) {
     try {
         if (!validEcho(record?.echo)) return null;
@@ -671,9 +662,11 @@ function sameEconomicOutput(before, after) {
 }
 
 // A published card made on exactly this state: the one check of decided(),
-// workshopFor() and feasibilityFor().
+// workshopFor() and feasibilityFor(). A hot bot's card is current by its post
+// number (nearSeq, checked on arrival), not by updatedAt: the body's row moves
+// on between posts.
 function current(state, entry) {
-    return !!entry && !entry.stale && entry.updatedAt === Number(state?.updatedAt || 0) && echoHolds(state, entry.echo);
+    return !!entry && !entry.stale && (state?.phase === 'hot' || entry.updatedAt === Number(state?.updatedAt || 0) && echoHolds(state, entry.echo));
 }
 class ColdEconomyDecisions {
     constructor() {
@@ -685,6 +678,7 @@ class ColdEconomyDecisions {
     // committed: the commit's result. A commit that merged board deals or PK
     // drops into the bag keeps the worker's updatedAt, but the decision was
     // made on the bag before them: keep its numbers, but defer its wishes.
+    // Returns the compact card (a near body's view reads the same one).
     accept(characterId, decision, committed = null, state = null) {
         const id = Number(characterId);
         if (!id) return;
@@ -721,6 +715,7 @@ class ColdEconomyDecisions {
             this.byId.set(id, card);
         }
         else if (this.byId.has(id)) this.byId.get(id).stale = true;
+        return incoming;
     }
 
     // The hot owner can retain advice without granting compact-card execution.
@@ -813,5 +808,5 @@ class ColdEconomyDecisions {
     }
 }
 
-module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateEcho, echoHolds, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, rememberPublished, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, current, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, cardWithShot, kindCode, kindFor, compact, workshopValues,
+module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateEcho, echoHolds, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, current, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, cardWithShot, kindCode, kindFor, compact, workshopValues,
     unknownWorkshop, MAX_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };

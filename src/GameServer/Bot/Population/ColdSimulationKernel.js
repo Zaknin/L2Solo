@@ -319,6 +319,18 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
 // require() inside lifecycleKind ran per inventory item on every row.
 let PartyMarketBreak, ClanPartyDuty, BotCrystallization;
 
+// A near bot's record (hot, nearSeq: its body's last post) against a hot row
+// without a newer post number: a writer's copy of the cached row
+// (notifyState from the party, PvP and clan writers, the competition's
+// onState, a catalog page), whose body is the activation's and older than the
+// posts. The record keeps its body and mind. Every activation fences the bot
+// first (HotActivation, HotPartyLifecycle, PvpEncounterLifecycle), and so does
+// the clan expulsion (ClanSocialRuntime), which removes its record: a new life
+// starts from no record, never against an older life's.
+function nearHeld(record, row) {
+    return row.phase === 'hot' && record.phase === 'hot' && Number(row.nearSeq || 0) < Number(record.nearSeq || 0);
+}
+
 function lifecycleKind(state = {}, facts = NO_FACTS) {
     if (state.phase !== 'cold' || state.activity === 'pk_hunting') return 'inactive';
     const leads = facts.leaderParty(state.characterId, state) !== null;
@@ -656,6 +668,8 @@ class ColdSimulationKernel {
         this.resolveChain = Promise.resolve();
         this.stats = {
             snapshots: 0,
+            // Hot rows older than their near record, kept out (nearHeld).
+            nearHeld: 0,
             selected: 0,
             resolved: 0,
             proposals: 0,
@@ -841,9 +855,12 @@ class ColdSimulationKernel {
         if (card !== undefined) delete entry.wishAdvisory;
         const incomingRevision = Math.max(0, Number(state.simulation?.revision || 0));
         const currentRevision = Math.max(0, Number(current?.state?.simulation?.revision || 0));
+        // A hot row older than the near record (nearHeld) leaves it as it is.
+        const nearStale = !!current && nearHeld(current.state, state);
+        if (nearStale) DiagnosticConfig.developerDiagnostics && (this.stats.nearHeld += 1);
         // A hot row at the cold row's revision is a stale near post that crossed
         // the cooldown: cold -> hot moves the revision (the handoff), hot -> cold does not.
-        if (current && (incomingRevision < currentRevision || incomingRevision === currentRevision
+        if (current && (nearStale || incomingRevision < currentRevision || incomingRevision === currentRevision
             && state.phase === 'hot' && current.state.phase === 'cold')) {
             // Periodic catalog pages are prepared on main while the worker can
             // still resolve and receive newer commit ACKs. Preserve monotonic
@@ -887,11 +904,13 @@ class ColdSimulationKernel {
         const version = Number(this.versions.get(characterId) || 0) + 1;
         this.versions.set(characterId, version);
         // The bot's one record: { state, version, route, materialMemo,
-        // economyPending, economyPlanHash, wishAdvisory, published }. Every
-        // field but the state and version is this thread's own and survives a
-        // new state: the kept route (BotRoute.trip) until its step's drops,
-        // the material memo (partyRequestForPlan), the economy plan sent and
-        // its hash, the card it holds and the decision it published.
+        // economyPending, economyPlanHash, wishAdvisory, published, raiseSeq,
+        // nearRoute }. Every field but the state and version is this thread's
+        // own and survives a new state: the kept route (BotRoute.trip) until
+        // its step's drops, the material memo (partyRequestForPlan), the
+        // economy plan sent and its hash, the card it holds, the decision it
+        // published and, for a near bot, the last raise applied and the route
+        // rows of its last decision (ColdSimulationWorker nearEvents, publish).
         this.states.set(characterId, { route: null, ...current, state, version }, card);
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);

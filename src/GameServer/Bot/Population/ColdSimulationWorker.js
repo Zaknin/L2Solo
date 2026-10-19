@@ -99,6 +99,7 @@ const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const DecisionEvents = require('../AI/DecisionEvents');
+const SavedStats = require('../SavedStats');
 const { stateKey } = require('./SpotOccupancyIndex');
 const DecisionSections = invoke('GameServer/Bot/Economy/DecisionSections');
 const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
@@ -266,7 +267,7 @@ const occupationPlanner = new ColdOccupationPlanner({
             buyOrderEscrow: input.buyOrderEscrow, stock: input.stock || null, economy: input.economy || null,
             routeRows: input.routeRows || null, routeKey: input.routeKey, mode: input.mode || 'occupation', meeting: input.meeting, pending: input.pending };
     },
-    create: input => ({ iterator: (function* () {
+    create: input => occupationWork(input, (function* () {
         if (input.mode === 'wish') return yield* EconomicTrip.prepare(input.state);
         if (input.mode === 'showcase') return { economyPlan:
             yield* invoke('GameServer/Bot/Population/ColdEconomyPlan').prepare(input.state, input.economy, {
@@ -367,20 +368,24 @@ const occupationPlanner = new ColdOccupationPlanner({
             return request;
         }
 
-        if (input.mode === 'refresh') {
-            const routeRows = input.routeRows || (yield* EconomicTrip.prepare(input.state));
+        // A refresh (a far bot's economy plan) and a near bot's decision
+        // (mode near) build the economy on the same inputs.
+        if (input.mode === 'refresh' || input.mode === 'near') {
+            const routeRows = input.routeRows = input.routeRows || (yield* EconomicTrip.prepare(input.state));
             input.economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(input.state, {
                 board: input.board, routeRows, workshops: workshopsFor,
                 timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, npcOffersFor: OccupationSources.npcOffersFor,
                 buyOrderEscrow: input.buyOrderEscrow, workshop: noWorkshop(),
-                rememberContext: false, caller: 'economy_refresh', trigger: 'native_own_action' });
+                // A refresh keeps no context; a near post is held and its clean repeat hits the verdict.
+                ...(input.mode === 'refresh' ? { rememberContext: false } : {}),
+                caller: `economy_${input.mode}`, trigger: 'native_own_action' });
             // The shared money packet is derived from this same graph. Use it
             // in preparation only; the native writer owns physical funding.
             input.state = { ...input.state, stats: { ...input.state.stats, ...input.economy.statsPacket } };
             input.stock = input.economy.stock('shots');
             yield 'candidate';
         }
-        if (input.mode === 'occupation') {
+        if (input.mode === 'occupation' || input.mode === 'near') {
             const eligible = invoke('GameServer/Bot/Economy/CraftShopService').isServiceCrafter(input.state);
             if (!eligible || !input.recipesKnown) {
                 const mask = input.board?.ownerLines(input.state.characterId)?.length
@@ -452,7 +457,7 @@ const occupationPlanner = new ColdOccupationPlanner({
         }) : null;
         return { selected, economyPlan, ...(input.mode === 'refresh' ? { economyDecision:
             ColdEconomyDecision.capture({ ...input.economy, shot: economyPlan?.shot || null }, input.state) } : {}) };
-    })(), done: false, value: null, stage: 0, units: 0 }),
+    })()),
     // An edge (one polygon side, teleport point or material node) costs less
     // than the planner's per-unit checks: up to EDGE_STEPS of them run as one
     // unit. Other yields still end the unit, so the 4 ms slice check is unchanged.
@@ -511,13 +516,38 @@ const occupationPlanner = new ColdOccupationPlanner({
             if (owner?.published && ColdEconomyDecision.current(input.state, owner.published)) owner.published.workshopStale = true;
             send('ready', { phase: 'economy_workshop_stale', characterId: id,
                 updatedAt: Number(input.state.updatedAt || 0), echo });
-        } else if (input.mode !== 'action' && input.mode !== 'showcase' && input.state.phase === 'hot') {
-            const decision = ColdEconomyDecision.capture({ workshop }, input.state);
-            if (owner) owner.published = decision;
-            send('ready', { phase: 'economy_decided', characterId: id, economyDecision: decision });
+        } else if (input.mode === 'near' && workshop?.decision) {
+            // The near bot's decision on its post: the card, and beside it the
+            // mind keys the body takes and the post and raise it answers.
+            owner.published = workshop.decision;
+            // The published packet moves the record's mind, as the far step's merge does,
+            // so the next post's events compare against it and a raise is taken once.
+            Object.assign(owner.state.stats ||= {}, workshop.statsPacket);
+            owner.nearRoute = { key: input.routeKey, rows: workshop.routeRows };
+            send('ready', { phase: 'economy_decided', characterId: id, economyDecision: workshop.decision,
+                near: { statsPacket: workshop.statsPacket, nearSeq: Number(input.state.nearSeq || 0),
+                    raiseSeq: Number(input.raiseSeq || 0), ...(workshop.shots ? { shots: workshop.shots } : {}) } });
+            // Sent once: the slot keeps the workshop.
+            workshop.decision = null; workshop.statsPacket = null; workshop.routeRows = null; workshop.shots = null;
         }
     }
 });
+// The planner's work for one request. A near bot's decision (mode near) is the
+// occupation's workshop with the card, the money packet and the route rows of
+// the same build (publish sends them once).
+function occupationWork(input, iterator) {
+    return { iterator: input.mode === 'near' ? nearDecision(input, iterator) : iterator, done: false, value: null, stage: 0, units: 0 };
+}
+function* nearDecision(input, iterator) {
+    const workshop = yield* iterator;
+    // The auto-shot verdict (ShotStock.enableAutoShot's inputs) from this
+    // build's shot stock, itself ShotStock.usePolicy over the build's tables.
+    const shots = input.stock;
+    return { workshop, decision: ColdEconomyDecision.capture({ ...input.economy, workshop }, input.state),
+        statsPacket: input.economy.statsPacket, routeRows: input.routeRows,
+        shots: shots ? { itemId: shots.itemId, ownedUsePerHour: shots.ownedUsePerHour,
+            beginnerUsePerHour: shots.beginnerUsePerHour, paidUsePerHour: shots.paidUsePerHour } : null };
+}
 // options: { economy, stock, routeRows, routeKey } a step already holds, and
 // a party goal query's own (main's) buyOrderEscrow and recipeKnowledge.
 function occupationFor(state, timestamp, options = {}, mode = 'occupation') {
@@ -606,17 +636,22 @@ function recipeKnowledgeOf(state) {
 }
 // The spot a bot stands at, in this worker's spot catalog.
 const standingSpot = state => SpotService.standingSpot(state, planningSpots);
+// A far bot's economy refresh, or a near bot's decision on its post (mode
+// near): the raise it consumed (raiseSeq) and the route rows of its last
+// decision while its route key holds.
 function occupationOwnerChanged(id, refresh = false) {
     const entry = kernel?.states.get(Number(id));
     if (!entry || entry.state.phase !== 'hot' && !refresh) return;
     // One economy refresh per native state object.
     if (refresh && refreshedStates.has(entry.state)) return;
     if (refresh) refreshedStates.add(entry.state);
+    const routeKey = EconomicTrip.key(entry.state);
     occupationPlanner.request(id, { state: entry.state, sourceState: entry.state, assetsKey: assetsKey(entry.state),
-        timestamp: Date.now(), mode: refresh ? 'refresh' : 'occupation', pending: entry.economyPending || 0,
+        timestamp: Date.now(), mode: refresh ? 'refresh' : 'near', pending: entry.economyPending || 0,
         buyOrderEscrow: escrowFor(id),
         ...recipeKnowledgeOf(entry.state),
-        routeKey: EconomicTrip.key(entry.state),
+        routeKey, ...(refresh ? {} : { raiseSeq: Number(entry.raiseSeq || 0),
+            routeRows: entry.nearRoute?.key === routeKey ? entry.nearRoute.rows : null }),
         sourceReady: tables.ready('board') && tables.ready('market') }, { awaitResult: false });
 }
 function changedItems(previous, next) {
@@ -651,6 +686,27 @@ function setRecordEscrow(key, ownerId, amount) {
     }
 }
 const escrowFor = characterId => escrowByOwner.get(Number(characterId)) || 0;
+// The soft point's inputs (DecisionSections.softEvents: a far bot's step,
+// BotLifeState.prepareResolve, and a near bot's post): the board mirror (null
+// until ready), the escrow and the bot's memory rows, read only when its bond
+// is compared.
+const softInputFor = (characterId, timestamp) => ({ board: boardReady(), buyOrderEscrow: escrowFor(characterId), timestamp,
+    memory: () => kernel.interactionMemory.relationRows(Number(characterId)) });
+// A near bot's post (BotLifeState.notifyNearFacts) against the row before
+// it, on the posted row before it is stored: the raise main named (once per
+// raise), the hard facts (DecisionSections.events) and the soft point, in the
+// far step's one bump. The decision is then taken on this row (mode near).
+// applied: the last raise the record applied.
+function nearEvents(id, previous, entry, applied) {
+    const row = entry.state, stats = row.stats ||= {};
+    // The worker owns the near mind: a post's mind keys are discarded and the
+    // record's stand, so a late post cannot roll back a raise.
+    for (const key of SavedStats.MIND_KEYS) stats[key] = previous.stats?.[key];
+    entry.raiseSeq = DecisionEvents.takePostedRaise(stats, row.raise, applied);
+    const hard = DecisionSections.events(previous, row, escrowFor(id));
+    const soft = DecisionSections.softEvents(row, stats.wishSections, softInputFor(id, Date.now()));
+    DecisionEvents.raiseSections(previous, row, hard, soft);
+}
 // A bot's goal revision (GoalState.revision on main, 0 = no goal) from the
 // 'goals' table; undefined while the table loads (the decision skips the compare).
 const goalRevision = characterId => tables.ready('goals')
@@ -1324,8 +1380,7 @@ function startKernel(config = {}) {
                 // The soft point's inputs (BotLifeState.prepareResolve, every
                 // step): the board mirror (null until ready), the escrow and
                 // the bot's memory rows, read only when its bond is compared.
-                softInputFor: (projected, at) => ({ board: boardReady(), buyOrderEscrow: ownEscrow(), timestamp: at,
-                    memory: () => kernel.interactionMemory.relationRows(Number(projected.characterId)) })
+                softInputFor: (projected, at) => softInputFor(projected.characterId, at)
             };
             const resolved = await LifeStateProjector.prepareResolve(state, result, stepEconomy
                 // Merged before the event check, whose dirty bits follow it.
@@ -1606,6 +1661,13 @@ function startKernel(config = {}) {
     const nativeClear = kernel.states.clear.bind(kernel.states);
     kernel.states.set = (id, entry, card) => {
         const previousEntry = kernel.states.get(Number(id)), previous = previousEntry?.state;
+        // A new life starts from no record (activations fence the bot first),
+        // so the raises applied are this life's.
+        if (previous && previous !== entry.state && entry.state.phase === 'hot') nearEvents(id, previous, entry, Number(previousEntry.raiseSeq || 0));
+        // The near bookkeeping ends with the body: a far record keeps no
+        // route rows of a near decision, and the next activation's raises
+        // count from its session's first.
+        else if (entry.state.phase !== 'hot' && (entry.nearRoute || entry.raiseSeq)) { entry.nearRoute = null; entry.raiseSeq = 0; }
         const result = nativeSet(id, entry, card);
         if (previous !== entry.state) {
             const route = routeRequests.get(Number(id));
@@ -1614,12 +1676,7 @@ function startKernel(config = {}) {
             const routeKey = EconomicTrip.key(entry.state);
             const incoming = held ? { ...held.input, state: entry.state, sourceState: entry.state, routeKey,
                 routeRows: held.input.routeKey === routeKey ? held.input.routeRows : null } : null;
-            const acceptedPublication = held?.done && publishedWorkshop(entry)?.known === true
-                && held.input.routeKey === routeKey
-                && held.input.state.updatedAt === entry.state.updatedAt
-                && sameDecisionInput(held.input.state, entry.state)
-                && Number(entry.state.simulation?.revision || 0) > Number(held.input.state.simulation?.revision || 0);
-            if (held?.done && (acceptedPublication || held.input.state === entry.state || occupationPlanner.sameInput(held.input, incoming))) {
+            if (held?.done && (held.input.state === entry.state || occupationPlanner.sameInput(held.input, incoming))) {
                 held.input = incoming;
             } else {
                 occupationPlanner.cancel(id);
@@ -1676,7 +1733,8 @@ function startKernel(config = {}) {
         workshop: id => {
             const entry = kernel.states.get(Number(id));
             const held = occupationPlanner.slots.get(Number(id));
-            const value = (held?.input.mode === 'occupation' ? occupationPlanner.valueFor(id, entry?.state) : null)
+            const value = (held?.input.mode === 'occupation' ? occupationPlanner.valueFor(id, entry?.state)
+                : held?.input.mode === 'near' ? occupationPlanner.valueFor(id, entry?.state)?.workshop : null)
                 || publishedWorkshop(entry);
             if (value) return value;
             // Counts crafters only: a bot without workshop entries has no workshop to know.

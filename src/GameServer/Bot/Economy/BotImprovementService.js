@@ -73,12 +73,13 @@ async function reviewCold(state, options = {}) {
     }).finally(() => pendingCold.delete(state.characterId));
     pendingCold.set(state.characterId,work); return work;
 }
-function reviewHot(session, context = null) {
+// The improvement the near body's held decision chose (DecisionEvents.held).
+function reviewHot(session) {
     const actor = session?.actor;
     if (!actor || actor.isDead?.() || !String(session.accountId || '').startsWith('bot_')) return Promise.resolve(null);
     if (pendingHot.has(actor)) return pendingHot.get(actor);
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    context ||= Economy.forActor(actor,session);
+    const context = DecisionEvents.held(session);
     const improvement = chosen(context.state,context);
     if (!improvement) return Promise.resolve(null);
     const World = invoke('GameServer/World/World');

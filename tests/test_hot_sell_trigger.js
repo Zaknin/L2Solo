@@ -77,13 +77,14 @@ Economy.forState = () => { throw Error('sell_check_rebuilt_economy'); };
 try {
     const seller = hunter(3);
     seller.session.coldLifeState.stats.decisionSeq = 12;
-    seller.session.economySeq = 12;
     seller.session.heldEconomy = { network: { activity: { activity: 'selling', items: [1864] } } };
     assert.equal(due(seller)?.reason, 'wish_funding');
     seller.bot.backpack.inventoryRevision = 1;
     assert.equal(due(seller)?.reason, 'wish_funding', 'loot reuses the held selling choice without a context build');
+    // The next decision the body receives (DecisionEvents.receive) replaces the held one.
     seller.session.coldLifeState.stats.decisionSeq = 13;
-    assert.equal(due(seller), null, 'a new event cannot act on the retired selling choice');
+    seller.session.heldEconomy = { network: { activity: null } };
+    assert.equal(due(seller), null, 'the next decision retires the selling choice');
 } finally { Economy.forState = originalContext; }
 
 console.log('Hot sell trigger checks passed');

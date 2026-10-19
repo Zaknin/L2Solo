@@ -138,7 +138,7 @@ function notifyNearFacts(session, reason) {
             if (session.nearRaise) row.raise = { ...session.nearRaise };
             // lazy: cycle the coordinator requires this module at its top.
             invoke('GameServer/Bot/Population/ColdSimulationCoordinator').markDirty(row,
-                { reason, critical: isCriticalSnapshotReason(reason, row), near: true });
+                { reason, critical: isCriticalSnapshotReason(reason, row) || !!row.raise, near: true });
         } catch (error) {
             utils.infoWarn('BotLife', 'near fact %s post failed: %s', reason, error.message);
         }
@@ -1295,7 +1295,7 @@ function mergeSessionIntoLifeState(session, state, phase, reason = '', options =
     const physicalSpot = physicalLoc ? SpotService.findCurrentSpot(physicalLoc) : null;
     const physicalActivity = physicalLoc && ['hunting', 'resting', 'shopping', 'pk_hunting'].includes(observed.activity)
         ? observed.activity : null;
-    return {
+    const merged = {
         ...state,
         accountName: observed.accountName,
         name: observed.characterName,
@@ -1327,6 +1327,10 @@ function mergeSessionIntoLifeState(session, state, phase, reason = '', options =
         },
         inventory: preserveStarterLootProvenance(state.inventory, observedInventory)
     };
+    // The cold row of every cooling writer (writeColdRow, partySessionSnapshot
+    // for the party and PvP cooldowns) takes the near raise still unanswered.
+    if (phase === 'cold') DecisionEvents.applyPendingRaise(session, merged.stats);
+    return merged;
 }
 
 // A stale cold snapshot can retain the previous hunting region while its
@@ -2058,6 +2062,8 @@ const BotLifeState = {
                 stats: { ...(craftState.stats || {}), ...membershipStats, pvpEnemies: BotEnemyMemory.snapshot(session), lastReason: reason },
                 inventory: parseJson(row.inventorySummary, {})
             };
+            // Built without mergeSessionIntoLifeState: the near raise joins here.
+            DecisionEvents.applyPendingRaise(session, nextState.stats);
             return this.upsertState(nextState, reason, { releaseHot: true });
         }
 
