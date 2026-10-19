@@ -2015,14 +2015,16 @@ class ColdSimulationCoordinator {
     // resolved itself (prepareProposal), a later write over the entry (an
     // afterCommit step, the party work), a row the commit re-read (a board
     // settlement, a PvP tally, a PK drop, a party payment: SQL wrote its bag or
-    // stats), or the economy leaf the row kept over the proposal's.
+    // stats), or the economy leaf the row kept over the proposal's (a different
+    // one): the committed stats are then a new object (ColdSimulationOwner
+    // withEconomyLeaf), the proposal's own object when the leaves match.
     ackNumbers(result, cached) {
-        const proposal = result.proposal, row = result.row, stats = proposal?.nextState?.stats;
+        const proposal = result.proposal, row = result.row;
         if (!proposal?.nextState || proposal.inventoryCleanupForced
             || !result.cached || cached !== result.cached
             || result.settled || result.pkDrops?.length || result.partyPayment
             || !row || typeof row.statsJson === 'string'
-            || row.economyCommit != null || stats && Object.hasOwn(stats, 'economyCommit')) return null;
+            || result.cached.stats !== proposal.nextState.stats) return null;
         // The ack's revision is already the commit's (result.revision, the cache's too).
         return { updatedAt: cached.updatedAt, inventoryRevision: cached.bagRevision,
             skillsRevision: cached.skillsRevision, hennaRevision: cached.hennaRevision };

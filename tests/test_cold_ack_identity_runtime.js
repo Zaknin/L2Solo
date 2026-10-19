@@ -12,6 +12,7 @@ const World = invoke('GameServer/World/World');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
+const EconomyCommit = require('../src/GameServer/Bot/Economy/EconomyCommit');
 const previous = { path: options.default.Database.path, history: options.default.Database.historyPath,
     knowledge: Config.knowledgeErrorsEnabled, world: World.user };
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l2solo-ack-runtime-'));
@@ -47,6 +48,22 @@ function take(type) {
     sent.length = 0;
     messages.forEach(message => assert(Protocol.validateEnvelope(message, 'main', { workerEpoch: coordinator.workerEpoch }).ok));
     return messages.flatMap(message => message.payload.results);
+}
+// A commit of a fresh bot whose row holds `rowLeaf` (written as an economy
+// command writes it) and whose proposal carries `proposalLeaf`: the row keeps
+// its own leaf over the proposal's (EconomyCommit.preserveLeafSql).
+async function leafCommit(rowLeaf, proposalLeaf, proposalId) {
+    const id = await create(), token = await claim(id), claimed = Life.cachedState(id), at = Date.now();
+    if (rowLeaf) await Database.execute(["UPDATE bot_life_state SET statsJson=json_set(COALESCE(statsJson,'{}'),'$.economyCommit',json(?)) WHERE characterId=?",
+        [JSON.stringify(rowLeaf), id]]);
+    const nextState = { ...claimed, activity: 'hunting', updatedAt: at,
+        timing: { ...claimed.timing, lastResolvedAt: at, nextResolveAt: at + 60000 },
+        stats: proposalLeaf ? { ...claimed.stats, economyCommit: proposalLeaf } : claimed.stats };
+    const proposal = { proposalId, token, nextState, result: { events: [] }, enqueuedAt: at };
+    const [commit] = await Owner.commitBatch([{ revision: token.revision, nextState, proposal, options: { allowLifecycle: true } }]);
+    assert(commit.ok); assert.equal(Life.cachedState(id), commit.cached);
+    assert.equal(commit.row.economyCommit, rowLeaf ? JSON.stringify(rowLeaf) : null, 'the row kept its own leaf');
+    return { ...commit, proposal, nextState };
 }
 async function release(token) {
     const request = Protocol.envelope('release_request', coordinator.workerEpoch,
@@ -158,9 +175,25 @@ async function release(token) {
         assert.deepStrictEqual(workerCopy, mainCopy, 'the worker copy is main\'s cached state, its bag canonical');
         console.log('A commit main did not change acks with numbers only and the worker rebuilds main\'s state: PASS');
 
+        // A bot after its first economy step: the row holds a leaf and the
+        // proposal carries the same one. The row kept nothing over it: numbers.
+        const leaf = EconomyCommit.completed(EconomyCommit.create(1, 0, {}), { success: true });
+        const otherLeaf = EconomyCommit.completed(EconomyCommit.create(1, 1, {}), { success: true });
+        const sameLeaf = await leafCommit(leaf, leaf, 'same-leaf-proposal');
+        assert.equal(sameLeaf.cached.stats, sameLeaf.nextState.stats, 'the same leaf keeps the proposal\'s stats');
+        const leafAckState = { ...coordinator.ackState };
+        await coordinator.handleCommitResults([sameLeaf]);
+        const [sameLeafAck] = take('commit_ack');
+        assert.equal(Object.hasOwn(sameLeafAck, 'state'), false, 'the same leaf acks without the state');
+        assert.equal(sameLeafAck.inventoryRevision, sameLeaf.cached.bagRevision);
+        assert.deepEqual(coordinator.ackState, { with: leafAckState.with, without: leafAckState.without + 1 });
+        console.log('A row and a proposal holding the same economy leaf ack with numbers only: PASS');
+
         // Each condition failing carries the state: main committed another
         // state, a write replaced the cache entry, the commit read the bag or
-        // the stats back from the row, or the row kept an economy leaf.
+        // the stats back from the row, or the row kept an economy leaf other
+        // than the proposal's (real commits: a different leaf, the row's leaf
+        // where the proposal has none, none where the proposal has one).
         const fails = {
             cleanup: { proposal: { ...numbersProposal, inventoryCleanupForced: true } },
             resolvedOnMain: { proposal: { ...numbersProposal, nextState: undefined } },
@@ -169,9 +202,9 @@ async function release(token) {
             pkDrops: { pkDrops: [{ itemId: 1 }] },
             partyPayment: { partyPayment: true },
             rowReread: { row: { ...numbersCommit.row, statsJson: '{}' } },
-            economyLeaf: { row: { ...numbersCommit.row, economyCommit: '{"id":"x"}' } },
-            proposalLeaf: { proposal: { ...numbersProposal, nextState: { ...proposedState,
-                stats: { ...proposedState.stats, economyCommit: { id: 'x' } } } } }
+            economyLeaf: await leafCommit(leaf, otherLeaf, 'different-leaf-proposal'),
+            rowLeaf: await leafCommit(leaf, null, 'row-leaf-proposal'),
+            proposalLeaf: await leafCommit(null, leaf, 'proposal-leaf-proposal')
         };
         for (const [name, change] of Object.entries(fails)) {
             await coordinator.handleCommitResults([{ ...committedResult, ...change }]);
