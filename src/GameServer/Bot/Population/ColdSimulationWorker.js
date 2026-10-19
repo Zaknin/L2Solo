@@ -1293,9 +1293,11 @@ function startKernel(config = {}) {
     if (typeof config.coldHonestTravel === 'boolean') Config.coldHonestTravel = config.coldHonestTravel;
     Config.developerDiagnostics = config.developerDiagnostics === true;
     Config.economyDiagnostics = Config.developerDiagnostics && config.economyDiagnostics === true;
+    // Busy share and heap after GC are two of the goal's three numbers (read with diagnostics off): always on, one
+    // major-GC observer and two clock reads per heartbeat.
+    heapTelemetry = invoke('GameServer/Bot/Population/WorkerHeapTelemetry').observe();
+    previousElu = performance.eventLoopUtilization();
     if (Config.developerDiagnostics) {
-        heapTelemetry = invoke('GameServer/Bot/Population/WorkerHeapTelemetry').observe();
-        if (Config.developerDiagnostics) previousElu = performance.eventLoopUtilization();
         eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
         eventLoopDelay.enable();
     }
@@ -1786,21 +1788,21 @@ function startKernel(config = {}) {
             if (Config.developerDiagnostics) competition.report.lastSampleMs = performance.now() - started;
             wakeLoopIfSooner();
         }
-        const elu = Config.developerDiagnostics ? performance.eventLoopUtilization(previousElu) : null;
-        if (Config.developerDiagnostics) previousElu = performance.eventLoopUtilization();
+        const elu = performance.eventLoopUtilization(previousElu);
+        previousElu = performance.eventLoopUtilization();
         const heartbeat = {
             ...kernel.heartbeatSnapshot(),
+            ...heapTelemetry.snapshot(),
+            eventLoopUtilization: elu.utilization,
             ...(Config.developerDiagnostics ? { occupationPlanning: occupationPlanner.snapshot() } : {}),
             safety: safetyTotals(),
             competition: competitionCandidates?.snapshot() || null,
             ...(Config.developerDiagnostics ? {
             tables: tables.summary(),
             developerDiagnostics: economyDiagnostics.delta(),
-            ...heapTelemetry.snapshot(),
             caches: { spotValue: SpotValueTable.cacheStats(), kitProfiles: ColdCombatProfile.kitStoreSize() },
             heapUsed: process.memoryUsage().heapUsed,
             rss: process.memoryUsage().rss,
-            eventLoopUtilization: elu.utilization,
             eventLoopLagP95Ms: Number(eventLoopDelay.percentile(95) / 1e6) || 0,
             eventLoopLagMaxMs: Number(eventLoopDelay.max / 1e6) || 0
             } : {})

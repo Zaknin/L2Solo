@@ -95,6 +95,14 @@ const PopulationStatus = {
             + ` nearDecisions=${decisions.accepted || 0}/${decisions.refused || 0}/${decisions.dropped || 0}`;
     },
 
+    // The goal's three numbers without diagnostics, in the full line's names: cold queue due now and the oldest wait,
+    // worker busy share since the last heartbeat, worker heap after the last major GC / its 10-min maximum.
+    goalText(queue = {}, coordinator) {
+        const worker = coordinator?.worker || {}, mb = bytes => bytes ? Math.round(bytes / 1024 / 1024) : '-';
+        return `coldDue=${queue.due || 0} coldDueAge=${Math.round((queue.oldestAgeMs || 0) / 1000)}s`
+            + ` workerElu=${Number(worker.eventLoopUtilization || 0).toFixed(2)} workerHeapGc=${mb(worker.heapAfterGc)}/${mb(worker.heapAfterGcMax10)}MB`;
+    },
+
     summary() {
         if (!Config.developerDiagnostics) return { enabled: false };
         const counts = this.counts();
