@@ -2492,6 +2492,8 @@ class ColdSimulationKernel {
                 if (review) reviews.push(review);
             } else {
                 this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || ''));
+                // No review runs the plan this step stamped as sent.
+                if (active?.economyPlan) this.forgetSentPlan(id);
                 if (DiagnosticConfig.developerDiagnostics && Protocol.staleRefusal(result)) this.stats.stale += 1;
                 EconomyDiagnostics.count('commit_ack', 'refused', result.detail || result.reason);
                 if (result.state) this.upsert({

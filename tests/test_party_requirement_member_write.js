@@ -2,7 +2,8 @@
 // read before; the member's own review (its class training) runs meanwhile.
 // The plan write holds on the revision of that copy and moves it: with no write
 // in between it lands, and a training publish landing in between wins: the
-// party write is skipped and the row keeps the trained sp and combat profile.
+// party write is skipped, the row keeps the trained sp and combat profile, and
+// the party's re-plan is marked due again so the member is planned anew.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -53,6 +54,7 @@ const plan = target => ({ status: 'active', strategy: 'direct_drop', partyNeed: 
         assert.equal(JSON.parse(planned.statsJson).equipmentPlan?.target?.selfId, 9101, 'the row holds the party plan');
         assert.equal(Life.cachedState(id).stats.equipmentPlan?.target?.selfId, 9101, 'the cache holds the party plan');
         assert.equal(Life.cachedState(id).simulation.revision, read + 1, 'the cache takes the written revision');
+        assert.equal(Population.partyRequirementRefreshDue.has(PARTY), false, 'a landed write marks no re-plan');
 
         // The member's review trains it (serialized on the member like
         // reviewTrainingAfterCommit, moving the revision) while the leader's
@@ -75,6 +77,7 @@ const plan = target => ({ status: 'active', strategy: 'direct_drop', partyNeed: 
         const cached = Life.cachedState(id);
         assert.equal(cached.sp, 777, 'the cache keeps the trained sp');
         assert.equal(cached.stats.equipmentPlan?.target?.selfId, 9101, 'nothing is published on a skip');
+        assert.equal(Population.partyRequirementRefreshDue.has(PARTY), true, 'a skipped write marks the party re-plan due again');
         console.log('PASS a party requirement write holds on the member revision it read');
     } finally {
         fs.rmSync(directory, { recursive: true, force: true });
