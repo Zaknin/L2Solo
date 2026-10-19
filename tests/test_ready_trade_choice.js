@@ -60,6 +60,12 @@ assert(Buffer.byteLength(JSON.stringify(prepared(state))) < 256);
     let next; do { next = iterator.next(); } while (!next.done);
     assert.equal(next.value.buyAds, undefined);
     assert.equal(next.value.d, undefined);
+    // A pending incoming delivery is main's: its settlement continues the page.
+    const incoming = Plan.prepare({ ...state, activity: 'hunting', stats: {}, incomingPending: true },
+        { network: {}, intentPending: true }, { board });
+    do { next = incoming.next(); } while (!next.done);
+    assert.equal(next.value.buyAds, undefined);
+    assert.equal(next.value.d, 1);
 }
 const Survival = invoke('GameServer/Bot/Population/SurvivalFloor');
 const oldFloor = Survival.forState;
