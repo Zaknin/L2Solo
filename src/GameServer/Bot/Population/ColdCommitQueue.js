@@ -61,7 +61,7 @@ class ColdCommitQueue {
         this.stopping = false;
         this.paused = false;
         this.p1Credit = 0;
-        this.samples = { claim: [], commit: [], queue: [] };
+        this.samples = { commit: [], queue: [] };
         // partyAck: from the flush's results to a held party leader's ack.
         this.stageSamples = { prepare: [], commitCall: [], afterCommit: [], ackBuild: [], partyAck: [] };
         // afterCommit split by the caller's step names: one sum per step per flush.
@@ -160,7 +160,9 @@ class ColdCommitQueue {
 
     enqueue(proposal, measuredBytes = null) {
         if (this.stopping) return { ok: false, reason: 'queue_stopping' };
-        if (!proposal || !proposal.characterId || !proposal.token) return { ok: false, reason: 'invalid_proposal' };
+        if (!proposal || !proposal.characterId || !Number.isSafeInteger(proposal.revision) || proposal.revision < 0) {
+            return { ok: false, reason: 'invalid_proposal' };
+        }
         const bytes = this.proposalBytes(proposal, measuredBytes);
         if (!Number.isFinite(bytes) || bytes > Protocol.MAX_MESSAGE_BYTES) return { ok: false, reason: 'proposal_too_large' };
         const priority = ['P0', 'P1', 'P2'].includes(proposal.priority) ? proposal.priority : 'P2';
@@ -169,8 +171,7 @@ class ColdCommitQueue {
         if (priority === 'P2') {
             const previous = this.p2.get(Number(proposal.characterId));
             if (previous) {
-                if (String(previous.token?.leaseId) !== String(proposal.token?.leaseId)
-                    || Number(previous.token?.revision) !== Number(proposal.token?.revision)) {
+                if (previous.revision !== proposal.revision) {
                     return { ok: false, reason: 'coalesce_boundary' };
                 }
                 this.bytes -= previous.bytes;
@@ -361,7 +362,7 @@ class ColdCommitQueue {
                         results.push({ ok: false, characterId: proposal.characterId, reason: 'prepare_rejected', proposal });
                         continue;
                     }
-                    prepared.push({ proposal, token: proposal.token, nextState, options: proposal.options || {},
+                    prepared.push({ proposal, revision: proposal.revision, nextState, options: proposal.options || {},
                         atomicGroup: proposal.atomicGroup || null, ...(stepMs ? { stepMs } : {}) });
                 } catch (error) {
                     results.push({ ok: false, characterId: proposal.characterId, reason: error?.message || 'prepare_error', proposal });
@@ -462,7 +463,7 @@ class ColdCommitQueue {
         try {
             results = await this.retryBusy(() => this.commit([{
                 proposal,
-                token: proposal.token,
+                revision: proposal.revision,
                 nextState,
                 atomicGroup: proposal.atomicGroup || null,
                 options: proposal.options || {}
@@ -472,7 +473,7 @@ class ColdCommitQueue {
             throw error;
         }
         const result = results?.[0] || { ok: false, characterId: id, reason: 'missing_commit_result' };
-        const entry = { proposal, token: proposal.token, nextState };
+        const entry = { proposal, revision: proposal.revision, nextState };
         if (result.ok) {
             try { await this.afterCommit(entry, result); }
             catch (error) { DiagnosticConfig.developerDiagnostics && (this.counters.errors += 1); result.afterCommitError = error?.message || 'after_commit_error'; }

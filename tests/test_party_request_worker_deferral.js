@@ -4,6 +4,7 @@ require('./helpers/databaseIsolation');
 const world = require('./fixtures/native_stock_world')();
 require('../src/Global');
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
+const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 const Request = require('../src/GameServer/Bot/Population/PartyRequestPlanner');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
@@ -37,7 +38,7 @@ async function checkDeferred(old, reason) {
     assert.equal(request.status, 'deferred');
     assert.equal(request.attempts, 3);
     assert(request.deferredUntil > at);
-    assert.equal(cached.simulation.revision, old.simulation.revision + 1, 'native deferral fences an in-transit stale claim');
+    assert.equal(cached.simulation.revision, old.simulation.revision + 1, 'native deferral moves the revision');
     assert.equal(row.simulationRevision, cached.simulation.revision);
     assert.deepEqual(cached.stats.partyRequest, request, 'cache accepts the exact committed request');
     assert(snapshots.some(packet => packet.state === cached && packet.options.critical && packet.options.reason === 'party_request_deferred'),
@@ -53,23 +54,18 @@ async function checkDeferred(old, reason) {
         assert.equal(planned.deferredUntil, request.deferredUntil);
         assert.equal(planned.attempts, request.attempts);
     } finally { Material.request = originalRequest; }
-    const claim = await DB.claimColdSimulationLease({ characterId: old.characterId, expectedRevision: old.simulation.revision,
-        allowLifecycle: true, ownerId: 'cold_simulation_owner', leaseId: `stale-${old.characterId}`, timestamp: at + 1, leaseUntil: at + 30000 });
-    assert.equal(claim.ok, false);
-    assert.equal(claim.reason, 'stale_revision');
+    const [stale] = await Owner.commitBatch([{ revision: old.simulation.revision, nextState: old, options: { allowLifecycle: true } }]);
+    assert.equal(stale.ok, false);
+    assert.equal(stale.reason, 'stale_revision', 'a step begun before the deferral is refused');
     if (reason) assert.equal(request.lastReason, reason);
     return cached;
 }
 async function main() {
     DB.init(); invoke('GameServer/DataCache').init(); await Life.init();
     Coordinator.markDirty = (state, options) => { snapshots.push({ state, options }); kernel.upsert({ state }); };
-    const incompatible = await seed(), claimed = await seed();
-    const grant = await DB.claimColdSimulationLease({ characterId: claimed.characterId, expectedRevision: claimed.simulation.revision,
-        allowLifecycle: true, ownerId: 'cold_simulation_owner', leaseId: 'active-request', timestamp: at, leaseUntil: at + 30000 });
-    assert(grant.ok);
+    const incompatible = await seed();
     snapshots.length = 0;
-    assert.equal(JSON.parse((await rowFor(claimed.characterId)).statsJson).partyRequest.status, 'open', 'an active worker lease is untouched');
-    assert.equal(await Life.deferUnformablePartyRequests([incompatible.characterId, claimed.characterId]), 1);
+    assert.equal(await Life.deferUnformablePartyRequests([incompatible.characterId]), 1);
     await checkDeferred(incompatible, 'no_compatible_level_match');
     assert.equal(await Life.deferUnformablePartyRequests([incompatible.characterId]), 0, 'one rejection increments attempts exactly once');
 
@@ -93,7 +89,7 @@ async function main() {
     assert.equal(fresh.stats.partyRequest.spotId, 'new-source');
     assert.equal(fresh.stats.nativeMarker, 123);
     assert.deepEqual(kernel.states.get(raced.characterId).state.stats.partyRequest, fresh.stats.partyRequest);
-    console.log('PASS both native request deferrals publish exact critical worker snapshots, advance revision and reject stale claims; active leases and concurrent native edits survive');
+    console.log('PASS both native request deferrals publish exact critical worker snapshots, advance revision and refuse stale steps; concurrent native edits survive');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
     Coordinator.markDirty = originalDirty;

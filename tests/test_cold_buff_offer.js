@@ -58,15 +58,12 @@ async function run() {
         for (const current of [provider, first, buyer, last]) transport.upsert({ state: { ...current,
             timing: { lastResolvedAt: timestamp - 45000, nextResolveAt: current === provider ? timestamp - 1 : timestamp + 60000 } } });
         transport.tick();
-        const claim = sent.find(row => row.type === 'claim_request');
-        assert.ok(claim);
-        transport.onClaimAck({ grants: [{ ok: true, characterId: provider.characterId, ownerId: 'cold_simulation_owner',
-            revision: 42, leaseId: 'buff-project-lease', leaseUntil: timestamp + 30000 }] }, claim.msgId);
+        assert.deepEqual([...transport.inFlight.keys()], [provider.characterId], 'the provider steps from the worker\'s copy');
         await transport.resolveChain;
         transport.flush(null, true);
         const projectedPacket = sent.find(row => row.type === 'proposal_batch')?.payload.proposals[0].buffOffer;
         assert.ok(projectedPacket, 'the provider resolve carries one actual proposal offer');
-        assert.equal(projectedPacket.providerRevision, 42);
+        assert.equal(projectedPacket.providerRevision, 41, 'the offer names the revision the step started from');
         assert.equal(projectedPacket.recipientRevision, 17);
         assert.equal(projectedPacket.recipientId, buyer.characterId);
         assert.ok(Buffer.byteLength(JSON.stringify(projectedPacket)) <= 512);

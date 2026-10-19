@@ -271,13 +271,12 @@ function productionResolverCases(members) {
         assert.equal(opened.memberResults.length, 9);
     } finally { Solo.prepareRaidParty = previous.prepare; Solo.resolvePartyFight = previous.fight; Encounter.resetForTests(); }
 }
+let proposals = 0;
 async function propose(proof, { reward = 100, status = 'active' } = {}) {
     const members = await refreshed();
-    const { grants } = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
-    assert.equal(grants.length, 9);
     const [raid] = await query('SELECT revision FROM bot_raid_encounters WHERE raidKey=?', ['raid:10137']);
     const revision = Number(raid?.revision || 0);
-    const atomicGroup = { id: `full:${grants[0].leaseId}`, memberIds: ids,
+    const atomicGroup = { id: `full:${++proposals}`, memberIds: ids,
         partyChanges: [{ partyId: party.partyId, memberIds: ids, expectedPartyRevision: party.revision,
             updatedAt: Math.max(Date.now(), party.updatedAt + 1), status, nextResolveAt: Date.now() + 30000,
             statsJson: JSON.stringify({ ...party.stats, raidAdmission: proof }) }],
@@ -285,9 +284,9 @@ async function propose(proof, { reward = 100, status = 'active' } = {}) {
             snapshot: { key: 'raid:10137', raidInstanceId: marker.raidInstanceId, status: 'active', hp: 500,
                 participants: { [party.partyId]: proof.startedAt }, updatedAt: Date.now() } } };
     const entries = members.map(member => ({ nextState: { ...member, exp: member.exp + reward },
-        revision: grants.find(grant => grant.characterId === member.characterId).revision, atomicGroup,
+        revision: member.simulation.revision, atomicGroup,
         proposal: { baseState: member }, options: { allowParty: true, allowLifecycle: true } }));
-    return { entries, grants };
+    return { entries };
 }
 async function reject(proof, mutation, restore, detail) {
     const prepared = await propose(proof);
@@ -297,7 +296,7 @@ async function reject(proof, mutation, restore, detail) {
         const result = await Owner.commitBatch(prepared.entries);
         assert(result.every(row => !row.ok && row.detail === detail), JSON.stringify(result.map(row => [row.reason, row.detail])));
         assert.deepEqual(await query('SELECT characterId,exp FROM bot_life_state ORDER BY characterId'), before);
-    } finally { await Owner.releaseBatch(prepared.grants, { releaseInvalidated: true }); await restore(); }
+    } finally { await restore(); }
 }
 async function phase(to) {
     const states = await refreshed(), at = Date.now();
@@ -387,18 +386,16 @@ async function main() {
                     memberResults: input.members.map(state => ({ state, result: { events: [] } })), events: [] };
             } });
         try {
-            const grants = new Map(members.map(member => [member.characterId, { characterId: member.characterId,
-                ownerId: Owner.OWNER_ID, leaseId: 'full-wire', revision: 1, leaseUntil: at + 30000 }]));
             for (const member of members) { kernel.upsert({ state: member });
-                kernel.inFlight.set(member.characterId, { state: member, grant: grants.get(member.characterId), partyId: party.partyId, claimRequestId: 'full-claim' }); }
+                kernel.inFlight.set(member.characterId, { state: member, startedAt: at, partyId: party.partyId }); }
             // The run carries the raid owner its parties table row published.
-            kernel.partyRuns.set(party.partyId, { party, members, spot, requestId: 'full-claim', grants, raidOwner: currentOwner });
-            await kernel.resolvePartyGrant(party.partyId);
+            kernel.partyRuns.set(party.partyId, { party, members, spot, startedAt: at, raidOwner: currentOwner });
+            await kernel.resolvePartyStep(party.partyId);
             const proposals = messages.filter(message => message.type === 'proposal_batch').flatMap(message => message.data.proposals);
             assert.equal(proposals.length, 9);
             assert(proposals.every(proposal => JSON.parse(proposal.atomicGroup.partyChanges[0].statsJson).raidAdmission.members.length === 9));
             kernel.onCommitAck({ results: proposals.map(proposal => ({ characterId: proposal.characterId, raidStepId: proposal.raidStepId,
-                ok: false, inputToken: proposal.token, proposalId: proposal.proposalId })) });
+                ok: false, proposalId: proposal.proposalId })) });
         } finally { await kernel.shutdown(); EncounterWire.resetForTests(); }
         await reject(proof, () => query('UPDATE characters SET classId=21 WHERE id=?', [base + 2]),
             () => query('UPDATE characters SET classId=15 WHERE id=?', [base + 2]), 'raid_roster_member_changed');
@@ -413,11 +410,9 @@ async function main() {
         stale.entries[0].revision -= 1;
         assert((await Owner.commitBatch(stale.entries)).every(row => !row.ok && row.detail === 'stale_revision'));
         assert.deepEqual(await query('SELECT characterId,exp FROM bot_life_state ORDER BY characterId'), noReward);
-        await Owner.releaseBatch(stale.grants, { releaseInvalidated: true });
         // No prior native opening provenance: a held-looking proof alone is rejected.
         const forged = await propose(proof); delete forged.entries[0].atomicGroup.raidCommit.snapshot.participants;
         assert((await Owner.commitBatch(forged.entries)).every(row => !row.ok && row.detail === 'raid_roster_not_opened'));
-        await Owner.releaseBatch(forged.grants, { releaseInvalidated: true });
         const success = await propose(proof); const result = await Owner.commitBatch(success.entries);
         assert(result.every(row => row.ok), JSON.stringify(result.map(row => [row.reason, row.detail])));
         party = Parties.acceptRow(result[0].raidPartyRow); assert(Roster.held(party, spot));
@@ -429,7 +424,6 @@ async function main() {
         lostMarker.entries[0].atomicGroup.partyChanges[0].statsJson = JSON.stringify(nextStats);
         assert((await Owner.commitBatch(lostMarker.entries)).every(row => !row.ok && row.detail === 'raid_roster_held_changed'),
             'held atomic update cannot erase marker and reopen as legacy7');
-        await Owner.releaseBatch(lostMarker.grants, { releaseInvalidated: true });
         assert((await Owner.commitBatch(success.entries)).every(row => !row.ok), 'native replay fences suppress another result');
         const persisted = (await query('SELECT * FROM bot_background_parties WHERE partyId=?', [party.partyId]))[0];
         party = Parties.acceptRow(persisted); assert(Roster.held(party, spot), 'restart reconstruction preserves original9 proof');

@@ -8,14 +8,7 @@ function proposal(characterId, priority = 'P2', revision = 1) {
         characterId,
         priority,
         enqueuedAt: 0,
-        token: {
-            ok: true,
-            characterId,
-            ownerId: 'cold_simulation_owner',
-            revision,
-            leaseId: `lease-${characterId}-${revision}`,
-            leaseUntil: 30000
-        },
+        revision,
         baseState: { characterId, phase: 'cold', activity: 'hunting' },
         result: { patch: {}, materialize: { exp: 1, sp: 0, adena: 0, items: [] }, events: [] }
     };
@@ -64,7 +57,7 @@ function proposal(characterId, priority = 'P2', revision = 1) {
         prepare: async (entry) => ({ ...entry.baseState, activity: entry.result.patch.activity || 'hunting' }),
         commit: async (entries) => {
             commits += 1;
-            return entries.map((entry) => ({ ok: true, characterId: entry.nextState.characterId, revision: entry.token.revision + 1 }));
+            return entries.map((entry) => ({ ok: true, characterId: entry.nextState.characterId, revision: entry.revision + 1 }));
         },
         onResults: (results) => resultBatches.push(results)
     });
@@ -93,7 +86,7 @@ function proposal(characterId, priority = 'P2', revision = 1) {
         onResume: () => { resumed += 1; }
     });
     for (let id = 10; id < 14; id++) pressureQueue.enqueue(proposal(id, 'P1'));
-    assert.strictEqual(paused, 1, 'high water must pause new cold claims');
+    assert.strictEqual(paused, 1, 'high water must pause new cold steps');
     await pressureQueue.flushDue(true);
     await pressureQueue.flushDue(true);
     assert.strictEqual(resumed, 1, 'queue must resume below low water');

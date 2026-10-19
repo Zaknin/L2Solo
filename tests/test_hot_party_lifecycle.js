@@ -105,8 +105,6 @@ async function run() {
         return fakeSession(data.coldLifeState, data);
     });
     let party = await createParty([1, 2, 3]);
-    const claims = await Owner.claimBatch(party.memberIds.map(id => Life.cachedState(id)), { allowParty: true, allowLifecycle: true });
-    assert.strictEqual(claims.grants.length, 3);
     const originalStates = party.memberIds.map(id => Life.cachedState(id));
     const activated = await Lifecycle.activate(party.partyId);
     assert(activated.ok, JSON.stringify(activated));
@@ -128,9 +126,9 @@ async function run() {
     assert.strictEqual(Lod.evaluate(Manager.sessions[1], [], Date.now()).tier, 'full',
         'a fighting member keeps the healer active even outside player visibility');
     Manager.sessions[0].actor.state.fetchHits = () => false;
-    const stale = await Owner.commitBatch(originalStates.map((state, index) => ({ revision: claims.grants[index].revision, nextState: state,
+    const stale = await Owner.commitBatch(originalStates.map(state => ({ revision: state.simulation.revision, nextState: state,
         atomicGroup: { id: 'stale', memberIds: [1, 2, 3] } })), { allowParty: true, allowLifecycle: true });
-    assert(stale.every(r => !r.ok), 'stale cold worker cannot overwrite the hot party');
+    assert(stale.every(r => !r.ok), 'the activation moved every revision: a worker step from before cannot overwrite the hot party');
     const group = Manager.sessions.slice();
     group[2].pvpDefense = {};
     assert(!(await Lifecycle.cooldown(party.partyId, 'test', { ignoreVisibility: true })).ok);

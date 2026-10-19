@@ -18,7 +18,7 @@ const originals = {
     recordMany: LifeEvents.recordMany
 };
 
-function hunter(characterId, token) {
+function hunter(characterId, simulation) {
     return {
         characterId,
         name: `Overloaded${characterId}`,
@@ -34,7 +34,7 @@ function hunter(characterId, token) {
         inventory: {},
         stats: {},
         timing: {},
-        ...(token ? { simulation: token } : {})
+        ...(simulation ? { simulation } : {})
     };
 }
 
@@ -56,11 +56,11 @@ const fightResult = () => ({
             realPlayerSessions: () => [],
             prepareInventoryCleanupProposal: (...args) => PopulationService.prepareInventoryCleanupProposal(...args)
         };
-        const token = { characterId: 7301, ownerId: 'cold_worker', revision: 3, leaseId: 'cleanup-lease', leaseUntil: Date.now() + 60000 };
-        const base = hunter(7301, token);
+        const simulation = { ownerId: 'legacy_main', revision: 3, leaseId: null, leaseUntil: 0 };
+        const base = hunter(7301, simulation);
         const proposal = {
             characterId: 7301,
-            token,
+            revision: simulation.revision,
             enqueuedAt: Date.now(),
             baseState: base,
             nextState: { ...base, exp: base.exp + 500, adena: base.adena + 600 },
@@ -75,7 +75,7 @@ const fightResult = () => ({
         const tripFee = (state) => Number(state.stats?.travel?.paid?.fee || 0);
         assert.strictEqual(prepared.adena, base.adena + 600 - tripFee(prepared), 'the fight\'s adena is kept');
         assert.strictEqual(proposal.result.events.length, 1, 'the fight\'s events are still recorded');
-        assert.strictEqual(prepared.simulation?.leaseId, token.leaseId, 'the commit keeps the worker lease');
+        assert.strictEqual(prepared.simulation?.revision, simulation.revision, 'the commit keeps the step base revision');
 
         // The cleanup still outranks a route trip the worker started this resolve.
         const routed = await coordinator.prepareProposal({
@@ -99,11 +99,11 @@ const fightResult = () => ({
 
         // An atomic group commits all members or none: a member its party
         // releases in this commit is judged as claimed (still in the party).
-        const member = { ...hunter(7303, { ...token, characterId: 7303 }), activity: 'grouped',
+        const member = { ...hunter(7303, simulation), activity: 'grouped',
             party: { partyId: 'dissolving', leaderId: 7303 } };
         const released = await coordinator.prepareProposal({
             characterId: 7303,
-            token: { ...token, characterId: 7303 },
+            revision: simulation.revision,
             enqueuedAt: Date.now(),
             baseState: member,
             atomicGroup: { id: 'party:dissolving', memberIds: [7303] },

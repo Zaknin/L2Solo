@@ -244,8 +244,8 @@ async function run() {
     assert.strictEqual(JSON.parse(socialRows[0].statsJson).capacityPool, undefined, 'new parties have no privileged origin pool');
     const reopened = await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId=1', []]);
     assert.strictEqual(JSON.parse(reopened[0].statsJson).coldCompetition.wait.until, yielded.waitUntil);
-    const replay = await Database.claimColdSimulationLease({ characterId: 1, expectedRevision: yieldEvent.actor.revision,
-        ownerId: 'cold_simulation_owner', leaseId: 'replay-after-restart', timestamp: now, leaseUntil: now + 30000 });
+    const [replay] = await Database.commitAndReleaseColdSimulationLeases([{ characterId: 1, expectedRevision: yieldEvent.actor.revision,
+        timestamp: now, allowLifecycle: true, patch: { phase: 'cold' } }]);
     assert.strictEqual(replay.ok, false, 'SQLite after reopen must reject the original delivered revision');
     const scheduled = [], scheduler = new ColdCompetitionActions({ now: () => now });
     scheduler.apply = async e => { scheduled.push(e.action); return { ok: true }; };

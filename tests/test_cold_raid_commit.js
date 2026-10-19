@@ -27,19 +27,17 @@ async function createParty(ids) {
 }
 async function proposed(party, id, snapshot) {
     const members = party.memberIds.map(state);
-    const { grants } = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
-    assert.equal(grants.length, 9);
     const atomicGroup = { id, memberIds: party.memberIds,
         partyChanges: [{ partyId: party.partyId, memberIds: party.memberIds, expectedPartyRevision: party.revision,
             updatedAt: Math.max(Date.now(), party.updatedAt + 1), nextResolveAt: null, status: 'dissolved',
             statsJson: JSON.stringify({ ...party.stats, raidEncounter: snapshot }) }],
         raidCommit: { key: snapshot.key, expectedRevision: 0, revision: 1, snapshot,
             worldDefeat: { npcId: 10484, respawnTime: at + 100000 } } };
-    const entries = members.map(member => ({ revision: grants.find(g => g.characterId === member.characterId).revision, atomicGroup,
+    const entries = members.map(member => ({ revision: member.simulation.revision, atomicGroup,
         options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: member },
         nextState: { ...member, exp: member.exp + 100, adena: member.adena + 10,
             inventory: { ...member.inventory, 57: { selfId: 57, amount: 10 } } } }));
-    return { entries, grants };
+    return { entries };
 }
 async function durable() {
     return {
@@ -81,7 +79,6 @@ async function run() {
     Raid.acknowledge('rejected', rejected[8].characterId, false);
     assert.equal(Raid.begin(b, spot, 10484, at + 5).hp, 600);
     assert.deepEqual(await durable(), initial, 'one stale member rolls back party, inventory, rewards and boss');
-    await Owner.releaseBatch(failed.grants);
 
     const crashStage = await win('sql-failure');
     const crash = await proposed(a, 'sql-failure', crashStage.snapshot);
@@ -90,7 +87,7 @@ async function run() {
     await assert.rejects(Owner.commitBatch(crash.entries), /synthetic raid party write failure/);
     assert.deepEqual(await durable(), initial, 'SQL failure after physical writes rolls back the entire transaction');
     await Database.execute(['DROP TRIGGER reject_raid_party', []]);
-    Raid.abort('sql-failure'); await Owner.releaseBatch(crash.grants);
+    Raid.abort('sql-failure');
 
     const success = await win('winner');
     const first = await proposed(a, 'winner', success.snapshot);
@@ -110,7 +107,6 @@ async function run() {
     assert.equal(committed.raids.length, 1); assert.equal(committed.spawns[0].hp, 0);
     assert((await Owner.commitBatch(first.entries)).every(row => !row.ok));
     assert.deepEqual(await durable(), committed, 'replayed proposals cannot grant rewards twice');
-    await Owner.releaseBatch(second.grants);
     await Database.close(); Database.init(); await Authority.init(); Raid.resetForTests();
     assert.equal(Raid.begin(b, { ...spot, raidAuthority: Authority.get('raid:10484').snapshot }, 10484).status, 'defeated',
         'shared authority survives a process-local reset and database reopen');
@@ -126,23 +122,20 @@ async function run() {
                 memberResults: members.map(state => ({ state, result: { events: [] } })), events: [] };
         } });
     const members = a.memberIds.map(state);
-    const held = new Map(members.map(member => [member.characterId, { characterId: member.characterId,
-        ownerId: Owner.OWNER_ID, leaseId: 'kernel', revision: 1, leaseUntil: at + 30000 }]));
     for (const member of members) {
         kernel.upsert({ state: member });
-        kernel.inFlight.set(member.characterId, { state: member, grant: held.get(member.characterId),
-            partyId: a.partyId, claimRequestId: 'raid-claim' });
+        kernel.inFlight.set(member.characterId, { state: member, startedAt: at + 100, partyId: a.partyId });
     }
     kernel.partyRuns.set(a.partyId, { party: a, members, spot: { ...spot, raidAuthorityRevision: 0 },
-        requestId: 'raid-claim', grants: held });
-    await kernel.resolvePartyGrant(a.partyId);
+        startedAt: at + 100 });
+    await kernel.resolvePartyStep(a.partyId);
     const proposals = messages.filter(message => message.type === 'proposal_batch').flatMap(message => message.data.proposals);
     assert.equal(proposals.length, 9, JSON.stringify(messages));
-    assert(proposals.every(p => p.raidStepId === 'raid:kernel' && p.atomicGroup.partyChanges.length === 1
+    assert(proposals.every(p => p.raidStepId === `raid:${a.leaderId}:${at + 100}` && p.atomicGroup.partyChanges.length === 1
         && p.atomicGroup.raidCommit.expectedRevision === 0));
     assert.equal(Raid.begin(b, spot, 10484).status, 'active');
     kernel.onCommitAck({ results: proposals.map(p => ({ characterId: p.characterId, raidStepId: p.raidStepId, ok: false,
-        inputToken: p.token, proposalId: p.proposalId })) });
+        proposalId: p.proposalId })) });
     assert.equal(Raid.begin(b, spot, 10484).status, 'active');
     const afterReject = await win('after-kernel-rejection'); Raid.abort('after-kernel-rejection');
     assert.equal(afterReject.snapshot.status, 'defeated');

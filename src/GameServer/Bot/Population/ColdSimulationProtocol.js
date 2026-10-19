@@ -15,11 +15,7 @@ const MAIN_TYPES = new Set([
     'clan_social_page',
     // ColdTableChannel pages: limited by size only, so no batch field below.
     'table_page',
-    'claim_ack',
-    'lease_renewal_probe',
-    'lease_renewal',
     'commit_ack',
-    'release_ack',
     'command_ack',
     'command_request',
     'maintenance_ack',
@@ -40,10 +36,7 @@ const WORKER_TYPES = new Set([
     'worker_presence_ack',
     'worker_repair_ack',
     'economy_route_result',
-    'claim_request',
-    'lease_renewal_candidates',
     'proposal_batch',
-    'release_request',
     'command_request',
     'command_ack',
     'maintenance_request',
@@ -55,11 +48,6 @@ const WORKER_TYPES = new Set([
     'table_resync',
     'fault'
 ]);
-
-function positiveInteger(value) {
-    const number = Number(value);
-    return Number.isSafeInteger(number) && number > 0;
-}
 
 function byteLength(value) {
     try {
@@ -275,14 +263,8 @@ function validateEnvelope(message, direction, options = {}) {
         worker_repair_ack: 'results',
         clan_social_page: 'rows',
         catalog_page: 'rows',
-        claim_request: 'candidates',
-        claim_ack: 'grants',
-        lease_renewal_candidates: 'tokens',
-        lease_renewal: 'renewals',
         proposal_batch: 'proposals',
         commit_ack: 'results',
-        release_request: 'releases',
-        release_ack: 'results',
         command_request: 'requests',
         command_ack: 'results',
         party_formation_proposal: 'candidates'
@@ -292,29 +274,12 @@ function validateEnvelope(message, direction, options = {}) {
     if (batchField && (!Array.isArray(batch) || batch.length > Number(options.maxBatch || MAX_BATCH))) {
         return { ok: false, reason: 'batch_size' };
     }
-    if (message.type === 'lease_renewal_probe' && (!Number.isSafeInteger(message.payload.replyBy)
-        || message.payload.replyBy <= 0)) return { ok: false, reason: 'invalid_renewal_probe' };
-    if (message.type === 'lease_renewal_candidates' || message.type === 'lease_renewal') {
-        const payload = message.payload, ids = new Set();
-        if (message.type === 'lease_renewal_candidates' && (typeof payload.requestId !== 'string'
-            || !payload.requestId || payload.requestId.length > 160 || !Number.isSafeInteger(payload.pageIndex)
-            || payload.pageIndex < 0 || typeof payload.done !== 'boolean')) {
-            return { ok: false, reason: 'invalid_renewal_page' };
-        }
-        for (const value of batch) {
-            const token = leaseRenewalToken(value);
-            if (!token || ids.has(token.characterId) || (message.type === 'lease_renewal' && value.ok !== true)) {
-                return { ok: false, reason: 'invalid_renewal_token' };
-            }
-            ids.add(token.characterId);
-        }
-    }
-    if (message.type === 'commit_ack' || message.type === 'release_ack') {
+    if (message.type === 'commit_ack') {
         const ids = new Set();
         for (const result of batch) {
-            const identity = leaseAckIdentity(result, message.type);
-            if (!identity || ids.has(result.characterId)) return { ok: false, reason: 'invalid_lease_ack' };
-            ids.add(result.characterId);
+            const identity = commitAckIdentity(result);
+            if (!identity || ids.has(identity.characterId)) return { ok: false, reason: 'invalid_commit_ack' };
+            ids.add(identity.characterId);
         }
     }
     if (message.type === 'worker_presence_request' || message.type === 'worker_repair_request') {
@@ -468,38 +433,13 @@ function commandIdentity(value) {
     return { characterId: value.characterId, commandId: value.commandId, checkpoint };
 }
 
-function validateToken(token = {}) {
-    if (!positiveInteger(token.characterId)) return { ok: false, reason: 'invalid_character' };
-    if (!Number.isSafeInteger(Number(token.revision)) || Number(token.revision) < 0) {
-        return { ok: false, reason: 'invalid_revision' };
-    }
-    if (!token.leaseId || typeof token.leaseId !== 'string' || token.leaseId.length > 200) {
-        return { ok: false, reason: 'invalid_lease' };
-    }
-    if (!Number.isFinite(Number(token.leaseUntil)) || Number(token.leaseUntil) <= 0) {
-        return { ok: false, reason: 'invalid_lease_until' };
-    }
-    return { ok: true };
-}
-
-function leaseRenewalToken(token) {
-    if (!token || typeof token !== 'object' || Array.isArray(token)
-        || !Number.isSafeInteger(token.characterId) || token.characterId <= 0
-        || token.ownerId !== 'cold_simulation_owner' || !Number.isSafeInteger(token.revision) || token.revision < 0
-        || typeof token.leaseId !== 'string' || !token.leaseId || token.leaseId.length > 200
-        || !Number.isSafeInteger(token.leaseUntil) || token.leaseUntil <= 0) return null;
-    return { characterId: token.characterId, ownerId: token.ownerId, revision: token.revision,
-        leaseId: token.leaseId, leaseUntil: token.leaseUntil };
-}
-
-function leaseAckIdentity(result, type) {
-    if (!['commit_ack', 'release_ack'].includes(type) || !result || typeof result !== 'object'
-        || Array.isArray(result) || typeof result.ok !== 'boolean') return null;
-    const token = leaseRenewalToken(result.inputToken);
-    const key = type === 'commit_ack' ? result.proposalId : result.releaseRequestId;
-    if (!token || result.characterId !== token.characterId || typeof key !== 'string' || !key
-        || key.length > (type === 'commit_ack' ? 240 : 160)) return null;
-    return { token, key };
+// A commit ack names its step: the bot and the proposal (the kernel's
+// characterId:startedAt).
+function commitAckIdentity(result) {
+    if (!result || typeof result !== 'object' || Array.isArray(result) || typeof result.ok !== 'boolean'
+        || !Number.isSafeInteger(result.characterId) || result.characterId <= 0
+        || typeof result.proposalId !== 'string' || !result.proposalId || result.proposalId.length > 240) return null;
+    return { characterId: result.characterId, proposalId: result.proposalId };
 }
 
 // The state main cached for an ok commit ack that carries the commit's numbers
@@ -533,9 +473,7 @@ module.exports = {
     envelope,
     envelopeBytes,
     validateEnvelope,
-    validateToken,
-    leaseRenewalToken,
-    leaseAckIdentity,
+    commitAckIdentity,
     committedState,
     staleRefusal,
     safetyCheckpoint,

@@ -48,17 +48,16 @@ function hotActor(state) {
     let timestamp = 2000;
     async function resolve(patch, debug = {}) {
         timestamp += 1000;
-        const token = await Owner.claim(state, { timestamp, leaseMs: 5000 });
-        assert(token.ok);
+        const revision = state.simulation.revision;
         const nextState = await Life.prepareResolve(state, {
             patch, events: [], materialize: { exp: 0, sp: 0, adena: 0, items: [] },
             nextResolveAt: timestamp + 1000, debug
         }, { persist: false, timestamp, projectClassProgression: true });
-        const [committed] = await Owner.commitBatch([{ revision: token.revision, nextState }], { timestamp });
+        const [committed] = await Owner.commitBatch([{ revision, nextState }], { timestamp });
         assert(committed.ok);
         state = Life.cachedState(id);
-        // A stale lease cannot overwrite either EXP or the death entitlement.
-        const [replayed] = await Owner.commitBatch([{ revision: token.revision, nextState }], { timestamp });
+        // A replay on the moved revision cannot overwrite either EXP or the death entitlement.
+        const [replayed] = await Owner.commitBatch([{ revision, nextState }], { timestamp });
         assert.strictEqual(replayed.ok, false);
         return Database.fetchCharacterDeathExperience(id);
     }

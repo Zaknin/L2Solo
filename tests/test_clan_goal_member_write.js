@@ -45,9 +45,8 @@ async function row(id) {
             loc: { locX: 1, locY: 1, locZ: 0 }, vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
             timing: { nextResolveAt: Date.now() + 86400000 } }, 'clan_goal_member_write_fixture');
 
-        // The worker claims the far member and builds a proposal on the old goal.
-        const token = await Owner.claim(Life.cachedState(far), { allowLifecycle: true });
-        assert(token.ok, `the far member is claimed: ${token.reason}`);
+        // The worker steps the far member and builds a proposal on the old goal.
+        const stepRevision = Life.cachedState(far).simulation.revision;
         const proposed = { ...Life.cachedState(far), stats: { ...Life.cachedState(far).stats, proposalProbe: true } };
         assert.equal(proposed.stats.equipmentPlan?.clanGoal?.goalKey, OLD_GOAL, 'fixture: the proposal carries the old goal');
 
@@ -55,7 +54,7 @@ async function row(id) {
         // on the revision it read, as ClanEquipmentService does.
         const [current] = await Life.statesByIds([far]);
         const read = current.simulation.revision;
-        assert.equal(read, Number((await row(far)).simulationRevision), 'fixture: main reads the claimed row');
+        assert.equal(read, Number((await row(far)).simulationRevision), 'fixture: main reads the stepped row');
         const repaired = Policy.reconcileGoals(current, new Set());
         assert.notEqual(repaired, current, 'fixture: the old goal is superseded');
         const written = await Database.writeClanGoalMember(far, repaired.activity, JSON.stringify(repaired.stats), read);
@@ -69,7 +68,7 @@ async function row(id) {
         assert.equal(cached.stats.clanPartyObjective, undefined, 'the cache holds the cleared objective');
 
         // The older proposal is refused and does not restore the old goal.
-        const [refused] = await Owner.commitBatch([{ revision: token.revision, nextState: proposed, proposal: { token } }]);
+        const [refused] = await Owner.commitBatch([{ revision: stepRevision, nextState: proposed, proposal: {} }]);
         assert.equal(refused.ok, false);
         assert.equal(refused.reason, 'stale_revision', 'the proposal built before the goal write is refused');
         assert.equal(JSON.parse((await row(far)).statsJson).equipmentPlan, undefined, 'the row keeps the cleared plan');

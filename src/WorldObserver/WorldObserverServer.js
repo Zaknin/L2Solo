@@ -2197,8 +2197,8 @@ function worldStatus() {
                     ageMs: worker.queueHead.ageMs ?? null,
                     current: worker.queueHead.current ?? null
                 } : null,
-                claiming: worker?.claiming ?? null,
                 inFlight: worker?.inFlight ?? null,
+                inFlightAgeMs: worker?.inFlightAgeMs ?? null,
                 dirty: worker?.dirty ?? null,
                 dirtyAgeMs: worker?.dirtyAgeMs ?? null,
                 commanding: worker?.commanding ?? null,

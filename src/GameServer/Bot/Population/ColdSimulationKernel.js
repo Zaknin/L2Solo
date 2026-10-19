@@ -5,6 +5,9 @@ const SparseNumericStorage = require('./SparseNumericStorage');
 const { isMainThread } = require('node:worker_threads');
 const SIMPLE_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const PROPOSAL_PAYLOAD_LIMIT_BYTES = 240 * 1024;
+// A step not answered by a commit ack this long after its start is requeued
+// (a party by its leader); a late ack then misses its proposal and is dropped.
+const STEP_STALL_MS = 30000;
 const BackgroundPartyLifecycle = require('./BackgroundPartyLifecycle');
 const PartyGoalCalculation = require('./PartyGoalCalculation');
 const Protocol = require('./ColdSimulationProtocol');
@@ -136,23 +139,16 @@ class DueHeap {
     }
 }
 
-// Active leases by bot. set() keeps checkAt at or below every positive
-// leaseUntil, so the 20 ms tick skips the expiry scan until a lease can be
-// due. Renewal only raises leaseUntil (onLeaseRenewal) and delete only raises
-// the minimum, so neither has to touch it; a grant's leaseUntil is never
-// lowered in place.
-class InFlightLeases extends Map {
-    constructor() {
-        super();
-        this.checkAt = Infinity;
-    }
+// A step's identity: a bot is in flight once at a time, so its start names
+// the step (its acks, its party's episode and raid ids).
+function stepProposalId(characterId, startedAt) {
+    return `${Number(characterId)}:${Number(startedAt)}`;
+}
 
-    set(id, active) {
-        super.set(id, active);
-        const until = Number(active?.grant?.leaseUntil || 0);
-        if (until > 0 && until < this.checkAt) this.checkAt = until;
-        return this;
-    }
+// The revision a party member's step started from: its proposal's fence.
+function memberRevision(run, characterId) {
+    const member = run.members.find(entry => Number(entry.characterId) === Number(characterId));
+    return Number(member?.simulation?.revision || 0);
 }
 
 function deterministicRandom(state = {}) {
@@ -295,11 +291,11 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
             ? [{ ...event, characterId: id }]
             : [];
         return {
-            proposalId: `${run.grants.get(id)?.leaseId}:${run.grants.get(id)?.revision}`,
+            proposalId: stepProposalId(id, run.startedAt),
             characterId: id,
             priority: 'P1',
             enqueuedAt: timestamp,
-            token: run.grants.get(id),
+            revision: memberRevision(run, id),
             baseState: run.members.find((member) => Number(member.characterId) === id) || state,
             nextState: state,
             durable: null,
@@ -589,12 +585,11 @@ class ColdSimulationKernel {
         this.now = options.now || Date.now;
         this.emit = options.emit || (() => {});
         this.maxBatch = Math.max(1, Math.min(64, Number(options.maxBatch) || 64));
-        // Resolves are chained below, so maxInFlight is an ownership/lease
-        // burst guard rather than a promise-concurrency setting. It must be
-        // allowed to stay below maxBatch; otherwise a large batch silently
-        // defeats the guard and recreates an expiring-lease backlog.
+        // Resolves are chained below, so maxInFlight is a step burst guard
+        // rather than a promise-concurrency setting. It must be allowed to
+        // stay below maxBatch; otherwise a large batch silently defeats the
+        // guard and recreates an unacknowledged-commit backlog.
         this.maxInFlight = Math.max(1, Math.min(128, Number(options.maxInFlight) || 32));
-        this.claimAckTimeoutMs = Math.max(1000, Number(options.claimAckTimeoutMs) || 5000);
         this.flushTargetMs = Math.max(100, Number(options.flushTargetMs) || 2000);
         this.flushHardMs = Math.max(this.flushTargetMs, Number(options.flushHardMs) || 5000);
         this.partySession = options.partySession || {};
@@ -632,24 +627,19 @@ class ColdSimulationKernel {
         this.heap = new DueHeap();
         this.scheduleTokens = new Map();
         this.nextScheduleToken = 1;
-        this.claiming = new Set();
-        this.claimStartedAt = new Map();
-        this.claimAttempts = new Map();
-        this.nextClaimRequest = 1;
         this.alarms = new Map();
-        this.operationalAlarms = new Map();
-        this.earliestOperationalAlarm = null;
         this.decisionAlarms = new Map();
         this.decisionEvents = null;
         this.buyerEvents = null;
         this.buyerWakeups = new Set();
-        // Own line observations: <=8 numeric {deals, at} rows per claimed bot.
-        // Release, hot handoff/remove and shutdown discard them; never saved.
+        // Own line observations: <=8 numeric {deals, at} rows per stepping bot.
+        // A step ended without a commit, hot handoff/remove and shutdown discard
+        // them; never saved.
         this.lookSeen = new Map();
         this.nextAlarmToken = 1;
-        this.inFlight = new InFlightLeases();
-        this.pendingReleases = new Map();
-        this.nextReleaseRequest = 1;
+        // Steps by bot, in start order (a Map keeps insertion order): the
+        // stall check reads only the oldest entries.
+        this.inFlight = new Map();
         this.partyRuns = new Map();
         this.dirty = new Map();
         this.commanding = new Set();
@@ -667,17 +657,14 @@ class ColdSimulationKernel {
         this.stats = {
             snapshots: 0,
             selected: 0,
-            claimed: 0,
             resolved: 0,
             proposals: 0,
             commands: 0,
             errors: 0,
             stale: 0,
-            claimRecoveries: 0,
-            leaseRecoveries: 0,
-            leaseRenewals: 0,
-            leaseRenewalMisses: 0,
-            // commit_acks that came after their lease ended or was re-claimed (a held party ack).
+            // Steps requeued after STEP_STALL_MS without a commit ack.
+            stallRecoveries: 0,
+            // commit_acks for a step no longer in flight (requeued as stalled, or removed).
             lateAcks: 0,
             proposalCompactions: 0,
             proposalOversize: 0,
@@ -920,23 +907,22 @@ class ColdSimulationKernel {
 
     remove(characterId) {
         const id = Number(characterId);
-        this.pendingReleases.delete(id);
         // Standalone kernels cannot have game economy entries before Global loads.
         if (typeof invoke === 'function') invoke('GameServer/Bot/Economy/EconomyContext').forget(id);
         if (!isMainThread && typeof invoke === 'function') invoke('GameServer/Bot/AI/BotPersona').forget(id);
         const current = this.states.get(id);
-        const partyId = String(this.inFlight.get(id)?.partyId || this.claimAttempts.get(id)?.partyId
+        const partyId = String(this.inFlight.get(id)?.partyId
             || this.partyOf(id)?.partyId || current?.state?.party?.partyId || '');
         if (partyId && typeof invoke === 'function') invoke('GameServer/Bot/Economy/EconomyContext').forgetGroup(partyId);
         this.partyRequirementProgress.delete(partyId);
         const run = this.partyRuns.get(partyId);
         if (run?.purpose.memberIds.includes(id)) {
-            // Retire the captured party before any pending resolver continues.
-            // Its remaining native leases use the existing release/ACK path.
+            // Retire the captured party before any pending resolver continues;
+            // the other members' steps end here and wait for their due.
             this.partyRuns.delete(partyId);
-            for (const memberId of run.purpose.memberIds) this.cancelClaimAttempt(memberId);
-            this.requestRelease([...run.grants.values()].filter(token => token.characterId !== id)
-                .map(token => ({ token, reason: 'party_member_removed' })));
+            const others = run.purpose.memberIds.filter(memberId => memberId !== id);
+            this.abandonSteps(others);
+            others.forEach(memberId => this.requeueAtDue(memberId));
         }
         this.inFlight.delete(id);
         this.dirty.delete(id);
@@ -950,9 +936,6 @@ class ColdSimulationKernel {
         this.versions.set(id, Number(this.versions.get(id) || 0) + 1);
         this.heap.remove(this.scheduleTokens.get(id)?.heapEntry);
         this.scheduleTokens.delete(id);
-        this.cancelClaimAttempt(id);
-        this.claiming.delete(id);
-        this.claimStartedAt.delete(id);
         this.commanding.delete(id);
         this.commandStartedAt.delete(id);
     }
@@ -982,35 +965,11 @@ class ColdSimulationKernel {
             locationStates: this.states.locationIndex.sourceSize('state'),
             occupancy: this.occupancy.size().owners,
             scheduleTokens: this.scheduleTokens.size, ownerHeapNodes: this.heap.size - this.alarms.size,
-            claiming: this.claiming.size, claimStartedAt: this.claimStartedAt.size, claimAttempts: this.claimAttempts.size,
-            inFlight: this.inFlight.size, dirty: this.dirty.size, pendingReleases: this.pendingReleases.size,
+            inFlight: this.inFlight.size, dirty: this.dirty.size,
             commanding: this.commanding.size, commandStartedAt: this.commandStartedAt.size,
             partyRuns: this.partyRuns.size, partyRequirementProgress: this.partyRequirementProgress.size,
             buyerWakeups: this.buyerWakeups.size, lookSeen: this.lookSeen.size
         };
-    }
-
-    armAlarm(kind, key, dueAt, options = {}) {
-        if (kind !== 'claim_ack' || options.operational !== true) throw new Error('unsupported_alarm');
-        if (!Number.isSafeInteger(dueAt) || dueAt < 0) throw new RangeError('invalid_alarm_deadline');
-        const id = Number(options.characterId);
-        if (typeof options.stamp !== 'string' || !options.stamp || Number(key) !== id
-            || (kind === 'claim_ack' && (!Number.isSafeInteger(id) || id <= 0 || !this.claiming.has(id)))) {
-            throw new Error('invalid_alarm_owner');
-        }
-        const alarmKey = `${kind}:${id}`;
-        const previous = this.alarms.get(alarmKey);
-        if (previous?.stamp === options.stamp && previous.dueAt === dueAt) return previous.alarmToken;
-        if (previous) this.cancelAlarm(kind, key, previous.alarmToken);
-        const entry = { kind: 'alarm', alarmKind: kind, alarmKey, key, dueAt, stamp: options.stamp,
-            characterId: id, alarmToken: this.nextAlarmToken++ };
-        this.alarms.set(alarmKey, entry);
-        this.operationalAlarms.set(alarmKey, entry);
-        this.heap.push(entry);
-        if (!this.earliestOperationalAlarm || this.heap.compare(entry, this.earliestOperationalAlarm) < 0) {
-            this.earliestOperationalAlarm = entry;
-        }
-        return entry.alarmToken;
     }
 
     armDecisionDeadline(key, dueAt, stamp, callback) {
@@ -1050,61 +1009,9 @@ class ColdSimulationKernel {
         return fired;
     }
 
-    cancelAlarm(kind, key, expectedToken) {
-        const alarmKey = `${kind}:${Number(key)}`;
-        const entry = this.alarms.get(alarmKey);
-        if (!entry || entry.alarmToken !== expectedToken) return false;
-        this.heap.remove(entry);
-        this.alarms.delete(alarmKey);
-        this.operationalAlarms.delete(alarmKey);
-        if (this.earliestOperationalAlarm === entry) {
-            this.earliestOperationalAlarm = null;
-            // Outstanding claims plus one worker safety cycle, bounded by
-            // normal/atomic ownership admission + 1; never all bot alarms.
-            for (const candidate of this.operationalAlarms.values()) {
-                if (!this.earliestOperationalAlarm || this.heap.compare(candidate, this.earliestOperationalAlarm) < 0) {
-                    this.earliestOperationalAlarm = candidate;
-                }
-            }
-        }
-        return true;
-    }
-
-    cancelClaimAttempt(characterId) {
-        const id = Number(characterId);
-        const attempt = this.claimAttempts.get(id);
-        if (attempt) this.cancelAlarm('claim_ack', id, attempt.alarmToken);
-        this.claimAttempts.delete(id);
-        this.claiming.delete(id);
-        this.claimStartedAt.delete(id);
-    }
-
-    drainOperationalAlarms(timestamp = this.now()) {
-        let fired = 0;
-        while (this.earliestOperationalAlarm && this.earliestOperationalAlarm.dueAt <= timestamp) {
-            const entry = this.earliestOperationalAlarm;
-            this.cancelAlarm(entry.alarmKind, entry.key, entry.alarmToken);
-            const id = entry.characterId;
-            if (this.claimAttempts.get(id)?.requestId !== entry.stamp || !this.claiming.has(id)) continue;
-            const run = [...this.partyRuns.values()].find(party => party.purpose.memberIds.includes(id));
-            if (run) {
-                run.purpose.memberIds.forEach(memberId => this.cancelClaimAttempt(memberId));
-                this.partyRuns.delete(String(run.purpose.partyId));
-                this.requeue(run.purpose.leaderId, timestamp + 1000);
-                DiagnosticConfig.developerDiagnostics && (this.stats.claimRecoveries += run.purpose.memberIds.length);
-            } else {
-                this.cancelClaimAttempt(id);
-                this.requeue(id, timestamp + 1000);
-                DiagnosticConfig.developerDiagnostics && (this.stats.claimRecoveries += 1);
-            }
-            fired++;
-        }
-        return fired;
-    }
-
     busy(characterId) {
         const id = Number(characterId);
-        return this.claiming.has(id) || this.inFlight.has(id) || this.commanding.has(id);
+        return this.inFlight.has(id) || this.commanding.has(id);
     }
 
     hasNormalCoverage(characterId) {
@@ -1113,14 +1020,6 @@ class ColdSimulationKernel {
             && scheduled.heapEntry?.scheduleToken === scheduled.token
             && scheduled.heapEntry?.version === current.version
             && this.heap.positions.has(scheduled.heapEntry);
-    }
-
-    // Matching partial party ACKs already own native leases before the whole
-    // party enters inFlight. Inspect this bounded alias set only after the
-    // healthy token/busy fast paths, never classify it as lost work.
-    hasAcceptedPartyGrant(characterId) {
-        for (const run of this.partyRuns.values()) if (run.grants?.has(Number(characterId))) return true;
-        return false;
     }
 
     needsNormalSchedule(characterId) {
@@ -1159,7 +1058,6 @@ class ColdSimulationKernel {
             }
             return false;
         }
-        if (this.hasAcceptedPartyGrant(id)) return false;
         kind ??= lifecycleKind(current.state, this);
         if (!isSchedulableKind(kind)) return false;
         this.schedule(id, current.version, dueAt ?? this.dueAt(current.state), kind);
@@ -1193,14 +1091,9 @@ class ColdSimulationKernel {
                 : transit && transit.dueAt <= timestamp ? transit : this.heap.peek();
             if (head.kind === 'alarm') {
                 if (head.dueAt > timestamp) break;
-                if (head.alarmKind === 'decision') {
-                    if (decisionBudget.remaining <= 0) break;
-                    DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
-                    this.drainDecisionDeadlines(timestamp, decisionBudget);
-                    continue;
-                }
+                if (decisionBudget.remaining <= 0) break;
                 DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
-                this.drainOperationalAlarms(timestamp);
+                this.drainDecisionDeadlines(timestamp, decisionBudget);
                 continue;
             }
             if (!this.validHeapEntry(head)) {
@@ -1217,7 +1110,7 @@ class ColdSimulationKernel {
             // A catalog page may race an ACK and carry a newer revision while
             // the previous revision is still busy. Never create a second
             // writer or depend on the invariant sweep to replace this token;
-            // every claim/commit/command completion schedules explicitly.
+            // every step/commit/command completion schedules explicitly.
             if (this.busy(id)) continue;
             const current = this.states.get(id);
             const encounter = current.state.stats?.pvpEncounter;
@@ -1228,14 +1121,9 @@ class ColdSimulationKernel {
             const kind = this.buyerWakeups.has(id) && eligibleBuyer(current.state)
                 ? 'command' : lifecycleKind(current.state, this);
             if (kind === 'resolver') {
-                this.claiming.add(id);
-                this.claimStartedAt.set(id, this.now());
-                candidates.push({
-                    characterId: id,
-                    expectedRevision: Math.max(0, Number(current.state.simulation?.revision || 0)),
-                    purpose: { kind: 'resolver' },
-                    state: current.state
-                });
+                // The step starts from the kernel's own copy at once.
+                this.inFlight.set(id, { state: current.state, startedAt: this.now() });
+                candidates.push({ characterId: id, purpose: { kind: 'resolver' } });
             } else if (kind === 'party') {
                 // The party row (the 'parties' table) without its two
                 // published fields, which the run keeps beside it.
@@ -1276,7 +1164,7 @@ class ColdSimulationKernel {
                         : members.filter((member) => Number(member.characterId) === id))
                     : members;
                 const candidateMemberIds = partyMembers.map((member) => Number(member.characterId)).filter(Boolean);
-                const occupiedOwnership = this.claiming.size + this.inFlight.size + this.commanding.size;
+                const occupiedOwnership = this.inFlight.size + this.commanding.size;
                 const atomicCapacityBurst = candidateMemberIds.length > this.maxInFlight
                     && candidateMemberIds.length <= this.maxAtomicPartySize
                     && occupiedOwnership === 0;
@@ -1293,7 +1181,7 @@ class ColdSimulationKernel {
                     continue;
                 }
                 if (!row || !partyMembers.length
-                    || candidateMemberIds.some((memberId) => this.claiming.has(memberId) || this.inFlight.has(memberId))) {
+                    || candidateMemberIds.some((memberId) => this.inFlight.has(memberId))) {
                     this.requeue(id, this.now() + 1000);
                     continue;
                 }
@@ -1301,7 +1189,7 @@ class ColdSimulationKernel {
                     this.partyCapacityBlocked = true;
                     // Keep the original overdue priority. Moving a party to
                     // now+100 on every partially free tick lets an endless
-                    // stream of overdue solo work starve the atomic claim.
+                    // stream of overdue solo work starve the atomic step.
                     this.schedule(id, current.version, entry.dueAt);
                     break;
                 }
@@ -1313,8 +1201,10 @@ class ColdSimulationKernel {
                     memberIds: candidateMemberIds,
                     invalidReason
                 };
+                const startedAt = this.now();
                 this.partyRuns.set(String(party.partyId), {
                     purpose,
+                    startedAt,
                     requirementRefresh: requirementRefresh === true,
                     raidOwner,
                     party,
@@ -1323,8 +1213,6 @@ class ColdSimulationKernel {
                     pressure: pressureFor(current.state, this.pressureRow),
                     targetNpcId: Number(PartyHuntingTarget.npcId(party, current.state,
                         memberId => this.states.get(Number(memberId))?.state) || 0),
-                    grants: new Map(),
-                    rejected: false,
                     invalidReason: purpose.invalidReason
                 });
                 candidateMemberIds.forEach((memberId) => {
@@ -1332,13 +1220,8 @@ class ColdSimulationKernel {
                     // The party run takes the member: its solo route is dropped.
                     const record = this.states.get(memberId);
                     if (record) record.route = null;
-                    this.claiming.add(memberId);
-                    this.claimStartedAt.set(memberId, this.now());
-                    candidates.push({
-                        characterId: memberId,
-                        expectedRevision: Math.max(0, Number(member?.simulation?.revision || 0)),
-                        purpose
-                    });
+                    this.inFlight.set(memberId, { state: member, startedAt, partyId: String(party.partyId) });
+                    candidates.push({ characterId: memberId, purpose });
                 });
             } else if (kind === 'command') {
                 const attempt = this.beginCommand(id);
@@ -1423,7 +1306,7 @@ class ColdSimulationKernel {
         const id = Number(characterId), current = this.states.get(id);
         if (!Number.isSafeInteger(id) || id <= 0 || (kind !== 'lifecycle' && kind !== 'review')
             || this.stopping || !current || current.state.phase !== 'cold' || this.busy(id)
-            || this.claiming.size + this.inFlight.size + this.commanding.size >= this.maxInFlight) return null;
+            || this.inFlight.size + this.commanding.size >= this.maxInFlight) return null;
         const checkpoint = Protocol.commandCheckpoint(current.state);
         if (!checkpoint) return null;
         const attempt = { startedAt: this.now(), commandId: `${kind}:${id}:${this.nextCommandRequest++}`,
@@ -1539,55 +1422,60 @@ class ColdSimulationKernel {
         }
     }
 
+    // Steps STEP_STALL_MS past their start without a commit ack: requeued, a
+    // party by its leader. inFlight is in start order, so the scan stops at
+    // the first step still within its time.
     recoverStalled(timestamp = this.now()) {
-        this.drainOperationalAlarms(timestamp);
-        if (this.inFlight.checkAt > timestamp) return;
-
-        let expiredLeases = null, checkAt = Infinity;
-        for (const entry of this.inFlight) {
-            const until = Number(entry[1]?.grant?.leaseUntil || 0);
-            if (!(until > 0)) continue;
-            if (until <= timestamp) (expiredLeases ||= []).push(entry);
-            else if (until < checkAt) checkAt = until;
+        for (const [id, active] of this.inFlight) {
+            if (active.startedAt + STEP_STALL_MS > timestamp) break;
+            const run = active.partyId ? this.partyRuns.get(active.partyId) : null;
+            const memberIds = active.partyId
+                ? [...this.inFlight].filter(([, entry]) => entry.partyId === active.partyId).map(([memberId]) => memberId)
+                : [id];
+            if (run) this.partyRuns.delete(active.partyId);
+            this.abandonSteps(memberIds);
+            if (active.partyId) {
+                const leaderId = Number(run?.purpose.leaderId || this.parties.get(active.partyId)?.leaderId || 0);
+                if (leaderId) this.requeue(leaderId, timestamp + 1000);
+            } else this.requeue(id, timestamp + 1000);
+            DiagnosticConfig.developerDiagnostics && (this.stats.stallRecoveries += memberIds.length);
         }
-        this.inFlight.checkAt = checkAt;
-        if (!expiredLeases) return;
-        const expiredParties = new Set(expiredLeases.map(([, active]) => active.partyId).filter(Boolean).map(String));
-        for (const partyId of expiredParties) {
-            const members = [...this.inFlight.entries()].filter(([, active]) => String(active.partyId || '') === partyId);
-            members.forEach(([id]) => {
-                this.inFlight.delete(Number(id));
-                this.dirty.delete(Number(id));
-            });
-            const leaderId = Number(this.parties.get(partyId)?.leaderId || 0);
-            if (leaderId && this.states.has(leaderId)) this.requeue(leaderId, timestamp + 1000);
-            DiagnosticConfig.developerDiagnostics && (this.stats.leaseRecoveries += members.length);
-        }
-        expiredLeases.filter(([, active]) => !active.partyId).forEach(([id]) => {
-            this.inFlight.delete(Number(id));
-            this.dirty.delete(Number(id));
-            this.requeue(Number(id), timestamp + 1000);
-            DiagnosticConfig.developerDiagnostics && (this.stats.leaseRecoveries += 1);
-        });
     }
 
-    // The earliest time tick() can find timed work: the heap head (a bot, a
-    // claim_ack alarm or a decision deadline, all on the one heap) or the
-    // first possible lease expiry. At or before now: work is due (maybe held
-    // by capacity or a pause). A superseded heap node only makes it earlier.
+    // A step that ends without a commit ack (an error, an oversized proposal,
+    // a stall, a removed party member): its slot frees here, and what the step
+    // kept goes. The caller requeues.
+    abandonSteps(characterIds) {
+        for (const characterId of characterIds) {
+            const id = Number(characterId), active = this.inFlight.get(id);
+            this.inFlight.delete(id);
+            this.dirty.delete(id);
+            this.lookSeen.delete(id);
+            if (!active) continue;
+            this.partyRequirementProgress.delete(String(active.partyId || active.state?.party?.partyId || ''));
+            // No review runs the plan a sent proposal stamped.
+            if (active.economyPlan) this.forgetSentPlan(id);
+        }
+    }
+
+    // The earliest time tick() can find timed work: the heap head (a bot or a
+    // decision deadline, both on the one heap) or the oldest step's stall. At
+    // or before now: work is due (maybe held by capacity or a pause). A
+    // superseded heap node only makes it earlier.
     nextWakeAt() {
-        return Math.min(Number(this.heap.peek()?.dueAt ?? Infinity), this.inFlight.checkAt);
+        const oldest = this.inFlight.values().next().value;
+        return Math.min(Number(this.heap.peek()?.dueAt ?? Infinity), oldest ? oldest.startedAt + STEP_STALL_MS : Infinity);
     }
 
-    // Diagnostics only: why a scheduler tick sent no claim. `no_claim`: the tick
+    // Diagnostics only: why a scheduler tick started no step. `no_step`: the tick
     // still took due work (a command, a busy or requeued bot, an alarm). For a
     // not-yet-due head, how far away the next heap entry (bot or alarm) is: how
     // often a wake at the earliest entry would fire instead of the 20 ms poll.
     countEmptyTick(timestamp) {
-        if (this.duePicked > 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_claim');
+        if (this.duePicked > 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_step');
         if (this.heap.size === 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'heap_empty');
         const gap = Number(this.heap.peek().dueAt || 0) - timestamp;
-        if (!(gap > 0)) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_claim');
+        if (!(gap > 0)) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_step');
         EconomyDiagnostics.count('worker_tick', 'empty', 'not_due');
         EconomyDiagnostics.count('worker_tick_gap', gap < 20 ? 'lt20ms' : gap < 100 ? 'lt100ms' : gap < 1000 ? 'lt1s' : 'ge1s');
     }
@@ -1602,7 +1490,7 @@ class ColdSimulationKernel {
             DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'empty', 'paused');
             return;
         }
-        const capacity = this.maxInFlight - this.claiming.size - this.inFlight.size - this.commanding.size;
+        const capacity = this.maxInFlight - this.inFlight.size - this.commanding.size;
         if (capacity <= 0) {
             DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'empty', 'no_capacity');
             // Completed work owns these slots until main acknowledges its
@@ -1618,197 +1506,43 @@ class ColdSimulationKernel {
             DiagnosticConfig.developerDiagnostics && this.countEmptyTick(timestamp);
             return;
         }
-        DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'claimed');
+        DiagnosticConfig.developerDiagnostics && EconomyDiagnostics.count('worker_tick', 'stepped');
         DiagnosticConfig.developerDiagnostics && (this.stats.selected += candidates.length);
-        const requestId = `claim:${this.nextClaimRequest++}`;
+        const parties = new Set();
         for (const candidate of candidates) {
-            const id = Number(candidate.characterId);
-            this.pendingReleases.delete(id);
-            const alarmToken = this.armAlarm('claim_ack', id,
-                this.claimStartedAt.get(id) + this.claimAckTimeoutMs,
-                { stamp: requestId, characterId: id, operational: true });
-            const partyId = candidate.purpose?.kind === 'party' ? String(candidate.purpose.partyId) : null;
-            this.claimAttempts.set(id, { requestId, alarmToken, partyId });
-            if (partyId) {
-                const run = this.partyRuns.get(partyId);
-                if (run) run.requestId = requestId;
+            if (candidate.purpose.kind === 'party') {
+                const partyId = String(candidate.purpose.partyId);
+                if (parties.has(partyId)) continue;
+                parties.add(partyId);
+                const source = this.capturePartyResolverSource(partyId);
+                this.resolveChain = this.resolveChain.then(() => this.resolvePartyStep(partyId, source));
+            } else {
+                const id = Number(candidate.characterId), source = this.captureResolverSource(id);
+                this.resolveChain = this.resolveChain.then(() => this.resolveStep(id, source));
             }
         }
-        this.emit('claim_request', { candidates: candidates.map(({ state, ...candidate }) => candidate) }, requestId);
-    }
-
-    onClaimAck(payload = {}, requestId) {
-        if (this.stopping || typeof requestId !== 'string' || !requestId) return;
-        const matches = result => this.claiming.has(Number(result.characterId))
-            && this.claimAttempts.get(Number(result.characterId))?.requestId === requestId;
-        // Unmatched grants stay inert. An abandoned native lease is cleaned
-        // by existing expiry/recovery; releasing an ACK replay could instead
-        // release the exact currently accepted solo/partial-party grant.
-        const rejected = (payload.rejected || []).filter(matches);
-        const grants = (payload.grants || []).filter(matches);
-        rejected.forEach((result) => {
-            const id = Number(result.characterId);
-            this.cancelClaimAttempt(id);
-            // A rejected claim carries the main process' current ownership
-            // snapshot. Party claims must absorb it just like solo claims do;
-            // otherwise the next party attempt repeats the same stale revision
-            // forever and creates a CAS/IPC retry storm.
-            if (result.state) {
-                this.upsert(result);
-                // Partition refusals can carry the same overdue row forever.
-                // Give other owners their turn instead of retrying every tick.
-                this.requeue(id, this.now() + Math.max(1000, Number(result.retryAfterMs) || 1000));
-            }
-            if (result.purpose?.kind === 'party') {
-                const run = this.partyRuns.get(String(result.purpose.partyId));
-                if (run) run.rejected = true;
-                return;
-            }
-            if (!result.state) this.requeue(id, this.now() + 1000);
-        });
-        grants.forEach((grant) => {
-            const id = Number(grant.characterId);
-            this.cancelClaimAttempt(id);
-            if (grant.purpose?.kind === 'party') {
-                const run = this.partyRuns.get(String(grant.purpose.partyId));
-                if (run) run.grants.set(id, grant);
-                return;
-            }
-            const entry = this.states.get(id);
-            if (!entry) return;
-            this.inFlight.set(id, { grant, state: entry.state, startedAt: this.now(), claimRequestId: requestId });
-            DiagnosticConfig.developerDiagnostics && (this.stats.claimed += 1);
-            const source = this.captureResolverSource(id);
-            this.resolveChain = this.resolveChain.then(() => this.resolveGrant(id, source));
-        });
-        const touchedParties = new Set([
-            ...grants.map((entry) => entry.purpose?.partyId),
-            ...rejected.map((entry) => entry.purpose?.partyId)
-        ].filter(Boolean).map(String));
-        touchedParties.forEach((partyId) => {
-            const run = this.partyRuns.get(partyId);
-            if (!run) return;
-            const complete = run.rejected || run.grants.size === run.purpose.memberIds.length;
-            if (!complete) return;
-            if (run.rejected) {
-                const releases = [...run.grants.values()].map((token) => ({ token, reason: 'party_claim_partial' }));
-                if (releases.length) this.requestRelease(releases);
-                run.purpose.memberIds.forEach((id) => {
-                    this.cancelClaimAttempt(id);
-                });
-                this.partyRuns.delete(partyId);
-                this.requeue(run.purpose.leaderId, this.now() + 1000);
-                return;
-            }
-            run.purpose.memberIds.forEach((id) => {
-                const state = run.members.find((member) => Number(member.characterId) === Number(id));
-                this.inFlight.set(Number(id), {
-                    grant: run.grants.get(Number(id)), state, startedAt: this.now(), partyId, claimRequestId: requestId
-                });
-            });
-            DiagnosticConfig.developerDiagnostics && (this.stats.claimed += run.purpose.memberIds.length);
-            const source = this.capturePartyResolverSource(partyId);
-            this.resolveChain = this.resolveChain.then(() => this.resolvePartyGrant(partyId, source));
-        });
-    }
-
-    livePartialRun(run) {
-        return !!run && !run.rejected && this.partyRuns.get(String(run.purpose.partyId)) === run
-            && run.purpose.memberIds.some(id => this.claiming.has(Number(id))
-                && this.claimAttempts.get(Number(id))?.requestId === run.requestId
-                && this.claimAttempts.get(Number(id))?.partyId === String(run.purpose.partyId));
-    }
-
-    renewalHolder(token, liveRuns = new Map()) {
-        if (this.stopping || !Protocol.leaseRenewalToken(token)) return null;
-        const id = token.characterId, entry = this.states.get(id);
-        if (entry?.state.phase !== 'cold') return null;
-        const same = grant => grant && grant.ownerId === token.ownerId && grant.revision === token.revision
-            && grant.leaseId === token.leaseId && grant.characterId === id;
-        const active = this.inFlight.get(id);
-        if (active) return same(active.grant) ? active : null;
-        const partyId = entry.state.party?.partyId || entry.state.partyId || this.partyOf(id)?.partyId;
-        const run = this.partyRuns.get(String(partyId || ''));
-        if (!liveRuns.has(run)) liveRuns.set(run, this.livePartialRun(run));
-        return liveRuns.get(run) && same(run.grants.get(id)) ? run : null;
-    }
-
-    *leaseRenewalPages({ replyBy } = {}) {
-        if (!Number.isSafeInteger(replyBy) || replyBy <= this.now() || this.stopping) return;
-        const runs = new Set();
-        for (const [id, attempt] of this.claimAttempts) {
-            if (!attempt.partyId || !this.claiming.has(id)) continue;
-            const run = this.partyRuns.get(attempt.partyId);
-            if (run?.requestId === attempt.requestId && !run.rejected) runs.add(run);
-        }
-        const activeHolders = [];
-        for (const active of this.inFlight.values()) activeHolders.push(active);
-        const holders = function* (kernel) {
-            // Capture only the bounded ownership window. New holders arriving
-            // during page ACK waits belong to the next renewal round.
-            for (const active of activeHolders) yield active.grant;
-            for (const run of runs) if (kernel.livePartialRun(run)) yield* run.grants.values();
-        }(this);
-        const seen = new Set();
-        let page = [], liveRuns = new Map();
-        for (const grant of holders) {
-            if (this.stopping || this.now() >= replyBy) return;
-            const token = Protocol.leaseRenewalToken(grant);
-            if (!token || token.leaseUntil <= this.now() || seen.has(token.characterId) || !this.renewalHolder(token, liveRuns)) continue;
-            seen.add(token.characterId); page.push(token);
-            if (page.length === Protocol.MAX_BATCH) { yield page; page = []; liveRuns = new Map(); }
-        }
-        if (page.length && !this.stopping && this.now() < replyBy) yield page;
-    }
-
-    onLeaseRenewal(payload = {}) {
-        const liveRuns = new Map();
-        (payload.renewals || []).forEach((renewal) => {
-            const id = Number(renewal.characterId);
-            const holder = this.renewalHolder(renewal, liveRuns);
-            const active = this.inFlight.get(id);
-            const grant = active?.grant || holder?.grants.get(id);
-            if (!holder || !grant) {
-                DiagnosticConfig.developerDiagnostics && (this.stats.leaseRenewalMisses += 1);
-                return;
-            }
-            const leaseUntil = Number(renewal.leaseUntil || 0);
-            if (!Number.isFinite(leaseUntil) || leaseUntil <= Number(grant.leaseUntil || 0)) return;
-            if (active) active.grant = { ...grant, leaseUntil };
-            if (!active || active.partyId) {
-                const run = !active ? holder : this.partyRuns.get(String(active.partyId));
-                const partyGrant = run?.grants.get(id);
-                if (partyGrant) run.grants.set(id, { ...partyGrant, leaseUntil });
-            }
-            DiagnosticConfig.developerDiagnostics && (this.stats.leaseRenewals += 1);
-        });
     }
 
     captureResolverSource(characterId) {
-        const id = Number(characterId), active = this.inFlight.get(id);
-        return { id, active, token: Protocol.leaseRenewalToken(active?.grant), requestId: active?.claimRequestId };
+        const id = Number(characterId);
+        return { id, active: this.inFlight.get(id) };
     }
 
     resolverSourceCurrent(source) {
-        return !this.stopping && !!source.token && typeof source.requestId === 'string' && !!source.requestId
-            && this.inFlight.get(source.id) === source.active && source.active.claimRequestId === source.requestId
-            && this.sameLease(source.active.grant, source.token)
-            && this.states.get(source.id)?.state.phase === 'cold'
-            && Number(source.active.grant.leaseUntil) > this.now();
+        return !this.stopping && !!source.active && this.inFlight.get(source.id) === source.active
+            && this.states.get(source.id)?.state.phase === 'cold';
     }
 
     capturePartyResolverSource(partyId) {
         const run = this.partyRuns.get(String(partyId));
-        return run ? { run, requestId: run.requestId,
-            sources: run.members.map(member => this.captureResolverSource(member.characterId)) } : null;
+        return run ? { run, sources: run.members.map(member => this.captureResolverSource(member.characterId)) } : null;
     }
 
-    async resolvePartyGrant(partyId, captured = this.capturePartyResolverSource(partyId)) {
+    async resolvePartyStep(partyId, captured = this.capturePartyResolverSource(partyId)) {
         if (!captured || this.stopping) return;
-        const { run, requestId, sources } = captured;
-        const current = () => this.partyRuns.get(String(partyId)) === run && run.requestId === requestId
-            && sources.every(source => source.requestId === requestId && this.resolverSourceCurrent(source)
-                && this.sameLease(run.grants.get(source.id), source.token));
+        const { run, sources } = captured;
+        const current = () => this.partyRuns.get(String(partyId)) === run
+            && sources.every(source => this.resolverSourceCurrent(source));
         if (!current()) return;
         const startedAt = this.now();
         let raidStepId = null;
@@ -2010,7 +1744,7 @@ class ColdSimulationKernel {
             if (!this.resolveParty) throw new Error('party_resolver_unavailable');
             const lastResolvedAt = Math.min(...run.members.map((member) => Number(member.timing?.lastResolvedAt || startedAt - 60000)));
             const resolveOptions = {
-                episodeId: run.grants.get(Number(run.party.leaderId))?.leaseId,
+                episodeId: stepProposalId(run.party.leaderId, run.startedAt),
                 assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
                 party: run.party,
                 raidOwner: run.raidOwner || null,
@@ -2026,7 +1760,7 @@ class ColdSimulationKernel {
             const raid = !meetingPending && run.spot?.raidBoss === true;
             let staged = null;
             if (raid) {
-                raidStepId = `raid:${run.grants.get(Number(run.party.leaderId))?.leaseId}`;
+                raidStepId = `raid:${stepProposalId(run.party.leaderId, run.startedAt)}`;
                 staged = await raids.stage({ key: raids.keyFor(run.spot, run.targetNpcId), id: raidStepId,
                     memberIds: run.members.map(member => Number(member.characterId)) }, () => this.resolveParty(resolveOptions));
                 if (!current()) return;
@@ -2068,7 +1802,7 @@ class ColdSimulationKernel {
             // commit, including completion with no funded helper contract.
             const atomicParty = raid || paidHelp || materialHunt || resolvedParty.status === 'dissolved';
             const memoryGroup = atomicParty || resolution.atomic || (resolution.memberResults || []).some(({ result }) => result.memoryEvents?.length)
-                ? { id: `hunt:${run.grants.get(Number(run.party.leaderId))?.leaseId}`,
+                ? { id: `hunt:${stepProposalId(run.party.leaderId, run.startedAt)}`,
                     memberIds: resolution.memberResults.map(({ state }) => Number(state.characterId)) } : null;
             if (atomicParty) {
                 resolvedParty.updatedAt = Math.max(startedAt, Number(run.party.updatedAt) + 1);
@@ -2142,13 +1876,13 @@ class ColdSimulationKernel {
                     requirementProgress.add(id);
                 }
                 const proposal = {
-                    proposalId: `${run.grants.get(id)?.leaseId}:${run.grants.get(id)?.revision}`,
+                    proposalId: stepProposalId(id, run.startedAt),
                     characterId: id,
                     priority: memoryGroup ? 'P1' : priorityForResult(state, result),
                     ...(memoryGroup ? { atomicGroup: memoryGroup } : {}),
                     ...(raid ? { raidStepId } : {}),
                     enqueuedAt: this.now(),
-                    token: run.grants.get(id),
+                    revision: memberRevision(run, id),
                     baseState: state,
                     nextState: projectedState,
                     durable: projection?.durable || null,
@@ -2213,7 +1947,8 @@ class ColdSimulationKernel {
                 DiagnosticConfig.developerDiagnostics && (this.stats.errors += 1);
                 this.emit('fault', { reason: error?.message || 'party_resolver_error', stage: 'party_project' });
             }
-            this.requestRelease([...run.grants.values()].map((token) => ({ token, reason: error?.message || 'party_resolver_error' })));
+            this.abandonSteps(run.purpose.memberIds);
+            this.requeue(run.purpose.leaderId, this.now() + 1000);
         } finally {
             if (raidStepId && !published) require('./ColdRaidEncounter').abort(raidStepId);
             if (this.partyRuns.get(String(partyId)) === run) this.partyRuns.delete(String(partyId));
@@ -2225,7 +1960,7 @@ class ColdSimulationKernel {
         }
     }
 
-    async resolveGrant(characterId, source = this.captureResolverSource(characterId)) {
+    async resolveStep(characterId, source = this.captureResolverSource(characterId)) {
         const active = source.active;
         if (source.id !== Number(characterId) || !this.resolverSourceCurrent(source)) return;
         const startedAt = this.now();
@@ -2264,11 +1999,11 @@ class ColdSimulationKernel {
             const priority = playerWaitingTransition(active.state, null, this) ? 'P0'
                 : projection?.durable ? 'P1' : priorityForResult(active.state, result);
             const proposal = {
-                proposalId: `${active.grant.leaseId}:${active.grant.revision}`,
+                proposalId: stepProposalId(characterId, active.startedAt),
                 characterId: Number(characterId),
                 priority,
                 enqueuedAt: this.now(),
-                token: active.grant,
+                revision: Number(active.state.simulation?.revision || 0),
                 baseState: resolveState,
                 nextState: projectedState,
                 durable: projection?.durable || null,
@@ -2276,10 +2011,7 @@ class ColdSimulationKernel {
                 ...(projection?.economyDecision ? { economyDecision: projection.economyDecision } : {}),
                 economyEdges: Number(projection?.economyEdges || 0),
                 ...(projection?.economyPlan ? { economyPlan: projection.economyPlan } : {}),
-                // The projected state precedes claim; main commits one revision
-                // after this grant before consuming the offer.
-                ...(projection?.buffOffer ? { buffOffer: { ...projection.buffOffer,
-                    providerRevision: active.grant.revision } } : {}),
+                ...(projection?.buffOffer ? { buffOffer: projection.buffOffer } : {}),
                 result,
                 options: { allowLifecycle: true, allowParty: !!active.state.stats?.tradeMeeting }
             };
@@ -2294,8 +2026,8 @@ class ColdSimulationKernel {
             handled = true;
             DiagnosticConfig.developerDiagnostics && (this.stats.errors += 1);
             this.emit('fault', { reason: error?.message || 'resolver_error', stage: 'solo_project', characterId: Number(characterId) });
-            this.inFlight.delete(Number(characterId));
-            this.requestRelease([{ token: active.grant, reason: error?.message || 'resolver_error' }]);
+            this.abandonSteps([characterId]);
+            this.requeueAtDue(characterId);
         } finally {
             if (handled) {
                 const elapsed = DiagnosticConfig.developerDiagnostics ? this.now() - startedAt : 0;
@@ -2383,9 +2115,8 @@ class ColdSimulationKernel {
         }
         oversized.forEach((proposal) => {
             if (proposal.raidStepId) require('./ColdRaidEncounter').abort(proposal.raidStepId);
-            this.dirty.delete(Number(proposal.characterId));
             DiagnosticConfig.developerDiagnostics && (this.stats.proposalOversizeRejected += 1);
-            this.requestRelease([{ token: proposal.token, reason: 'proposal_too_large' }]);
+            this.abandonSteps([proposal.characterId]);
             this.requeue(Number(proposal.characterId), timestamp + 5000);
         });
         if (!proposals.length) return 0;
@@ -2400,10 +2131,10 @@ class ColdSimulationKernel {
         // to 32 characters, so off need only preserve the original shape.
         if (!Object.hasOwn(this.stats.flushReasons, reason)) this.stats.flushReasons[reason] = 0;
         DiagnosticConfig.developerDiagnostics && (this.stats.flushReasons[reason] = Number(this.stats.flushReasons[reason] || 0) + 1);
-        // Sent proposals keep their ownership slots until the commit ACK.
+        // Sent proposals keep their in-flight slots until the commit ACK.
         // Priority and party flushes can fill that window just like a timer flush.
         const capacityBlocked = this.partyCapacityBlocked === true
-            || this.claiming.size + this.inFlight.size + this.commanding.size >= this.maxInFlight;
+            || this.inFlight.size + this.commanding.size >= this.maxInFlight;
         // Each proposal's measured size travels with it, so the main commit
         // queue need not serialise it again (the list fits the 16 KiB left
         // between the payload limit and the message limit).
@@ -2414,7 +2145,7 @@ class ColdSimulationKernel {
         const payloadBytes = proposalPayloadBytes(proposals.length, itemBytes) + Protocol.byteLength(tail) - 1;
         for (const proposal of proposals) {
             const active = this.inFlight.get(Number(proposal.characterId));
-            if (this.sameLease(active?.grant, proposal.token)) {
+            if (active && stepProposalId(proposal.characterId, active.startedAt) === proposal.proposalId) {
                 active.pendingCommitId = proposal.proposalId;
                 active.pendingRaidStepId = proposal.raidStepId;
                 // The inputs of the review the commit ack may name (onCommitAck).
@@ -2434,11 +2165,11 @@ class ColdSimulationKernel {
         const oldest = Math.min(...[...this.dirty.values()].map((proposal) => Number(proposal.enqueuedAt || now)), now);
         if (!this.dirty.size) return 0;
         const ageMs = now - oldest;
-        const capacity = this.maxInFlight - this.claiming.size - this.inFlight.size - this.commanding.size;
+        const capacity = this.maxInFlight - this.inFlight.size - this.commanding.size;
         if (capacity <= 0 || this.partyCapacityBlocked) {
             // A player-aware ownership window can be smaller than maxBatch.
             // Do not wait for an unreachable batch threshold while completed
-            // proposals occupy every lease; the main commit queue still
+            // proposals occupy every slot; the main commit queue still
             // coalesces these bounded batches before touching SQLite.
             return this.flush(null, false, { reason: 'capacity', limit: this.maxInFlight });
         }
@@ -2454,43 +2185,19 @@ class ColdSimulationKernel {
         return 0;
     }
 
-    sameLease(left, right) {
-        return !!left && !!right && left.characterId === right.characterId && left.ownerId === right.ownerId
-            && left.revision === right.revision && left.leaseId === right.leaseId;
-    }
-
-    requestRelease(releases = []) {
-        if (this.stopping) return 0;
-        const accepted = releases.filter(entry => Protocol.leaseRenewalToken(entry?.token));
-        if (!accepted.length) return 0;
-        const requestId = `release:${this.nextReleaseRequest++}`;
-        for (const entry of accepted) {
-            const token = Protocol.leaseRenewalToken(entry.token), id = token.characterId;
-            this.pendingReleases.delete(id);
-            if (this.pendingReleases.size >= 128 * Protocol.MAX_BATCH) {
-                // Forget admission only; the native requested release still
-                // runs, and existing snapshots/lease expiry cover a lost ACK.
-                this.pendingReleases.delete(this.pendingReleases.keys().next().value);
-            }
-            this.pendingReleases.set(id, { token, requestId, version: this.versions.get(id) || 0 });
-        }
-        this.emit('release_request', { releases: accepted }, requestId);
-        return accepted.length;
-    }
-
     onCommitAck(payload = {}) {
         const accepted = [], requeued = [], reviews = [];
         if (this.stopping) return accepted;
         (payload.results || []).forEach((result) => {
-            const identity = Protocol.leaseAckIdentity(result, 'commit_ack');
+            const identity = Protocol.commitAckIdentity(result);
             if (!identity) return;
-            const id = Number(result.characterId);
+            const id = identity.characterId;
             const active = this.inFlight.get(id);
-            if (!this.sameLease(active?.grant, identity.token) || Number(active.grant.leaseUntil) <= this.now()) {
+            if (active?.pendingCommitId !== identity.proposalId) {
                 DiagnosticConfig.developerDiagnostics && (this.stats.lateAcks += 1);
                 return;
             }
-            if (active.pendingCommitId !== identity.key || this.states.get(id)?.state.phase !== 'cold') return;
+            if (this.states.get(id)?.state.phase !== 'cold') return;
             if (active.pendingRaidStepId) require('./ColdRaidEncounter').acknowledge(active.pendingRaidStepId, id, result.ok);
             this.inFlight.delete(id);
             // An ok ack without the state carries the commit's numbers: main's
@@ -2503,8 +2210,8 @@ class ColdSimulationKernel {
                 const review = this.beginReview(id, result.review, active);
                 if (review) reviews.push(review);
             } else if (result.ok) {
-                // Committed, but the held state is the claim's: the bot waits for
-                // its due and its next claim, refused as stale, hands back the row.
+                // Committed, but the held state is the step's base: the bot waits
+                // for its due and its next step, refused as stale, hands back the row.
                 this.ackUnbuilt += 1;
                 requeued.push(id);
             } else {
@@ -2573,30 +2280,6 @@ class ColdSimulationKernel {
             ...(steps.has('training') ? { training: true } : {}) } };
     }
 
-    onReleaseAck(payload = {}) {
-        const accepted = [];
-        if (this.stopping) return accepted;
-        (payload.results || []).forEach((result) => {
-            const identity = Protocol.leaseAckIdentity(result, 'release_ack');
-            if (!identity) return;
-            const id = Number(result.characterId);
-            const pending = this.pendingReleases.get(id), active = this.inFlight.get(id);
-            if (!pending || pending.requestId !== identity.key || !this.sameLease(pending.token, identity.token)
-                || this.claiming.has(id) || this.states.get(id)?.state.phase !== 'cold'
-                || (active && !this.sameLease(active.grant, identity.token))
-                || (!active && pending.version !== this.versions.get(id))
-                || Number(active?.grant.leaseUntil || pending.token.leaseUntil) <= this.now()) return;
-            this.pendingReleases.delete(id);
-            this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || this.partyOf(id)?.partyId || ''));
-            this.lookSeen.delete(id);
-            this.inFlight.delete(id);
-            if (result.state) this.upsert(result);
-            else this.requeueAtDue(id);
-            accepted.push(result);
-        });
-        return accepted;
-    }
-
     completeCommand(payload = {}) {
         if (payload.kind === 'meeting') return this.completeMeetingPage(payload);
         const identity = Protocol.commandIdentity(payload);
@@ -2620,12 +2303,6 @@ class ColdSimulationKernel {
                     && !Protocol.sameCommandCheckpoint(outputCheckpoint, latest)
                     && outputCheckpoint.simulationRevision === latest.simulationRevision
                     && outputCheckpoint.updatedAt <= latest.updatedAt)) output = current.state;
-            if (output !== current.state && outputCheckpoint.simulationOwner === latest.simulationOwner
-                && outputCheckpoint.simulationRevision === latest.simulationRevision
-                && outputCheckpoint.simulationLeaseId === latest.simulationLeaseId
-                && Number(output.simulation?.leaseUntil || 0) < Number(current.state.simulation?.leaseUntil || 0)) {
-                output = { ...output, simulation: { ...output.simulation, leaseUntil: current.state.simulation.leaseUntil } };
-            }
             this.upsert({ state: output });
             // Rejected commands often return the unchanged overdue state. Do
             // not let that timestamp immediately re-enter the head of the queue.
@@ -2654,13 +2331,11 @@ class ColdSimulationKernel {
     fence(characterId) {
         const id = Number(characterId);
         const proposal = this.dirty.get(id) || null;
-        const active = this.inFlight.get(id) || null;
         const accepted = this.states.get(id)?.wishAdvisory;
         const wishAdvisory = accepted ? ColdEconomyDecision.wireAdvisory(accepted) : null;
         if (accepted && !wishAdvisory && EconomyDiagnostics.active()) EconomyDiagnostics.count('card', 'drop', 'handoff_unproved');
         this.remove(id);
-        return { characterId: id, proposal, token: active?.grant || proposal?.token || null,
-            ...(wishAdvisory ? { wishAdvisory } : {}) };
+        return { characterId: id, proposal, ...(wishAdvisory ? { wishAdvisory } : {}) };
     }
 
     pause() {
@@ -2682,14 +2357,9 @@ class ColdSimulationKernel {
         this.buyerEvents?.clear();
         this.buyerWakeups.clear();
         this.lookSeen.clear();
-        this.pendingReleases.clear();
         this.commanding.clear();
         this.commandStartedAt.clear();
-        for (const id of this.claimAttempts.keys()) this.cancelClaimAttempt(id);
-        for (const entry of this.alarms.values()) {
-            if (entry.alarmKind === 'decision') this.cancelDecisionDeadline(entry.key, entry.alarmToken);
-            else this.cancelAlarm(entry.alarmKind, entry.key, entry.alarmToken);
-        }
+        for (const entry of this.alarms.values()) this.cancelDecisionDeadline(entry.key, entry.alarmToken);
         await this.resolveChain.catch(() => null);
         this.flush(null, true);
         return this.heartbeatSnapshot();
@@ -2720,8 +2390,9 @@ class ColdSimulationKernel {
                 ageMs: head ? Math.max(0, now - dueAt) : 0,
                 current
             },
-            claiming: this.claiming.size,
             inFlight: this.inFlight.size,
+            // The oldest step's age (inFlight is in start order); STEP_STALL_MS requeues it.
+            inFlightAgeMs: this.inFlight.size ? Math.max(0, now - this.inFlight.values().next().value.startedAt) : 0,
             dirty: this.dirty.size,
             dirtyAgeMs: this.dirty.size ? Math.max(0, now - oldestDirtyAt) : 0,
             commanding: this.commanding.size,
@@ -2747,13 +2418,12 @@ class ColdSimulationKernel {
         ), now);
         const dueFences = due.reduce((counts, entry) => {
             const id = Number(entry.state.characterId);
-            if (this.claiming.has(id)) counts.claiming += 1;
-            else if (this.inFlight.has(id)) counts.inFlight += 1;
+            if (this.inFlight.has(id)) counts.inFlight += 1;
             else if (this.commanding.has(id)) counts.commanding += 1;
             else if (this.scheduleTokens.has(id)) counts.scheduled += 1;
             else counts.orphaned += 1;
             return counts;
-        }, { scheduled: 0, claiming: 0, inFlight: 0, commanding: 0, orphaned: 0 });
+        }, { scheduled: 0, inFlight: 0, commanding: 0, orphaned: 0 });
         return {
             ...this.heartbeatSnapshot(),
             due: due.length,
