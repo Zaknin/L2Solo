@@ -608,6 +608,9 @@ class ColdSimulationKernel {
         // party id, each member's party id, the director's one pressure row.
         this.parties = new Map();
         this.partyByMember = new Map();
+        // A party whose last run had no member result (no spot, no members):
+        // party id -> its resolver's retry time. Its next row clears it.
+        this.partyRetryAt = new Map();
         this.pressureRow = null;
         // The adena a bot's buy orders hold (the worker sums its board rows).
         this.escrowOf = typeof options.buyOrderEscrow === 'function' ? options.buyOrderEscrow : () => 0;
@@ -702,7 +705,13 @@ class ColdSimulationKernel {
             }
             if (Number.isFinite(transitionDue)) return transitionDue;
         }
-        return nextDueAt(state, timestamp, this.partySession, meetingPending, this);
+        const due = nextDueAt(state, timestamp, this.partySession, meetingPending, this);
+        // After a run with no result the stale row's due would come back with
+        // every new revision (the release returns one) and claim again at
+        // once; the retry time holds until the next row. A broken roster
+        // still dissolves now.
+        const retryAt = party && !meetingPending ? this.partyRetryAt.get(String(party.partyId)) : undefined;
+        return retryAt > due && !partyIntegrityInvalid(party, this.partyMembers(party), this.partySession) ? retryAt : due;
     }
 
     // The 'parties' table (ColdSimulationWorker watch): the rows by party id
@@ -730,6 +739,7 @@ class ColdSimulationKernel {
         const leaders = [...this.parties.values()].map(party => party.leaderId);
         this.parties.clear();
         this.partyByMember.clear();
+        this.partyRetryAt.clear();
         for (const id of leaders) this.refreshLeaderSchedule(id);
         return leaders;
     }
@@ -738,6 +748,7 @@ class ColdSimulationKernel {
         const previous = this.parties.get(partyId);
         if (!previous) return null;
         this.parties.delete(partyId);
+        this.partyRetryAt.delete(String(partyId));
         for (const id of previous.memberIds || []) {
             if (this.partyByMember.get(Number(id)) === partyId) this.partyByMember.delete(Number(id));
         }
@@ -1509,7 +1520,8 @@ class ColdSimulationKernel {
                     // The trip the plan started (commandSpot on main reads it).
                     route: lifecyclePlan?.route?.needed ? { needed: true, spotId: lifecyclePlan.route.spotId } : null,
                     computedAt: timestamp,
-                    ...(attempt.marketWakeup ? { marketWakeup: true } : {})
+                    ...(attempt.marketWakeup ? { marketWakeup: true } : {}),
+                    ...(hallVisit ? { hallVisit: true } : {})
                 }]
             });
             if (sent === false && this.cancelCommand(id, attempt)) {
@@ -2171,9 +2183,14 @@ class ColdSimulationKernel {
                 // No member result (the resolver found no spot or no members):
                 // no commit will answer these claims, so they go back now, not
                 // at lease expiry, and main can move the members meanwhile.
+                // The leader waits for the resolver's retry time (dueAt); the
+                // party's next row wakes it sooner.
                 handled = true;
+                EconomyDiagnostics.count('party_run', 'no_result', resolution.debug?.reason);
+                const retryAt = Math.max(this.now() + 1000, Number(resolution.nextResolveAt) || 0);
+                this.partyRetryAt.set(String(run.party.partyId), retryAt);
                 this.requestRelease([...run.grants.values()].map(token => ({ token, reason: 'party_no_result' })));
-                this.requeue(run.purpose.leaderId, this.now() + 1000);
+                this.requeue(run.purpose.leaderId, retryAt);
                 return;
             }
             published = handled = true;

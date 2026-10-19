@@ -2984,7 +2984,7 @@ const PopulationService = {
         }
         if (workerRequest?.precomputedPlan?.statsPacket) options = { ...options, statsPacket: workerRequest.precomputedPlan.statsPacket };
         const startedAt = Date.now();
-        const entryResult = this.resolveColdEntryBranch(state, options, startedAt);
+        const entryResult = this.resolveColdEntryBranch(state, options, startedAt, workerRequest?.hallVisit === true);
         if (entryResult !== COLD_RESOLVE_NEXT) return entryResult;
         const precomputedResult = workerRequest?.precomputedResult || null;
         if (joinedBackgroundParty(state)) {
@@ -3119,9 +3119,13 @@ const PopulationService = {
             });
     },
 
-    resolveColdEntryBranch(state, options, startedAt) {
+    // workerHall: the worker sent a hall visit (its placeholder result); a
+    // visit main does not take here falls through on that empty result.
+    resolveColdEntryBranch(state, options, startedAt, workerHall = false) {
         const hallVisit = invoke('GameServer/ClanHall/ColdVisit');
-        if (!joinedBackgroundParty(state) && (hallVisit.needed(state, startedAt) || state.stats?.clanHallVisit)) {
+        const visit = !joinedBackgroundParty(state) && (hallVisit.needed(state, startedAt) || !!state.stats?.clanHallVisit);
+        if (workerHall) Config.developerDiagnostics && Diagnostics.count('hall_visit', visit ? 'visit' : 'fall_through');
+        if (visit) {
             // ARCH-NOTE: Hall dispatch bypasses the ordinary resolve branch; keep Main's captured admission through its inner writer.
             return hallVisit.resolve(state, startedAt, options);
         }

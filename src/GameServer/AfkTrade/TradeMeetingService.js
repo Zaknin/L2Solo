@@ -548,6 +548,5 @@ async function init() {
     }
 }
 module.exports = { stage, discard, hasPreparation, preparationOf, canJoinParty, accept, cancel, receipt, prepareTrade, trade, wake, init, reset, presenceChanged,
-    isPlayerWaiting: id => !!playerWaiters.get(Number(id))?.size,
     adjustTransportPages,
     counters: () => ({ preparations: staged.size, pages: pages + transportPages, bytes: transportBytes + [...staged.values()].reduce((total, row) => total + row.bytes, 0), queued: queue.size, participants: enrolled.size }) };

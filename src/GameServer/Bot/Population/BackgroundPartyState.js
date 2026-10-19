@@ -5,6 +5,7 @@ const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const PartyRisk = require('./PartySpotRiskPolicy');
 const TableChannel = require('./ColdTableChannel').shared;
+const RaidEncounterScope = invoke('GameServer/RaidBoss/RaidEncounterScope');
 
 const TABLE = 'bot_background_parties';
 const cache = new Map();
@@ -79,6 +80,9 @@ function indexRaid(snapshot) {
     if (!bossKey) return;
     addKey(byRaidBoss, bossKey, snapshot.partyId);
     raidIndexed.set(snapshot.partyId, { bossKey, order: cacheGeneration });
+    // A boss a party newly hunts: its 'raids' row goes to the worker now, not
+    // at the coordinator's next review.
+    if (previous?.bossKey !== bossKey) RaidEncounterScope.changed(bossKey);
 }
 
 function clearIndexes() {

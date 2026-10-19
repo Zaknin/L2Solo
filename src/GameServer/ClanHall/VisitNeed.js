@@ -173,4 +173,19 @@ function needed(state, hall, managerPresent, timestamp = Date.now()) {
         (local(actor, hall) && recovery(actor, hall))
     );
 }
-module.exports = { REFRESH_MS, skillFor, available, point, effectFor, missing, recovery, local, actorFor, eligible, needed };
+// The first time after `timestamp` at which needed() can answer otherwise for
+// the same state and hall row: the retry time, the hall's service due time,
+// and each effect's expiry and refresh threshold (missing). Infinity: none.
+function validUntil(state, hall, timestamp = Date.now()) {
+    let until = Infinity;
+    const cross = (at) => { if (at > timestamp && at < until) until = at; };
+    cross(Number(state?.stats?.clanHallRetryAt || 0));
+    if (hall) cross(Number(hall.serviceDueAt || 0));
+    for (const effect of state?.stats?.coldCombat?.effects || []) {
+        if (!effect?.expiresAt) continue;
+        cross(Number(effect.expiresAt) - REFRESH_MS);
+        cross(Number(effect.expiresAt));
+    }
+    return until;
+}
+module.exports = { REFRESH_MS, skillFor, available, point, effectFor, missing, recovery, local, actorFor, eligible, needed, validUntil };

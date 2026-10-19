@@ -738,16 +738,17 @@ tables.watch('clan_halls', {
         if (previous && hallByOwner.get(previous.ownerId) === previous) hallByOwner.delete(previous.ownerId);
     }
 }, { retain: false });
-// One hall verdict per state object and hall row for a second: lifecycleKind
-// asks it several times per step.
+// One hall verdict per state object and hall row until its next time
+// crossing (VisitNeed.validUntil): lifecycleKind asks it several times per
+// step, and a new state or hall row is a new key.
 const hallVerdicts = new WeakMap();
 function hallNeeded(state, timestamp) {
     const hall = hallByOwner.get(Number(state?.clanId ?? state?.stats?.clanId)) || null;
     if (!hall && !state?.stats?.clanHallVisit) return false;
     const known = hallVerdicts.get(state);
-    if (known && known.hall === hall && timestamp - known.at < 1000) return known.value;
+    if (known && known.hall === hall && timestamp >= known.at && timestamp < known.until) return known.value;
     const value = VisitNeed.needed(state, hall, hall?.managerPresent === true, timestamp);
-    hallVerdicts.set(state, { hall, at: timestamp, value });
+    hallVerdicts.set(state, { hall, at: timestamp, until: VisitNeed.validUntil(state, hall, timestamp), value });
     return value;
 }
 tables.watch('personal_warehouse', {
