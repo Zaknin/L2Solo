@@ -71,7 +71,7 @@ function reviewDecision(state, existing, options, timestamp) {
     if (!goal) {
         if (existing?.current?.type === 'sell_inventory'
             && ['planned', 'active', 'blocked'].includes(existing.current.status)
-            && economy && !economy.intentPending && !economy.routePending && !state.incomingPending) {
+            && economy && !economy.intentPending && !state.incomingPending) {
             return { result: null, unchanged: false, candidates, economy,
                 goal: { ...existing.current, status: 'abandoned', reviewedAt: timestamp, nextReviewAt: timestamp } };
         }

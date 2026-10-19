@@ -68,7 +68,7 @@ function* measured(iterator) {
 function* prepareNative(state, economy, options) {
     const Listing = require('../Economy/MarketListingPolicy');
     const Ready = require('../Economy/ReadyTradeChoice');
-    const canAct = !economy.intentPending && !economy.routePending
+    const canAct = !economy.intentPending
         && !['dead', 'resting', 'traveling', 'crafting'].includes(state.activity)
         && !state.stats?.tradeMeeting && !state.incomingPending
         && !invoke('GameServer/Bot/Population/SurvivalFloor').forState(state, Number(options.now) || Date.now());

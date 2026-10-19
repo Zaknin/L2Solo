@@ -290,7 +290,7 @@ const occupationPlanner = new ColdOccupationPlanner({
                 // replaces the bot's held plan: its next request still finds it (L133).
                 rememberContext: false, caller: 'meeting_prepare', trigger: request.token });
             yield 'candidate';
-            if (economy.intentPending || economy.routePending) throw Error('trade_meeting_preparation_pending');
+            if (economy.intentPending) throw Error('trade_meeting_preparation_pending');
             const intents = invoke('GameServer/Bot/Economy/TradeIntent').project(input.state, economy.network, economy.projection,
                 id => economy.worth(id) ?? economy.price(id), 40);
             if (!intents) throw Error('trade_meeting_preparation_pending');

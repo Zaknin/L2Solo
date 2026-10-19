@@ -42,7 +42,6 @@ const original = {
     applyBestUpgrades: BotEquipmentUpgrade.applyBestUpgrades,
     sellAndRestock: ShoppingState.sellAndRestock,
     scheduleRestock: ShoppingState.scheduleRestock,
-    economyForState: invoke('GameServer/Bot/Economy/EconomyContext').forState,
     skillReview: BotSkillTraining.review
 };
 
@@ -194,9 +193,10 @@ async function run() {
             inventory: {}
         }
     };
-    const economyModule = invoke('GameServer/Bot/Economy/EconomyContext');
-    economyModule.forState = () => ({ inputKey: 'companion-fixture', worth: () => 1000,
-        network: { activity: { activity: 'shopping', itemId: 1, amount: 1 } } });
+    // The near decision the background thread sends this body (the
+    // coordinator's economy_decided -> DecisionEvents.receive): a shopping leaf.
+    const decision = { decided: true, inputHash: 1, worth: () => 1000,
+        network: { activity: { activity: 'shopping', itemId: 1, amount: 1 } } };
     genericSession.coldLifeState.stats.money = [77000, 2e-5, 15000, 0, 2e-5, 500, 1];
     let genericMarketLookups = 0;
     MarketOpportunity.bestOffer = (selfId, options = {}) => {
@@ -216,17 +216,15 @@ async function run() {
         } : null;
     };
     World.user = { sessions: [afkSellerSession] };
-    const preparedForState = economyModule.forState;
-    economyModule.forState = () => ({ ...preparedForState(), routePending: true });
     const heldPlan = genericSession.coldLifeState.stats.equipmentPlan;
     ShoppingState.tick(genericSession, genericBot, null, { getClosestTown: () => town, say() {} });
     assert.strictEqual(genericSession.shoppingEquipmentPlanChecked, undefined,
-        'pending route is not a completed town visit check');
+        'a visit before the first decision is not a completed town visit check');
     assert.strictEqual(genericSession.coldLifeState.stats.equipmentPlan, heldPlan,
-        'pending preparation preserves the accepted equipment plan');
-    assert.strictEqual(genericSession.plan, 'shopping', 'pending route does not end the visit');
+        'waiting for the first decision preserves the accepted equipment plan');
+    assert.strictEqual(genericSession.plan, 'shopping', 'waiting for the first decision does not end the visit');
     assert.strictEqual(genericMarketLookups, 0);
-    economyModule.forState = preparedForState;
+    genericSession.heldEconomy = decision;
     ShoppingState.tick(genericSession, genericBot, null, {
         getClosestTown: () => town,
         say() {}
@@ -248,7 +246,6 @@ async function run() {
     MarketOpportunity.bestOffer = (_itemId, options = {}) => options.budget >= 500 ? { ...offer, price: 500 } : null;
     assert.strictEqual(CompanionEquipmentShopping.planErrand(nonWish, genericBot, town), null,
         'an autonomous bot cannot spend its earmarked money on an item absent from the packet');
-    economyModule.forState = original.economyForState;
 
     World.user = { sessions: [] };
     MarketOpportunity.bestOffer = (selfId, options = {}) => Number(selfId) === 1 && !purchased
@@ -377,6 +374,5 @@ run().catch((error) => {
     BotEquipmentUpgrade.applyBestUpgrades = original.applyBestUpgrades;
     ShoppingState.sellAndRestock = original.sellAndRestock;
     ShoppingState.scheduleRestock = original.scheduleRestock;
-    invoke('GameServer/Bot/Economy/EconomyContext').forState = original.economyForState;
     BotSkillTraining.review = original.skillReview;
 });
