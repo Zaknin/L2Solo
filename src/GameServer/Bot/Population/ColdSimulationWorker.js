@@ -1639,9 +1639,9 @@ function startKernel(config = {}) {
     // scratch is cancelled on a newer canonical owner; it is never LRU-evicted.
     const nativeSet = kernel.states.set.bind(kernel.states), nativeDelete = kernel.states.delete.bind(kernel.states);
     const nativeClear = kernel.states.clear.bind(kernel.states);
-    // ownCommit (kernel upsert): the state is the step's own proposal echoed
-    // back by main's commit ack; the step already built its economy on it.
-    kernel.states.set = (id, entry, ownCommit = false) => {
+    // ownOutput (kernel upsert): the state is the step's own output echoed back
+    // by main ('commit' or 'review'); the step already built its economy on it.
+    kernel.states.set = (id, entry, ownOutput = null) => {
         const previousEntry = kernel.states.get(Number(id)), previous = previousEntry?.state;
         // A new life starts from no record (activations fence the bot first),
         // so the raises applied are this life's.
@@ -1663,9 +1663,10 @@ function startKernel(config = {}) {
             } else {
                 occupationPlanner.cancel(id);
                 // Own outputs are not inputs: no economy refresh for the own
-                // commit; economyPending stays for main's next refresh.
-                if (ownCommit && entry.economyPending) economyDiagnostics.count('occupation', 'refresh', 'own_commit_skipped');
-                occupationOwnerChanged(id, !ownCommit && Boolean(entry.economyPending));
+                // commit or review; economyPending stays for main's next refresh.
+                if (ownOutput && entry.economyPending) economyDiagnostics.count('occupation', 'refresh',
+                    ownOutput === 'review' ? 'own_review_skipped' : 'own_commit_skipped');
+                occupationOwnerChanged(id, !ownOutput && Boolean(entry.economyPending));
             }
         }
         return result;
