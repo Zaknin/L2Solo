@@ -38,10 +38,9 @@ function canonical(request) {
             || Buffer.byteLength(JSON.stringify(route)) > 256) throw Error('trade_meeting_route');
         if (!safe(party.revision) || !safe(party.hotAt)
             || !['hot', 'cold', 'player'].includes(party.phase)
-            || ![party.ownerId, party.leaseId].every(value => value === null || ascii(value) && Buffer.byteLength(value) <= 80)
             || !safe(party.sequence, true) || party.sequence !== (side ? seqB : seqA)) throw Error('trade_meeting_authority');
         return { revision: party.revision, sequence: party.sequence,
-            phase: party.phase, ownerId: party.ownerId, leaseId: party.leaseId, hotAt: party.hotAt, route: { fee: route.fee, scroll: route.scroll, method: route.method, durationMs: route.durationMs }, needRevision: requireSafe(party.needRevision),
+            phase: party.phase, hotAt: party.hotAt, route: { fee: route.fee, scroll: route.scroll, method: route.method, durationMs: route.durationMs }, needRevision: requireSafe(party.needRevision),
             survivalCost: requireSafe(party.survivalCost || 0) };
     });
     return { token, actorA, actorB, seqA, seqB, town, point: { locX: point.locX, locY: point.locY, locZ: point.locZ }, lines: basket, parties: sides };
@@ -111,7 +110,6 @@ function create(io) {
             const life = one("SELECT *, json_extract(statsJson,'$.playerPartyTakeover.playerId') playerPartyId FROM bot_life_state WHERE characterId=?", [id]);
             if (io.canStartTrade && !io.canStartTrade(id, life)) throw Error('trade_meeting_party_busy');
             if (life && (Number(life.hp) <= 0 || life.activity === 'dead' || Number(life.simulationRevision) !== party.revision || life.phase !== party.phase
-                || (life.simulationOwner || null) !== party.ownerId || (life.simulationLeaseId || null) !== party.leaseId
                 || Number(life.lastHotAt || 0) !== party.hotAt)) throw Error('trade_meeting_authority_changed');
             if (life && party.phase === 'hot' && !io.position(id)?.alive) throw Error('trade_meeting_authority_changed');
             if (!life) {

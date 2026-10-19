@@ -131,6 +131,7 @@ const ColdCombatProfile = require('./ColdCombatProfile');
 const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
 const CraftEligibility = require('../Economy/CraftEligibility');
 const RecipeBookCodec = require('../Economy/RecipeBookCodec');
+const EconomyCommit = require('../Economy/EconomyCommit');
 const VisitNeed = require('../../ClanHall/VisitNeed');
 const HallPolicy = require('../../ClanHall/Policy');
 const forbiddenLoaded = Object.keys(require.cache).filter((filename) => (
@@ -252,8 +253,6 @@ const occupationPlanner = new ColdOccupationPlanner({
         : left.assetsKey === right.assetsKey && left.state.updatedAt === right.state.updatedAt
         && sameDecisionInput(left.state, right.state)
         && left.state.simulation?.revision === right.state.simulation?.revision
-        && left.state.simulation?.ownerId === right.state.simulation?.ownerId
-        && left.state.simulation?.leaseId === right.state.simulation?.leaseId
         && left.state.inventory === right.state.inventory
         && left.state.stats?.workshop?.entries === right.state.stats?.workshop?.entries
         && left.knownShotRecipes === right.knownShotRecipes && left.recipeBook === right.recipeBook && left.stock === right.stock
@@ -279,9 +278,7 @@ const occupationPlanner = new ColdOccupationPlanner({
         if (input.mode === 'meeting') {
             const request = input.meeting, ownId = Number(input.state.characterId);
             const side = request.actorA === ownId ? 0 : 1, own = request.parties[side];
-            const authority = invoke('GameServer/Bot/Economy/EconomyCommit').authority(input.state);
-            if (!['phase', 'ownerId', 'leaseId', 'hotAt', 'revision'].every(key => own[key] === authority[key]))
-                throw Error('trade_meeting_authority_changed');
+            if (!EconomyCommit.sameAuthority(own, EconomyCommit.authority(input.state))) throw Error('trade_meeting_authority_changed');
             const routeRows = yield* EconomicTrip.prepare(input.state);
             const Context = invoke('GameServer/Bot/Economy/EconomyContext');
             // Fresh physical incoming is delivered in the native owner snapshot.
@@ -489,7 +486,7 @@ const occupationPlanner = new ColdOccupationPlanner({
                 entry.economyPending = workshop.economyPlan.d || 0;
                 if (workshop.economyDecision) entry.published = workshop.economyDecision;
                 send('ready', { phase: 'economy_plan_ready', characterId: id,
-                    authority: invoke('GameServer/Bot/Economy/EconomyCommit').authority(input.state), economyPlan: workshop.economyPlan,
+                    authority: EconomyCommit.authority(input.state), economyPlan: workshop.economyPlan,
                     economyDecision: workshop.economyDecision });
             }
             input.economy = null; return;
@@ -1641,9 +1638,7 @@ function startKernel(config = {}) {
                 && held.input.routeKey === routeKey
                 && held.input.state.updatedAt === entry.state.updatedAt
                 && sameDecisionInput(held.input.state, entry.state)
-                && Number(entry.state.simulation?.revision || 0) > Number(held.input.state.simulation?.revision || 0)
-                && held.input.state.simulation?.ownerId === entry.state.simulation?.ownerId
-                && held.input.state.simulation?.leaseId === entry.state.simulation?.leaseId;
+                && Number(entry.state.simulation?.revision || 0) > Number(held.input.state.simulation?.revision || 0);
             if (held?.done && (acceptedPublication || held.input.state === entry.state || occupationPlanner.sameInput(held.input, incoming))) {
                 held.input = incoming;
             } else {

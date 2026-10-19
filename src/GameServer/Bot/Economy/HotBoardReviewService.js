@@ -2,15 +2,14 @@ const { performance } = require('perf_hooks');
 const BoardReviewEvents = require('./BoardReviewEvents');
 const Diagnostics = require('./EconomyDiagnostics');
 
+// A hot review is fenced by the revision; the phase is the DB's hot check.
+// No hot time: every hot merge moves lastHotAt without a new decision.
 function authorityOf(state) {
-    return { ownerId: state.simulation?.ownerId || 'legacy_main',
-        revision: Number(state.simulation?.revision || 0), leaseId: state.simulation?.leaseId || null };
+    return { revision: Number(state.simulation?.revision || 0) };
 }
 
 function sameAuthority(state, expected) {
-    const actual = authorityOf(state);
-    return actual.ownerId === expected.ownerId && actual.revision === expected.revision
-        && actual.leaseId === expected.leaseId;
+    return authorityOf(state).revision === expected.revision;
 }
 
 function botSession(session) {
