@@ -25,8 +25,8 @@ const MAX_SOURCE_YIELDS = 16384;
 // Rows are as long as an item's index records (up to ~3,300 for a material
 // every monster drops): the bound counts cells, one per record (9 bytes for
 // rules plus 4 for its eligible ordinal) and one per eligible record (4 for
-// its level-ordered ordinal): 1 MiB of ordinals in total, plus ~24 bytes per
-// distinct target level of a row.
+// its level-ordered ordinal): 1 MiB of ordinals in total, plus ~32 bytes per
+// distinct target level of a row. One row per item serves every killer level.
 const MAX_SOURCE_FACT_RULE_CELLS = 262144;
 let sourceIndexCache = { byItemId: null, resolved: new Map(), yields: new Map(),
     plainYields: new Map(), deepYields: new Map(), plainRatesKey: null, huntable: new Map(), factRules: new Map(), factRulesKey: null, factRuleCells: 0 };
@@ -1286,7 +1286,13 @@ function sourceWithinVoluntaryHuntBand(state = {}, source = {}) {
     const sourceLevel = Number(source.npcLevel || source.spotLevel || 0);
     if (!botLevel || !sourceLevel) return true;
     const economic = state.economicLower || invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state);
-    return sourceLevel - botLevel >= (economic ? -15 : BotTargetScorer.MIN_LEVEL_GAP);
+    return sourceLevel - botLevel >= sourceMinLevelGap(economic);
+}
+
+// The lowest npc-minus-bot level gap a bot hunts voluntarily: an equipment
+// earning route admits fifteen levels below, an ordinary hunt the scorer's.
+function sourceMinLevelGap(economicLower) {
+    return economicLower ? -15 : BotTargetScorer.MIN_LEVEL_GAP;
 }
 
 function isPlanSourceViableForState(state = {}, plan = {}) {
@@ -2191,7 +2197,9 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
         }
         return readiness;
     };
-    const rules = sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, !!options.economicLower);
+    const rules = sourceFactRulesFor(entries, itemId, ratesKey);
+    // The bot's voluntary level band: a record below it is refused as level_band.
+    const minGap = sourceMinLevelGap(!!options.economicLower);
     // The full view still reads all rows. Ready readers walk only eligible
     // ordinals; diagnostics merge the few static buckets at their first row.
     // Oversized uncached rows use the full walk without an extra ordinal array.
@@ -2201,31 +2209,44 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
     if (!bestForWish || !prepared) {
         return yield* walk(prepared ? rules.eligible : null, prepared && counts ? rules.staticBuckets : [], counts, false, 0);
     }
-    // The row orders each kind's eligible records by target level: the safe
-    // ones (level <= soloLevelBound) are a prefix, the party_needed ones the
-    // tail. A bot without Spoil refuses every spoil record as spoil_skill.
-    // Neither is visited: both tails are counted as buckets at their first
+    // The row orders each kind's eligible records by target level (the
+    // record's npc level, else its spot level, else Infinity, which the band
+    // never takes): the
+    // level_band ones (below killerLevel + minGap) are a prefix, the safe ones
+    // (up to soloLevelBound) follow, the party_needed ones are the tail. A bot
+    // without Spoil refuses every spoil record as spoil_skill. Only the safe
+    // window is visited: the rest is counted as buckets at their first
     // ordinal, so the reason keys keep the full walk's first-seen order.
     const { levels, drops, spoils } = rules;
     if (spoils.count && spoiler === undefined) spoiler = sourceSpoilerFor(state);
     const walkSpoils = spoils.count > 0 && !!spoiler;
+    const bandRanks = killerLevel ? levelRanksBelowGap(levels, killerLevel, minGap) : 0;
+    const bandDrops = drops.rankStart[bandRanks], bandSpoils = walkSpoils ? spoils.rankStart[bandRanks] : 0;
     let safeRanks = levels.length;
-    if (drops.count || walkSpoils) safeRanks = levelRanksAtMost(levels, soloLevelBound(readReadiness()));
-    const safeDrops = drops.rankStart[safeRanks], safeSpoils = walkSpoils ? spoils.rankStart[safeRanks] : 0;
+    if (drops.count > bandDrops || walkSpoils && spoils.count > bandSpoils) {
+        safeRanks = Math.max(bandRanks, levelRanksAtMost(levels, soloLevelBound(readReadiness())));
+    }
+    const safeDrops = drops.rankStart[safeRanks] - bandDrops;
+    const safeSpoils = walkSpoils ? spoils.rankStart[safeRanks] - bandSpoils : 0;
     let safeOrdinals = rules.eligible;
     if (safeDrops + safeSpoils < safeOrdinals.length) {
         // Back to ordinal order: the walk reads values, trips and ties in it.
         safeOrdinals = new Uint32Array(safeDrops + safeSpoils);
-        safeOrdinals.set(rules.ranked.subarray(drops.base, drops.base + safeDrops));
-        safeOrdinals.set(rules.ranked.subarray(spoils.base, spoils.base + safeSpoils), safeDrops);
+        safeOrdinals.set(rules.ranked.subarray(drops.base + bandDrops, drops.base + bandDrops + safeDrops));
+        safeOrdinals.set(rules.ranked.subarray(spoils.base + bandSpoils, spoils.base + bandSpoils + safeSpoils), safeDrops);
         safeOrdinals.sort();
     }
     let safeBuckets = counts ? rules.staticBuckets : [];
     if (counts && safeOrdinals !== rules.eligible) {
         safeBuckets = [...safeBuckets];
-        if (safeDrops < drops.count) safeBuckets.push(sourceTailBucket('party_needed', drops, safeRanks));
+        if (bandDrops) safeBuckets.push(sourceHeadBucket(drops, bandRanks));
+        if (bandDrops + safeDrops < drops.count) safeBuckets.push(sourceTailBucket('party_needed', drops, safeRanks));
+        // spoil_skill precedes level_band: the whole kind is one bucket.
         if (!walkSpoils && spoils.count) safeBuckets.push(sourceTailBucket('spoil_skill', spoils, 0));
-        else if (safeSpoils < spoils.count) safeBuckets.push(sourceTailBucket('party_needed', spoils, safeRanks));
+        else {
+            if (bandSpoils) safeBuckets.push(sourceHeadBucket(spoils, bandRanks));
+            if (bandSpoils + safeSpoils < spoils.count) safeBuckets.push(sourceTailBucket('party_needed', spoils, safeRanks));
+        }
         safeBuckets.sort((a, b) => a.firstOrdinal - b.firstOrdinal);
     }
     // The 'source' steps stay as many as the full walk takes.
@@ -2262,10 +2283,16 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
             }
             cursor++;
             // The fact reads the shared rule row of the record (yield and the
-            // per-level refusals), not a materialized source per entry.
+            // static refusals), not a materialized source per entry; the
+            // level band and the deep-blue yield follow the killer level.
             const rule = rules.reasons[ordinal];
             if (rule === FACT_RULE_NO_CHANCE) continue;
-            const entry = entries[ordinal], { spot, kind } = entry, expectedYield = rules.expected[ordinal];
+            const entry = entries[ordinal], { spot, kind } = entry, npcLevel = sourceRecordNpcLevel(entry);
+            // The row holds the penalty-free yield; a deep-blue record (only an
+            // equipment earning route walks one) reads its penalised yield.
+            const expectedYield = ProgressionRates.deepBluePenaltyPercent(npcLevel, killerLevel)
+                ? dropYieldFor(entry.reward, itemId, kind, npcLevel, killerLevel, ratesKey).expectedYield
+                : rules.expected[ordinal];
             let status = 'ineligible', reason = rule === FACT_RULE_RAID ? 'raid' : null;
             if (!reason && kind === 'spoil') {
                 // The executor's rule: a learned Spoil, not the class (E189).
@@ -2273,6 +2300,7 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
                 if (!spoiler) reason = 'spoil_skill';
             }
             if (!reason && rule) reason = FACT_RULE_REASONS[rule];
+            if (!reason && !bounded && killerLevel && npcLevel && npcLevel - killerLevel < minGap) reason = 'level_band';
             if (!reason) {
                 // A raid record never reaches here (FACT_RULE_RAID); a 'raid' kind
                 // still needs its roster, as soloSafeForSource says.
@@ -2337,6 +2365,12 @@ function sourceTailBucket(reason, kind, rank) {
     return { rule: 0, kind: null, firstOrdinal: kind.tailFirst[rank], count: kind.count - kind.rankStart[rank], reason };
 }
 
+// The level_band head of one kind of a fact row, below rank: one counts
+// bucket at the head's first ordinal.
+function sourceHeadBucket(kind, rank) {
+    return { rule: 0, kind: null, firstOrdinal: kind.headFirst[rank], count: kind.rankStart[rank], reason: 'level_band' };
+}
+
 // How many of the ascending levels are <= bound (a binary search).
 function levelRanksAtMost(levels, bound) {
     let low = 0, high = levels.length;
@@ -2348,31 +2382,50 @@ function levelRanksAtMost(levels, bound) {
     return low;
 }
 
+// How many of the ascending levels are below the band: level - killerLevel
+// < minGap, strictly, as the walk refuses a record (a binary search; a NaN
+// level sorts last and is never below).
+function levelRanksBelowGap(levels, killerLevel, minGap) {
+    let low = 0, high = levels.length;
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (levels[middle] - killerLevel < minGap) low = middle + 1;
+        else high = middle;
+    }
+    return low;
+}
+
 // The per-bot loop of sourceFacts re-derived, for every record, answers that
-// depend only on the record, the item, the killer level and the rates: the
-// yield pair, raid, a huntable NPC and the voluntary level band. One row per
-// item and level holds them, aligned with the index records; it lives with
-// the index (rebuilt with it) and follows the rate profile. Numbers only, no
-// bot references: 9 bytes per record, two 4-byte ordinals per eligible record
-// (in record order and by target level) and ~24 bytes per distinct level.
-// Static refusals use at most six buckets, each retaining its first ordinal,
-// so diagnostic reason keys keep their full-view insertion order. A record
-// with FACT_RULE_NO_CHANCE is never seen or counted by the bot (chance 0).
-const FACT_RULE_RAID = 1, FACT_RULE_CANNOT_HUNT = 2, FACT_RULE_LEVEL_BAND = 3, FACT_RULE_NO_CHANCE = 255;
-const FACT_RULE_REASONS = [null, 'raid', 'cannot_hunt', 'level_band'];
+// depend only on the record, the item and the rates: the penalty-free yield
+// pair, raid and a huntable NPC. One row per item holds them, aligned with
+// the index records; it lives with the index (rebuilt with it) and follows
+// the rate profile. The voluntary level band and the deep-blue yield depend
+// on the killer level: sourceFacts applies them per bot (the band is a prefix
+// of the level ranks). Numbers only, no bot references: 9 bytes per record,
+// two 4-byte ordinals per eligible record (in record order and by target
+// level) and ~32 bytes per distinct level. Static refusals use at most four
+// buckets, each retaining its first ordinal, so diagnostic reason keys keep
+// their full-view insertion order. A record with FACT_RULE_NO_CHANCE is never
+// seen or counted by the bot: its chance is 0 at killer level 0, which holds
+// at every killer level only while every reward group has overall * rate > 0
+// (a deep-blue penalty lifts a 0-chance group to its floor; the game data has
+// no such group).
+const FACT_RULE_RAID = 1, FACT_RULE_CANNOT_HUNT = 2, FACT_RULE_NO_CHANCE = 255;
+const FACT_RULE_REASONS = [null, 'raid', 'cannot_hunt'];
 const NO_FACT_ORDINAL = 0xFFFFFFFF;
-const NO_RANKED_KIND = { base: 0, count: 0, rankStart: new Uint32Array(1), tailFirst: new Uint32Array([NO_FACT_ORDINAL]) };
+const NO_RANKED_KIND = { base: 0, count: 0, rankStart: new Uint32Array(1),
+    headFirst: new Uint32Array([NO_FACT_ORDINAL]), tailFirst: new Uint32Array([NO_FACT_ORDINAL]) };
 const NO_FACT_RULES = { entries: [], expected: new Float64Array(0), reasons: new Uint8Array(0),
     eligible: new Uint32Array(0), staticBuckets: [], cells: 0,
     levels: new Float64Array(0), ranked: new Uint32Array(0), drops: NO_RANKED_KIND, spoils: NO_RANKED_KIND };
-function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLower = false) {
+function sourceFactRulesFor(entries, itemId, ratesKey) {
     if (!entries.length) return NO_FACT_RULES;
     if (sourceIndexCache.factRulesKey !== ratesKey) {
         sourceIndexCache.factRules = new Map();
         sourceIndexCache.factRulesKey = ratesKey;
         sourceIndexCache.factRuleCells = 0;
     }
-    const cache = sourceIndexCache.factRules, key = `${itemId}:${killerLevel}:${Number(economicLower)}`;
+    const cache = sourceIndexCache.factRules, key = Number(itemId);
     let rules = cache.get(key);
     if (rules && rules.entries === entries) return rules;
     if (rules) { cache.delete(key); sourceIndexCache.factRuleCells -= rules.cells; }
@@ -2388,19 +2441,18 @@ function sourceFactRulesFor(entries, itemId, killerLevel, ratesKey, economicLowe
     const eligible = retain ? new Uint32Array(entries.length) : null;
     const staticBuckets = [], bucketsByRuleKind = new Map();
     let eligibleCount = 0;
-    // This shared rule row already has the resolved economic band. Do not
-    // re-enter the actor's wish policy (and resolve its module) per record.
-    const minGap = economicLower ? -15 : BotTargetScorer.MIN_LEVEL_GAP;
+    if (Diagnostics.active()) Diagnostics.count('source_bound', 'row', 'built');
     for (let ordinal = 0; ordinal < entries.length; ordinal++) {
         // The rule reads only the level, the raid flag and the NPC id of a
         // record: no source target object per record (L130).
         const entry = entries[ordinal], npcLevel = sourceRecordNpcLevel(entry);
-        const value = dropYieldFor(entry.reward, itemId, entry.kind, npcLevel, killerLevel, ratesKey);
+        // Killer level 0 has no deep-blue penalty; nothing else of a reward
+        // roll reads the killer level, so this is every bot's penalty-free yield.
+        const value = dropYieldFor(entry.reward, itemId, entry.kind, npcLevel, 0, ratesKey);
         if (!value.chance) { reasons[ordinal] = FACT_RULE_NO_CHANCE; continue; }
         expected[ordinal] = value.expectedYield;
         reasons[ordinal] = entry.spot?.raidBoss === true ? FACT_RULE_RAID
-            : !sourceNpcHuntable(Number(entry.reward.selfId)) ? FACT_RULE_CANNOT_HUNT
-                : killerLevel && npcLevel && npcLevel - killerLevel < minGap ? FACT_RULE_LEVEL_BAND : 0;
+            : !sourceNpcHuntable(Number(entry.reward.selfId)) ? FACT_RULE_CANNOT_HUNT : 0;
         if (!retain) continue;
         const rule = reasons[ordinal];
         if (!rule) eligible[eligibleCount++] = ordinal;
@@ -2442,7 +2494,9 @@ function makeFactRuleRoom(cells) {
 // by the rank of their target level among the row's distinct levels, ties
 // in record order (a counting sort). For a bot whose solo bound admits the
 // first r levels, rankStart[r] of a kind is its count of safe records and
-// tailFirst[r] the first ordinal of its unsafe rest.
+// tailFirst[r] the first ordinal of its unsafe rest; for a bot whose level
+// band starts at rank r, rankStart[r] is its count of banded records and
+// headFirst[r] their first ordinal.
 function rankSourceFactRules(rules) {
     const { entries, eligible } = rules, count = eligible.length;
     const targetLevels = new Float64Array(count);
@@ -2473,6 +2527,11 @@ function rankSourceFactRules(rules) {
         ranked[kinds[spoil].base + next[spoil][ranks[index]]++] = eligible[index];
     }
     for (const kind of kinds) {
+        kind.headFirst[0] = NO_FACT_ORDINAL;
+        for (let rank = 0; rank < distinct; rank++) {
+            const first = kind.rankStart[rank] < kind.rankStart[rank + 1] ? ranked[kind.base + kind.rankStart[rank]] : NO_FACT_ORDINAL;
+            kind.headFirst[rank + 1] = Math.min(first, kind.headFirst[rank]);
+        }
         kind.tailFirst[distinct] = NO_FACT_ORDINAL;
         for (let rank = distinct - 1; rank >= 0; rank--) {
             const first = kind.rankStart[rank] < kind.rankStart[rank + 1] ? ranked[kind.base + kind.rankStart[rank]] : NO_FACT_ORDINAL;
@@ -2486,7 +2545,8 @@ function rankSourceFactRules(rules) {
 }
 
 function rankedKind(levels) {
-    return { base: 0, count: 0, rankStart: new Uint32Array(levels + 1), tailFirst: new Uint32Array(levels + 1) };
+    return { base: 0, count: 0, rankStart: new Uint32Array(levels + 1),
+        headFirst: new Uint32Array(levels + 1), tailFirst: new Uint32Array(levels + 1) };
 }
 
 // A drop yield depends only on the reward, the item and the deep-blue level
