@@ -5,7 +5,8 @@
 //   (build, relations, occupation, sources). trip keeps its result in the
 //   bot's kernel record; the worker's step drops it (drop, dropReason) when
 //   its mask hits those sections, it wrote other plan / request fields the
-//   search reads, or a leaf trip starts; it reads no leaf and no focus.
+//   search reads, a leaf trip starts, or the trip finds the kept spot full
+//   (ROUTE-ROOM-3); it reads no leaf and no focus.
 // - record: the trip from where the bot stands now (destinations, travel
 //   time, the reason fields), built per read and never kept.
 // leafChoice: the spot the step's own decision names, when it may go there.
@@ -109,7 +110,7 @@ function choose(state, currentSpot, party, partyMembers = [], { spots, timestamp
     if (!partyRoute && PartyWaitFallback.waiting(state, state.stats?.equipmentPlan, state.stats?.partyRequest)) {
         try {
             fallbackSpot = PartyWaitFallback.spotFor(state, state.stats?.equipmentPlan, spots,
-                { excludedSpotIds, timestamp })?.spot || null;
+                { excludedSpotIds, timestamp, hasRoom: options.hasRoom })?.spot || null;
         } catch (_) { fallbackSpot = null; }
     }
     const routeState = partyRoute
@@ -268,8 +269,11 @@ function route(state, currentSpot, party, partyMembers = [], { spots, timestamp 
 // from the ground the bot leaves), else to the route kept on `owner` (the
 // bot's kernel record), searched here when it holds none (null: dropped or
 // never computed; not saved, so the first read after a restart searches).
-// The trip is built from where the bot stands now; null: no trip. Counted
-// as route:trip:leaf|kept|search. hasRoom: the search's room filter.
+// A kept route to a spot other than the bot's own that hasRoom (the search's
+// room filter, ROUTE-ROOM-3) refuses is dropped first (route:drop:full): the
+// room-filtered search decides, as it does for a leaf trip. The trip is
+// built from where the bot stands now; null: no trip. Counted as
+// route:trip:leaf|kept|search.
 function trip(owner, state, leaf, { spots, currentSpot = null, timestamp, hasRoom = null }) {
     if (!routable(state, null, [])) return null;
     const frame = frameFor(state, null, [], timestamp, hasRoom);
@@ -279,6 +283,10 @@ function trip(owner, state, leaf, { spots, currentSpot = null, timestamp, hasRoo
         const started = record(state, wished, null, [], { spots, currentSpot, timestamp, frame });
         if (started) drop(owner, 'leaf');
         return started;
+    }
+    const kept = owner?.route;
+    if (hasRoom && kept?.spotId && String(kept.spotId) !== String(state.spotId || '') && !hasRoom(kept.spotId)) {
+        drop(owner, 'full');
     }
     EconomyDiagnostics.count('route', 'trip', owner?.route ? 'kept' : 'search');
     const chosen = owner?.route || choose(state, currentSpot, null, [], { spots, timestamp, frame });

@@ -113,8 +113,8 @@ async function run() {
         // The worker's 'memory' table over the real channel: a full copy at
         // attach, then every snapshot main accepts, accepted as the worker does.
         const mirror = new TableMirror();
-        mirror.watch('memory', { reset() {}, put: (_key, row) => kernel.interactionMemory.accept(row),
-            remove: key => kernel.interactionMemory.forget(Number(key)) }, { retain: false });
+        mirror.watch('memory', { reset() {}, put: (_key, row) => kernel.interactionMemory.accept(row), remove() {} },
+            { retain: false });
         const channelTarget = {};
         TableChannel.attach(channelTarget, 'memory-test', payload => { mirror.apply(payload.tables); return true; });
         assert.strictEqual(mirror.rows('memory').size, 0, 'the worker keeps the accepted snapshots, not a second row copy');
@@ -145,9 +145,6 @@ async function run() {
         assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'phase changes do not erase memory');
         kernel.remove(1);
         assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'a state leaving the worker keeps its table memory');
-        TableChannel.changed('memory', { key: 1, removed: true });
-        TableChannel.flush();
-        assert.strictEqual(kernel.interactionMemory.inspect(1).ready, false, 'a removed memory row forgets the owner');
         TableChannel.detach(channelTarget);
         const saved = await Repository.load(1);
         await Database.close();

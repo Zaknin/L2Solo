@@ -117,7 +117,7 @@ function request(state, plan, { spots = [], economy, memo = null, timestamp = Da
     const camps = campsFor(state, material.selfId, spots, spoiler);
     if (!camps.length) return noRequest();
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
-    const allowed = Planner.sourceRouteReader(state, { timestamp });
+    const allowed = Planner.sourceRouteReader(state, { timestamp, spots });
     const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
     if (camps.some(row => allowed(SpotIndex.spotById(spots, row.spotId))
         && Planner.soloSafeForSource(state, row))) return noRequest();

@@ -83,6 +83,30 @@ async function main() {
     assert.equal(kernel.scheduleTokens.get(attached.characterId).dueAt, oldParty.nextResolveAt);
     await kernel.shutdown();
 
+    // Main sends the departed leader's solo state at once and rewrites the
+    // party row only after later awaits: a stale row that still names it
+    // leader must not make the solo trip a party writer.
+    const soloKernel = new ColdSimulationKernel({ now: () => at, resolveSolo: input => Resolver.resolveSolo(input),
+        projectResolve: (state, result, timestamp) => Life.prepareResolve(state, result, { timestamp, persist: false }),
+        emit: () => {} });
+    const leftAt = at + 20000;
+    const departed = { ...paid, characterId: id + 20,
+        timing: { lastResolvedAt: at - 1000, nextResolveAt: leftAt },
+        stats: { ...paid.stats, travel: { ...paid.stats.travel, startedAt: at - 1000, arrivalAt: leftAt } } };
+    const staleParty = { partyId: 'stale-departed-party', status: 'active', leaderId: departed.characterId,
+        memberIds: [departed.characterId, id + 21, id + 22], nextResolveAt: at + 3600000 };
+    soloKernel.upsert({ state: departed, context: {} });
+    for (const followerId of [id + 21, id + 22]) {
+        soloKernel.upsert({ state: { ...follower, characterId: followerId,
+            party: { partyId: staleParty.partyId, leaderId: departed.characterId } }, context: {} });
+    }
+    soloKernel.partyPut(staleParty.partyId, staleParty);
+    assert.equal(soloKernel.leaderParty(departed.characterId), null, 'a solo state leads no stale party row');
+    assert.equal(lifecycleKind(departed, {}, soloKernel), 'resolver', 'the solo trip keeps its own writer');
+    assert.equal(soloKernel.scheduleTokens.get(departed.characterId).dueAt, leftAt,
+        'the paid trip owns the deadline, no party claim');
+    await soloKernel.shutdown();
+
     // Native group results repeat the same party row for every member. The
     // leader's postcommit review can dissolve it before the follower's tail.
     const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');

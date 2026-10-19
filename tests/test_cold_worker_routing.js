@@ -198,6 +198,25 @@ try {
         'a leaf trip to a full spot is not taken: the search decides');
     assert.strictEqual(roomTrip({ ...keptHunter, spotId: otherSpot.id }, () => false), otherSpot.id,
         'the leaf trip to the bot\'s own spot is taken even when it counts as full');
+    // ROUTE-ROOM-3: the kept route obeys the same filter: one to a full spot
+    // other than the bot's own is dropped and the search decides; one to the
+    // bot's own spot is kept.
+    SpotProfiles.findForState = () => otherSpot;
+    const keptRoom = (hunter, hasRoom) => {
+        const owner = { route: null };
+        const walk = (room) => BotRoute.trip(owner, hunter, null,
+            { spots: keptSpots, currentSpot, timestamp: leafAt, hasRoom: room })?.spotId;
+        assert.strictEqual(walk(null), otherSpot.id, 'fixture: the route is kept on the first search');
+        SpotProfiles.findForState = () => targetSpot;
+        return walk(hasRoom);
+    };
+    assert.strictEqual(keptRoom(keptHunter, id => id !== otherSpot.id), targetSpot.id,
+        'a kept route to a spot that is full now is dropped: the search decides');
+    SpotProfiles.findForState = () => otherSpot;
+    assert.strictEqual(keptRoom(keptHunter, () => true), otherSpot.id, 'a kept route to a spot with room is kept');
+    SpotProfiles.findForState = () => otherSpot;
+    assert.strictEqual(keptRoom({ ...keptHunter, spotId: otherSpot.id }, () => false), otherSpot.id,
+        'a kept route to the bot\'s own spot is kept even when it counts as full');
     SpotProfiles.findForState = routeTargetForState;
 
     const raidSpot = {

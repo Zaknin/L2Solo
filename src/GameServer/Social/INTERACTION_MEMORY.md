@@ -181,7 +181,9 @@ table (ColdTableChannel, key: owner id); the cold worker accepts each row into
 its own instance and keeps no second row copy (TableMirror `retain: false`).
 State pages and commit ACKs carry no memory. Social revisions are accepted
 independently of lifecycle revisions, and older rows cannot replace a newer view.
-A worker entry leaving keeps its view; a removed table row forgets it.
+A worker entry leaving keeps its view. Main publishes no removed row, so the
+worker's set is bounded by the owners main accepted; a full copy of the table
+re-sends them and the kept views refuse the equal revisions.
 Resolver callbacks receive `assessRelationship`, the same evaluator used on main.
 
 `workerMemory.propose(events)` only validates/copies events. Put the result in

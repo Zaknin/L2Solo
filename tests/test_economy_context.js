@@ -306,15 +306,24 @@ async function run() {
             assert.equal(sources.plan.hunt, held.plan.hunt, 'a source raise keeps the foundation hunt');
             assert.equal(sources.plan.kit, held.plan.kit, 'a source raise keeps the foundation kit');
             assert.equal(delta(before, 'source_memo:miss:sections'), 1, 'a source raise rebuilds the source walk');
+            assert.equal(delta(before, 'source_route:ground:reuse'), 1, 'a source raise keeps the ground verdict');
             assert.equal(delta(before, 'context:foundation:kept'), 1, 'the kept foundation is counted');
             assert.notDeepEqual(sources.statsPacket.wishSections.cashBounds, stale.cashBounds,
                 'the rebuild records its own money bounds, not the last decision\'s');
+            before = counts();
+            const money = Economy.forState(raised(sources, 'money'), { timestamp: T });
+            assert.notEqual(money.plan, sources.plan, 'a raised money section rebuilds');
+            assert.equal(delta(before, 'source_route:ground:reuse'), 1, 'a money raise keeps the ground verdict');
+            before = counts();
+            Economy.forState(raised(money, 'occupation'), { timestamp: T });
+            assert.equal(delta(before, 'source_route:ground:reuse'), 1, 'an occupation raise keeps the ground verdict');
             Economy.forget(native.characterId);
             const again = Economy.forState(native, { timestamp: T });
             before = counts();
             const build = Economy.forState(raised(again, 'build'), { timestamp: T });
             assert.notEqual(build.plan.hunt, again.plan.hunt, 'a build raise rebuilds the foundation');
             assert.equal(delta(before, 'source_memo:miss:sections'), 1, 'a build raise rebuilds the source walk');
+            assert.equal(delta(before, 'source_route:ground:build'), 1, 'a build raise rebuilds the ground verdict');
             assert.equal(delta(before, 'context:foundation:built'), 1, 'the rebuilt foundation is counted');
             // No held entry (a deploy, an eviction) and nothing raised: every
             // piece is built, no event re-weighs the published focus and step.

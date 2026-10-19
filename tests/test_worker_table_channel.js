@@ -153,6 +153,20 @@ async function unitChecks() {
         w.same();
     }
 
+    // A row given as a function (a costly copy) is built only for an attached worker.
+    {
+        const w = wired();
+        let built = 0;
+        const lazy = (row) => { w.rows.set(row.id, row); w.channel.changed('test', () => { built += 1; return row; }); };
+        lazy({ id: 1, price: 10 });
+        assert.strictEqual(built, 0, 'no worker attached: the row is never built');
+        w.channel.attach(w.target, 'e1', w.deliver('e1'));
+        lazy({ id: 1, price: 11 });
+        w.channel.flush();
+        assert.strictEqual(built, 1);
+        w.same();
+    }
+
     // Pages are limited by size only: a 600 KB table and a 600 KB change both
     // arrive whole, each page within 240 KB, with far more than 64 rows a page.
     {
