@@ -899,12 +899,15 @@ function save(row, options = {}) {
             -- mind on main is the worker's copy, the next save carries the
             -- same copy, and a refused save is a stale actor snapshot, so a
             -- second unguarded statement would buy nothing. Over a far row
-            -- (old phase cold) the worker is the mind's one writer: a main
-            -- save there (npc liquidation, a purchase, leaving a party) keeps
-            -- the row's mind; the hot->cold hand-off (old phase hot) still
-            -- carries main's. RETURNING hands the kept mind back, so the
-            -- cache and the snapshot the worker receives carry the row's.
-            mindJson = CASE WHEN ${TABLE}.phase = 'cold' THEN ${TABLE}.mindJson ELSE excluded.mindJson END,
+            -- (old phase cold) the revision fences it: a save built on the
+            -- row's revision writes its mind (a worker packet main applies
+            -- for a lifecycle step, a purchase's money); one built on an
+            -- older copy (the row moved past it since) keeps the row's. The
+            -- hot->cold hand-off (old phase hot) carries main's. RETURNING
+            -- hands the written mind back, so the cache and the snapshot the
+            -- worker receives carry the row's.
+            mindJson = CASE WHEN ${TABLE}.phase = 'cold' AND ${TABLE}.simulationRevision > ?
+                THEN ${TABLE}.mindJson ELSE excluded.mindJson END,
             updatedAt = excluded.updatedAt,
             -- A main write to a far row moves its revision: a worker step
             -- begun before it is refused stale_revision and rebases.
@@ -948,7 +951,9 @@ function save(row, options = {}) {
             row.updatedAt,
             Number(row.nameGeneratorVersion || 0),
             Number(row.appearanceVersion || 0),
-            row.mindJson
+            row.mindJson,
+            // The revision the save was built on (the mind's fence above).
+            Math.max(0, Number(row.simulationRevision || 0))
         ]
     ];
     NativeWriteCheckpoint.bindRow(beforeWrite?.value, statement, row.characterId);

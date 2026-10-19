@@ -4283,10 +4283,11 @@ const Database = {
                 const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson, mindJson` : 'simulationRevision, statsJson, mindJson';
                 let params = statement[1] || [];
                 if (characterId !== undefined) {
-                    // BotLifeState.save supplies its native 32-column ROW.
+                    // BotLifeState.save supplies its native 32-column ROW and
+                    // the revision it was built on (the mind's fence).
                     // Read skills inside this queued job, after admission and
                     // immediately before SQL, so an earlier await cannot age it.
-                    if (!Number.isSafeInteger(characterId) || characterId <= 0 || params.length !== 32 || params[0] !== characterId)
+                    if (!Number.isSafeInteger(characterId) || characterId <= 0 || params.length !== 33 || params[0] !== characterId)
                         throw new TypeError('invalid_bot_life_skill_snapshot');
                     const stats = jsonObject(params[27]);
                     const combat = stats.coldCombat || jsonObject(one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId])?.statsJson).coldCombat;
