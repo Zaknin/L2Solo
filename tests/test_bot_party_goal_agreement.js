@@ -112,6 +112,13 @@ async function run() {
             assert.deepEqual(split.map(entry => entry.amount), [334, 334, 333]);
             sessions[2].actor.setIsOnline(false);
             assert(!Party.lootMembersForLeader(sessions[0]).includes(sessions[2]));
+            // Need mode reads each bot's value from its held decision; the player scores 0.
+            Parties.find('hot-loot-policy').stats.agreement = { mode: 'need' };
+            sessions[0].accountId = 'player_leader'; // not a bot session
+            sessions[0].heldEconomy = { itemUsefulness: () => 99 };
+            sessions[1].heldEconomy = { itemUsefulness: id => id === 1869 ? 5 : 0 };
+            assert.equal(Party.resolveLootSession(sessions[0], 1869, null), sessions[1],
+                'the bot whose held values rank the item takes it; the player holds no bot decision');
             // Actual player companion distribution remains Finder/Turn, without an autonomous agreement.
             sessions[0].hotBackgroundPartyId = null; sessions[1].hotBackgroundPartyId = null;
             sessions[1].partyCompanion = true; sessions[1].followPlayerSession = sessions[0];

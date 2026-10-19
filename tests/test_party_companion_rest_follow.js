@@ -3398,7 +3398,12 @@ try {
     shoppingSession.plan = 'shopping';
     shoppingSession.shoppingTarget = { name: 'shop', locX: 1000, locY: 0, locZ: 0 };
 
-    ShoppingState.tick(shoppingSession, shoppingCompanion, {}, { say() {} });
+    // Main never builds an economy for a near bot: the build belongs to the worker.
+    const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
+    const realForState = EconomyContext.forState;
+    EconomyContext.forState = () => { throw new Error('main built a near economy'); };
+    try { ShoppingState.tick(shoppingSession, shoppingCompanion, {}, { say() {} }); }
+    finally { EconomyContext.forState = realForState; }
 
     assert.strictEqual(shoppingSession.plan, 'following', 'shopping companion should return to follow state');
     assert.strictEqual(shoppingSession.shoppingTarget, undefined, 'shopping target should be cleared for companions');

@@ -992,7 +992,8 @@ const PartyCompanionService = {
             if (agreement.mode === 'need') {
                 // Each bot's item value from the decision its body holds
                 // (DecisionEvents.held): an item outside its listed values
-                // scores 0, and so does the player, who holds no bot decision.
+                // scores 0, and so does the player, who holds no bot decision
+                // (reached only with a party agreement, which player parties do not carry).
                 // lazy: cycle DecisionEvents loads this module through its economy imports.
                 const DecisionEvents = invoke('GameServer/Bot/AI/DecisionEvents');
                 const scores = members.map(session => ({ session, value: world().isBotSession(session)
