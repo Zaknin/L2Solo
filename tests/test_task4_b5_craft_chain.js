@@ -82,11 +82,12 @@ const item = (selfId, amount) => ({ selfId, amount, name: nativeItem(selfId)?.te
         assert.equal(meetings, 1, 'the card buys the missing gemstones once');
         assert.equal(held(await Database.fetchItems(id), gemstoneId), inputs.get(gemstoneId));
 
-        // Receipt: the life state reads the delivered units; the same card cannot buy again.
+        // Receipt: the life state reads the delivered units; the same card cannot buy again
+        // (the receipt save moved the far row: the card waits for the worker's new one).
         customer = await Life.upsertState({ ...Life.cachedState(id), activity: 'crafting',
             inventory: Life.inventorySummaryFromItems(await Database.fetchItems(id)) }, 'b5_chain_receipt');
         assert.equal(customer.inventory[gemstoneId].amount, inputs.get(gemstoneId));
-        assert.equal((await Market.executePlan(customer, take, { preparedState: prepared })).buyPending, true);
+        assert.equal((await Market.executePlan(customer, take, { preparedState: prepared })).tradeDeferred, true);
         assert.equal(meetings, 1, 'received units never buy twice');
 
         // Craft and equip.

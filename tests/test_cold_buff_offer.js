@@ -104,20 +104,22 @@ async function run() {
             await coordinator.commandTail;
             return answers.at(-1);
         };
+        // Life.init's startup repair already saved (and moved) the fixture rows.
+        const buyerBefore = Life.cachedState(buyer.characterId).simulation.revision;
         assert.equal((await review(packet)).ok, true);
         assert.equal(guarded, 1);
         assert.equal(Cold.summary().sold, 1);
         const stored = (await Database.execute(['SELECT statsJson,simulationRevision FROM bot_life_state WHERE characterId=?', [buyer.characterId]]))[0];
         assert.deepEqual(JSON.parse(stored.statsJson).coldCombat.effects, native.effects);
-        assert.equal(stored.simulationRevision, 18);
+        assert.equal(stored.simulationRevision, buyerBefore + 1, 'the purchase moves the buyer once');
         const stale = { ...packet, providerRevision: Life.cachedState(provider.characterId).simulation.revision,
-            recipientRevision: 16 };
+            recipientRevision: Number(stored.simulationRevision) - 2 };
         assert.equal((await review(stale)).ok, true, 'a stale offer does not refuse the provider review');
         assert.equal(Cold.summary().dropped, 1, 'recipient two revisions ahead drops once');
         assert.equal(Cold.summary().sold, 1);
         coordinator.stopping = true;
         assert.equal((await review({ ...packet, providerRevision: Life.cachedState(provider.characterId).simulation.revision,
-            recipientRevision: 18 })).reason, 'coordinator_stopping');
+            recipientRevision: Number(stored.simulationRevision) })).reason, 'coordinator_stopping');
         assert.equal(guarded, 1, 'a retired source cannot reach the buff writer');
         const sellerNow = Life.cachedState(provider.characterId), buyerNow = Life.cachedState(buyer.characterId);
         const currentPacket = { ...packet, providerRevision: sellerNow.simulation.revision,

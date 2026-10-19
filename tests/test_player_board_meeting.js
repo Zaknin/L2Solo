@@ -230,11 +230,11 @@ const waitFor = async (predicate, label, timeoutMs = 30000) => {
             } },
             timing: { lastResolvedAt: Date.now(), nextResolveAt: merchantArrival } }, 'cancelled_merchant_fixture');
         const cancelStock = (await Database.fetchItems(seller)).find(row => row.selfId === 20);
-        const cancelSale = await Database.createAfkTradeShop(seller, { kind: 'sell_ad', storeType: 1, town: 'Giran', ...point,
+        // Through the owner: the ad moves the seller's far row and its cache.
+        const cancelSale = await Afk.publishBot(seller, { kind: 'sell_ad', storeType: 1, town: 'Giran', ...point,
             lines: [{ objectId: cancelStock.id, selfId: 20, count: 1, price: 4081 }] });
-        Afk.refreshRecord(cancelSale.shop);
         Board.show(session, { side: 1, town: 'Giran' });
-        await click(new RegExp('action="bypass -h (board answer sell_ad ' + cancelSale.shop.id + ' [^"]+)"').exec(html())[1]);
+        await click(new RegExp('action="bypass -h (board answer sell_ad ' + cancelSale.id + ' [^"]+)"').exec(html())[1]);
         await click('board agree');
         await waitFor(() => !session.playerBoardAgreePending, 'cancellable merchant agreement');
         assert(meetingRow(seller), 'a separate accepted trade sets waiting-player priority');
@@ -268,7 +268,7 @@ const waitFor = async (predicate, label, timeoutMs = 30000) => {
                 stats: { ...Life.cachedState(seller).stats, restUntil: null, travel: null },
                 timing: { lastResolvedAt: Date.now(), nextResolveAt: Date.now() + 3600000 } }, 'field_merchant_fixture');
             Board.show(session, { side: 1, town: 'Giran' });
-            await click(new RegExp('action="bypass -h (board answer sell_ad ' + cancelSale.shop.id + ' [^"]+)"').exec(html())[1]);
+            await click(new RegExp('action="bypass -h (board answer sell_ad ' + cancelSale.id + ' [^"]+)"').exec(html())[1]);
             await click('board agree');
             await waitFor(() => !session.playerBoardAgreePending, 'field merchant agreement');
             await restoreLegacyParty('legacy_field_party_fixture');

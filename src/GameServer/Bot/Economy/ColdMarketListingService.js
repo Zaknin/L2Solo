@@ -131,7 +131,15 @@ function open(state, options = {}) {
     // the buy ads it answers here, the NPC sale, the board's listings.
     const market = invoke('GameServer/Bot/Economy/BotAfkMarketService').saleDecision(state, options);
     const initialMarket = market;
-    return BuyStoreService.sellToBestBuyer(state, town?.name, { answers: market.answers }).then((dynamicBuyerSale) => {
+    // An answer may stage a trade meeting, which records the seller's revision:
+    // a later main save of the seller would discard it. The sale retry every
+    // outcome below sets is on the row before the answers run (E311).
+    const answerTown = town?.name ?? state.currentRegion;
+    const answering = market.answers.some((answer) => answer.line.town === answerTown)
+        ? LifeState.upsertState(deferSellRetry(state), 'market_sale_retry').then((saved) => saved || deferSellRetry(state))
+        : Promise.resolve(state);
+    return answering.then((answeringState) => { state = answeringState;
+        return BuyStoreService.sellToBestBuyer(state, answerTown, { answers: market.answers }); }).then((dynamicBuyerSale) => {
     // A deal through a trade meeting ends the sale like every other outcome:
     // the retry keeps a later pass from answering the same ad again when the
     // payer refuses it (E311).
