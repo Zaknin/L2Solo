@@ -19,11 +19,13 @@ function waiting(state, plan, partyRequest) {
 
 // Where it hunts meanwhile: the plan's own safe fallback, with the NPC to farm
 // there, when the bot may hunt it; otherwise ordinary level ground chosen
-// without the plan (a fitting current spot is kept). hasRoom (the worker's
-// room filter, ROUTE-ROOM-3): a planned spot other than the bot's own with no
-// room for it is no fallback, and the level search takes the filter too; main
-// passes none. Null when neither exists.
-function spotFor(state, plan, profiles, { excludedSpotIds, timestamp, hasRoom = null } = {}) {
+// without the plan (a fitting current spot is kept). hasRoom (ROUTE-ROOM-3):
+// a planned spot other than the bot's own with no room for it is no fallback,
+// and the level search takes the filter too. The worker passes its own; main
+// passes none and reads main's world index (SpotProfiles.defaultRoomFilter,
+// ROUTE-ROOM-4). Null when neither exists.
+function spotFor(state, plan, profiles, { excludedSpotIds, timestamp, hasRoom: given = null } = {}) {
+    const hasRoom = given ?? SpotProfiles.defaultRoomFilter(state, profiles);
     const planned = GearAcquisitionPlanner.safeFallbackForPlan(state, plan, profiles, { excludedSpotIds });
     const plannedSpot = planned ? SpotIndex.spotById(profiles, planned.spotId) : null;
     const refused = !!plannedSpot && !!hasRoom && String(plannedSpot.id) !== String(state.spotId || '')

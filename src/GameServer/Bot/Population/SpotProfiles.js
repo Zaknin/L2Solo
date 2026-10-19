@@ -6,6 +6,8 @@ const EquipmentIncomeRoute = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute
 const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
+const { stateKey } = require('./SpotOccupancyIndex');
+const { isMainThread } = require('node:worker_threads');
 
 function rewardForLevel(level) {
     const value = Math.max(1, Number(level || 1));
@@ -124,6 +126,34 @@ function spotHunters(spot) {
     return spot?.id ? Math.max(1, BotLifeState.occupancyIndex().physicalCount(spot.id)) : 1;
 }
 
+// How many bots a spot holds (LevelingRoutes.roomForSpot); a raid boss spot
+// or a spot the catalog does not know: no limit. The worker's arrival check
+// and the route search's room filter below read this one rule.
+function spotRoom(spots, spotId) {
+    const spot = SpotIndex.spotById(spots, spotId);
+    return !spot || spot.raidBoss === true ? Infinity : LevelingRoutes.roomForSpot(spot);
+}
+
+// The room filter of a route (ROUTE-ROOM): a spot has room for the routed
+// bots (members: [state] for a solo bot, the whole party for a party) when
+// every bot `index` has there, those on their way included, other than these
+// bots, plus all of them fit; re-checked at arrival. A party's own members are
+// not counted against it. index: the worker's own (kernel.occupancy) or main's
+// world index (BotLifeState.occupancyIndex()), the one of the thread that plans.
+function roomFilterFor(index, spots, members) {
+    const own = new Set(members.map(stateKey));
+    return (spotId) => index.physicalCount(spotId, { excludeKeys: own }) + members.length <= spotRoom(spots, spotId);
+}
+
+// The room filter a search takes when its caller passes none: a search on
+// main reads main's world index (ROUTE-ROOM-4) for the routed bots (members:
+// the search's capacityStates, else the bot alone); the worker always passes
+// its own (null here).
+function defaultRoomFilter(state, spots, members = null) {
+    return isMainThread
+        ? roomFilterFor(BotLifeState.occupancyIndex(), spots, members?.length ? members : [state]) : null;
+}
+
 // A solo fallback search must not become a travel loop between comparable
 // camps: the bot keeps its current camp when it is one of the candidates.
 function currentSpotAmong(candidates, currentSpot, mustRelocate) {
@@ -211,15 +241,20 @@ const SpotProfiles = {
         // One list object for the income route and the list walk below: its
         // spoiler and costs are read once, and only when one of them asks.
         const list = EquipmentIncomeRoute.spotList(state);
-        // options.hasRoom(spotId): the worker's own exact index, a filter on
-        // every spot this search returns other than the current one
-        // (ROUTE-ROOM, ROUTE-ROOM-2): the income route's spot, the planned
-        // source, the list walk and the near-level fallback; a refused
-        // candidate counts as absent. A bot's own spot is never full to it;
-        // the room is checked again at arrival. Main passes none: no filter.
+        // hasRoom(spotId): a filter on every spot this search returns other
+        // than the current one (ROUTE-ROOM, ROUTE-ROOM-2): the income route's
+        // spot, the planned source, the list walk and the near-level
+        // fallback; a refused candidate counts as absent. A bot's own spot is
+        // never full to it; the room is checked again at arrival. The worker
+        // passes its own index's filter (options.hasRoom); a search on main
+        // (market return, competition retreat, a command's trip, a party's
+        // formation) reads main's world index (ROUTE-ROOM-4). A party search
+        // counts the whole party (options.capacityStates), its own members
+        // excluded.
+        const hasRoom = options.hasRoom ?? defaultRoomFilter(state, profiles, options.capacityStates);
         const full = (spot) => {
-            if (!options.hasRoom || (currentSpot && spot.id === currentSpot.id)
-                || options.hasRoom(spot.id)) return false;
+            if (!hasRoom || (currentSpot && spot.id === currentSpot.id)
+                || hasRoom(spot.id)) return false;
             Diagnostics.count('spot_list', 'skip', 'full');
             return true;
         };
@@ -227,7 +262,12 @@ const SpotProfiles = {
             const incomeRoute = EquipmentIncomeRoute.select(state, {
                 spots: profiles, timestamp, mode, list,
                 required: invoke('GameServer/Bot/AI/PersonalGearProgression').assess(state).required });
-            if (incomeRoute && !full(incomeRoute.spot)) return incomeRoute.spot;
+            // The route reads its own risk marks, not the caller's exclusions
+            // (a market return's full saved spot, ROUTE-ROOM-4): an excluded
+            // pick counts as absent, as on the list walk.
+            if (incomeRoute && !excludedSpotIds.has(String(incomeRoute.spot.id)) && !full(incomeRoute.spot)) {
+                return incomeRoute.spot;
+            }
         }
 
         if (keepCurrentSpot) {
@@ -376,6 +416,9 @@ const SpotProfiles = {
 };
 
 SpotProfiles.spotHunters = spotHunters;
+SpotProfiles.spotRoom = spotRoom;
+SpotProfiles.roomFilterFor = roomFilterFor;
+SpotProfiles.defaultRoomFilter = defaultRoomFilter;
 
 module.exports = SpotProfiles;
 // A getter also sees replaced period catalogs and manually hydrated profiles;

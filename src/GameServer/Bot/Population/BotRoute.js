@@ -73,8 +73,10 @@ function groundOf(state, currentSpot) {
 // depend on the bot, not the spot: built once per frame (solo()), as is the
 // unsafe-ground verdict. One frame serves one trip start (leafChoice or
 // choose, then record): the caller builds it once and passes it to each.
-// hasRoom: the worker's room filter for the spot search (ROUTE-ROOM), only
-// on the solo trip; a party search and main pass none.
+// hasRoom: the worker's room filter for the spot search (ROUTE-ROOM): the
+// solo trip's for the bot, the party run's for the whole party; main passes
+// none (a search on main reads main's world index for the routed members in
+// SpotProfiles.findForState, ROUTE-ROOM-4).
 function frameFor(state, party, partyMembers = [], timestamp, hasRoom = null) {
     const partyRoute = !!party;
     const routedMembers = partyRoute ? partyMembers : [state];
@@ -145,6 +147,10 @@ function choose(state, currentSpot, party, partyMembers = [], { spots, timestamp
         if (repeatsCurrentGround || !LevelingRoutes.isSpotAllowedForState(selected, state, frame.solo())) selected = null;
     }
     if (!selected && unsafe) selected = evacuationSpot(state, currentId, spots, frame);
+    // A party search with no spot (no room for the whole party, or none
+    // allowed or matched): the party stays where it is; the next run searches
+    // again.
+    if (partyRoute && !selected) EconomyDiagnostics.count('route', 'party', 'none');
     return { spotId: selected ? selected.id : null,
         ...(materialRoute ? { materialRoute: true, materialSources: materialRoute.sources } : {}) };
 }
@@ -256,10 +262,11 @@ function record(state, chosen, party, partyMembers = [], { spots, currentSpot = 
     };
 }
 
-// One search and its trip, nothing kept: the party run and the retreat.
-function route(state, currentSpot, party, partyMembers = [], { spots, timestamp }) {
+// One search and its trip, nothing kept: the party run (the worker's room
+// filter in hasRoom) and the retreat (main: none, the search reads main's index).
+function route(state, currentSpot, party, partyMembers = [], { spots, timestamp, hasRoom = null }) {
     if (!routable(state, party, partyMembers)) return null;
-    const frame = frameFor(state, party, partyMembers, timestamp);
+    const frame = frameFor(state, party, partyMembers, timestamp, hasRoom);
     return record(state, choose(state, currentSpot, party, partyMembers, { spots, timestamp, frame }), party, partyMembers,
         { spots, currentSpot, timestamp, frame });
 }
