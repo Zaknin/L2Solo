@@ -17,7 +17,7 @@ function observe(pressure, relation = neutral, stall = false) {
         const entries = Array.from({ length: 6 }, (_, i) => ({ state: {
             characterId: 2000000 + run * 6 + i, name: `Hunter${i}`, level: 40,
             phase: 'cold', activity: 'hunting', spotId: spot.id, vitals: { hp: 100 }, stats: {}
-        }, context: { spot, targetNpcId: 10 } }));
+        }, context: { spot } }));
         const personas = new Map(entries.map(({ state }, i) => [state.characterId,
             Persona.generate({ characterId: state.characterId, stats: { generatedIndex: run * 6 + i } })]));
         const monitor = new ColdCompetitionMonitor({ capacityForSpot: () => 6 / pressure,
@@ -66,7 +66,7 @@ assert(stalled.meanIntentsPerHour < 10, 'a long offline interval cannot generate
 {
     const spot = { id: 'release', npcEntries: [{ selfId: 10, count: 1 }] };
     const entries = [2100001, 2100002].map((characterId, i) => ({ state: { characterId, name: `Leaver${i}`, level: 40,
-        phase: 'cold', activity: 'hunting', spotId: spot.id, vitals: { hp: 100 }, stats: {} }, context: { spot, targetNpcId: 10 } }));
+        phase: 'cold', activity: 'hunting', spotId: spot.id, vitals: { hp: 100 }, stats: {} }, context: { spot } }));
     const memory = { assess: () => neutral, views: new Map() };
     const make = () => new ColdCompetitionMonitor({ capacityForSpot: () => 1, personaFor: s => Persona.generate({ characterId: s.characterId, stats: {} }) });
     const kept = make(), released = make();

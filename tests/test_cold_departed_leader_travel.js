@@ -66,7 +66,7 @@ async function main() {
     assert.equal(amounts[736], 1);
     kernel.onCommitAck({ results: [{ characterId: id, ok: true, inputToken: proposal.token,
         proposalId: proposal.proposalId, state: saved, context: {} }] });
-    assert.equal(lifecycleKind(kernel.states.get(id).state, kernel.states.get(id).context, kernel), 'command',
+    assert.equal(lifecycleKind(kernel.states.get(id).state, kernel), 'command',
         'town errands can run after the arrival receipt');
     kernel.upsert({ state: paid, context: {} });
     assert.equal(kernel.states.get(id).state.activity, 'shopping', 'an older snapshot cannot roll arrival back');
@@ -78,7 +78,7 @@ async function main() {
     kernel.upsert({ state: follower, context: {} });
     kernel.partyPut(oldParty.partyId, { ...oldParty, leaderId: attached.characterId,
         memberIds: [attached.characterId, follower.characterId] });
-    assert.equal(lifecycleKind(attached, kernel.states.get(attached.characterId).context, kernel), 'party',
+    assert.equal(lifecycleKind(attached, kernel), 'party',
         'an attached leader keeps the group writer');
     assert.equal(kernel.scheduleTokens.get(attached.characterId).dueAt, oldParty.nextResolveAt);
     await kernel.shutdown();

@@ -448,7 +448,7 @@ async function main() {
             stats: { ...current.stats, classId: session.actor.fetchClassId(), coldCombat: Combat.capture(session.actor), hennas: session.hennas || [] } });
         const admittedParty = { ...party, stats: { ...party.stats, raidAdmission: { ...proof, startedAt: null } } };
         let targetId = base, instance = marker.raidInstanceId;
-        Index.bossByTemplateId = () => ({ raidInstanceId: instance, fetchId: () => 998877, fetchDestId: () => targetId });
+        Index.bossByTemplateId = () => ({ raidInstanceId: instance, fetchId: () => 998877, fetchSelfId: () => spot.raidBossTemplateId, fetchDestId: () => targetId });
         assert(!Roster.nativeHotStarted(admittedParty), 'autoaggro while admission pending is not opening provenance');
         registry.delete(base + 8);
         assert.equal(Hot.roster(sessions[0]).length, 8);

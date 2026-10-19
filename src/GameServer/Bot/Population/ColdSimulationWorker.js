@@ -128,6 +128,8 @@ const SpotValueTable = require('../AI/SpotValueTable');
 const ColdCombatProfile = require('./ColdCombatProfile');
 const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
 const CraftEligibility = require('../Economy/CraftEligibility');
+const VisitNeed = require('../../ClanHall/VisitNeed');
+const HallPolicy = require('../../ClanHall/Policy');
 const forbiddenLoaded = Object.keys(require.cache).filter((filename) => (
     /[\\/]src[\\/]Database\.js$/i.test(filename)
     || /[\\/]GameServer[\\/]World[\\/]World\.js$/i.test(filename)
@@ -703,6 +705,49 @@ tables.watch('market', {
         else if (String(key).startsWith('c:')) occupationPlanner.scopeChanged(String(key).slice(2));
     }
 });
+// The player's meeting waits ('meetings'): the bots a player waits for. A
+// row that comes or goes moves the bot's schedule (playerWaitingTransition).
+const playerWaits = new Set();
+tables.watch('meetings', {
+    reset: () => {
+        const previous = [...playerWaits];
+        playerWaits.clear();
+        for (const id of previous) kernel?.ensureScheduled(id);
+    },
+    put: key => { playerWaits.add(Number(key)); kernel?.ensureScheduled(Number(key)); },
+    remove: key => { playerWaits.delete(Number(key)); kernel?.ensureScheduled(Number(key)); }
+}, { retain: false });
+// The clan halls ('clan_halls'), by owner clan: VisitNeed.needed reads the
+// row with the hall's catalog definition (bounds, managers).
+const hallById = new Map();
+const hallByOwner = new Map();
+tables.watch('clan_halls', {
+    reset: () => { hallById.clear(); hallByOwner.clear(); },
+    put: (key, row) => {
+        const previous = hallById.get(Number(key));
+        if (previous && hallByOwner.get(previous.ownerId) === previous) hallByOwner.delete(previous.ownerId);
+        const hall = { ...HallPolicy.definition(row.id), ...row };
+        hallById.set(Number(key), hall);
+        if (hall.ownerId > 0) hallByOwner.set(hall.ownerId, hall);
+    },
+    remove: key => {
+        const previous = hallById.get(Number(key));
+        hallById.delete(Number(key));
+        if (previous && hallByOwner.get(previous.ownerId) === previous) hallByOwner.delete(previous.ownerId);
+    }
+}, { retain: false });
+// One hall verdict per state object and hall row for a second: lifecycleKind
+// asks it several times per step.
+const hallVerdicts = new WeakMap();
+function hallNeeded(state, timestamp) {
+    const hall = hallByOwner.get(Number(state?.clanId ?? state?.stats?.clanId)) || null;
+    if (!hall && !state?.stats?.clanHallVisit) return false;
+    const known = hallVerdicts.get(state);
+    if (known && known.hall === hall && timestamp - known.at < 1000) return known.value;
+    const value = VisitNeed.needed(state, hall, hall?.managerPresent === true, timestamp);
+    hallVerdicts.set(state, { hall, at: timestamp, value });
+    return value;
+}
 tables.watch('personal_warehouse', {
     reset: () => {},
     put: (key, row) => { PersonalWarehouseIndex.prepareRow(row); occupationOwnerChanged(Number(key)); },
@@ -1242,6 +1287,9 @@ function startKernel(config = {}) {
         },
         partyMinSize: Config.partyMinSize,
         buyOrderEscrow: escrowFor,
+        hallNeeded,
+        playerWaiting: id => playerWaits.has(id),
+        raidRow: id => tables.rows('raids').get(id) || null,
         equipmentBridgeReason: (state) => GearAcquisitionPlanner.equipmentBridgeReason(state, {
             ...planningNpcCatalog.plannerOptions,
             buyOrderEscrow: escrowFor(state.characterId)

@@ -21,9 +21,19 @@ const future = kernel();
 future.upsert({ state: state(1, 1000), context: {} });
 future.upsert({ state: state(30, 101000, true), context: {} });
 assert.equal(future.dueCandidates(100000, 1)[0].characterId, 1, 'arrival priority does not shorten travel');
-const player = kernel();
-player.upsert({ state: state(30, 99000, true), context: {} });
-player.upsert({ state: state(31, 99500, true), context: { playerWaiting: true } });
+// The player's waits come from the 'meetings' table; its row arriving
+// reschedules the bot (the worker's watch calls ensureScheduled).
+function playerKernel(waits) {
+    const built = new ColdSimulationKernel({ now: () => 100000, resolveSolo: () => null, playerWaiting: id => waits.has(id) });
+    built.upsert({ state: state(30, 99000, true), context: {} });
+    built.upsert({ state: state(31, 99500, true), context: {} });
+    return built;
+}
+assert.equal(playerKernel(new Set()).dueCandidates(100000, 1)[0].characterId, 30, 'no wait: the earlier arrival goes first');
+const waits = new Set();
+const player = playerKernel(waits);
+waits.add(31);
+player.ensureScheduled(31);
 assert.equal(player.dueCandidates(100000, 1)[0].characterId, 31, 'a waiting player keeps first priority');
 const changed = kernel(), travelling = state(30, 99000, true);
 changed.upsert({ state: travelling, context: {} });

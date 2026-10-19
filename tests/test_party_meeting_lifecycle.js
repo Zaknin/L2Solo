@@ -6,7 +6,8 @@ const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Assembly = require('../src/GameServer/Bot/Population/PartyHuntingAssembly');
 const { ColdSimulationKernel, lifecycleKind } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 // The facts a kernel gives lifecycleKind for a bot that leads `led` (its parties table).
-const leading = led => ({ leaderParty: () => led, partyMembers: () => [], buyOrderEscrow: () => 0 });
+const leading = led => ({ leaderParty: () => led, partyMembers: () => [], buyOrderEscrow: () => 0,
+    hallNeeded: () => false, playerWaiting: () => false });
 const at = Date.now();
 const party = { partyId: 'meeting-roster', leaderId: 1, memberIds: [1, 2], status: 'active',
     spotId: 'old-spot', nextResolveAt: at, stats: { sessionExpiresAt: at - 1,
@@ -25,8 +26,8 @@ async function main() {
     for (const activity of ['traveling', 'resting', 'dead', 'shopping']) {
         const leader = { ...members[0], activity, stats: { tradeMeeting: [7, 1] } };
         const follower = { ...members[1], activity };
-        assert.equal(lifecycleKind(leader, {}, leading(party)), 'party');
-        assert.equal(lifecycleKind(follower, {}, leading(null)), 'party_member');
+        assert.equal(lifecycleKind(leader, leading(party)), 'party');
+        assert.equal(lifecycleKind(follower, leading(null)), 'party_member');
         assert.equal(Owner.eligibility(follower, { allowLifecycle: true }).reason, 'background_party', 'solo gate remains strict');
     }
     assert.equal(lifecycleKind({ ...members[1], party: null }), 'resolver', 'solo finite meeting travel is unchanged');

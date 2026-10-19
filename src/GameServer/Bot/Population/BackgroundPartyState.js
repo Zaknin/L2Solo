@@ -486,6 +486,11 @@ const BackgroundPartyState = {
 
     raidBossKey,
 
+    // The raid bosses (template ids) active or hot parties hunt.
+    raidBossKeys() {
+        return byRaidBoss.keys();
+    },
+
     // The active parties among these ids (each once), in active() order.
     activeByIds(partyIds, reader = 'unknown') {
         return activeOf(new Set((partyIds || []).map(String)), reader);

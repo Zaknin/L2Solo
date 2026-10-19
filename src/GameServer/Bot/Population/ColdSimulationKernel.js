@@ -12,6 +12,7 @@ const ColdStateDelta = require('./ColdStateDelta');
 const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
 const CraftMaterialPartyRoute = require('./CraftMaterialPartyRoute');
 const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
+const PartyHuntingTarget = require('./PartyHuntingTarget');
 const PurchaseFunding = require('../Economy/PurchaseFunding');
 const { pressureFor } = require('./PopulationPressure');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
@@ -171,9 +172,12 @@ function deterministicRandom(state = {}) {
 
 // The facts the kernel reads from its worker tables, not from a context: the
 // party a bot leads ('parties'), that party's member states (the kernel's
-// own records) and the adena its buy orders hold (the board). A caller
-// without a kernel (BotLifeState, a test) reads none.
-const NO_FACTS = Object.freeze({ leaderParty: () => null, partyMembers: () => [], buyOrderEscrow: () => 0 });
+// own records), the adena its buy orders hold (the board), whether its clan
+// hall needs a visit ('clan_halls') and whether the player waits for it at a
+// meeting point ('meetings'). A caller without a kernel (BotLifeState, a
+// test) reads none.
+const NO_FACTS = Object.freeze({ leaderParty: () => null, partyMembers: () => [], buyOrderEscrow: () => 0,
+    hallNeeded: () => false, playerWaiting: () => false });
 
 // party: the party row this bot leads, or null.
 function partySessionExpiryAt(state = {}, party = null, partySession = {}) {
@@ -310,7 +314,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
 // require() inside lifecycleKind ran per inventory item on every row.
 let PartyMarketBreak, ClanPartyDuty, BotCrystallization;
 
-function lifecycleKind(state = {}, context = {}, facts = NO_FACTS) {
+function lifecycleKind(state = {}, facts = NO_FACTS) {
     if (state.phase !== 'cold' || state.activity === 'pk_hunting') return 'inactive';
     const leads = facts.leaderParty(state.characterId) !== null;
     // Paid personal journeys retain the existing group writer.
@@ -323,7 +327,7 @@ function lifecycleKind(state = {}, context = {}, facts = NO_FACTS) {
     if (state.activity === 'crafting' && state.stats?.craftShop) return 'event_driven';
     const stats = state.stats || {};
     const plan = stats.equipmentPlan || {};
-    if (context.clanHallServices || stats.clanHallVisit) return 'command';
+    if (stats.clanHallVisit || facts.hallNeeded(state)) return 'command';
     // Finite travel/rest/death transitions are completely represented by the
     // pure resolver result and the owner CAS proposal. Economy follow-up, if
     // any, is selected on the next state after the transition is durable.
@@ -367,14 +371,14 @@ function isSchedulableKind(kind) {
 
 // A caller that already read this state's kind in the same call passes it;
 // otherwise the kind is read only when the cheap meeting test passes.
-function playerWaitingTransition(state, context, kind = null, facts = NO_FACTS) {
-    return context?.playerWaiting === true && !!state?.stats?.tradeMeeting
-        && (kind ?? lifecycleKind(state, context, facts)) === 'resolver';
+function playerWaitingTransition(state, kind = null, facts = NO_FACTS) {
+    return !!state?.stats?.tradeMeeting && facts.playerWaiting(state.characterId)
+        && (kind ?? lifecycleKind(state, facts)) === 'resolver';
 }
 
-function meetingTravelTransition(state, context, kind = null, facts = NO_FACTS) {
+function meetingTravelTransition(state, kind = null, facts = NO_FACTS) {
     return state?.activity === 'traveling' && !!state.stats?.tradeMeeting
-        && (kind ?? lifecycleKind(state, context, facts)) === 'resolver';
+        && (kind ?? lifecycleKind(state, facts)) === 'resolver';
 }
 
 // A lifecycle plan as main receives it: the step's economy object stays in
@@ -607,6 +611,11 @@ class ColdSimulationKernel {
         this.pressureRow = null;
         // The adena a bot's buy orders hold (the worker sums its board rows).
         this.escrowOf = typeof options.buyOrderEscrow === 'function' ? options.buyOrderEscrow : () => 0;
+        // The clan hall rule over the bot's hall row (the worker's 'clan_halls'),
+        // the player's meeting waits ('meetings') and a raid boss's row ('raids').
+        this.hallNeedOf = typeof options.hallNeeded === 'function' ? options.hallNeeded : () => false;
+        this.waitingOf = typeof options.playerWaiting === 'function' ? options.playerWaiting : () => false;
+        this.raidRowOf = typeof options.raidRow === 'function' ? options.raidRow : () => null;
         this.interactionMemory.playingHours = id => this.states.get(id)?.state?.stats?.playedHours;
         this.interactionMemory.clanSocial = new (require('../../Clan/ClanSocialView'))();
         this.versions = new Map();
@@ -761,6 +770,23 @@ class ColdSimulationKernel {
         return Number(this.escrowOf(Number(characterId)) || 0);
     }
 
+    // Whether this cold bot needs its clan hall now (lifecycleKind, the command).
+    hallNeeded(state) {
+        return this.hallNeedOf(state, this.now()) === true;
+    }
+
+    // Whether the player waits for this bot at a meeting point.
+    playerWaiting(characterId) {
+        return this.waitingOf(Number(characterId)) === true;
+    }
+
+    // A raid spot with its boss's live row (instance, authority, engagement,
+    // availability); any other spot as it is.
+    raidSpot(spot) {
+        const row = spot?.raidBoss ? this.raidRowOf(Number(spot.raidBossTemplateId)) : null;
+        return row ? { ...spot, ...row } : spot;
+    }
+
     // A follower's change moves its leader's due time (a meeting leg, a
     // transition). Its native membership points to the leader.
     refreshPartyMeetingLeader(characterId, previous) {
@@ -827,8 +853,8 @@ class ColdSimulationKernel {
             // meeting flag clears is read again after the store.
             if (!current.state.stats?.tradeMeeting || state.stats?.tradeMeeting) nextDue = due;
             if (this.dueAt(current.state) === due) {
-                nextKind = lifecycleKind(state, nextContext, this);
-                unchanged = lifecycleKind(current.state, current.context, this) === nextKind;
+                nextKind = lifecycleKind(state, this);
+                unchanged = lifecycleKind(current.state, this) === nextKind;
             }
         }
         if (unchanged) {
@@ -920,8 +946,8 @@ class ColdSimulationKernel {
         const current = this.states.get(id);
         const heapEntry = { characterId: id, version: Number(version),
             dueAt: Number(dueAt || this.now()), scheduleToken: token,
-            playerWaiting: playerWaitingTransition(current?.state, current?.context, kind, this),
-            meetingTravel: meetingTravelTransition(current?.state, current?.context, kind, this) };
+            playerWaiting: playerWaitingTransition(current?.state, kind, this),
+            meetingTravel: meetingTravelTransition(current?.state, kind, this) };
         this.scheduleTokens.set(id, { token, version: Number(version), dueAt: heapEntry.dueAt, heapEntry });
         this.heap.push(heapEntry);
     }
@@ -1078,7 +1104,7 @@ class ColdSimulationKernel {
 
     needsNormalSchedule(characterId) {
         const entry = this.states.get(Number(characterId));
-        return !!entry && isSchedulableKind(lifecycleKind(entry.state, entry.context, this));
+        return !!entry && isSchedulableKind(lifecycleKind(entry.state, this));
     }
 
     buyerStateChanged(characterId) {
@@ -1106,14 +1132,14 @@ class ColdSimulationKernel {
         }
         if (this.hasNormalCoverage(id)) {
             const scheduled = this.scheduleTokens.get(id);
-            if (scheduled.heapEntry.playerWaiting !== playerWaitingTransition(current.state, current.context, kind, this)
-                || scheduled.heapEntry.meetingTravel !== meetingTravelTransition(current.state, current.context, kind, this)) {
+            if (scheduled.heapEntry.playerWaiting !== playerWaitingTransition(current.state, kind, this)
+                || scheduled.heapEntry.meetingTravel !== meetingTravelTransition(current.state, kind, this)) {
                 this.schedule(id, current.version, scheduled.dueAt, kind);
             }
             return false;
         }
         if (this.hasAcceptedPartyGrant(id)) return false;
-        kind ??= lifecycleKind(current.state, current.context, this);
+        kind ??= lifecycleKind(current.state, this);
         if (!isSchedulableKind(kind)) return false;
         this.schedule(id, current.version, dueAt ?? this.dueAt(current.state), kind);
         return true;
@@ -1179,7 +1205,7 @@ class ColdSimulationKernel {
                 continue;
             }
             const kind = this.buyerWakeups.has(id) && eligibleBuyer(current.state)
-                ? 'command' : lifecycleKind(current.state, current.context, this);
+                ? 'command' : lifecycleKind(current.state, this);
             if (kind === 'resolver') {
                 this.claiming.add(id);
                 this.claimStartedAt.set(id, this.now());
@@ -1273,9 +1299,10 @@ class ColdSimulationKernel {
                     raidOwner,
                     party,
                     members: partyMembers,
-                    spot: current.context.spot,
+                    spot: this.raidSpot(current.context.spot),
                     pressure: pressureFor(current.state, this.pressureRow),
-                    targetNpcId: Number(current.context.targetNpcId || 0),
+                    targetNpcId: Number(PartyHuntingTarget.npcId(party, current.state,
+                        memberId => this.states.get(Number(memberId))?.state) || 0),
                     grants: new Map(),
                     rejected: false,
                     invalidReason: purpose.invalidReason
@@ -1436,7 +1463,8 @@ class ColdSimulationKernel {
             const elapsedMs = current.state.timing?.lastResolvedAt
                 ? Math.max(1000, timestamp - Number(current.state.timing.lastResolvedAt))
                 : 60000;
-            const lifecyclePlan = !current.context.clanHallServices && !current.state.stats?.clanHallVisit && this.planLifecycle
+            const hallVisit = !!current.state.stats?.clanHallVisit || this.hallNeeded(current.state);
+            const lifecyclePlan = !hallVisit && this.planLifecycle
                 ? await this.planLifecycle({
                     state: current.state,
                     context: current.context,
@@ -1445,7 +1473,7 @@ class ColdSimulationKernel {
                 : null;
             if (!this.currentCommand(id, attempt)) return;
             const resolveState = lifecyclePlan?.plannedState || current.state;
-            const result = current.context.clanHallServices || current.state.stats?.clanHallVisit
+            const result = hallVisit
                 ? { patch: {}, events: [], materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: timestamp + 30000 }
                 : await this.resolveSolo({
                 assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
@@ -1453,7 +1481,7 @@ class ColdSimulationKernel {
                 spot: current.context.spot || null,
                 spotHunters: this.spotHunters(current.context.spot),
                 pressure: pressureFor(current.state, this.pressureRow),
-                targetNpcId: Number(current.context.targetNpcId || lifecyclePlan?.targetNpcId ||
+                targetNpcId: Number(lifecyclePlan?.targetNpcId ||
                     (lifecyclePlan?.activityPick?.activity === 'hunting' ? lifecyclePlan.activityPick.npcId : 0) || 0),
                 elapsedMs,
                 rng: deterministicRandom(current.state),
@@ -2133,6 +2161,15 @@ class ColdSimulationKernel {
                 if (resolvedParty.status === 'dissolved') this.partyRequirementProgress.delete(String(run.party.partyId));
             }
             if (!current()) return;
+            if (!proposals.length) {
+                // No member result (the resolver found no spot or no members):
+                // no commit will answer these claims, so they go back now, not
+                // at lease expiry, and main can move the members meanwhile.
+                handled = true;
+                this.requestRelease([...run.grants.values()].map(token => ({ token, reason: 'party_no_result' })));
+                this.requeue(run.purpose.leaderId, this.now() + 1000);
+                return;
+            }
             published = handled = true;
             proposals.forEach(proposal => this.dirty.set(proposal.characterId, proposal));
             DiagnosticConfig.developerDiagnostics && (this.stats.resolved += proposals.length);
@@ -2183,8 +2220,7 @@ class ColdSimulationKernel {
                 spotHunters: this.spotHunters(spot),
                 pressure: pressureFor(active.state, this.pressureRow),
                 targetNpcId: Number(lifecyclePlan?.targetNpcId || lifecyclePlan?.acquisitionPlan?.next?.npcId ||
-                    (lifecyclePlan?.activityPick?.activity === 'hunting' ? lifecyclePlan.activityPick.npcId : 0) ||
-                    active.context.targetNpcId || 0),
+                    (lifecyclePlan?.activityPick?.activity === 'hunting' ? lifecyclePlan.activityPick.npcId : 0) || 0),
                 elapsedMs,
                 rng: deterministicRandom(active.state),
                 timestamp
@@ -2197,7 +2233,7 @@ class ColdSimulationKernel {
                 : null;
             if (!this.resolverSourceCurrent(source)) return;
             const projectedState = projection?.state || projection;
-            const priority = playerWaitingTransition(active.state, active.context, null, this) ? 'P0'
+            const priority = playerWaitingTransition(active.state, null, this) ? 'P0'
                 : projection?.durable ? 'P1' : priorityForResult(active.state, result);
             const proposal = {
                 proposalId: `${active.grant.leaseId}:${active.grant.revision}`,
@@ -2600,7 +2636,7 @@ class ColdSimulationKernel {
         if (!DiagnosticConfig.developerDiagnostics) return this.heartbeatSnapshot();
         const now = this.now();
         const due = [...this.states.values()].filter((entry) => (
-            isSchedulableKind(lifecycleKind(entry.state, entry.context, this))
+            isSchedulableKind(lifecycleKind(entry.state, this))
             && this.dueAt(entry.state, now) <= now
         ));
         const oldestDueAt = due.reduce((oldest, entry) => (

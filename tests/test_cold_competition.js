@@ -7,7 +7,7 @@ const at = 1800000000000;
 const memory = new Memory();
 const spot = { id: 'test', npcEntries: [{ selfId: 10, count: 1 }] };
 const entries = Array.from({ length: 20 }, (_, i) => ({ state: { characterId: i + 1, name: `Bot${i + 1}`, phase: 'cold',
-    activity: 'hunting', level: 40, spotId: 'test', vitals: { hp: 100 }, stats: {} }, context: { spot, targetNpcId: 10 } }));
+    activity: 'hunting', level: 40, spotId: 'test', vitals: { hp: 100 }, stats: {} }, context: { spot } }));
 entries.forEach(e => memory.accept(P.empty(e.state.characterId)));
 // The worker's parties table as a fixture states it: the row a bot leads is
 // the party its own entry carries when it is that party's leader.
@@ -36,7 +36,7 @@ const crowdedEntries = Array.from({ length: 8 }, (_, ground) => entries.map((e, 
     const id = 100 + ground * 20 + index;
     memory.accept(P.empty(id));
     const crowdedSpot = { ...spot, id: `crowded-${ground}` };
-    return { state: { ...e.state, characterId: id, spotId: crowdedSpot.id }, context: { spot: crowdedSpot, targetNpcId: 10 } };
+    return { state: { ...e.state, characterId: id, spotId: crowdedSpot.id }, context: { spot: crowdedSpot } };
 })).flat();
 const crowded = make();
 let preservedLargeBatch = false;

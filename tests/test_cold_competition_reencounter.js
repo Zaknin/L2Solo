@@ -108,7 +108,7 @@ function monitorReplay(c, memory) {
         if (party) led.set(Number(party.leaderId), party);
         return { state: { ...s, phase: 'cold', activity: party ? 'grouped' : 'hunting', spotId: c.spotId,
             vitals: { hp: 100 }, party: { partyId: party?.partyId || null } },
-        context: { spot, targetNpcId: c.npcId } };
+        context: { spot } };
     });
     const decisions = new Map();
     for (let scan = 0; scan <= 1440; scan++) {

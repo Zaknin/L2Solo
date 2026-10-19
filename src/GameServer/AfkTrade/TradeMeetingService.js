@@ -2,11 +2,24 @@
 const { randomUUID } = require('node:crypto');
 const { MAX_COMMITMENTS } = require('./TradeMeeting');
 const { partyTradeAllowed } = require('../Bot/Population/PartyAdmission');
+const TableChannel = require('../Bot/Population/ColdTableChannel').shared;
 const staged = new Map();
 const preparedActors = new Map(); // actor -> staged token; one preparation per actor.
 const enrolled = new Map(); // At most eight numeric references per actor; no custody/terms.
 const playerWaiters = new Map(); // Derived numeric references, retired with native commitments.
 const travelNotices = new Map(); // One private acknowledgement per enrolled bot/player commitment.
+// The 'meetings' table: one row per bot the player waits for at a meeting point.
+// The cold worker reschedules the bot when its row comes or goes.
+TableChannel.register('meetings', { key: row => row.characterId,
+    allRows: () => [...playerWaiters.keys()].map(characterId => ({ characterId })), eventDriven: true });
+function publishWaiting(actor) {
+    TableChannel.changed('meetings', playerWaiters.get(actor)?.size
+        ? { characterId: actor } : { key: actor, removed: true });
+}
+function clearWaiters() {
+    for (const actor of playerWaiters.keys()) TableChannel.changed('meetings', { key: actor, removed: true });
+    playerWaiters.clear();
+}
 function notifyPlayerTravel(row) {
     if (row.state !== 'accepted') return;
     for (const [id, other, suffix] of [[row.actorA, row.actorB, 'A'], [row.actorB, row.actorA, 'B']]) {
@@ -54,9 +67,7 @@ function trackPlayerWaiting(row) {
             refs?.delete(row.id);
             if (!refs?.size) playerWaiters.delete(actor);
         }
-        if (previous !== !!playerWaiters.get(actor)?.size) {
-            coordinator()?.notifyState?.(life().cachedState(actor), { reason: 'player_meeting_wait', critical: true });
-        }
+        if (previous !== !!playerWaiters.get(actor)?.size) publishWaiting(actor);
     }
 }
 function enroll(actor, id) {
@@ -72,7 +83,7 @@ function unenroll(actor, id) {
     const waiting = playerWaiters.get(actor);
     if (waiting?.delete(id) && !waiting.size) {
         playerWaiters.delete(actor);
-        coordinator()?.notifyState?.(life().cachedState(actor), { reason: 'player_meeting_wait', critical: true });
+        publishWaiting(actor);
     }
 }
 const queue = new Set();
@@ -389,7 +400,7 @@ function reset() {
     unsubscribeLife?.(); unsubscribeMarketLife?.(); unsubscribePlayer?.(); unsubscribeBoard?.();
     unsubscribeLife = unsubscribeMarketLife = unsubscribePlayer = unsubscribeBoard = undefined;
     for (const token of [...staged.keys()]) discard(token);
-    staged.clear(); preparedActors.clear(); refusedAds.clear(); pages = 0; transportPages = 0; transportBytes = 0; enrolled.clear(); playerWaiters.clear(); travelNotices.clear(); queue.clear();
+    staged.clear(); preparedActors.clear(); refusedAds.clear(); pages = 0; transportPages = 0; transportBytes = 0; enrolled.clear(); clearWaiters(); travelNotices.clear(); queue.clear();
 }
 function wake(id) {
     if (!enrolled.has(Number(id))) return;
@@ -497,7 +508,7 @@ async function drain() {
     } finally { draining = false; if (queue.size) { draining = true; setImmediate(drain); } }
 }
 async function init() {
-    unsubscribeLife?.(); unsubscribeMarketLife?.(); unsubscribePlayer?.(); unsubscribeBoard?.(); enrolled.clear(); playerWaiters.clear(); travelNotices.clear(); queue.clear();
+    unsubscribeLife?.(); unsubscribeMarketLife?.(); unsubscribePlayer?.(); unsubscribeBoard?.(); enrolled.clear(); clearWaiters(); travelNotices.clear(); queue.clear();
     unsubscribeLife = life().subscribeChanges(change => {
         const id = Number(typeof change === 'number' ? change : change.characterId);
         // Only bounded unaccepted preparations are replaceable. The durable

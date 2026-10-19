@@ -54,6 +54,15 @@ function onMinionRemoved(listener) {
     minionRemovedListeners.add(listener);
 }
 
+// Listeners told the template id of a raid boss that entered or left the
+// index. Called inside index writes (a rebuild included): a listener defers
+// any lookup of its own.
+const bossChangedListeners = new Set();
+
+function onBossChanged(listener) {
+    bossChangedListeners.add(listener);
+}
+
 function bossIn(state, target) {
     const bossObjectId = positiveId(target.minionBossObjectId);
     const bossTemplateId = positiveId(target.minionBossTemplateId);
@@ -95,6 +104,7 @@ function removeMembership(state, npc, membership) {
             state.bossesByObjectId.delete(membership.objectId);
         }
         removeFromSetMap(state.bossesByTemplateId, membership.templateId, npc);
+        bossChangedListeners.forEach((listener) => listener(membership.templateId));
     }
     if (membership.raidMinion) {
         removeFromSetMap(state.minionsByBossObjectId, membership.bossObjectId, npc);
@@ -124,6 +134,7 @@ function indexObject(state, npc, { count = true } = {}) {
     if (raidBoss && membership.objectId) {
         state.bossesByObjectId.set(membership.objectId, npc);
         addToSetMap(state.bossesByTemplateId, membership.templateId, npc);
+        bossChangedListeners.forEach((listener) => listener(membership.templateId));
     }
     if (raidMinion) {
         addToSetMap(state.minionsByBossObjectId, bossObjectId, npc);
@@ -264,6 +275,7 @@ module.exports = {
     add,
     remove,
     onMinionRemoved,
+    onBossChanged,
     bossByObjectId,
     raidEntityByObjectId,
     bossByTemplateId,

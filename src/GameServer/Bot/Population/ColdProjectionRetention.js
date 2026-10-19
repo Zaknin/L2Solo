@@ -17,10 +17,11 @@ function same(left, right) {
     return left.length === right.length && left.every((value, index) => Object.is(value, right[index]));
 }
 
-// Party, memory, pressure, goal and escrow are worker tables, not context:
-// a replayed entry carries none of them, so none is checked here.
+// Party, memory, pressure, goal, escrow, the raid boss, the player's meeting
+// wait and the clan hall are worker tables, not context: a replayed entry
+// carries none of them, so none is checked here.
 function contextStamp(context) {
-    return [context.spot, context.clanHallServices, context.targetNpcId];
+    return [context.spot];
 }
 
 // Replay only a producer's existing intent. The provider reads current local
@@ -77,13 +78,11 @@ class ColdProjectionRetention {
         if (record.sequence !== (this.dirty.get(state) || 0)) return unavailable('projection_dirty');
         const context = record.context;
         if (!same(record.contextStamp, contextStamp(context))) return unavailable('projection_context_changed');
-        if (context.spot?.raidBoss) return unavailable('dynamic_raid_context');
         const current = this.dependencies(state, context);
-        if (current.clanId || context.clanHallServices) return unavailable('dynamic_clan_hall_context');
+        if (current.clanId) return unavailable('dynamic_clan_hall_context');
         if (record.stamp.catalog !== current.catalog || record.stamp.physicalCatalog !== current.physicalCatalog) {
             return unavailable('spot_catalog_changed');
         }
-        if (context.targetNpcId !== current.targetNpcId) return unavailable('target_changed');
         return { ok: true, entry: record.entry };
     }
 }

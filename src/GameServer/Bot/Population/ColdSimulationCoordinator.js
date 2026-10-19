@@ -17,12 +17,12 @@ const NpcShopBuyLists = invoke('GameServer/World/Generics/NpcShopBuyLists');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
 const ClanSocial = invoke('GameServer/Clan/ClanSocialRuntime');
-const PartyHuntingTarget = invoke('GameServer/Bot/Population/PartyHuntingTarget');
 const HuntEfficiency = invoke('GameServer/Bot/AI/BotHuntEfficiency');
 const PartyComposition = invoke('GameServer/Bot/Population/BackgroundPartyComposition');
 const BackgroundPartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const GlobalChat = invoke('GameServer/Bot/Population/BotGlobalChat');
 const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const RaidEncounterScope = invoke('GameServer/RaidBoss/RaidEncounterScope');
 const Protocol = require('./ColdSimulationProtocol');
 const { ColdEconomyDecisions, wireAdvisory, echoHolds } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
@@ -91,12 +91,6 @@ function npcPlanningCatalogRows() {
     });
 }
 
-// The active party this bot leads (the last one active() lists), or null:
-// the context's target npc reads it.
-function ledParty(state) {
-    return BackgroundPartyState.activeByLeaders([state.characterId], 'context').at(-1) || null;
-}
-
 class ColdSimulationCoordinator {
     constructor(options = {}) {
         this.WorkerClass = options.WorkerClass || Worker;
@@ -109,8 +103,7 @@ class ColdSimulationCoordinator {
             stateFor: id => LifeState.cachedState(id), epoch: () => this.workerEpoch,
             dependencies: state => ({
                 catalog: SpotProfiles.cache, physicalCatalog: SpotService.spots,
-                clanId: ClanSocial.view.memberships.get(Number(state.characterId)) || 0,
-                targetNpcId: this.targetNpcId(state, ledParty(state))
+                clanId: ClanSocial.view.memberships.get(Number(state.characterId)) || 0
             })
         });
         this.population = null;
@@ -358,6 +351,8 @@ class ColdSimulationCoordinator {
                 encounters.tick(this.competitionActions)?.catch(error => this.recordError(error));
             }, 1000);
             this.reconcileTimer = setInterval(() => {
+                // The hunted bosses' rows: players engaging or the boss dying.
+                RaidEncounterScope.reviewBosses(BackgroundPartyState.raidBossKeys());
                 this.tableChannel.flush();
                 this.sendSnapshots(false).catch((error) => this.recordError(error));
             }, snapshotRefreshMs());
@@ -1051,14 +1046,6 @@ class ColdSimulationCoordinator {
         return { spots, profiles };
     }
 
-    // The hunted npc of the bot's step: its party's target when it leads
-    // one, else its solo hunting leaf's.
-    targetNpcId(state, party) {
-        if (party) return PartyHuntingTarget.npcId(party, state);
-        const leaf = this.economyDecisions.activity(state);
-        return leaf?.activity === 'hunting' ? (leaf.npcId || null) : null;
-    }
-
     async ensureCraftRecipes(state) {
         if (invoke('GameServer/Bot/Economy/CraftShopService').isServiceCrafter(state)) {
             await invoke('GameServer/Bot/Economy/CraftWorkshopService').knownFor(state.characterId);
@@ -1076,20 +1063,18 @@ class ColdSimulationCoordinator {
             || (physical && index.spots.get(String(physical.id)))
             || declared
             || null;
-        // Party, leadership, memory, pressure, goal revision and escrow are
-        // worker tables (BackgroundPartyState, InteractionMemoryRuntime,
-        // PopulationDirector, GoalState, the board's escrow), not context.
-        const party = ledParty(state);
+        // Party, leadership, memory, pressure, goal revision, escrow, the
+        // raid boss, the player's meeting wait and the clan hall are worker
+        // tables (BackgroundPartyState, InteractionMemoryRuntime,
+        // PopulationDirector, GoalState, the board's escrow, RaidEncounterScope,
+        // TradeMeetingService, ClanHall/Runtime), not context.
         const workshop = this.economyDecisions.workshopFor(state);
         const context = {
-            playerWaiting: invoke('GameServer/AfkTrade/TradeMeetingService').isPlayerWaiting?.(state.characterId) === true,
             // The public workshop is capped at 16 entries, not the recipe
             // book. Hydrated knowledge travels as one catalogue bitset.
             ...recipeKnowledgeFor(state),
             ...(state.stats?.workshop?.entries?.length ? { workshop } : {}),
-            spot: invoke('GameServer/RaidBoss/RaidEncounterScope').decorateSpot(spot),
-            clanHallServices: invoke('GameServer/ClanHall/ColdVisit').needed(state),
-            targetNpcId: this.targetNpcId(state, party)
+            spot
         };
         this.projectionRetention.prepare(state, context);
         return context;

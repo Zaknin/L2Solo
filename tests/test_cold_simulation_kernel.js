@@ -16,7 +16,8 @@ const { beginHuntingTrip } = require('../src/GameServer/Bot/Population/HuntingTr
 
 // The facts a kernel gives the free functions (its parties table, its
 // states, the board's escrow) for a bot that leads `party`.
-const leading = (party, members = []) => ({ leaderParty: () => party, partyMembers: () => members, buyOrderEscrow: () => 0 });
+const leading = (party, members = []) => ({ leaderParty: () => party, partyMembers: () => members, buyOrderEscrow: () => 0,
+    hallNeeded: () => false, playerWaiting: () => false });
 
 function state(characterId = 1, overrides = {}) {
     return {
@@ -349,21 +350,21 @@ function claimAck(kernel, payload) {
         adena: 1000,
         stats: { equipmentPlan: { strategy: 'market', market: { price: 500, reserve: 100 } } }
     })), 'command');
-    assert.strictEqual(lifecycleKind(state(2, { party: { partyId: 'party' } }), {}, leading({ partyId: 'party', leaderId: 2 })), 'party');
+    assert.strictEqual(lifecycleKind(state(2, { party: { partyId: 'party' } }), leading({ partyId: 'party', leaderId: 2 })), 'party');
 
-    // An absent main decision sends target 0; the worker's own hunting pick
-    // remains the target for the native solo resolver.
+    // The worker's own hunting pick is the target for the native solo
+    // resolver (the context carries no target).
     let pickedTarget = 0;
     const pickKernel = recordingKernel({ now: () => 5000,
         resolveSolo: input => { pickedTarget = input.targetNpcId; return resolver(input); },
         planLifecycle: ({ state }) => ({ plannedState: state, targetNpcId: 0,
             activityPick: { activity: 'hunting', npcId: 20101, spotId: 'worker-ground' } }) });
-    pickKernel.upsert({ state: state(79), context: { targetNpcId: 0, spot: { id: 'worker-ground' } } });
+    pickKernel.upsert({ state: state(79), context: { spot: { id: 'worker-ground' } } });
     pickKernel.tick();
     claimAck(pickKernel, { grants: [{ ok: true, characterId: 79, ownerId: 'cold_simulation_owner', revision: 4,
         leaseId: 'pick-lease', leaseUntil: 35000 }] });
     await pickKernel.resolveChain;
-    assert.strictEqual(pickedTarget, 20101, 'native solo resolve uses worker activityPick when main target is absent');
+    assert.strictEqual(pickedTarget, 20101, 'native solo resolve uses the worker activityPick');
 
     const commandMessages = [];
     let plannedOnWorker = 0;

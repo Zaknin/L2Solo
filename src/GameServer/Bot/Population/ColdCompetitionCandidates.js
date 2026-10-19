@@ -218,7 +218,7 @@ class ColdCompetitionCandidates {
             if (!first || record[metaKey].sequence < first[metaKey].sequence) first = record;
         }
         return first ? PartyTarget.competitionNpcId(party, this.packets(Number(party.leaderId))?.state,
-            this.packets(first.id)?.context.spot) : 0;
+            this.packets(first.id)?.context.spot, id => this.packets(Number(id))?.state) : 0;
     }
     // One encounter roll per spot and 30 s window, its decision point. The
     // monitor seeds a group's rolls by the window, so every review of the spot

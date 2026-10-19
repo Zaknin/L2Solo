@@ -58,7 +58,7 @@ for (const value of [...roster, healer, damage, ...Array.from({ length: 71 }, (_
 }
 seed.close();
 const query = (sql, args = []) => Database.execute([sql, args]);
-const originals = { find: Catalog.findById, decorate: Scope.decorateSpot, project: Scope.projectSource, share: Config.maxBotMemberShare,
+const originals = { find: Catalog.findById, project: Scope.projectSource, share: Config.maxBotMemberShare,
     reload: invoke('GameServer/Clan/ClanService').reload };
 const plan = { status: 'active', strategy: 'direct_drop', partyNeed: 'required', expectedKills: 10, expectedEffort: 10,
     target: { selfId: 80, name: 'Sword', slot: 7 }, next: { spotId: spot.id, npcId: spot.raidBossTemplateId, itemId: 80,
@@ -246,9 +246,9 @@ function scalarSourceCase() {
         const scalar = originals.project(spot);
         assert.equal(sessionsReads, 0); assert.equal(snapshotReads, 0);
         assert(!Object.hasOwn(scalar, 'raidAuthority') && !Object.hasOwn(scalar, 'raidExternallyEngaged'));
-        const full = originals.decorate(spot);
+        const full = { ...spot, ...Scope.raidRow(spot.raidBossTemplateId) };
         assert.equal(Demand.sourceFingerprint(scalar), Demand.sourceFingerprint(full));
-        assert.equal(sessionsReads, 1); assert.equal(snapshotReads, 1, 'legacy full encounter decoration still reads its old inputs');
+        assert.equal(sessionsReads, 1); assert.equal(snapshotReads, 1, 'the raids table row still reads the full encounter inputs');
         dead = true;
         const gone = originals.project(spot);
         assert.equal(gone.raidWorldAvailable, false); assert.equal(gone.raidInstanceId, scalar.raidInstanceId);
@@ -464,7 +464,7 @@ async function main() {
         await fundedOwners();
         console.log('Clan goal recruitment: native conditional RPC, alternatives, capacity, stale CAS, refusal, accepted9 and owner/watch tests passed');
     } finally {
-        Catalog.findById = originals.find; Scope.decorateSpot = originals.decorate; Scope.projectSource = originals.project; Config.maxBotMemberShare = originals.share;
+        Catalog.findById = originals.find; Scope.projectSource = originals.project; Config.maxBotMemberShare = originals.share;
         invoke('GameServer/Clan/ClanService').reload = originals.reload;
         Events.stop(); await Runtime.shutdown(); await Database.close(); fs.rmSync(isolated.directory, { recursive: true, force: true });
     }

@@ -10,7 +10,7 @@ const entries=Array.from({length:40},(_,i)=>{
     memory.accept(Policy.empty(i+1));
     return { state:{characterId:i+1,level:20,phase:'cold',activity:'hunting',spotId:spot.id,
         vitals:{hp:100},stats:{equipmentPlan:i%2?{status:'active',strategy:'market'}:{status:'complete'}},party:{}},
-        context:{spot,targetNpcId:0} };
+        context:{spot} };
 });
 const selected=entries.map(e=>Target.competitionNpcId(null,e.state,spot));
 assert(selected.includes(10)&&selected.includes(11),'ordinary hunters distribute across actual spawn types');

@@ -18,6 +18,8 @@ const Navigation = invoke('GameServer/Bot/AI/CompanionNavigationRecovery');
 const Spots = invoke('GameServer/Bot/AI/SpotService');
 const Departure = require('../src/GameServer/ClanHall/Departure');
 const VisitPolicy = require('../src/GameServer/ClanHall/VisitPolicy');
+const VisitNeed = require('../src/GameServer/ClanHall/VisitNeed');
+const TableChannel = require('../src/GameServer/Bot/Population/ColdTableChannel').shared;
 const originalBestSpot = Spots.findBestSpot;
 const originalArrival = Spots.arrivalPointForState;
 const originalInvoke = global.invoke;
@@ -292,10 +294,10 @@ async function main() {
         await Life.init();
         state = await Life.upsertState(state, 'hall_test_seed');
         assert(state);
-        assert.equal(lifecycleKind(state, { clanHallServices: true }), 'command');
         let requests;
         const kernel = new ColdSimulationKernel({
             now: () => at,
+            hallNeeded: () => true,
             emit: (type, payload) => {
                 if (type === 'command_request') requests = payload.requests;
             },
@@ -303,7 +305,8 @@ async function main() {
                 throw Error('hall service must not simulate a fight');
             }
         });
-        kernel.upsert({ state, context: { clanHallServices: true } });
+        assert.equal(lifecycleKind(state, kernel), 'command', 'a bot that needs its hall is a command');
+        kernel.upsert({ state, context: {} });
         const commandAttempt = kernel.beginCommand(id);
         assert(commandAttempt, 'hall fixture admits an actual current command attempt');
         await kernel.resolveCommand(id, commandAttempt);
@@ -413,6 +416,26 @@ async function main() {
         const row = (await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId=?', [id]]))[0];
         assert(JSON.parse(row.statsJson).coldCombat.effects.some((e) => e.id === 1086));
         assert.equal(Cold.needed(state, at + 60000), false, 'no repeat visit while buffs are fresh');
+        // The cold worker's view: the published 'clan_halls' row joined with
+        // the catalog definition, and an EffectStore that knows no actor (the
+        // worker's stub lists nothing).
+        const hallTable = TableChannel.full(TableChannel.tables.get('clan_halls'));
+        const published = hallTable.rows.map(([, row]) => row).find((row) => row.id === def.id);
+        assert.equal(published.managerPresent, true, 'the row carries the spawned manager');
+        const workerHall = { ...Runtime.Policy.definition(published.id), ...published };
+        const liveList = Effects.list;
+        Effects.list = () => [];
+        try {
+            const unbuffed = { ...state, stats: { ...state.stats, clanHallRetryAt: 0, coldCombat: { effects: [] } } };
+            assert.equal(VisitNeed.needed(unbuffed, workerHall, published.managerPresent, at + 60000), true,
+                'worker: a hall bot without the buff needs the hall');
+            assert.equal(VisitNeed.needed({ ...state, stats: { ...state.stats, clanHallRetryAt: 0 } }, workerHall,
+                published.managerPresent, at + 60000), false, 'worker: the bot\'s own fresh buffs count, not the store');
+            assert.equal(VisitNeed.needed(unbuffed, workerHall, false, at + 60000), false,
+                'worker: no visit while the manager is absent');
+        } finally {
+            Effects.list = liveList;
+        }
         const activated = hotActor({ ...state, stats: { ...state.stats, coldCombat: { effects: [] } } });
         actors.push(activated);
         invoke('GameServer/Actor/CharacterStatus').restoreEffects(null, activated, state.stats.coldCombat.effects);

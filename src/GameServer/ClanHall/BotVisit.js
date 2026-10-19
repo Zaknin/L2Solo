@@ -3,6 +3,7 @@ const Services = require('./Services');
 const Approach = invoke('GameServer/Bot/AI/TownNpcApproach');
 const Navigation = invoke('GameServer/Bot/AI/CompanionNavigationRecovery');
 const VisitPolicy = require('./VisitPolicy');
+const { local } = require('./VisitNeed');
 const RETRY_MS = 300000;
 const VISIT_MS = 180000;
 
@@ -21,14 +22,6 @@ function safe(session, actor) {
         !session.spotRelocation &&
         !session.townEscape &&
         !session.pendingTownTrip
-    );
-}
-function local(actor, hall) {
-    const p = Services.point(actor);
-    const town = invoke('GameServer/World/TownRespawn').getClosestTown(p.locX, p.locY, p.locZ);
-    return (
-        Runtime.Policy.inside(hall, actor) ||
-        (town?.name === hall.town && Math.hypot(p.locX - hall.spawn.locX, p.locY - hall.spawn.locY) <= 7500)
     );
 }
 function finish(session, actor, retryAt) {

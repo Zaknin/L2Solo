@@ -3,6 +3,7 @@ const Policy = require('./Policy');
 const ReviewEvents = require('../Clan/ClanReviewEvents');
 const Diagnostics = require('../Bot/Economy/EconomyDiagnostics');
 const Clans = invoke('GameServer/Clan/ClanService');
+const TableChannel = require('../Bot/Population/ColdTableChannel').shared;
 const HOUR = 60 * 60 * 1000;
 let halls = [],
     timer = null,
@@ -24,8 +25,29 @@ function financeSummary() {
     const sorted = [...financeSamples].sort((a, b) => a - b);
     return { samples: sorted.length, p95Ms: sorted.length ? sorted[Math.ceil(sorted.length * 0.95) - 1] : 0 };
 }
+// The 'clan_halls' table: what the cold worker's VisitNeed.needed reads of a
+// hall. managerPresent = the last value published per hall (tick reviews it).
+const managerSeen = new Map();
+function managerPresent(h) {
+    // lazy: cycle Services requires Runtime.
+    return h.ownerId > 0 && !!require('./Services').manager(h);
+}
+function tableRow(h, present = managerPresent(h)) {
+    managerSeen.set(h.id, present);
+    return { id: h.id, ownerId: Number(h.ownerId) || 0, town: h.town, spawn: h.spawn,
+        serviceDueAt: Number(h.serviceDueAt) || 0, functions: h.functions, managerPresent: present };
+}
+// One compare per owned hall: a manager that spawned or died since the last row.
+function reviewManagers() {
+    for (const h of halls) {
+        if (!(h.ownerId > 0)) continue;
+        const present = managerPresent(h);
+        if (present !== managerSeen.get(h.id)) TableChannel.changed('clan_halls', tableRow(h, present));
+    }
+}
 function applyRows(rows) {
     halls = rows.map((h) => ({ ...Policy.definition(h.id), ...h, functions: JSON.parse(h.functionsJson || '{}') }));
+    for (const h of halls) TableChannel.changed('clan_halls', tableRow(h));
     nextSettleAt = Infinity;
     for (const h of halls) {
         const at = h.ownerId ? Math.min(Number(h.rentDueAt) || 0, Number(h.serviceDueAt) || 0) : Number(h.auctionEndsAt) || 0;
@@ -139,6 +161,7 @@ async function tick() {
         const due = settleDue(Date.now());
         Diagnostics.count('clan_hall', 'tick', due ? 'due' : 'skipped');
         if (due) refresh(await db.tickClanHalls());
+        reviewManagers();
         if (!invoke('GameServer/Clan/ClanSimulationConfig').enabled) return;
         const deadline = Date.now() + 40;
         const financeStarted = DiagnosticConfig.developerDiagnostics ? performance.now() : 0;
@@ -177,6 +200,7 @@ async function tick() {
         running = false;
     }
 }
+TableChannel.register('clan_halls', { key: row => row.id, allRows: () => halls.map(h => tableRow(h)) });
 module.exports = {
     Policy,
     applyRows,

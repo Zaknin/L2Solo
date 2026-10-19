@@ -41,7 +41,7 @@ const memory = new Memory();
 const spot = { id: 'null-persona', npcEntries: [{ selfId: 10, count: 1 }] };
 const entries = Array.from({ length: 8 }, (_, i) => ({ state: { characterId: i + 1, name: `Bot${i + 1}`,
     phase: 'cold', activity: 'hunting', level: 40, spotId: spot.id, vitals: { hp: 100 }, stats: {} },
-    context: { spot, targetNpcId: 10 } }));
+    context: { spot } }));
 entries.forEach(e => memory.accept(P.empty(e.state.characterId)));
 function forecast(persona) {
     const monitor = new ColdCompetitionMonitor({ capacityForSpot: () => 1, personaFor: () => persona });

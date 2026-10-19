@@ -1,6 +1,7 @@
 const { decide } = require('./ColdCompetitionPolicy');
 const Visible = require('../../Social/VisibleStrength');
 const BotErrands = require('./BotErrands');
+const PartyHuntingTarget = require('./PartyHuntingTarget');
 // A party competes as one unit only when no member is on one of these errands.
 const PARTY_MEMBER_BUSY_FLAGS = ['pvpEncounter', 'supplyErrand', 'warehouseWorkflow', 'marketReturn'];
 const INTERVAL_MS = 30000;
@@ -76,11 +77,12 @@ class ColdCompetitionMonitor {
             const partyId = state.party?.partyId || state.partyId || null;
             if (partyId && !partyTargets.has(partyId)) {
                 const party = parties.get(partyId);
-                partyTargets.set(partyId, targetForParty ? targetForParty(partyId) : party ? require('./PartyHuntingTarget').competitionNpcId(
-                    party, states.get(Number(party.leaderId)), context.spot) : 0);
+                partyTargets.set(partyId, targetForParty ? targetForParty(partyId) : party ? PartyHuntingTarget.competitionNpcId(
+                    party, states.get(Number(party.leaderId)), context.spot, id => states.get(Number(id))) : 0);
             }
-            const target = partyId ? partyTargets.get(partyId) || 0 : Number(context.targetNpcId || 0)
-                || require('./PartyHuntingTarget').competitionNpcId(null, state, context.spot);
+            // A solo hunter's target is the one main validates its event with.
+            const target = partyId ? partyTargets.get(partyId) || 0
+                : PartyHuntingTarget.competitionNpcId(null, state, context.spot);
             if (!target) { untargeted.set(state.spotId, (untargeted.get(state.spotId) || 0) + 1); continue; }
             if (!this.isTargetAllowed(target)) continue;
             const spawnRows = context.spot.npcEntries || [];

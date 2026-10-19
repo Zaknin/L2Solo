@@ -10,6 +10,7 @@ const Data = invoke('GameServer/DataCache');
 const Response = invoke('GameServer/Network/Response');
 const Board = require('../src/GameServer/AfkTrade/PlayerBoardWindow');
 const Meetings = require('../src/GameServer/AfkTrade/TradeMeetingService');
+const TableChannel = require('../src/GameServer/Bot/Population/ColdTableChannel').shared;
 const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 const HtmlLink = invoke('GameServer/Network/Request/HtmlLink');
 const seller = 730501, buyer = 730502, follower = 730503;
@@ -177,8 +178,9 @@ const waitFor = async (predicate, label, timeoutMs = 30000) => {
         // deals are prohibited, but saved custody must still reach its buyer.
         await restoreLegacyParty('legacy_meeting_party_fixture');
         assert.equal(Meetings.isPlayerWaiting(seller), true, 'accepted custody prioritizes the merchant while the human waits at the point');
-        assert.equal(Coordinator.contextFor(Life.cachedState(seller)).playerWaiting, true,
-            'the real coordinator carries waiting-player priority into the worker context');
+        const meetings = TableChannel.full(TableChannel.tables.get('meetings'));
+        assert.deepEqual(meetings.rows.find(([key]) => key === seller)?.[1], { characterId: seller },
+            'the meetings table carries waiting-player priority to the worker');
         assert.equal(tells().length, 1, 'the accepted remote merchant privately acknowledges the reservation');
         assert.equal(tells()[0].sender, seller);
         assert.equal(tells()[0].kind, 2, 'meeting acknowledgement uses the private C4 chat channel');
