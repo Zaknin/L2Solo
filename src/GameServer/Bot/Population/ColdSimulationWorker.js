@@ -1704,7 +1704,9 @@ function startKernel(config = {}) {
             const value = (held?.input.mode === 'occupation' ? occupationPlanner.valueFor(id, entry?.state) : null)
                 || publishedWorkshop(entry);
             if (value) return value;
-            Config.developerDiagnostics && economyDiagnostics.count('occupation', 'workshop', 'unknown');
+            // Counts crafters only: a bot without workshop entries has no workshop to know.
+            Config.developerDiagnostics && entry?.state?.stats?.workshop?.entries?.length
+                && economyDiagnostics.count('occupation', 'workshop', 'unknown');
             return ColdEconomyDecision.unknownWorkshop();
         },
         buyOrderEscrow: escrowFor,

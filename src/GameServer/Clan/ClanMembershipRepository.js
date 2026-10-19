@@ -5,20 +5,23 @@ const EconomyCommit = require('../Bot/Economy/EconomyCommit');
 // write can be handed the same number; the cache gets the written one. The
 // economy leaf stays the row's.
 const MEMBER_WRITE = `UPDATE bot_life_state SET activity = ?, statsJson = ${EconomyCommit.preserveLeafSql('?')},
-    simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ? RETURNING `;
+    simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`;
 
 module.exports = ({ all, write, inTransaction, now }) => {
     function writeMemberUnsafe(row, activity, statsJson) {
-        const [written] = all(`${MEMBER_WRITE}simulationRevision, updatedAt`, [activity, statsJson, now(), row.characterId]);
+        const [written] = all(`${MEMBER_WRITE} RETURNING simulationRevision, updatedAt`, [activity, statsJson, now(), row.characterId]);
         return { ...row, activity, statsJson, ...written };
     }
 
-    // One member's goal repair built from main's cache (ClanEquipmentService):
+    // One member's goal repair built from main's copy (ClanEquipmentService):
     // the same write, so a proposal built before it is refused on its
-    // revision. Published like the repairs below.
-    function writeGoalMember(characterId, activity, statsJson) {
+    // revision. The copy was read before this write; a commit that moved the
+    // row in between wins and nothing is written or published here: the next
+    // goal change, or the refused claim's own goal repair, covers that member.
+    function writeGoalMember(characterId, activity, statsJson, expectedRevision) {
         return inTransaction(() => {
-            const members = all(`${MEMBER_WRITE}*`, [activity, statsJson, now(), Number(characterId)]);
+            const members = all(`${MEMBER_WRITE} AND simulationRevision = ? RETURNING *`,
+                [activity, statsJson, now(), Number(characterId), Number(expectedRevision)]);
             return { repairedMembers: members.length, repairedParties: 0, membershipRepair: { members, parties: [] } };
         }, 'clan-goal:member').then(publish);
     }
