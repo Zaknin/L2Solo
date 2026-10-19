@@ -3362,7 +3362,8 @@ const PopulationService = {
         }
         // Native errands can start a new trip after publishing the bids.
         // Finish this owner's resolve against that final route and money
-        // packet, including recovery and preparation-pending branches.
+        // packet, including recovery; while a meeting preparation is staged the
+        // review waits and runs at the next commit's boardLimits step.
         if (outcome?.ok && outcome.state) {
             const checked = await BotAfkMarketService.reviewPurchaseLimits(outcome.state);
             outcome.state = checked.state || outcome.state;

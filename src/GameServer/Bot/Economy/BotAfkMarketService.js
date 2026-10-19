@@ -1,6 +1,7 @@
 const ClassProgression = invoke('GameServer/ClassProgression');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
+const TradeMeetingService = invoke('GameServer/AfkTrade/TradeMeetingService');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
@@ -379,6 +380,12 @@ async function withdrawSourceInvalidBuyAds(ownerId) {
     return sourceChanged;
 }
 
+// A bot in a trade meeting or with a staged meeting preparation holds its
+// money and board lines: the meeting was quoted on them.
+function meetingHolds(state) {
+    return Boolean(state.stats?.tradeMeeting || TradeMeetingService.hasPreparation(state.characterId));
+}
+
 // The buy side of a review: the bot's buy ads follow its goal as the author's
 // single WTB order did. A buy goal the bot can trade remotely gets its ad
 // (replacing another one); a buy goal it travels for takes the ads back
@@ -387,9 +394,11 @@ async function withdrawSourceInvalidBuyAds(ownerId) {
 async function reduceStandingBids(state, ads, { beforeWrite } = {}) {
     const hour = Number(state.stats?.money?.[0]);
     if (state.phase !== 'cold' || !ads.length || !Number.isFinite(hour) || hour < 0
-        || state.stats?.tradeMeeting) return false;
-    // A preparation is still a quote, checked by record revision at native
-    // acceptance. It cannot lock an overpriced remaining ad indefinitely.
+        || meetingHolds(state)) return false;
+    // The meeting hold keeps the standing bids. Both holds are bounded (the
+    // preparation times out, trade_meeting_preparation_timeout, and is discarded
+    // on any life/board/user change), and the review reruns at the next commit's
+    // boardLimits step.
     // Native lifecycle transitions can have no worker plan. Compare only the
     // owner's five bids against reserved stock/NPCs and known routes, using the
     // existing money packet; this does not build or value a wish graph.
@@ -745,7 +754,7 @@ async function listSellAds(ownerId, state, listings, shop, inventory, options = 
 // current item/record rows; a failed step is dropped by the coordinator's
 // existing after-commit guard, and the next resolve can decide again.
 async function executePlan(state, plan, { step = work => work(), beforeWrite = () => {}, preparedState = state, reviewGoal = true } = {}) {
-    if (state.stats?.tradeMeeting || invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(state.characterId)) return { state, pending: true };
+    if (meetingHolds(state)) return { state, pending: true };
     const ownerId = Number(state.characterId);
     const authority = EconomyCommit.authority(preparedState);
     const stillPrepared = () => EconomyCommit.sameAuthority(EconomyCommit.authority(LifeState.cachedState(ownerId) || state), authority);
@@ -833,7 +842,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         return { state: await require('./ColdShotEconomyService').execute(state, shot) };
     }) : null;
     if (crafted?.stale) return { state, buyPending: true };
-    if (require('../../AfkTrade/TradeMeetingService').hasPreparation(ownerId)) return { state, pending: true };
+    if (TradeMeetingService.hasPreparation(ownerId)) return { state, pending: true };
     if (plan.withdraw?.length) await run(async () => {
         const own = new Map(AfkTrade.boardIndex().ownerLines(ownerId).map(line => [line.lineId, line]));
         const withdrawals = [];
