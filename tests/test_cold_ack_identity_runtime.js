@@ -125,8 +125,13 @@ async function release(token) {
         // command checkpoint and the bag, kit and henna revisions.
         const numbersId = await create(), numbersToken = await claim(numbersId), claimed = Life.cachedState(numbersId);
         const at = Date.now();
+        // The worker's bag as a step leaves it, not canonical: a bought sword
+        // counted before its physical copy exists and an emptied stack.
         const proposedState = { ...claimed, activity: 'hunting', updatedAt: at,
-            timing: { ...claimed.timing, lastResolvedAt: at, nextResolveAt: at + 60000 } };
+            timing: { ...claimed.timing, lastResolvedAt: at, nextResolveAt: at + 60000 },
+            inventory: { 1: { selfId: 1, name: 'Short Sword', amount: 2, stackable: false, equipped: false, slot: 0,
+                instances: [{ id: null, amount: 1, enchant: 0, equipped: false, slot: 0 }] },
+            1835: { selfId: 1835, name: 'Soulshot: No Grade', amount: 0, stackable: true } } };
         const numbersKernel = new ColdSimulationKernel({ resolveSolo: () => null, emit: () => true });
         numbersKernel.upsert({ state: claimed });
         numbersKernel.inFlight.set(numbersId, { state: claimed, grant: numbersToken });
@@ -150,10 +155,7 @@ async function release(token) {
         numbersKernel.onCommitAck({ results: [numbersAck] });
         const workerCopy = numbersKernel.states.get(numbersId).state, mainCopy = Life.cachedState(numbersId);
         assert(Protocol.sameCommandCheckpoint(workerCopy, mainCopy), 'the worker copy passes main\'s command checkpoint');
-        for (const key of ['updatedAt', 'activity', 'bagRevision', 'skillsRevision', 'hennaRevision'])
-            assert.deepEqual(workerCopy[key], mainCopy[key], key);
-        assert.deepEqual(workerCopy.timing, mainCopy.timing);
-        assert.deepEqual(workerCopy.simulation, mainCopy.simulation);
+        assert.deepStrictEqual(workerCopy, mainCopy, 'the worker copy is main\'s cached state, its bag canonical');
         console.log('A commit main did not change acks with numbers only and the worker rebuilds main\'s state: PASS');
 
         // Each condition failing carries the state: main committed another

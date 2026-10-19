@@ -658,6 +658,9 @@ class ColdSimulationKernel {
         // Reviews a commit ack named that found no command slot (always counted:
         // the plan is re-planned at the bot's next step, its buff or training waits).
         this.reviewsSkipped = 0;
+        // Ok commit acks with numbers only whose state this thread could not
+        // rebuild (no proposal kept, a bad number): always counted.
+        this.ackUnbuilt = 0;
         this.paused = false;
         this.stopping = false;
         this.resolveChain = Promise.resolve();
@@ -2476,7 +2479,7 @@ class ColdSimulationKernel {
     }
 
     onCommitAck(payload = {}) {
-        const accepted = [], refused = [], reviews = [];
+        const accepted = [], requeued = [], reviews = [];
         if (this.stopping) return accepted;
         (payload.results || []).forEach((result) => {
             const identity = Protocol.leaseAckIdentity(result, 'commit_ack');
@@ -2499,6 +2502,11 @@ class ColdSimulationKernel {
                 // state: the review main named takes the bot before any step does.
                 const review = this.beginReview(id, result.review, active);
                 if (review) reviews.push(review);
+            } else if (result.ok) {
+                // Committed, but the held state is the claim's: the bot waits for
+                // its due and its next claim, refused as stale, hands back the row.
+                this.ackUnbuilt += 1;
+                requeued.push(id);
             } else {
                 this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || ''));
                 // No review runs the plan this step stamped as sent.
@@ -2514,13 +2522,13 @@ class ColdSimulationKernel {
                         }
                     }
                 });
-                refused.push(id);
+                requeued.push(id);
             }
             accepted.push(result);
         });
         // After the whole ACK: a follower's state in it moves its leader to the
         // party row's due, which an unchanged row has in the past.
-        refused.forEach(id => this.requeueAtDue(id));
+        requeued.forEach(id => this.requeueAtDue(id));
         if (reviews.length && this.emit('command_request', { requests: reviews.map(review => review.request) }) === false) {
             for (const { request, attempt } of reviews) {
                 if (!this.cancelCommand(request.characterId, attempt)) continue;
@@ -2719,6 +2727,7 @@ class ColdSimulationKernel {
             commanding: this.commanding.size,
             commandingAgeMs: this.commanding.size ? Math.max(0, now - oldestCommandAt) : 0,
             reviewsSkipped: this.reviewsSkipped,
+            ackUnbuilt: this.ackUnbuilt,
             maxInFlight: this.maxInFlight,
             maxAtomicPartySize: this.maxAtomicPartySize,
             paused: this.paused,

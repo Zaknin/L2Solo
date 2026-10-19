@@ -140,8 +140,7 @@ function reflect(result, committedState = null) {
         const memory = invoke('GameServer/Social/InteractionMemoryRuntime');
         result.memorySnapshots.forEach(snapshot => memory.accept(snapshot));
     }
-    const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
-    BotLifeState.acceptSimulationOwnership(result.characterId, result, committedState);
+    LifeState.acceptSimulationOwnership(result.characterId, result, committedState);
     if (result.pkDrops?.length) {
         const row = result.row;
         require('../../Actor/Generics/PkDeathDrop').spawn(result.characterId,
@@ -151,8 +150,7 @@ function reflect(result, committedState = null) {
 }
 
 function reflectRecovery(result = {}) {
-    const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
-    (result.rows || []).forEach((row) => BotLifeState.acceptSimulationOwnership(row.characterId, {
+    (result.rows || []).forEach((row) => LifeState.acceptSimulationOwnership(row.characterId, {
         ownerId: row.simulationOwner,
         revision: row.simulationRevision,
         leaseId: row.simulationLeaseId,
@@ -427,7 +425,7 @@ function renewActiveLeases(tokens = [], options = {}) {
     return Database.renewColdSimulationLeases(tokens, options).then((results) => {
         results.forEach((result) => {
             if (!result.ok) { DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRejected(result.reason); return; }
-            const cached = invoke('GameServer/Bot/Population/BotLifeState').cachedState(result.characterId);
+            const cached = LifeState.cachedState(result.characterId);
             const current = cached?.simulation;
             if (cached?.phase === 'cold' && current?.ownerId === result.ownerId && current.revision === result.revision
                 && current.leaseId === result.leaseId && options.canRenew(result) === true) reflect(result);

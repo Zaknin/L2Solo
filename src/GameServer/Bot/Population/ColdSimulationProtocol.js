@@ -1,3 +1,5 @@
+const InventorySummary = require('./InventorySummary');
+
 const PROTOCOL_VERSION = 1;
 const MAX_BATCH = 64;
 const MAX_MESSAGE_BYTES = 256 * 1024;
@@ -502,13 +504,14 @@ function leaseAckIdentity(result, type) {
 
 // The state main cached for an ok commit ack that carries the commit's numbers
 // instead of the state (ColdSimulationCoordinator ackNumbers): the proposal's
-// own state, released to main, with the row's clock and revisions. The ack
+// own state with the bag main committed (ColdSimulationOwner canonicalizes it),
+// released to main, with the row's clock and revisions. The ack
 // names the bag's revision as the row does; the state calls it bagRevision
 // (Database.stateRevisions, main-only). Null when a number is not one.
 function committedState(proposed, ack) {
     const numbers = ['revision', 'updatedAt', 'inventoryRevision', 'skillsRevision', 'hennaRevision'];
     if (!proposed || !ack || !numbers.every(key => Number.isSafeInteger(ack[key]) && ack[key] >= 0)) return null;
-    return { ...proposed,
+    return { ...proposed, inventory: InventorySummary.canonicalize(proposed.inventory),
         simulation: { ownerId: 'legacy_main', revision: ack.revision, leaseId: null, leaseUntil: 0 },
         bagRevision: ack.inventoryRevision, skillsRevision: ack.skillsRevision, hennaRevision: ack.hennaRevision,
         updatedAt: ack.updatedAt };

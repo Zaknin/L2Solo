@@ -1557,6 +1557,22 @@ function claimAck(kernel, payload) {
         assert.strictEqual(numbersKernel.inFlight.has(62), false, 'the proposed state goes with the in-flight record');
         assert.strictEqual(sentCommands.get(numbersKernel).get(62)?.kind, 'review', 'a numbers ack still sends the named review');
         assert.strictEqual(Protocol.committedState(next, { ...ack, updatedAt: undefined }), null, 'a missing number builds nothing');
+        // An ok ack whose state cannot be rebuilt is no refusal: counted, the bot
+        // keeps its plan as sent and waits for its due.
+        const plan = { sell: [], withdraw: [8], buyAds: [], travel: null };
+        const unbuiltToken = { ...token, characterId: 63, leaseId: 'numbers-63' };
+        numbersKernel.upsert({ state: state(63, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } }) });
+        Object.assign(numbersKernel.states.get(63), { economyPlanHash: 4321 });
+        numbersKernel.inFlight.set(63, { state: numbersKernel.states.get(63).state, grant: unbuiltToken });
+        numbersKernel.dirty.set(63, { proposalId: 'numbers:63', characterId: 63, token: unbuiltToken, priority: 'P1',
+            enqueuedAt: at, nextState: next, result: { events: [] }, economyPlan: plan });
+        numbersKernel.flush(null, true);
+        commitAck(numbersKernel, { results: [{ ...ack, characterId: 63, updatedAt: undefined, review: ['plan'] }] });
+        assert.strictEqual(numbersKernel.ackUnbuilt, 1);
+        assert.strictEqual(numbersKernel.inFlight.has(63), false);
+        assert.strictEqual(numbersKernel.states.get(63).state.simulation.revision, 3, 'nothing is upserted');
+        assert.strictEqual(numbersKernel.states.get(63).economyPlanHash, 4321, 'the plan main named stays sent');
+        assert.strictEqual(sentCommands.get(numbersKernel).has(63), false, 'no review on an unbuilt state');
     }
 
     {
