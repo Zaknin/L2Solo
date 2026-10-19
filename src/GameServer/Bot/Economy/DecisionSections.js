@@ -213,11 +213,15 @@ function sample(state, timestamp = Date.now(), mode) {
     return sampleOf(Hunt.sampledRows(state, timestamp, mode));
 }
 // noise: each current row's own noise (BotHuntEfficiency.record); a drift
-// inside the larger of the bot's error and that noise is no change.
+// inside the larger of the bot's error and that noise is no change. Rows
+// match by spot hash: a round moves its spot's row to the front of the list
+// (BotHuntEfficiency.record), which is no change of any value. noise is
+// indexed like current.
 function learnedChange(current, previous, error, share, previousShare, noise = []) {
     if (current.length !== previous.length) return true;
-    return current.some((row, at) => row[0] !== previous[at]?.[0] || row.slice(1).some((value, index) => {
-        const old = Number(previous[at]?.[index + 1]) * previousShare;
+    const before = new Map(previous.map(row => [row[0], row]));
+    return current.some((row, at) => !before.has(row[0]) || row.slice(1).some((value, index) => {
+        const old = Number(before.get(row[0])[index + 1]) * previousShare;
         return !Number.isFinite(old) || Math.abs(value * share - old) > Math.abs(old) * Math.max(error, noise[at] || 0);
     }));
 }

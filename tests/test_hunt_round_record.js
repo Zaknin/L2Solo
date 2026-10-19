@@ -87,6 +87,17 @@ huntFor(8, { adena: 150, exp: 25 });
 assert.strictEqual(Sections.observationChanged(steady, observed, steadyAt), true,
     'a hunt that fell to a quarter is an observation event');
 
+// A round at a spot the bot already knows moves its row to the front
+// (record's [next, ...kept]): the same spots and values in another order are
+// no observation event, a value beyond the error after the reorder is one.
+const rowA = steady.stats.huntEfficiency[0], rowB = { ...rowA, spotId: 'other' };
+const withRows = rows => ({ ...steady, stats: { ...steady.stats, huntEfficiency: rows } });
+const orderBase = { ...observed, sample: Sections.packSample(Sections.sample(withRows([rowA, rowB]), steadyAt)) };
+assert.strictEqual(Sections.observationChanged(withRows([rowB, rowA]), orderBase, steadyAt), false,
+    'the same spots and values in another order are no observation event');
+assert.strictEqual(Sections.observationChanged(withRows([{ ...rowB, exp: rowB.exp / 4 }, rowA]), orderBase, steadyAt), true,
+    'a value beyond the error after a reorder is an observation event');
+
 // ARCH-NOTE: the delivered private-income rule intentionally removed cohort medians;
 // other bots' rows cannot establish this bot's hour. Solo/party samples remain separate.
 const earner = (characterId, party, adena) => {
