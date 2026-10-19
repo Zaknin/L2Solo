@@ -39,6 +39,7 @@ const TableChannel = require('./ColdTableChannel');
 const TownNpcCatalog = require('../Economy/TownNpcCatalog');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 const EconomyCommit = require('../Economy/EconomyCommit');
+const DecisionEvents = require('../AI/DecisionEvents');
 const RecomputeGeneration = require('./RecomputeGeneration');
 
 const ClanRaidRoster = require('../../Clan/ClanRaidRoster');
@@ -95,6 +96,8 @@ class ColdSimulationCoordinator {
         this.workerDiagnosticsSeq = 0;
         this.diagnosticsResyncAt = 0;
         this.partyReviews = { committed: 0, departed: 0, dissolved: 0, reasons: {}, recent: [] };
+        // Always on (PopulationStatus.nearText): the near decisions the bodies took or refused.
+        this.nearDecisions = { accepted: 0, refused: 0 };
         this.workerMaxInFlight = null;
         this.restartCount = 0;
         this.restartTimer = null;
@@ -111,15 +114,7 @@ class ColdSimulationCoordinator {
                 const record = invoke('GameServer/World/World').registeredActorById(id);
                 return !record || record.retired || record.session?.actor !== record.actor || record.session.aiActive !== true;
             },
-            prepared: (id, key) => {
-                const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-                Economy.forgetContext(id, 'state_publication');
-                const record = invoke('GameServer/World/World').registeredActorById(id);
-                const session = record?.session;
-                if (record && !record.retired && session?.actor === record.actor
-                    && invoke('GameServer/Bot/Economy/EconomicTrip').key(Economy.stateForActor(record.actor, session)) === key)
-                    invoke('GameServer/Bot/AI/DecisionEvents').prepared(session);
-            }
+            prepared: id => invoke('GameServer/Bot/Economy/EconomyContext').forgetContext(id, 'state_publication')
         });
         this.unsubscribeWishRemovals = LifeState.subscribePublications(packet => {
             if (packet.kind !== 'remove') return;
@@ -758,15 +753,18 @@ class ColdSimulationCoordinator {
                     } finally { this.economyDecisions.release(id); }
                 }
             } else if (payload.phase === 'economy_decided' && !this.stopping) {
+                // A near bot's decision, taken on its post (payload.near.nearSeq).
+                // The body keeps the newest one it got: an older post's decision
+                // arriving after it is refused. It never authorizes native spending.
                 const id = Number(payload.characterId), state = LifeState.cachedState(id);
+                const session = invoke('GameServer/World/World').registeredActorById(id)?.session;
                 const decision = payload.economyDecision ? invoke('GameServer/Bot/Population/ColdEconomyDecision').compact(payload.economyDecision) : null;
-                // Same worker generation plus the publication and the decision's
-                // echo fence hot publications; they never authorize native spending.
-                if (state?.phase === 'hot' && decision && decision.updatedAt === Number(state.updatedAt || 0)
-                    && echoHolds(state, decision.echo)) {
-                    this.economyDecisions.accept(id, decision, null, state);
-                    if (decision.feasibility) invoke('GameServer/Bot/Economy/HotBoardReviewService').preparedOwner(id);
-                }
+                if (state?.phase !== 'hot' || !decision || !payload.near || !session?.actor) break;
+                if (Number(payload.near.nearSeq || 0) < Number(session.heldNearSeq || 0)) { this.nearDecisions.refused++; break; }
+                this.nearDecisions.accepted++;
+                DecisionEvents.receive(session, decision, payload.near);
+                this.economyDecisions.accept(id, decision, null, state);
+                if (decision.feasibility) invoke('GameServer/Bot/Economy/HotBoardReviewService').preparedOwner(id);
             } else if (payload.phase === 'economy_workshop_stale' && !this.stopping) {
                 this.economyDecisions.staleWorkshop(Number(payload.characterId),
                     { updatedAt: Number(payload.updatedAt), echo: payload.echo });
@@ -2309,6 +2307,7 @@ class ColdSimulationCoordinator {
             heldAcks: this.heldAcks.size,
             ackState: { ...this.ackState },
             soloHolds: invoke('GameServer/Bot/Population/PartyIncomeComparison').soloHoldStats(),
+            nearDecisions: { ...this.nearDecisions },
             competitionActions: Config.developerDiagnostics ? this.competitionActions.snapshot() : null,
             economyDecisions: Config.developerDiagnostics ? { hits: this.economyDecisions.hits, misses: this.economyDecisions.misses, held: this.economyDecisions.byId.size } : null,
             partyReviews: Config.developerDiagnostics ? this.partyReviews : null,

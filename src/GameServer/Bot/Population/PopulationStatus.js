@@ -15,7 +15,6 @@ const ClanMarketService = invoke('GameServer/Clan/ClanMarketService');
 const ClanTitleService = invoke('GameServer/Clan/ClanTitleService');
 const BackgroundWorkGovernor = invoke('GameServer/Bot/Population/BackgroundWorkGovernor');
 const BackgroundJobRegistry = invoke('GameServer/Bot/Population/BackgroundJobRegistry');
-const DecisionEvents = require('../AI/DecisionEvents');
 const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const NpcDecay = invoke('GameServer/World/Generics/NpcDecay');
 const { heapRecord, heapsLine } = require('./WorkerHeapTelemetry');
@@ -36,12 +35,11 @@ const PopulationStatus = {
     counts() {
         const BotManager = invoke('GameServer/Bot/BotManager');
         const sessions = BotManager.sessions || [];
-        let hot = 0, merchants = 0, hotHunters = 0;
+        let hot = 0, merchants = 0;
         for (const session of sessions) {
             if (!isBotSession(session) || !session.actor) continue;
             hot++;
             if (session.plan === 'merchant') merchants++;
-            if (session.plan === 'hunting' && session.partyCompanion !== true && !session.followPlayerSession) hotHunters++;
         }
         const active = Math.max(0, hot - merchants);
         const lifeCounts = LifeState.counts();
@@ -52,7 +50,6 @@ const PopulationStatus = {
 
         return {
             hot,
-            hotHunters,
             active,
             warm: lifeCounts.warm || 0,
             cold: lifeCounts.cold || 0,
@@ -81,12 +78,15 @@ const PopulationStatus = {
         return heaps;
     },
 
-    // bag/equip/level/death/revive/near_spot/activated: near bots' fact posts
-    // queued since start. Always on: logSummary prints it without diagnostics.
-    nearFactsText(snapshots) {
-        const nearFacts = snapshots?.nearFacts || {};
-        return ['bag', 'equip', 'level', 'death', 'revive', 'near_spot', 'activated']
-            .map(reason => nearFacts[reason] || 0).join('/');
+    // The near bots' line, always on (logSummary prints it without
+    // diagnostics), from the coordinator's snapshot: nearFacts=bag/equip/
+    // level/death/revive/near_spot/activated, their fact posts queued since
+    // start; nearDecisions=accepted/refused, the decisions their bodies took
+    // or refused as older than the one held.
+    nearText(coordinator) {
+        const nearFacts = coordinator?.snapshots?.nearFacts || {}, decisions = coordinator?.nearDecisions || {};
+        return `nearFacts=${['bag', 'equip', 'level', 'death', 'revive', 'near_spot', 'activated']
+            .map(reason => nearFacts[reason] || 0).join('/')} nearDecisions=${decisions.accepted || 0}/${decisions.refused || 0}`;
     },
 
     summary() {
@@ -228,15 +228,11 @@ const PopulationStatus = {
             hotDispatch,
             line: `hot=${counts.hot} warm=${counts.warm} cold=${counts.cold} parties=${counts.parties} persisted=${counts.persisted} merchants=${counts.merchants} coldDue=${counts.coldQueue.due} coldDueHigh=${counts.coldQueue.highLevel} coldReplans=${counts.coldQueue.replans} coldDueAge=${Math.round(counts.coldQueue.oldestAgeMs / 1000)}s partyRequests=${counts.partyRequests.total} partyRequired=${counts.partyRequests.required} partyPreferred=${counts.partyRequests.preferred} partyBlocked=${counts.partyRequests.blocked} partyMaxAge=${Math.round(counts.partyRequests.maxAgeMs / 1000)}s partyRequiredReasons=${partyRequiredReasons} marketListings=${market.delta.listingsOpened} marketSpeculative=${market.delta.speculativeListings} marketBuyStores=${market.delta.buyStoresOpened} marketBuys=${market.delta.purchases} marketItems=${market.delta.itemsSold} marketAdena=${market.delta.adenaTraded} dynamicBuyerSales=${market.delta.dynamicBuyerSales} dynamicBuyerItems=${market.delta.dynamicBuyerItems} dynamicBuyerAdena=${market.delta.dynamicBuyerAdena} staticBuyerSales=${market.delta.staticBuyerSales} staticBuyerItems=${market.delta.staticBuyerItems} staticBuyerAdena=${market.delta.staticBuyerAdena} marketNoOffer=${market.delta.noOffer} marketSoldOut=${market.delta.soldOut} marketExpired=${market.delta.expired} marketDemandClosed=${market.delta.demandClosed} marketDemandPruned=${market.delta.demandPrunedItems} ticks=${metrics.delta.hotTicks} resolves=${metrics.delta.backgroundResolves} partyResolves=${metrics.delta.partyResolves} combatActions=${metrics.delta.combatActions} skillUses=${metrics.delta.skillUses} heals=${metrics.delta.heals} skipped=${metrics.delta.skippedResolves} skipReasons=${skipReasons} activations=${metrics.delta.activations} cooldowns=${metrics.delta.cooldowns} partyForms=${metrics.delta.partyFormations} partyRecruits=${metrics.delta.partyRecruits} partyDissolves=${metrics.delta.partyDissolutions} partyFormP95=${partyFormation.p95Ms || 0}ms partyAssembly=${assembly.events || 0}/${assembly.attempts || 0} partyFormBudgetStops=${metrics.delta.partyFormationBudgetStops || 0} partyFormDeferrals=${metrics.delta.partyFormationDeferrals || 0} partyFormStages=${Object.entries(partyFormationStages).map(([stage, value]) => `${stage}:${value.p95Ms || 0}`).join('|') || 'none'} dbFlushes=${metrics.delta.dbFlushes} resolveAvg=${resolve.avgMs || 0}ms resolveP95=${resolve.p95Ms || 0}ms schedulerP95=${scheduler.p95Ms || 0}ms schedulerBudget=${scheduler.budgetMs || 0}ms schedulerMode=${scheduler.mode || 'unknown'} playerMode=${scheduler.playerMode || 'idle'} realPlayers=${scheduler.realPlayers || 0} connectingPlayers=${scheduler.connectingPlayers || 0} companions=${scheduler.companions || 0} coldBatch=${scheduler.coldBatch || 0}/${scheduler.coldBatchLimit || 0} schedulerLag=${scheduler.lagMs || 0}ms schedulerSkips=${metrics.delta.schedulerSkips || 0} backgroundDeferrals=${metrics.delta.backgroundDeferrals || 0} schedulerOverruns=${metrics.delta.schedulerOverruns || 0} slowResolves=${metrics.delta.slowResolves || 0} actorPath=${actorPath.count || 0}/${actorPath.p95Ms || 0}/${actorPath.maxMs || 0}ms companionPath=${companionPath.count || 0}/${companionPath.p95Ms || 0}/${companionPath.maxMs || 0}ms pathWorkers=${pathWorkers.workers || 0}w/${pathWorkers.busy || 0}b/${pathWorkers.queue || 0}q/${pathWorkers.maxQueue || 0}mq/${pathWorkers.completed || 0}ok/${pathWorkers.errors || 0}err/${pathWorkers.rejected || 0}rej/${pathWorkers.stale || 0}stale raidAggro=${raidAggro.engagements || 0}/${raidAggro.minionsAlerted || 0} raidMinions=${raidAggro.refills || 0}/${raidAggro.groupVisits || 0}/${raidAggro.removalFeeds || 0} raidIndex=${raidIndex.bosses || 0}b/${raidIndex.minions || 0}m/${raidIndex.rebuilds || 0}r/${raidIndex.objectsScanned || 0}s npcDecay=${npcDecay.scheduled || 0}s/${npcDecay.expired || 0}e/${npcDecay.retries || 0}r/${npcDecay.discarded || 0}d heap=${heapMb}MB lag=${lag}ms lagSustained=${Metrics.sustainedEventLoopLag()}ms maxLag=${maxLag}ms ${Director.statusLine()}`
         };
-        const decisions = DecisionEvents.summary(counts.hotHunters);
         const missingTotal = require('../Economy/PurchaseFunding').summary().moneyPacketMissing;
-        summary.hotEconomyBuilds = decisions.hotEconomyBuilds;
-        summary.hotEconomyBuildsPerBotMinute = decisions.hotEconomyBuildsPerBotMinute;
-        summary.decisionEvents = decisions.reasons;
         summary.moneyPacketMissing = Math.max(0, missingTotal - lastMoneyPacketMissing);
         summary.moneyPacketMissingTotal = missingTotal;
         lastMoneyPacketMissing = missingTotal;
-        summary.line += ` hotEconomyBuilds=${decisions.hotEconomyBuildsPerBotMinute}/bot/min moneyPacketMissing=${summary.moneyPacketMissing}`;
+        summary.line += ` moneyPacketMissing=${summary.moneyPacketMissing}`;
         const mainCold = require('../Economy/EconomyContext').summary().mainColdForState;
         summary.mainColdForState = mainCold;
         const mainColdTotal = Object.values(mainCold).reduce((sum, count) => sum + count, 0);
@@ -308,7 +304,7 @@ const PopulationStatus = {
         const soloHolds = coldWorker.soloHolds || {};
         summary.line += ` soloHolds=${soloHolds.hits || 0}/${soloHolds.misses || 0}/${soloHolds.size || 0}`;
         summary.line += ` snapshot=${snapshots.dirty || 0}/${snapshots.critical || 0}/${snapshots.inFlight ? 1 : 0} snapshotLast=${lastSnapshot.mode || 'none'}/${lastSnapshot.rows || 0}/${lastSnapshot.pages || 0}/${lastSnapshot.durationMs || 0}ms snapshotRuns=${snapshots.fullRuns || 0}/${snapshots.dirtyRuns || 0}/${snapshots.criticalRuns || 0} snapshotDeferrals=${snapshots.deferrals || 0} snapshotYields=${snapshots.yields || 0}`;
-        summary.line += ` nearFacts=${this.nearFactsText(snapshots)}`;
+        summary.line += ` ${this.nearText(coldWorker)}`;
         return summary;
     }
 };
