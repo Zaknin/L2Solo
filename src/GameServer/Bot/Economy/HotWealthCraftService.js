@@ -53,10 +53,7 @@ function review(session, context) {
         const packet = context.statsPacket || DecisionEvents.statsFor(session);
         const accepted = { characterId: Number(actor.fetchId()), stats: { decisionSeq: packet.decisionSeq, activityLeaf: packet.activityLeaf,
             wishFocus: packet.wishFocus, wishSections: packet.wishSections } };
-        const retirePreparation = () => {
-            DecisionEvents.prepared(session);
-            Economy.forget(Number(actor.fetchId()));
-        };
+        const retirePreparation = () => Economy.forget(Number(actor.fetchId()));
         let state = liveState();
         if (!permitted(state)) return { attempted: false };
         if (!ready(state)) {

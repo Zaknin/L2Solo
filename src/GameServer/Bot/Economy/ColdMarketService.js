@@ -387,11 +387,12 @@ function canTravelForPurchase(state, request, options = {}) {
     // of one plan shares it). Public quote
     // versions omit membership, so retain at most eight observed owner/allowed
     // pairs and recheck them through the same indexed admission on a hit.
+    // A built context names its inputs (inputKey), a near body's held view
+    // its card's (inputHash).
     let key = null;
-    if (options.economy && economy.inputKey && board?.itemRevision && !options.cost) {
+    if (options.economy && (economy.inputKey || economy.inputHash) && board?.itemRevision && !options.cost) {
         const rates = invoke('GameServer/ProgressionRates').profile();
         const token = JSON.stringify([request, Number(state.adena), state.stats?.money,
-            economy.routePending, economy.routeRows,
             require('./EconomicTrip').key(state), board.itemRevision(id), rates.multiplier, rates.adena,
             require('./ProductionPolicy').shotsDisabled()]);
         if (token.length <= 2048) key = token;

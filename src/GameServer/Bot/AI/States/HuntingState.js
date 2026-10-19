@@ -129,11 +129,6 @@ function isPartyCompanion(session) {
     return session.partyCompanion === true && !!session.followPlayerSession;
 }
 
-function economyForHunt(session, bot) {
-    return DecisionEvents.held(session) || DecisionEvents.hold(session, bot,
-        invoke('GameServer/Bot/Economy/EconomyContext').forActor(bot, session));
-}
-
 function startShopping(session, bot, BotAI, reason, townName = null) {
     if (isPartyCompanion(session)) {
         session.plan = 'following';
@@ -567,7 +562,6 @@ function targetProgressing(session, bot, target) {
 
 module.exports = {
     leaveShop,
-    economyForHunt,
     sellTripDue,
     pauseSelling,
     findPreferredMonster,
@@ -580,7 +574,7 @@ module.exports = {
         }
 
         const floor = SurvivalFloor.forActor(bot, session.coldLifeState);
-        if (isSoloHunter(session)) DecisionEvents.observe(session, bot);
+        if (isSoloHunter(session)) DecisionEvents.checkWallet(session, bot);
         if (floor?.action === 'rest') {
             TownNpcApproach.reset(session);
             bot.automation.abortAll(bot);
@@ -623,7 +617,7 @@ module.exports = {
         }
 
         if (isSoloHunter(session) && Number(session.companionEquipmentRetryAt || 0) <= Date.now()) {
-            const economy = economyForHunt(session, bot);
+            const economy = DecisionEvents.held(session);
             const wealthCraft = require('../../Economy/HotWealthCraftService');
             if (wealthCraft.canStart(session, economy.network.activity)) {
                 wealthCraft.review(session, economy)
@@ -638,7 +632,7 @@ module.exports = {
                     const trip = startShopping(session, bot, BotAI, 'Heading to town for my planned improvement.');
                     if (trip !== 'deferred' && trip !== false) return;
                 }
-                invoke('GameServer/Bot/Economy/BotImprovementService').reviewHot(session, { ...economy, state })
+                invoke('GameServer/Bot/Economy/BotImprovementService').reviewHot(session)
                     .catch(error => utils.infoWarn('BotImprovement', '%s', error.message));
             }
             if (economy.network.activity?.activity === 'shopping') {
