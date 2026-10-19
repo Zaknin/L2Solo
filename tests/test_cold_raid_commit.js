@@ -35,7 +35,7 @@ async function proposed(party, id, snapshot) {
             statsJson: JSON.stringify({ ...party.stats, raidEncounter: snapshot }) }],
         raidCommit: { key: snapshot.key, expectedRevision: 0, revision: 1, snapshot,
             worldDefeat: { npcId: 10484, respawnTime: at + 100000 } } };
-    const entries = members.map(member => ({ token: grants.find(g => g.characterId === member.characterId), atomicGroup,
+    const entries = members.map(member => ({ revision: grants.find(g => g.characterId === member.characterId).revision, atomicGroup,
         options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: member },
         nextState: { ...member, exp: member.exp + 100, adena: member.adena + 10,
             inventory: { ...member.inventory, 57: { selfId: 57, amount: 10 } } } }));
@@ -73,8 +73,8 @@ async function run() {
     assert.equal(Raid.begin(b, spot, 10484, at + 4).hp, 600, 'another clan never sees an uncommitted kill');
     await assert.rejects(win('competing'), /raid_step_pending/);
     const failed = await proposed(a, 'rejected', staged.snapshot);
-    failed.entries[8].token = { ...failed.entries[8].token, revision: failed.entries[8].token.revision - 1 };
-    const rejected = await Owner.commitAndReleaseBatch(failed.entries);
+    failed.entries[8].revision -= 1;
+    const rejected = await Owner.commitBatch(failed.entries);
     assert(rejected.every(row => !row.ok));
     for (const row of rejected.slice(0, 8)) Raid.acknowledge('rejected', row.characterId, row.ok);
     await assert.rejects(win('still-pending'), /raid_step_pending/, 'paged ACKs retain the boss fence');
@@ -87,7 +87,7 @@ async function run() {
     const crash = await proposed(a, 'sql-failure', crashStage.snapshot);
     await Database.execute([`CREATE TRIGGER reject_raid_party BEFORE UPDATE ON bot_background_parties
         BEGIN SELECT RAISE(ABORT, 'synthetic raid party write failure'); END`, []]);
-    await assert.rejects(Owner.commitAndReleaseBatch(crash.entries), /synthetic raid party write failure/);
+    await assert.rejects(Owner.commitBatch(crash.entries), /synthetic raid party write failure/);
     assert.deepEqual(await durable(), initial, 'SQL failure after physical writes rolls back the entire transaction');
     await Database.execute(['DROP TRIGGER reject_raid_party', []]);
     Raid.abort('sql-failure'); await Owner.releaseBatch(crash.grants);
@@ -95,7 +95,7 @@ async function run() {
     const success = await win('winner');
     const first = await proposed(a, 'winner', success.snapshot);
     const second = await proposed(b, 'competitor', { ...success.snapshot, winnerPartyId: b.partyId });
-    const results = await Owner.commitAndReleaseBatch([...first.entries, ...second.entries]);
+    const results = await Owner.commitBatch([...first.entries, ...second.entries]);
     const accepted = results.filter(row => row.ok), refused = results.filter(row => !row.ok);
     assert.equal(accepted.length, 9); assert.equal(refused.length, 9);
     assert(refused.every(row => row.detail === 'raid_revision_changed'));
@@ -108,7 +108,7 @@ async function run() {
     const committed = await durable();
     assert(committed.lives.slice(0, 9).every(row => row.exp === initial.lives[0].exp + 100 && row.adena === 10));
     assert.equal(committed.raids.length, 1); assert.equal(committed.spawns[0].hp, 0);
-    assert((await Owner.commitAndReleaseBatch(first.entries)).every(row => !row.ok));
+    assert((await Owner.commitBatch(first.entries)).every(row => !row.ok));
     assert.deepEqual(await durable(), committed, 'replayed proposals cannot grant rewards twice');
     await Owner.releaseBatch(second.grants);
     await Database.close(); Database.init(); await Authority.init(); Raid.resetForTests();

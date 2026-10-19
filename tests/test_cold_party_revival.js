@@ -17,12 +17,12 @@ async function commit(resolution, reject = false) {
     const { grants } = await Owner.claimBatch(states(), { timestamp: at, allowParty: true, allowLifecycle: true });
     const entries = await Promise.all(resolution.memberResults.map(async ({ state, result }) => {
         const projection = await Life.prepareResolve(state, result, { timestamp: at, persist: false, projectClassProgression: true });
-        return { token: grants.find(g => g.characterId === state.characterId), nextState: projection,
+        return { revision: grants.find(g => g.characterId === state.characterId).revision, nextState: projection,
             options: { allowParty: true, allowLifecycle: true }, atomicGroup: { id: `revive:${at}`, memberIds: [1, 2] },
             proposal: { baseState: state, result } };
     }));
-    if (reject) entries[0].token = { ...entries[0].token, leaseId: 'stale' };
-    const results = await Owner.commitAndReleaseBatch(entries, { timestamp: at });
+    if (reject) entries[0].revision -= 1;
+    const results = await Owner.commitBatch(entries, { timestamp: at });
     await Owner.releaseBatch(grants, { timestamp: at });
     return results;
 }

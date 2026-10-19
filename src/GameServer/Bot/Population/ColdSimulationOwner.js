@@ -223,47 +223,6 @@ function claimBatch(candidates = [], options = {}) {
     }).catch(recordFailure);
 }
 
-function commit(claimToken, nextState, options = {}) {
-    if (!claimToken?.ok) {
-        const result = { ok: false, reason: 'missing_claim' };
-        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerCommit(result, 0);
-        return Promise.resolve(result);
-    }
-    const partition = eligibility(nextState, options);
-    if (!partition.ok) {
-        const result = { ok: false, reason: 'partition_rejected', detail: partition.reason };
-        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerCommit(result, 0);
-        return Promise.resolve(result);
-    }
-    if (Number(nextState.characterId) !== Number(claimToken.characterId)) {
-        const result = { ok: false, reason: 'character_changed' };
-        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerCommit(result, 0);
-        return Promise.resolve(result);
-    }
-    const canonicalState = {
-        ...nextState,
-        inventory: InventorySummary.canonicalize(nextState.inventory)
-    };
-    const timestamp = Number(options.timestamp || Date.now());
-    const leaseMs = Math.max(1000, Number(options.leaseMs || DEFAULT_LEASE_MS));
-    const startedAt = DiagnosticConfig.developerDiagnostics ? Date.now() : 0;
-    return Database.commitColdSimulationLease({
-        characterId: Number(claimToken.characterId),
-        expectedRevision: Number(claimToken.revision),
-        ownerId: OWNER_ID,
-        leaseId: claimToken.leaseId,
-        timestamp,
-        leaseUntil: timestamp + leaseMs,
-        patch: persistencePatch(canonicalState, timestamp),
-        // The partition reads these instead of parsing the patch's statsJson.
-        stats: canonicalState.stats || {},
-        ...(options.memoryEvents ? { memoryEvents: options.memoryEvents } : {})
-    }).then((result) => {
-        DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerCommit(result, Date.now() - startedAt);
-        return reflect(result, withPersistedStats(canonicalState, result));
-    }).catch(recordFailure);
-}
-
 function release(claimToken, options = {}) {
     if (!claimToken?.ok) {
         const result = { ok: false, reason: 'missing_claim' };
@@ -282,7 +241,9 @@ function release(claimToken, options = {}) {
     }).catch(recordFailure);
 }
 
-function commitAndReleaseBatch(entries = [], options = {}) {
+// Each entry commits on the revision its step started from (`revision`): the
+// row takes it only while still far and at that revision.
+function commitBatch(entries = [], options = {}) {
     const timestamp = Number(options.timestamp || Date.now());
     const requests = [];
     const states = new Map();
@@ -290,7 +251,6 @@ function commitAndReleaseBatch(entries = [], options = {}) {
     const accepted = [];
     const groupedEntries = new Map();
     (entries || []).slice(0, 32).forEach((entry) => {
-        const token = entry.token || {};
         const nextState = entry.nextState;
         const partition = eligibility(nextState, entry.options || options);
         const groupId = entry.atomicGroup?.id ? String(entry.atomicGroup.id) : null;
@@ -299,16 +259,17 @@ function commitAndReleaseBatch(entries = [], options = {}) {
             group.push(entry);
             groupedEntries.set(groupId, group);
         }
-        if (!token?.ok || !partition.ok || Number(token.characterId) !== Number(nextState?.characterId)) {
+        const validRevision = Number.isSafeInteger(entry.revision) && entry.revision >= 0;
+        if (!validRevision || !partition.ok) {
             rejected.push({
                 ok: false,
-                characterId: Number(nextState?.characterId || token?.characterId || 0),
-                reason: !token?.ok ? 'missing_claim' : !partition.ok ? 'partition_rejected' : 'character_changed',
+                characterId: Number(nextState?.characterId || 0),
+                reason: !validRevision ? 'invalid_revision' : 'partition_rejected',
                 detail: !partition.ok ? partition.reason : undefined
             });
             return;
         }
-        accepted.push({ entry, token, nextState, groupId });
+        accepted.push({ entry, nextState, groupId });
     });
 
     const abortedGroups = new Map();
@@ -327,7 +288,7 @@ function commitAndReleaseBatch(entries = [], options = {}) {
         }
     });
 
-    accepted.forEach(({ entry, token, nextState, groupId }) => {
+    accepted.forEach(({ entry, nextState, groupId }) => {
         if (groupId && abortedGroups.has(groupId)) {
             rejected.push({
                 ok: false,
@@ -339,7 +300,7 @@ function commitAndReleaseBatch(entries = [], options = {}) {
         }
         const canonicalInventory = InventorySummary.canonicalize(nextState.inventory);
         const canonicalState = { ...nextState, inventory: canonicalInventory };
-        states.set(Number(token.characterId), canonicalState);
+        states.set(Number(nextState.characterId), canonicalState);
         const previousInventory = InventorySummary.canonicalize(entry.proposal?.baseState?.inventory);
         const inventorySummary = JSON.stringify(canonicalInventory);
         const inventoryChanged = JSON.stringify(previousInventory) !== inventorySummary;
@@ -350,10 +311,8 @@ function commitAndReleaseBatch(entries = [], options = {}) {
             if (!canonicalInventory[key]) physicalInventory[key] = { ...item, amount: 0 };
         });
         requests.push({
-            characterId: Number(token.characterId),
-            expectedRevision: Number(token.revision),
-            ownerId: OWNER_ID,
-            leaseId: token.leaseId,
+            characterId: Number(nextState.characterId),
+            expectedRevision: entry.revision,
             timestamp,
             patch: persistencePatch(canonicalState, timestamp, inventorySummary),
             // The partition and the death record read these instead of parsing the patch's statsJson.
@@ -474,8 +433,7 @@ module.exports = {
     persistencePatch,
     claim,
     claimBatch,
-    commit,
-    commitAndReleaseBatch,
+    commitBatch,
     release,
     releaseBatch,
     renewActiveLeases,

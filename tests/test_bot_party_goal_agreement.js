@@ -61,12 +61,12 @@ async function loot(party, units, { stale = false } = {}) {
     const entries = rewards.memberResults.map(({ state, result }) => {
         const inventory = { ...state.inventory };
         for (const item of result.materialize.items) inventory[item.selfId] = { ...item, amount: Number(inventory[item.selfId]?.amount || 0) + item.amount };
-        return { token: grants.find(grant => grant.characterId === state.characterId), atomicGroup,
+        return { revision: grants.find(grant => grant.characterId === state.characterId).revision, atomicGroup,
             options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: state }, nextState: { ...state, inventory } };
     });
-    if (stale) entries[1].token = { ...entries[1].token, revision: entries[1].token.revision - 1 };
+    if (stale) entries[1].revision -= 1;
     const before = await images(party.memberIds);
-    const results = await Owner.commitAndReleaseBatch(entries);
+    const results = await Owner.commitBatch(entries);
     if (stale) { assert(results.every(result => !result.ok)); assert.deepEqual(await images(party.memberIds), before);
         await Owner.releaseBatch(grants); }
     else { assert(results.every(result => result.ok)); assert(results.every(result => result.row.simulationRevision === result.revision));
@@ -180,7 +180,7 @@ async function run() {
     assert.equal(held(await DB.fetchItems(b.characterId), 57), 10250);
     assert.equal(held(await DB.fetchItems(c.characterId), 57), 10250);
     const conserved = await images(partial.memberIds);
-    assert((await Owner.commitAndReleaseBatch(first.entries)).every(result => !result.ok));
+    assert((await Owner.commitBatch(first.entries)).every(result => !result.ok));
     assert.deepEqual(await images(partial.memberIds), conserved);
     console.log('PASS actual ordered drop pays proportionally/equally; replay cannot pay twice');
     await loot(partial, 1);

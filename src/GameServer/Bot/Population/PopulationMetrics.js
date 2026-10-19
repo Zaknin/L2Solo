@@ -54,7 +54,6 @@ function emptyCounters() {
         coldOwnerRejected: 0,
         coldOwnerLeaseRecoveries: 0,
         coldOwnerLeaseExpiries: 0,
-        coldOwnerTimeouts: 0,
         coldOwnerErrors: 0,
         coldOwnerLegacyDeferred: 0,
         coldOwnerDbBusy: 0,
@@ -427,11 +426,6 @@ const PopulationMetrics = {
         const recovered = Math.max(0, Number(count) || 0);
         this.counters.coldOwnerLeaseRecoveries += recovered;
         if (!startup) this.counters.coldOwnerLeaseExpiries += recovered;
-    },
-
-    recordColdOwnerTimeout() {
-        if (!Config.developerDiagnostics) return;
-        this.counters.coldOwnerTimeouts += 1;
     },
 
     recordColdOwnerError(error = null) {

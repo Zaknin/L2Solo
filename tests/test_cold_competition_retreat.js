@@ -147,24 +147,13 @@ async function run() {
     assert.strictEqual((await new ColdCompetitionActions({ ...base, participantAllowed: id => id !== 24 }).apply(pending)).ok, false);
     assert.strictEqual((await new ColdCompetitionActions({ ...base, contestContextAllowed: s => s.characterId !== 24 }).apply(pending)).ok, false);
     assert.strictEqual((await new ColdCompetitionActions({ ...base, retreatRoute: () => null }).apply(pending)).reason, 'no_retreat_route');
-    const partial = new ColdCompetitionActions({ ...base, owner: { ...Owner,
-        claimBatch: (states, opts) => Owner.claimBatch(states.slice(0, 1), opts) } });
-    assert.strictEqual((await partial.apply(pending)).reason, 'claim_rejected');
-    assert(!state(23).simulation.leaseId);
     const fresh = event(23, 25);
-    const race = new ColdCompetitionActions({ ...base, owner: { ...Owner, commitAndReleaseBatch: async (entries, opts) => {
+    const race = new ColdCompetitionActions({ ...base, owner: { ...Owner, commitBatch: async (entries, opts) => {
         await Database.execute(['UPDATE bot_background_parties SET revision=revision+1 WHERE partyId=?', ['p23']]);
-        return Owner.commitAndReleaseBatch(entries, opts);
+        return Owner.commitBatch(entries, opts);
     } } });
     assert.strictEqual((await race.apply(fresh)).reason, 'commit_rejected');
     assert([23, 24, 25].every(id => !state(id).stats.travel && !state(id).simulation.leaseId), 'membership race aborts every departure and releases leases');
-    const memoryRace = new ColdCompetitionActions({ ...base, owner: { ...Owner, claimBatch: async (...args) => {
-        const claims = await Owner.claimBatch(...args);
-        await Memory.recordBatch([{ key: 'retreat-help-race', sourceId: 26, targetId: 27, type: 'healed', at }]);
-        return claims;
-    } } });
-    assert.strictEqual((await memoryRace.apply(event(26, 27))).reason, 'retreat_changed_during_claim');
-    assert(!state(26).stats.travel && !state(26).simulation.leaseId);
     // The scheduler report is developer diagnostics (off by default since c656911d):
     // the departure itself must happen with it off, and is counted when it is on.
     const Diagnostics = invoke('GameServer/Bot/Population/PopulationConfig');

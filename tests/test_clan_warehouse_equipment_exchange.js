@@ -185,7 +185,7 @@ async function main() {
         const afterWorkerExchange = await LifeState.findByCharacterId(22);
         assert.strictEqual(afterWorkerExchange.stats.equipment[0].enchant, 12, 'a worker-owned party member must also exchange gear');
         assert.strictEqual(afterWorkerExchange.party.partyId, 'exchange-party', 'exchange must preserve party membership');
-        assert.strictEqual((await owner.commit(lease, cached, { allowParty: true, allowLifecycle: true })).ok, false,
+        assert.strictEqual((await owner.commitBatch([{ revision: lease.revision, nextState: cached, options: { allowParty: true, allowLifecycle: true } }]))[0].ok, false,
             'a pre-exchange worker proposal cannot restore the returned item');
 
         // Use small explicit equipment templates to cover layout decisions.

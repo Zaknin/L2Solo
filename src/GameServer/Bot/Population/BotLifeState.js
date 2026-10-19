@@ -2937,16 +2937,6 @@ const BotLifeState = {
         });
     },
 
-    syncResolvedState(state) {
-        if (!state?.characterId) return Promise.resolve(null);
-        const row = rowFromState(state);
-        return this.serializeClanLevelUp(row.characterId, () => Database.updateColdCharacterProgression(row.characterId, state)
-            .then(() => Database.updateCharacterVitals(row.characterId, row.hp, row.maxHp, row.mp, row.maxMp))
-            .then(() => syncInventorySummary(row.characterId, state.inventory || {}, 'resolve_sync'))
-            .then(() => enqueueEquipmentGoalAdvance(row.equipmentAdvance))
-            .then(() => state));
-    },
-
     enqueueEquipmentGoalAdvanceForState,
 
     shouldRecoverOrphanedGiranState,

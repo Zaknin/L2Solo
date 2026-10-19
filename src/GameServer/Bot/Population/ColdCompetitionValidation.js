@@ -61,7 +61,6 @@ function member(state, characterId, participant, event, { party: group, resume =
     const busy = (retreat && BotErrands.busyWith(state, RETREAT_BUSY_FLAGS))
         || (!resume && BotErrands.busyWith(state, MEMBER_BUSY_FLAGS));
     if (busy) return fail(BUSY_DETAILS[busy]);
-    if ((state.simulation?.ownerId || 'legacy_main') !== 'legacy_main') return fail('member_owner_changed', { actual: state.simulation.ownerId });
     if (!participantAllowed(state.characterId)) return fail('member_handoff_fenced');
     if (!resume && !contestContextAllowed(state, event)) return fail('member_contest_context_changed');
     if (!memory.snapshot(state.characterId)) return fail('member_memory_unavailable');

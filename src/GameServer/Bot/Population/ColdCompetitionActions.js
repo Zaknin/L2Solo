@@ -1,5 +1,6 @@
 const DiagnosticConfig = require('./PopulationConfig');
 const Episode = require('./ColdCompetitionEpisode');
+const RelationshipContext = require('../../Social/RelationshipContext');
 const TTL_MS = 10000;
 const COOLDOWN_MS = 2 * 60000;
 const WAIT_MS = 15000;
@@ -21,7 +22,6 @@ function eligible(state, event, participant, now) {
         && (recruiting ? partyId === participant.partyId : !partyId) && !state.stats?.travel
         && !state.stats?.supplyErrand && !state.stats?.warehouseWorkflow && !state.stats?.marketReturn
         && !state.stats?.coldCompetition?.wait
-        && (state.simulation?.ownerId || 'legacy_main') === 'legacy_main'
         && Number(state.simulation?.revision || 0) === participant.revision
         && state.spotId === event.spotId
         && (recruiting || require('./PartyHuntingTarget').competitionNpcId(null, state) === event.npcId)
@@ -187,34 +187,23 @@ class ColdCompetitionActions {
             });
         }
         if (event.action !== 'yield' && !contest && !queued) return { ok: false, reason: 'forecast_only' };
-        const { grants } = await this.owner.claimBatch(states, { timestamp: now, allowLifecycle: true });
-        try {
-            if (grants.length !== 2) return { ok: false, reason: 'claim_rejected' };
-            if (contest && (!participants.every(p => this.participantAllowed(p.id)
-                && this.memory.snapshot(p.id)?.revision === p.memoryRevision)
-                || !states.every(s => this.contestContextAllowed(s, event)))) return { ok: false, reason: 'contest_changed_during_claim' };
-            const delayed = contest ? 1 : 0;
-            if (!queued) next[delayed].timing = { ...states[delayed].timing,
-                nextResolveAt: Math.max(now, Number(states[delayed].timing?.nextResolveAt || 0)) + WAIT_MS };
-            const group = { id: event.key, memberIds: participants.map(p => p.id) };
-            const results = await this.owner.commitAndReleaseBatch(next.map((state, i) => ({
-                token: grants.find(g => g.characterId === state.characterId), nextState: state,
-                atomicGroup: group, options: { allowLifecycle: true }, proposal: { baseState: states[i],
-                    ...(contest && i === 1 ? { result: { memoryEvents: [require('../../Social/RelationshipContext').enrich({ key: `${event.key}:contested`,
-                        sourceId: state.characterId, targetId: states[0].characterId, kind: 'character',
-                        type: 'mob_contested', at: now }, state)] } } : {}) }
-            })), { timestamp: this.now(), journalReason: 'competition' });
-            states.forEach(s => this.onState(s.characterId));
-            return results.length === 2 && results.every(r => r.ok)
-                ? (queued ? { ok: true, queued: true } : { ok: true, waitUntil: now + WAIT_MS,
-                    ...(contest ? { victimId: states[1].characterId, memoryEvent: 'mob_contested', pvp: false } : {}) }) : { ok: false, reason: 'commit_rejected' };
-        } finally {
-            // Successful atomic commits already released their leases; release
-            // only tokens still owned after a rejected or interrupted operation.
-            const owned = grants.filter(g => this.life.cachedState(g.characterId)?.simulation?.leaseId === g.leaseId);
-            if (owned.length) await this.owner.releaseBatch(owned);
-            states.forEach(s => this.onState(s.characterId));
-        }
+        const delayed = contest ? 1 : 0;
+        if (!queued) next[delayed].timing = { ...states[delayed].timing,
+            nextResolveAt: Math.max(now, Number(states[delayed].timing?.nextResolveAt || 0)) + WAIT_MS };
+        const group = { id: event.key, memberIds: participants.map(p => p.id) };
+        // Each member commits on its cached revision: a write since then
+        // refuses the pair whole.
+        const results = await this.owner.commitBatch(next.map((state, i) => ({
+            revision: Number(states[i].simulation?.revision || 0), nextState: state,
+            atomicGroup: group, options: { allowLifecycle: true }, proposal: { baseState: states[i],
+                ...(contest && i === 1 ? { result: { memoryEvents: [RelationshipContext.enrich({ key: `${event.key}:contested`,
+                    sourceId: state.characterId, targetId: states[0].characterId, kind: 'character',
+                    type: 'mob_contested', at: now }, state)] } } : {}) }
+        })), { timestamp: this.now(), journalReason: 'competition' });
+        if (results.length !== 2 || results.some(r => !r.ok)) return { ok: false, reason: 'commit_rejected' };
+        states.forEach(s => this.onState(s.characterId));
+        return queued ? { ok: true, queued: true } : { ok: true, waitUntil: now + WAIT_MS,
+            ...(contest ? { victimId: states[1].characterId, memoryEvent: 'mob_contested', pvp: false } : {}) };
     }
     async stop() { this.stopping = true; if (this.running) await this.running; }
     recordPvpStep(result) {

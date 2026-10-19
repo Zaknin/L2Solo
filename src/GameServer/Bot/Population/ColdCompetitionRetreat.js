@@ -28,7 +28,6 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
     }
     const states = sides.flatMap(s => s.members);
     if (states.length > 18 || new Set(states.map(s => s.characterId)).size !== states.length) return { ok: false, reason: 'overlapping_sides' };
-    const revisions = new Map(states.map(s => [s.characterId, memory.snapshot(s.characterId).revision]));
     const avoiding = event.action === 'avoid';
     // One avoid per holder, on its own counter: each member's far steps, the
     // party's rounds for the party copy.
@@ -62,30 +61,23 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
         timing: i === 0 ? { ...result.timing,
             nextResolveAt: preparedParties[i]?.row.nextResolveAt || (avoiding ? result.timing.nextResolveAt : Math.max(at, Number(s.timing?.nextResolveAt || 0)) + waitMs) } : s.timing };
     }));
-    const { grants } = await owner.claimBatch(states, { timestamp: at, allowParty: true, allowLifecycle: true });
-    try {
-        if (grants.length !== states.length) return { ok: false, reason: 'claim_rejected' };
-        if (now() - event.at > 10000 || states.some(s => !participantAllowed(s.characterId) || !contestContextAllowed(s, event)
-            || memory.snapshot(s.characterId)?.revision !== revisions.get(s.characterId))) return { ok: false, reason: 'retreat_changed_during_claim' };
-        const group = { id: event.key, memberIds: states.map(s => s.characterId),
-            partyChanges: preparedParties.flatMap((p, i) => p ? [{ partyId: p.row.partyId,
-                expectedPartyRevision: sides[i].party.revision, memberIds: sides[i].party.memberIds,
-                spotId: p.row.spotId, nextResolveAt: p.row.nextResolveAt, statsJson: p.row.statsJson, updatedAt: p.row.updatedAt }] : []) };
-        const results = await owner.commitAndReleaseBatch(next.map((s, i) => ({
-            token: grants.find(g => g.characterId === s.characterId), nextState: s, atomicGroup: group,
-            options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: states[i] }
-        })), { timestamp: now(), journalReason: 'retreat' });
-        if (results.length !== states.length || results.some(r => !r.ok)) return { ok: false, reason: 'commit_rejected' };
-        // Each side caches its own committed row (Database commitBatch, partyRow).
-        preparedParties.filter(Boolean).forEach(p => parties.acceptRow(results.find(r => r.partyRow?.partyId === p.row.partyId).partyRow));
-        return { ok: true, affectedIds: sides[0].members.map(s => s.characterId), memoryEvents: 0,
-            matchup: sides.map(s => s.party ? 'party' : 'solo').join('_vs_'),
-            ...(avoiding ? { destinationSpotId: route.spotId, arrivalAt: travelling[0].timing.nextResolveAt, avoidSteps: AVOID_STEPS }
-                : { waitUntil: at + waitMs }) };
-    } finally {
-        const owned = grants.filter(g => life.cachedState(g.characterId)?.simulation?.leaseId === g.leaseId);
-        if (owned.length) await owner.releaseBatch(owned);
-        states.forEach(s => onState(s.characterId));
-    }
+    const group = { id: event.key, memberIds: states.map(s => s.characterId),
+        partyChanges: preparedParties.flatMap((p, i) => p ? [{ partyId: p.row.partyId,
+            expectedPartyRevision: sides[i].party.revision, memberIds: sides[i].party.memberIds,
+            spotId: p.row.spotId, nextResolveAt: p.row.nextResolveAt, statsJson: p.row.statsJson, updatedAt: p.row.updatedAt }] : []) };
+    // Each member commits on its cached revision: a write since then refuses
+    // the group whole.
+    const results = await owner.commitBatch(next.map((s, i) => ({
+        revision: Number(states[i].simulation?.revision || 0), nextState: s, atomicGroup: group,
+        options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: states[i] }
+    })), { timestamp: now(), journalReason: 'retreat' });
+    if (results.length !== states.length || results.some(r => !r.ok)) return { ok: false, reason: 'commit_rejected' };
+    // Each side caches its own committed row (Database commitBatch, partyRow).
+    preparedParties.filter(Boolean).forEach(p => parties.acceptRow(results.find(r => r.partyRow?.partyId === p.row.partyId).partyRow));
+    states.forEach(s => onState(s.characterId));
+    return { ok: true, affectedIds: sides[0].members.map(s => s.characterId), memoryEvents: 0,
+        matchup: sides.map(s => s.party ? 'party' : 'solo').join('_vs_'),
+        ...(avoiding ? { destinationSpotId: route.spotId, arrivalAt: travelling[0].timing.nextResolveAt, avoidSteps: AVOID_STEPS }
+            : { waitUntil: at + waitMs }) };
 }
 module.exports = { apply, AVOID_STEPS };

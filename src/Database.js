@@ -2965,12 +2965,11 @@ function coldClaimRow(characterId) {
     return { row, stats };
 }
 
-function coldSimulationConflict(row, request, timestamp) {
+// Why a guarded far-row write found no row: the revision is the fence.
+function coldSimulationConflict(row, request) {
     if (!row) return 'missing_state';
     if (Number(row.simulationRevision || 0) !== Number(request.expectedRevision)) return 'stale_revision';
-    if (String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== String(request.ownerId || COLD_SIMULATION_OWNER)) return 'owner_changed';
-    if (String(row.simulationLeaseId || '') !== String(request.leaseId || '')) return 'lease_changed';
-    if (Number(row.simulationLeaseUntil || 0) <= timestamp) return 'lease_expired';
+    if (row.phase !== 'cold') return 'phase_hot';
     return 'cas_failed';
 }
 
@@ -2981,21 +2980,21 @@ function coldPatchAssignments(entries) {
 }
 
 // An atomic group member's guard columns (coldSimulationConflict) and party.
-const COLD_GROUP_MEMBER_SQL = `SELECT characterId, partyId, phase, simulationOwner, simulationRevision,
-    simulationLeaseId, simulationLeaseUntil FROM bot_life_state WHERE characterId = ?`;
+const COLD_GROUP_MEMBER_SQL = 'SELECT characterId, partyId, phase, simulationRevision FROM bot_life_state WHERE characterId = ?';
 
 // What a cold commit hands back on its write: the row's revisions, its time
 // and the economy leaf it kept (JSON text, NULL when none).
 const COLD_COMMIT_RETURNING = `characterId, simulationRevision, inventoryRevision, skillsRevision, hennaRevision, updatedAt,
     json_extract(statsJson, '$.economyCommit') AS economyCommit`;
 
-// A cold commit's one write: the guarded UPDATE of the proposal's columns,
-// with no row read before it. The bag revision moves in this statement:
-// RETURNING does not see what an AFTER trigger writes, and a statement that
-// moved it leaves the trigger nothing to do. `lease` holds the owner and
-// lease assignments the commit leaves behind. Null when the guard refused.
-function writeColdCommitUnsafe(fields, patch, lease) {
-    const { characterId, ownerId, expectedRevision, leaseId, timestamp } = fields;
+// A cold commit's one write: the UPDATE of the proposal's columns guarded by
+// the far phase and the revision the step started from, with no row read
+// before it. The bag revision moves in this statement: RETURNING does not see
+// what an AFTER trigger writes, and a statement that moved it leaves the
+// trigger nothing to do. The owner and lease columns are set to their constant
+// values. Null when the guard refused.
+function writeColdCommitUnsafe(fields, patch) {
+    const { characterId, expectedRevision, timestamp } = fields;
     const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
     const assignments = coldPatchAssignments(entries);
     const params = entries.map(([, value]) => value);
@@ -3003,12 +3002,11 @@ function writeColdCommitUnsafe(fields, patch, lease) {
         assignments.push('inventoryRevision = CASE WHEN inventorySummary IS ? THEN inventoryRevision ELSE inventoryRevision + 1 END');
         params.push(patch.inventorySummary);
     }
-    assignments.push('simulationRevision = ?', ...lease.assignments);
-    params.push(expectedRevision + 1, ...lease.params);
+    assignments.push('simulationRevision = ?', 'simulationOwner = ?', 'simulationLeaseId = NULL', 'simulationLeaseUntil = 0');
+    params.push(expectedRevision + 1, LEGACY_SIMULATION_OWNER);
     return one(`UPDATE bot_life_state SET ${assignments.join(', ')}
-        WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ?
-          AND simulationLeaseId = ? AND simulationLeaseUntil > ?
-        RETURNING ${COLD_COMMIT_RETURNING}`, [...params, characterId, ownerId, expectedRevision, leaseId, timestamp]) || null;
+        WHERE characterId = ? AND phase = 'cold' AND simulationRevision = ?
+        RETURNING ${COLD_COMMIT_RETURNING}`, [...params, characterId, expectedRevision]) || null;
 }
 
 function ensureSocialEntityUnsafe(entity, timestamp) {
@@ -5702,41 +5700,6 @@ const Database = {
         }), 'bot-life:cold-owner-claim-batch');
     },
 
-    commitColdSimulationLease(request = {}) {
-        const characterId = Number(request.characterId);
-        const expectedRevision = Number(request.expectedRevision);
-        const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-        const leaseId = String(request.leaseId || '');
-        const timestamp = Number(request.timestamp || now());
-        const leaseUntil = Number(request.leaseUntil || 0);
-        const requestedPatch = { ...(request.patch || {}) };
-        const invalidColumn = Object.keys(requestedPatch).find((column) => !COLD_SIMULATION_PATCH_COLUMNS.has(column));
-        if (!Number.isSafeInteger(characterId) || characterId <= 0) return Promise.resolve({ ok: false, reason: 'invalid_character' });
-        if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return Promise.resolve({ ok: false, reason: 'invalid_revision' });
-        if (ownerId !== COLD_SIMULATION_OWNER || !leaseId || leaseUntil <= timestamp) return Promise.resolve({ ok: false, reason: 'invalid_lease' });
-        if (invalidColumn) return Promise.resolve({ ok: false, reason: 'invalid_patch', column: invalidColumn });
-
-        return inTransaction(() => {
-            const fields = { characterId, expectedRevision, ownerId, leaseId, timestamp };
-            // The proposal's columns and the stats object its owner passes.
-            const partition = coldSimulationPartition(requestedPatch, request, request.stats || {});
-            if (!partition.ok) return { ok: false, reason: 'partition_rejected', detail: partition.reason };
-            const written = writeColdCommitUnsafe(fields, requestedPatch, { assignments: ['simulationLeaseUntil = ?'], params: [leaseUntil] });
-            if (!written) return { ok: false, reason: coldSimulationConflict(coldSimulationRow(characterId), fields, timestamp) };
-            return {
-                ok: true,
-                characterId,
-                ownerId,
-                leaseId,
-                revision: expectedRevision + 1,
-                leaseUntil,
-                reason: 'committed',
-                ...(request.memoryEvents !== undefined ? { memorySnapshots: commitColdInteractionMemoryUnsafe(request) || [] } : {}),
-                row: written
-            };
-        }, 'bot-life:cold-owner-commit');
-    },
-
     commitAndReleaseColdSimulationLeases(requests = []) {
         const batch = Array.isArray(requests) ? requests.slice(0, 32) : [];
         if (!batch.length) return Promise.resolve([]);
@@ -5752,15 +5715,11 @@ const Database = {
             group.push(request);
             atomicGroups.set(groupId, group);
         });
-        const RELEASE_LEASE = { assignments: ['simulationOwner = ?', 'simulationLeaseId = NULL', 'simulationLeaseUntil = 0'],
-            params: [LEGACY_SIMULATION_OWNER] };
         const commitFields = (request) => {
             const requestedPatch = { ...(request.patch || {}) };
             return {
                 characterId: Number(request.characterId),
                 expectedRevision: Number(request.expectedRevision),
-                ownerId: String(request.ownerId || COLD_SIMULATION_OWNER),
-                leaseId: String(request.leaseId || ''),
                 timestamp: Number(request.timestamp || now()),
                 requestedPatch,
                 invalidColumn: Object.keys(requestedPatch).find((column) => !COLD_SIMULATION_PATCH_COLUMNS.has(column))
@@ -5805,11 +5764,10 @@ const Database = {
                     // Only the guard columns and the party: a member's commit
                     // writes under the same guard.
                     const row = one(COLD_GROUP_MEMBER_SQL, [fields.characterId]);
-                    const conflict = coldSimulationConflict(row, fields, fields.timestamp);
+                    const conflict = coldSimulationConflict(row, fields);
                     memberRows.set(fields.characterId, row);
                     if (!Number.isSafeInteger(fields.characterId) || fields.characterId <= 0
                         || !Number.isSafeInteger(fields.expectedRevision) || fields.expectedRevision < 0
-                        || fields.ownerId !== COLD_SIMULATION_OWNER || !fields.leaseId
                         || fields.invalidColumn || conflict !== 'cas_failed' || !proposalPartition(request, fields).ok) {
                         failure = true;
                         reason = conflict !== 'cas_failed' ? conflict : 'party_group_invalid';
@@ -5867,22 +5825,21 @@ const Database = {
                 };
             }
             const fields = commitFields(request);
-            const { characterId, expectedRevision, ownerId, leaseId, timestamp, invalidColumn, requestedPatch } = fields;
+            const { characterId, expectedRevision, timestamp, invalidColumn, requestedPatch } = fields;
             if (!Number.isSafeInteger(characterId) || characterId <= 0) return { ok: false, characterId, reason: 'invalid_character' };
             if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return { ok: false, characterId, reason: 'invalid_revision' };
-            if (ownerId !== COLD_SIMULATION_OWNER || !leaseId) return { ok: false, characterId, reason: 'invalid_lease' };
             if (invalidColumn) return { ok: false, characterId, reason: 'invalid_patch', column: invalidColumn };
             const parts = Diagnostics.laps('commit_');
             const partition = proposalPartition(request, fields);
             if (!partition.ok) return { ok: false, characterId, reason: 'partition_rejected', detail: partition.reason };
-            const written = writeColdCommitUnsafe(fields, requestedPatch, RELEASE_LEASE);
+            const written = writeColdCommitUnsafe(fields, requestedPatch);
             if (!written) {
                 // A refusal hands back the row: the worker rebases on it.
                 const current = coldSimulationRow(characterId);
                 return {
                     ok: false,
                     characterId,
-                    reason: coldSimulationConflict(current, fields, timestamp),
+                    reason: coldSimulationConflict(current, fields),
                     ...(current ? { row: current } : {})
                 };
             }
@@ -5898,8 +5855,8 @@ const Database = {
             const settled = pendingSettlementOwners.has(characterId)
                 ? mergeBoardSettlementsUnsafe(characterId, { advance: false }) : null;
             EconomyJournal.detail(null);
-            // Persist the entitlement under the same lease fence and transaction
-            // as EXP. Cold-to-hot resurrection reads this durable record.
+            // Persist the entitlement under the same revision fence and
+            // transaction as EXP. Cold-to-hot resurrection reads this durable record.
             syncColdDeathExperienceUnsafe(characterId, request.stats?.deathExperience, timestamp);
             const memorySnapshots = request.memoryEvents !== undefined ? commitColdInteractionMemoryUnsafe(request) || [] : undefined;
             // The resolve's life events (BotLifeEvents.resolvePayload) leave
@@ -6007,7 +5964,6 @@ const Database = {
             let expectedRevision = Number(request.expectedRevision);
             const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
             const leaseId = String(request.leaseId || '');
-            const timestamp = Number(request.timestamp || now());
             const row = coldSimulationRow(characterId);
             // A clan inventory write can advance the row while retaining the
             // same lease. Its rejected proposal must still relinquish that
@@ -6019,7 +5975,7 @@ const Database = {
                 && Number(row.simulationRevision) > expectedRevision) {
                 expectedRevision = Number(row.simulationRevision);
             }
-            const conflict = coldSimulationConflict(row, { expectedRevision, ownerId, leaseId }, timestamp);
+            const conflict = coldSimulationConflict(row, { expectedRevision });
             if (conflict !== 'cas_failed') return { ok: false, characterId, reason: conflict };
             const revision = expectedRevision + 1;
             const result = write(`UPDATE bot_life_state
@@ -6037,10 +5993,9 @@ const Database = {
         const expectedRevision = Number(request.expectedRevision);
         const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
         const leaseId = String(request.leaseId || '');
-        const timestamp = Number(request.timestamp || now());
         return inTransaction(() => {
             const row = coldSimulationRow(characterId);
-            const conflict = coldSimulationConflict(row, { expectedRevision, ownerId, leaseId }, timestamp);
+            const conflict = coldSimulationConflict(row, { expectedRevision });
             if (conflict !== 'cas_failed') return { ok: false, reason: conflict };
             const revision = expectedRevision + 1;
             const result = write(`UPDATE bot_life_state
@@ -11040,19 +10995,6 @@ const Database = {
     fetchCharacterDeathExperience(id) {
         return selectOne('character_death_experience', ['*'], 'characterId = ?', [Number(id)], 'character:death-exp-fetch')
             .then((rows) => rows[0] || null);
-    },
-    updateColdCharacterProgression(id, state) {
-        return withCharacterFlush(id, () => inTransaction(() => {
-            const life = one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [id]);
-            if (Number(jsonObject(life?.statsJson).clanLevelSpVersion || 0) > Number(state.stats?.clanLevelSpVersion || 0)) {
-                const error = new Error(`stale SP before clan level-up for ${id}`);
-                error.code = 'BOT_LIFE_STATE_OWNERSHIP_CONFLICT';
-                throw error;
-            }
-            write('UPDATE characters SET level = ?, exp = ?, sp = ? WHERE id = ?',
-                [state.level, state.exp, state.sp, id]);
-            syncColdDeathExperienceUnsafe(id, state.stats?.deathExperience, Number(state.updatedAt || now()));
-        }, 'character:cold-progression'));
     },
     applyCharacterDeathExperience(record, options = {}) {
         const id = Number(record.characterId);

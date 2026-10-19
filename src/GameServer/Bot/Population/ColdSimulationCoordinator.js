@@ -49,8 +49,6 @@ const OWNERSHIP_REBASE_REASONS = new Set([
     'stale_revision',
     'cas_failed',
     'owner_changed',
-    'lease_changed',
-    'lease_expired',
     'lease_active'
 ]);
 
@@ -269,7 +267,9 @@ class ColdSimulationCoordinator {
             maxBytes: Config.coldWorkerQueueMaxBytes || 4 * 1024 * 1024,
             prepare: (proposal) => this.prepareProposal(proposal),
             // The journal rides the commit transaction (the world outbox), not a write per bot after it.
-            commit: (entries) => ColdSimulationOwner.commitAndReleaseBatch(entries.map((entry) => ({ ...entry,
+            // The step commits on the revision its claim granted.
+            commit: (entries) => ColdSimulationOwner.commitBatch(entries.map((entry) => ({ ...entry,
+                revision: entry.proposal.token.revision,
                 lifeEvents: LifeEvents.resolvePayload(entry.nextState.characterId, entry.proposal.result?.events) }))),
             afterCommit: (entry, result) => this.afterCommit(entry, result),
             onResults: (results) => {

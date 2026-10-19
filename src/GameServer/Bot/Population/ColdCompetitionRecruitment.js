@@ -28,7 +28,6 @@ async function recruit({ participants, event, parties, life, memory, composition
         || members.length < limits.minSize
         || !members.every(s => s && s.phase === 'cold' && ['grouped', 'hunting', 'resting'].includes(s.activity)
             && s.vitals?.hp > 0 && s.party?.partyId === partyId && s.spotId === event.spotId
-            && (s.simulation?.ownerId || 'legacy_main') === 'legacy_main'
             && !s.stats?.travel && !s.stats?.coldCompetition?.wait && !s.stats?.supplyErrand
             && !s.stats?.warehouseWorkflow && !s.stats?.marketReturn && !clanReserved(s)
             && participantAllowed(s.characterId))) return { rejected: 'party_member_busy' };

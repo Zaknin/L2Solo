@@ -121,15 +121,12 @@ function state(characterId, revision, activity = 'hunting') {
     }, { timestamp: 1500, leaseMs: 5000, leaseId: 'lease-b' });
     assert.strictEqual(competing.reason, 'lease_active', 'an active lease must reject a competing claim');
 
-    const invalidPatch = await Database.commitColdSimulationLease({
+    const [invalidPatch] = await Database.commitAndReleaseColdSimulationLeases([{
         characterId,
         expectedRevision: first.revision,
-        ownerId: Owner.OWNER_ID,
-        leaseId: first.leaseId,
         timestamp: 1800,
-        leaseUntil: 6800,
         patch: { arbitraryColumn: 1 }
-    });
+    }]);
     assert.strictEqual(invalidPatch.reason, 'invalid_patch', 'gateway must reject fields outside the explicit bridge protocol');
 
     const renewed = await Owner.renewActiveLeases([first], { now: () => 2000, leaseMs: 5000, canRenew: () => true });
@@ -158,14 +155,16 @@ function state(characterId, revision, activity = 'hunting') {
         timing: { activityStartedAt: 2000, nextResolveAt: 9000, lastResolvedAt: 2000, lastHotAt: null },
         updatedAt: 2000
     };
+    const commitOn = (revision, nextState, timestamp) => Owner.commitBatch([{ revision, nextState }], { timestamp })
+        .then(([result]) => result);
     // The look write under the lease moved the row: the proposal built before
     // it is refused, the lease is released and the step redone on the row.
-    assert.strictEqual((await Owner.commit(first, resting, { timestamp: 2000, leaseMs: 5000 })).reason, 'stale_revision',
+    assert.strictEqual((await commitOn(first.revision, resting, 2000)).reason, 'stale_revision',
         'a proposal built before a main write is refused');
     assert.strictEqual((await Owner.releaseBatch([first], { releaseInvalidated: true, timestamp: 2000 }))[0].ok, true);
     const redo = await Owner.claim(BotLifeState.cachedState(characterId), { timestamp: 2000, leaseMs: 5000, leaseId: 'lease-a2' });
     assert.strictEqual(redo.ok, true, 'the refused step claims the row again');
-    const committed = await Owner.commit(redo, resting, { timestamp: 2000, leaseMs: 5000 });
+    const committed = await commitOn(redo.revision, resting, 2000);
     assert.strictEqual(committed.ok, true, 'owner proposal must commit through the main database gateway');
     assert.strictEqual(committed.revision, redo.revision + 1, 'conditional commit must advance the revision');
     assert.strictEqual(Number(committed.row.simulationRevision), committed.revision, 'the commit hands back the revision it wrote');
@@ -193,22 +192,19 @@ function state(characterId, revision, activity = 'hunting') {
     assert.strictEqual(Number(committedCharacter.sex), 1,
         'the same migration transaction must update the physical character appearance');
 
-    const staleCommit = await Owner.commit(first, { ...resting, activity: 'hunting' }, { timestamp: 2100, leaseMs: 5000 });
+    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.LEGACY_OWNER_ID,
+        'a commit returns the bot to main');
+
+    const staleCommit = await commitOn(first.revision, { ...resting, activity: 'hunting' }, 2100);
     assert.strictEqual(staleCommit.reason, 'stale_revision', 'an old claim must never overwrite a newer revision');
-    const partitionFailure = await Owner.commit(committed, { ...resting, activity: 'crafting', stats: { craftShop: {} } }, { timestamp: 2200 });
+    const partitionFailure = await commitOn(committed.revision, { ...resting, activity: 'crafting', stats: { craftShop: {} } }, 2200);
     assert.strictEqual(partitionFailure.reason, 'partition_rejected', 'owner cannot cross into a legacy-main activity');
     const staleRelease = await Owner.release(first, { timestamp: 2300 });
     assert.strictEqual(staleRelease.reason, 'stale_revision', 'release is CAS-protected too');
 
-    const released = await Owner.release(committed, { timestamp: 2400 });
-    assert.strictEqual(released.ok, true);
-    assert.strictEqual(released.ownerId, Owner.LEGACY_OWNER_ID);
-    assert.strictEqual(released.revision, committed.revision + 1);
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.LEGACY_OWNER_ID, 'release must return cached ownership to main');
-
     const secondState = {
         ...resting,
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: released.revision, leaseId: null, leaseUntil: 0 }
+        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: committed.revision, leaseId: null, leaseUntil: 0 }
     };
     const second = await Owner.claim(secondState, { timestamp: 3000, leaseMs: 5000, leaseId: 'lease-c' });
     assert.strictEqual(second.ok, true);
@@ -217,7 +213,7 @@ function state(characterId, revision, activity = 'hunting') {
         simulation: { ownerId: Owner.OWNER_ID, revision: second.revision, leaseId: second.leaseId, leaseUntil: second.leaseUntil }
     });
     assert.strictEqual(handoff.reason, 'hot_handoff', 'hot activation must revoke the cold claim before spawning');
-    const postHandoffCommit = await Owner.commit(second, resting, { timestamp: 3200 });
+    const postHandoffCommit = await commitOn(second.revision, resting, 3200);
     assert.strictEqual(postHandoffCommit.reason, 'stale_revision', 'handoff must fence a late cold commit');
 
     const thirdState = {
@@ -319,7 +315,7 @@ function state(characterId, revision, activity = 'hunting') {
     await Database.execute([`UPDATE bot_life_state SET simulationRevision = simulationRevision + 1,
         inventorySummary = ?, statsJson = ? WHERE characterId = ?`,
     [inventoryAfterClanWrite, JSON.stringify({ clanInventoryRevision: inventoryRace.revision + 1 }), characterId]]);
-    const rejectedCommit = await Owner.commit(inventoryRace, resting, { timestamp: 6400 });
+    const rejectedCommit = await commitOn(inventoryRace.revision, resting, 6400);
     assert.strictEqual(rejectedCommit.reason, 'stale_revision');
     assert.strictEqual((await Owner.releaseBatch([inventoryRace], { timestamp: 6400 }))[0].reason, 'stale_revision',
         'ordinary release retains revision fencing');

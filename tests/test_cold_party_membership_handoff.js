@@ -197,11 +197,11 @@ function settleSnapshot() {
     assert.strictEqual(raceDetached.simulation.ownerId, 'legacy_main');
     assert(Number(raceDetached.simulation.revision) > Number(activeClaim.revision),
         'the atomic main transition must advance the revision past the active worker token');
-    const staleCommit = await Owner.commit(activeClaim, claimedPartyState, {
-        allowParty: true,
-        allowLifecycle: true,
-        timestamp: Date.now()
-    });
+    const [staleCommit] = await Owner.commitBatch([{
+        revision: activeClaim.revision,
+        nextState: claimedPartyState,
+        options: { allowParty: true, allowLifecycle: true }
+    }]);
     assert.strictEqual(staleCommit.ok, false, 'the invalidated worker token must not overwrite party departure');
 
     console.log('Cold party membership snapshot handoff and stale-claim fencing checks passed');

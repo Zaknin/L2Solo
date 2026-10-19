@@ -235,30 +235,26 @@ async function main() {
 
     await party([7, 8]);
     const rejected = await Conflict.apply({ ...base, event: event(7, 9), owner: { ...Owner,
-        commitAndReleaseBatch: async (entries, options) => {
+        commitBatch: async (entries, options) => {
             await Database.execute(['UPDATE bot_background_parties SET revision=revision+1 WHERE partyId=?', ['pvp-party-7']]);
-            return Owner.commitAndReleaseBatch(entries, options);
+            return Owner.commitBatch(entries, options);
         } } });
     assert.strictEqual(rejected.ok, false);
     assert.strictEqual((await Database.execute(['SELECT hp FROM characters WHERE id=7', []]))[0].hp, 20);
     assert.strictEqual((await Database.execute(['SELECT pk FROM characters WHERE id=9', []]))[0].pk, 0);
     assert.strictEqual((await Repository.load(7)).relations.length, 0);
     assert.strictEqual((await Conflict.apply({ ...base, event: event(10, 12), participantAllowed: id => id !== 12 })).ok, false);
-    const partial = await Conflict.apply({ ...base, event: event(10, 12), owner: { ...Owner,
-        claimBatch: (states, options) => Owner.claimBatch(states.slice(0, 1), options) } });
-    assert.strictEqual(partial.ok, false);
-    assert(!state(10).simulation.leaseId, 'partial ownership is released');
     await assert.rejects(Conflict.apply({ ...base, event: event(13, 15), owner: { ...Owner,
-        commitAndReleaseBatch: (entries, options) => {
+        commitBatch: (entries, options) => {
             entries.find(e => e.proposal.result.memoryEvents.length).proposal.result.memoryEvents[0].key = '';
-            return Owner.commitAndReleaseBatch(entries, options);
+            return Owner.commitBatch(entries, options);
         } } }), /memory/i);
     assert.strictEqual((await Database.execute(['SELECT hp FROM characters WHERE id=13', []]))[0].hp, 20);
     assert.strictEqual((await Database.execute(['SELECT pk FROM characters WHERE id=15', []]))[0].pk, 0);
     const contextRace = await Conflict.apply({ ...base, event: event(16, 18), owner: { ...Owner,
-        commitAndReleaseBatch: async (entries, options) => {
+        commitBatch: async (entries, options) => {
             await Database.execute(['UPDATE characters SET karma=7 WHERE id=18', []]);
-            return Owner.commitAndReleaseBatch(entries, options);
+            return Owner.commitBatch(entries, options);
         } } });
     assert.strictEqual(contextRace.ok, false, 'political/karma context is checked against character rows at commit');
     assert.strictEqual((await Database.execute(['SELECT hp FROM characters WHERE id=16', []]))[0].hp, 20);
@@ -288,16 +284,6 @@ async function main() {
     await grievance(29, 32);
     const refused = await new ColdCompetitionActions({ ...base, pvpEnabled: () => false }).apply(revengeEvent(29, 32));
     assert.strictEqual(refused.reason, 'forecast_only');
-    const beforeClaim = await Repository.load(32);
-    const staleRelation = await Conflict.apply({ ...base, event: revengeEvent(29, 32), owner: { ...Owner,
-        claimBatch: async (...args) => {
-            const claimed = await Owner.claimBatch(...args);
-            await Memory.recordBatch([{ key: 'reconciled-during-claim', sourceId: 29, targetId: 32, type: 'resurrected', at }]);
-            return claimed;
-        } } });
-    assert.strictEqual(staleRelation.reason, 'contest_changed_during_claim');
-    assert.deepStrictEqual(await Repository.load(32), beforeClaim, 'rejected intent must not create attacks');
-    assert(!state(29).simulation.leaseId);
     const initial = await Conflict.apply({ ...base, event: revengeEvent(29, 32), incrementalPvp: true });
     assert(initial.ok && initial.encounter?.reason === 'revenge', JSON.stringify(initial));
     assert(state(29).stats.coldPvp.flagUntil > at, 'the initiating avenger carries a flag into hot activation');
@@ -337,11 +323,11 @@ async function main() {
     }
     const beforeAid = await Repository.load(38), beforeHelper = state(35).vitals.mp;
     await assert.rejects(Conflict.apply({ ...base, event: event(38, 35), owner: { ...Owner,
-        commitAndReleaseBatch: (entries, options) => {
+        commitBatch: (entries, options) => {
             const aid = entries.flatMap(e => e.proposal.result.memoryEvents).find(e => e.type === 'aided_opponent');
             assert(aid, 'the rejected proposal contained a real aid event');
             aid.key = '';
-            return Owner.commitAndReleaseBatch(entries, options);
+            return Owner.commitBatch(entries, options);
         } } }), /memory/i);
     assert.deepStrictEqual(await Repository.load(38), beforeAid, 'a rejected fight cannot leave an aid grievance');
     assert.strictEqual(state(35).vitals.mp, beforeHelper);

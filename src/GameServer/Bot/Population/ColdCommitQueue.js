@@ -393,7 +393,7 @@ class ColdCommitQueue {
                             if (DiagnosticConfig.developerDiagnostics) afterCommitMs += this.now() - afterStartedAt;
                         }
                         DiagnosticConfig.developerDiagnostics && (this.counters.committed += 1);
-                    } else if (Protocol.staleRefusal(result) || ['lease_changed', 'owner_changed'].includes(result.reason)) {
+                    } else if (Protocol.staleRefusal(result)) {
                         DiagnosticConfig.developerDiagnostics && (this.counters.stale += 1);
                     } else {
                         DiagnosticConfig.developerDiagnostics && (this.counters.rejected += 1);

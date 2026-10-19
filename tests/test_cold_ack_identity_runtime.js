@@ -74,7 +74,7 @@ async function release(token) {
         const handoff = await Owner.handoffToMain(Life.cachedState(id)); assert(handoff.ok);
         const current = await claim(id), currentRow = await row(id);
         assert.notEqual(original.leaseId, current.leaseId);
-        const stale = await Owner.commit(original, Life.cachedState(id), { allowLifecycle: true });
+        const stale = (await Owner.commitBatch([{ revision: original.revision, nextState: Life.cachedState(id), options: { allowLifecycle: true } }]))[0];
         assert.equal(stale.ok, false); assert.equal(stale.reason, 'stale_revision');
         assert.deepEqual(await row(id), currentRow);
         const proposal = { proposalId: 'old-native-proposal', token: original };
@@ -94,7 +94,7 @@ async function release(token) {
         assert.deepEqual(await row(id), currentRow);
         console.log('Native stale release echoes exact request identity and conserves fresh grant: PASS');
 
-        const committed = await Owner.commit(current, Life.cachedState(id), { allowLifecycle: true });
+        const committed = (await Owner.commitBatch([{ revision: current.revision, nextState: Life.cachedState(id), options: { allowLifecycle: true } }]))[0];
         assert(committed.ok); assert.notEqual(committed.revision, current.revision);
         const currentProposal = { proposalId: 'current-native-proposal', token: current };
         await coordinator.handleCommitResults([{ ...committed, characterId: id, proposal: currentProposal },
@@ -107,9 +107,9 @@ async function release(token) {
         assert.equal(currentAcks[0].state.simulation.revision, committed.revision);
         console.log('Successful native output revision stays separate and malformed sibling cannot poison ACK: PASS');
 
-        // Native commit retains its lease at a newer revision. The next
-        // request uses that current token, never the old original revision.
-        const releaseToken = { ok: true, characterId: id, ...Life.cachedState(id).simulation };
+        // A commit returns the bot to main; a new claim leases it again at a
+        // newer revision, and its release uses that current token.
+        const releaseToken = await claim(id);
         const activeRelease = await release(releaseToken);
         assert.equal(activeRelease.results.length, 1); assert(activeRelease.results[0].ok);
         assert.deepEqual(activeRelease.results[0].inputToken, Protocol.leaseRenewalToken(releaseToken));

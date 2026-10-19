@@ -43,7 +43,6 @@ const PersonaPartyPolicy = invoke('GameServer/Bot/Population/PersonaPartyPolicy'
 const PlayerActivitySignal = invoke('GameServer/Bot/Population/PlayerActivitySignal');
 const ActorQueries = require('../../World/ActorSpatialQueries');
 const FloorAwareActivationPolicy = invoke('GameServer/Bot/Population/FloorAwareActivationPolicy');
-const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const ColdSimulationCoordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 const BackgroundWorkGovernor = invoke('GameServer/Bot/Population/BackgroundWorkGovernor');
 const BackgroundJobRegistry = invoke('GameServer/Bot/Population/BackgroundJobRegistry');
@@ -89,34 +88,6 @@ function logPartyActivationFailure(state, result, timestamp = Date.now()) {
     activationFailureLogAt.set(key, timestamp);
     utils.infoWarn('BotPopulation', 'party activation deferred %s reason=%s%s',
         partyId, reason, detail ? ` detail=${detail}` : '');
-}
-
-function deterministicRandom(state = {}) {
-    const seedText = `${state.characterId || 0}:${state.timing?.lastResolvedAt || 0}:${state.timing?.nextResolveAt || 0}`;
-    let seed = 2166136261;
-    for (let index = 0; index < seedText.length; index++) {
-        seed ^= seedText.charCodeAt(index);
-        seed = Math.imul(seed, 16777619);
-    }
-    return () => {
-        seed |= 0;
-        seed = (seed + 0x6D2B79F5) | 0;
-        let value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-        value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
-        return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-    };
-}
-
-function withTimeout(work, timeoutMs) {
-    let timer = null;
-    const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => {
-            const error = new Error('cold_owner_resolve_timeout');
-            error.code = 'COLD_OWNER_TIMEOUT';
-            reject(error);
-        }, Math.max(1000, Number(timeoutMs) || 10000));
-    });
-    return Promise.race([Promise.resolve().then(work), timeout]).finally(() => clearTimeout(timer));
 }
 
 function hasFiniteCoordinate(value) {
@@ -2686,104 +2657,6 @@ const PopulationService = {
                     return joint ? joinPartyRecruits(party, members, hydratedRecruits, joint).then(claim) : null;
                 });
             }), Promise.resolve())).then(() => claimed);
-    },
-
-    resolveOwnedColdState(state) {
-        const partition = ColdSimulationOwner.eligibility(state);
-        if (!partition.ok) {
-            Config.developerDiagnostics && Metrics.recordColdOwnerLegacyDeferred(partition.reason);
-            return this.resolveColdState(state);
-        }
-
-        const startedAt = Date.now();
-        const leaseMs = Math.max(2000, Number(Config.coldOwnerLeaseMs) || ColdSimulationOwner.DEFAULT_LEASE_MS);
-        const timeoutMs = Math.min(leaseMs - 1000, Math.max(1000, Number(Config.coldOwnerResolveTimeoutMs) || 10000));
-        let activeToken = null;
-        Config.developerDiagnostics && Metrics.recordColdOwnerSelected();
-
-        const releaseActive = () => activeToken?.ok
-            ? ColdSimulationOwner.release(activeToken).catch(() => ({ ok: false, reason: 'release_error' }))
-            : Promise.resolve({ ok: false, reason: 'missing_claim' });
-
-        return ColdSimulationOwner.claim(state, { timestamp: startedAt, leaseMs }).then((claim) => {
-            if (!claim.ok) {
-                if (['legacy_activity', 'background_party', 'warehouse_state', 'market_state', 'craft_state', 'player_workflow'].includes(claim.reason)) {
-                    Config.developerDiagnostics && Metrics.recordColdOwnerLegacyDeferred(claim.reason);
-                    return this.resolveColdState(state);
-                }
-                Config.developerDiagnostics && Metrics.recordSkippedResolve(`cold_owner_claim_${claim.reason || 'rejected'}`);
-                return { ok: false, reason: claim.reason || 'claim_rejected', state };
-            }
-            activeToken = claim;
-            const claimedState = {
-                ...state,
-                simulation: {
-                    ownerId: claim.ownerId,
-                    revision: claim.revision,
-                    leaseId: claim.leaseId,
-                    leaseUntil: claim.leaseUntil
-                }
-            };
-
-            return withTimeout(() => {
-                if (joinedBackgroundParty(claimedState)) throw new Error('joined_party_after_claim');
-                const elapsedMs = claimedState.timing?.lastResolvedAt
-                    ? Math.max(1000, startedAt - claimedState.timing.lastResolvedAt)
-                    : 60000;
-                const lifecycleState = expirePartyRequestForState(claimedState, startedAt);
-                const spot = lifecycleState.activity === 'hunting' ? SpotProfiles.findForState(lifecycleState) : null;
-                if (lifecycleState.activity === 'hunting' && !spot) {
-                    const error = new Error('missing_owner_spot');
-                    error.code = 'COLD_OWNER_MISSING_SPOT';
-                    throw error;
-                }
-                const result = BackgroundResolver.resolveSolo({
-                    state: lifecycleState,
-                    spot,
-                    spotHunters: SpotProfiles.spotHunters(spot),
-                    pressure: Director.pressureForState(lifecycleState),
-                    targetNpcId: directDropTargetNpcId(lifecycleState.stats?.equipmentPlan),
-                    elapsedMs,
-                    rng: deterministicRandom(lifecycleState),
-                    timestamp: startedAt
-                });
-                return LifeState.prepareResolve(lifecycleState, result, { persist: false, timestamp: startedAt })
-                    .then((nextState) => ({ nextState, result }));
-            }, timeoutMs).then(({ nextState, result }) => {
-                Config.developerDiagnostics && Metrics.recordColdOwnerResolved();
-                if (!nextState || joinedBackgroundParty(nextState)) {
-                    const error = new Error('owner_result_invalidated');
-                    error.code = 'COLD_OWNER_INVALIDATED';
-                    throw error;
-                }
-                return ColdSimulationOwner.commit(activeToken, nextState, { leaseMs }).then((committed) => {
-                    if (!committed.ok) {
-                        Config.developerDiagnostics && Metrics.recordSkippedResolve(`cold_owner_commit_${committed.reason || 'rejected'}`);
-                        return releaseActive().then(() => ({ ok: false, reason: committed.reason || 'commit_rejected', state }));
-                    }
-                    activeToken = committed;
-                    const committedState = LifeState.cachedState(state.characterId) || nextState;
-                    return LifeState.syncResolvedState(committedState)
-                        .then(() => LifeEvents.recordMany(state.characterId, result.events || []))
-                        .then(() => {
-                            Config.developerDiagnostics && Metrics.recordBackgroundResolve();
-                            Config.developerDiagnostics && Metrics.recordCombat(result.debug);
-                            GlobalChat.maybeAnnounce(committedState, result.events || []);
-                            return releaseActive().then((released) => ({
-                                ok: true,
-                                state: LifeState.cachedState(state.characterId) || committedState,
-                                debug: result.debug,
-                                release: released
-                            }));
-                        });
-                });
-            });
-        }).catch((error) => {
-            if (error?.code === 'COLD_OWNER_TIMEOUT') Config.developerDiagnostics && Metrics.recordColdOwnerTimeout();
-            else if (!error?.coldOwnerRecorded) Config.developerDiagnostics && Metrics.recordColdOwnerError(error);
-            Config.developerDiagnostics && Metrics.recordSkippedResolve(error?.code === 'COLD_OWNER_TIMEOUT' ? 'cold_owner_timeout' : 'cold_owner_error');
-            return releaseActive().then(() => ({ ok: false, reason: error?.message || 'owner_error', state }));
-        }).finally(() => Config.developerDiagnostics && Metrics.recordResolveDuration(Date.now() - startedAt));
     },
 
     checkpointPressure() {

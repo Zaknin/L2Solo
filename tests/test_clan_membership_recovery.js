@@ -122,9 +122,9 @@ async function main() {
         assert(claimed.ok, JSON.stringify(claimed));
         await Database.updateCharacterClan(ids[3], clanId, 0, 0, 0);
         // A proposal is written as is: its columns and the stats object it was built with.
-        const propose = (expectedRevision, stats, at) => Database.commitColdSimulationLease({ characterId: ids[3], expectedRevision,
-            leaseId: 'membership-race', timestamp: timestamp + at, leaseUntil: timestamp + 60000, allowLifecycle: true,
-            patch: { phase: 'cold', statsJson: JSON.stringify(stats) }, stats });
+        const propose = (expectedRevision, stats, at) => Database.commitAndReleaseColdSimulationLeases([{ characterId: ids[3], expectedRevision,
+            timestamp: timestamp + at, allowLifecycle: true,
+            patch: { phase: 'cold', statsJson: JSON.stringify(stats) }, stats }]).then(([result]) => result);
         const staleCommit = await propose(claimed.revision, { clanId: 0 }, 1);
         assert.equal(staleCommit.reason, 'stale_revision', 'running worker cannot erase a newer membership');
         assert.equal(Life.cachedState(ids[3]).stats.clanId, clanId);

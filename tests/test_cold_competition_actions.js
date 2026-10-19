@@ -146,9 +146,9 @@ async function run() {
     assert.deepStrictEqual(Party.find('competition-party').memberIds, beforeRace.memberIds);
     assert(!Life.cachedState(8).party?.partyId);
     const raced = new ColdCompetitionActions({ life: Life, memory, now: () => now, owner: { ...Owner,
-        commitAndReleaseBatch: async (entries, options) => {
+        commitBatch: async (entries, options) => {
             await Database.execute(['UPDATE bot_life_state SET simulationRevision=simulationRevision+1 WHERE characterId=6', []]);
-            return Owner.commitAndReleaseBatch(entries, options);
+            return Owner.commitBatch(entries, options);
         } } });
     assert.strictEqual((await raced.apply(event(5, 6))).ok, false);
     const failedRows = await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId IN (5,6)', []]);
@@ -212,22 +212,14 @@ async function run() {
     const laterEvent = { ...contestEvent(13, 15), key: 'later-opponent', at: contestNow + 120001 };
     assert.strictEqual((await later.apply(laterEvent)).reason, 'conflict_cooldown', 'durable conflict budget covers different opponents');
     const contestedRace = new ColdCompetitionActions({ ...conflictOptions, owner: { ...Owner,
-        commitAndReleaseBatch: async (entries, options) => {
+        commitBatch: async (entries, options) => {
             await Database.execute(['UPDATE bot_life_state SET simulationRevision=simulationRevision+1 WHERE characterId=16', []]);
-            return Owner.commitAndReleaseBatch(entries, options);
+            return Owner.commitBatch(entries, options);
         } } });
     assert.strictEqual((await contestedRace.apply(contestEvent(15, 16))).ok, false);
     const rollback = await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId IN (15,16)', []]);
     assert(rollback.every(row => !JSON.parse(row.statsJson).coldCompetition), 'both physical outcomes abort on one stale lease');
     assert.strictEqual((await invoke('GameServer/Social/InteractionMemoryRepository').load(16)).relations.length, 0, 'rejected outcome must not write resentment');
-    const memoryRace = new ColdCompetitionActions({ ...conflictOptions, owner: { ...Owner,
-        claimBatch: async (...args) => {
-            const claims = await Owner.claimBatch(...args);
-            await runtimeMemory.recordBatch([{ key: 'concurrent-help', sourceId: 18, targetId: 17, type: 'helped_in_combat', at: contestNow }]);
-            return claims;
-        } } });
-    assert.strictEqual((await memoryRace.apply(contestEvent(17, 18))).reason, 'contest_changed_during_claim');
-    assert.strictEqual(runtimeMemory.assess({ id: 18 }, { id: 17 }, {}, contestNow).personal.hostility, 0);
     await assert.rejects(conflicts.apply({ ...contestEvent(17, 18), key: 'invalid/key' }), /interaction memory: invalid key/);
     const memoryRollback = await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId IN (17,18)', []]);
     assert(memoryRollback.every(row => !JSON.parse(row.statsJson).coldCompetition), 'memory failure rolls back both life-state writes');
