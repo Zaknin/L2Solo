@@ -108,7 +108,8 @@ try {
         const Events = invoke('GameServer/Bot/AI/DecisionEvents');
         actor.autoSoulshots.add(1835);
         actor.session.actor = actor;
-        Events.receive(actor.session, null, { statsPacket: {}, nearSeq: 1 });
+        // The worker's verdict rides the decision: its build's shot stock.
+        Events.receive(actor.session, null, { statsPacket: {}, nearSeq: 1, shots: Economy.basics(state, deps).stock('shots') });
         assert.equal(actor.autoSoulshots.size, 0, 'a received decision applies the current shot use choice');
     } finally { Economy.stateForActor = actorState; }
     benefit = .01;

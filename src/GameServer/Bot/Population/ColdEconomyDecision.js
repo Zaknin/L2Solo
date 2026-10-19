@@ -690,6 +690,7 @@ class ColdEconomyDecisions {
     // committed: the commit's result. A commit that merged board deals or PK
     // drops into the bag keeps the worker's updatedAt, but the decision was
     // made on the bag before them: keep its numbers, but defer its wishes.
+    // Returns the compact card (a near body's view reads the same one).
     accept(characterId, decision, committed = null, state = null) {
         const id = Number(characterId);
         if (!id) return;
@@ -726,6 +727,7 @@ class ColdEconomyDecisions {
             this.byId.set(id, card);
         }
         else if (this.byId.has(id)) this.byId.get(id).stale = true;
+        return incoming;
     }
 
     // The hot owner can retain advice without granting compact-card execution.
