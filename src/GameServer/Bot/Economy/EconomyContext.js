@@ -1016,6 +1016,9 @@ function forState(state = {}, deps = {}) {
         const steps = Trip.prepare(state);
         let step; do { step = steps.next(); } while (!step.done);
         deps.routeRows = step.value;
+        // Read live: a high share against context builds says the 64-request
+        // cap refuses too often.
+        if (Diagnostics.active()) Diagnostics.count('context', 'route', 'inline');
     }
     const gearThreat = GearThreat.prepare(state, deps, held?.gearThreat);
     deps.gearThreatMask = gearThreat.mask;
