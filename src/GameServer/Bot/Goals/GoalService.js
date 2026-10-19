@@ -1,6 +1,35 @@
 const GoalState = invoke('GameServer/Bot/Goals/GoalState');
 const NeedsEvaluator = invoke('GameServer/Bot/Goals/NeedsEvaluator');
 const GoalPlanner = invoke('GameServer/Bot/Goals/GoalPlanner');
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+
+// A far bot that hunts alone has no other main pass that reviews its goal, so
+// main keeps a due list (bot id -> nextReviewAt of its cached goal, fed by
+// every goal write, GoalState.watch) and one timer armed at the earliest
+// time. A fire reviews at most REVIEWS_PER_FIRE due bots and fires no closer
+// than REVIEW_SPACING_MS after the last one (64 reviews/s at most: a restart
+// makes every cached goal due at once). A due bot leaves the list; its next
+// goal write puts it back.
+const REVIEWS_PER_FIRE = 16;
+const REVIEW_SPACING_MS = 250;
+const due = new Map();
+let armedAt = Infinity, lastFireAt = 0, timer = null;
+
+function arm(at) {
+    at = Math.max(at, lastFireAt + REVIEW_SPACING_MS);
+    if (at >= armedAt) return;
+    if (timer) clearTimeout(timer);
+    armedAt = at;
+    timer = setTimeout(fire, Math.max(0, at - Date.now()));
+    timer.unref?.();
+}
+
+function fire() {
+    timer = null;
+    armedAt = Infinity;
+    lastFireAt = Date.now();
+    GoalService.reviewDue(lastFireAt);
+}
 
 function reviewSpot(state, explicitSpot = null, existingGoal = null) {
     if (explicitSpot) return explicitSpot;
@@ -114,6 +143,34 @@ const GoalService = {
         return (cached ? Promise.resolve(cached) : GoalState.load(state.characterId)).then(choose);
     },
 
+    // The due list's fire: the due far solo bots' goals reviewed in one batch.
+    // Each review builds the bot's economy on main (NeedsEvaluator ->
+    // economyFor), once per due goal, not per commit.
+    reviewDue(timestamp = Date.now()) {
+        const states = [];
+        let next = Infinity;
+        for (const [id, at] of due) {
+            if (at > timestamp || states.length >= REVIEWS_PER_FIRE) {
+                next = Math.min(next, at);
+                continue;
+            }
+            due.delete(id);
+            const state = LifeState.cachedState(id);
+            if (state?.phase === 'cold' && !state.party?.partyId) states.push(state);
+        }
+        if (next < Infinity) arm(next);
+        if (!states.length) return Promise.resolve([]);
+        return this.reviewBatch(states, { now: timestamp }).catch((err) => {
+            utils.infoWarn('BotGoals', 'due goal review failed: %s', err.message);
+            return [];
+        });
+    },
+
+    // The due list's next fire time (Infinity: none armed).
+    dueArmedAt() {
+        return armedAt;
+    },
+
     reviewBatch(states = [], options = {}) {
         const candidates = (states || []).filter((state) => state?.characterId && state.phase !== 'hot');
         if (!candidates.length) return Promise.resolve([]);
@@ -151,5 +208,18 @@ const GoalService = {
 };
 
 GoalService.reviewSpot = reviewSpot;
+
+GoalState.watch = {
+    put(characterId, nextReviewAt) {
+        due.set(characterId, nextReviewAt);
+        arm(nextReviewAt);
+    },
+    reset() {
+        due.clear();
+        if (timer) clearTimeout(timer);
+        timer = null;
+        armedAt = Infinity;
+    }
+};
 
 module.exports = GoalService;

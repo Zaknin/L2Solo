@@ -96,6 +96,7 @@ function tableRow(snapshot) {
 function store(snapshot) {
     cache.set(snapshot.characterId, snapshot);
     TableChannel.changed('goals', tableRow(snapshot));
+    GoalState.watch?.put(snapshot.characterId, Number(snapshot.current?.nextReviewAt || 0));
 }
 
 TableChannel.register('goals', {
@@ -104,6 +105,10 @@ TableChannel.register('goals', {
 });
 
 const GoalState = {
+    // { put(characterId, nextReviewAt), reset() }: told of every goal write
+    // beside its 'goals' row (GoalService's due list of reviews).
+    watch: null,
+
     init() {
         if (initialized) return Promise.resolve(true);
         if (initPromise) return initPromise;
@@ -244,6 +249,7 @@ const GoalState = {
     reset() {
         for (const id of cache.keys()) TableChannel.changed('goals', { key: id, removed: true });
         cache.clear();
+        this.watch?.reset();
         initialized = false;
         initPromise = null;
     }
