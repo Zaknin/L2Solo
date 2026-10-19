@@ -122,11 +122,11 @@ async function run() {
         assert(kept.bag.some(item => item.selfId === 94 && item.enchant === 0 && item.petData === '{"tag":"copy-zero"}'),
             'selected physical copy retains its enchant and provenance');
         const beforeFence = kept.total;
-        const owned = { ...townGear.state, simulation: { ownerId: 'cold_worker', revision: 1 } };
-        assert.equal((await Warehouse.releaseCold(owned, { inTown: true })).released, false);
+        // A stale copy (not the bot's current state) cannot release.
+        const stale = { ...townGear.state, simulation: { ...townGear.state.simulation,
+            revision: Number(townGear.state.simulation.revision) - 1 } };
+        assert.equal((await Warehouse.releaseCold(stale, { inTown: true })).released, false);
         assert.equal((await Warehouse.releaseCold({ ...townGear.state, partyId: 23 }, { inTown: true })).released, false);
-        await Database.execute(['UPDATE bot_life_state SET simulationOwner=? WHERE characterId=?', ['cold_worker', ids[3]]]);
-        assert.equal((await Warehouse.releaseCold(owned, { inTown: true })).released, false);
         assert.equal((await totals(ids[3], 94)).total, beforeFence);
 
         const sql = [];

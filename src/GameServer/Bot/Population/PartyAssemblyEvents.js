@@ -198,8 +198,7 @@ class PartyAssemblyEvents {
             const [id, record] = iterator.next().value;
             pool.delete(id); pool.set(id, record);
             const state = this.life.cachedState(id);
-            if (state !== record.state || used.has(id) || state.simulation?.leaseId
-                || state.simulation?.ownerId && state.simulation.ownerId !== 'legacy_main') continue;
+            if (state !== record.state || used.has(id)) continue;
             shortlist.push(state); used.add(id);
         }
         return shortlist;

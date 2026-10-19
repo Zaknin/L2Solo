@@ -179,22 +179,24 @@ async function run() {
         'and stays on the board');
     assert.strictEqual((await bag(keeper))[1864], 10, 'the continuing conditional quote holds no extra stock');
 
-    // What the board owes a bot survives a restart: a deal on a record of a
-    // bot the worker holds waits; after a restart (the lease recovered) the
-    // board merges it.
+    // What the board owes a bot survives a restart: a far seller's deal
+    // credits a settlement the board merges at once; when that merge fails
+    // the money waits on the board and, after a restart, the board merges it.
     const holder = await makeBot([{ selfId: 1864, name: 'Stem', amount: 10 }]);
     const buyer = await makeBot([{ selfId: 57, name: 'Adena', amount: 100000 }], true);
     const holderAd = await AfkTrade.publishBot(holder, { ...await sellAd(holder, 1864, 10, 100), kind: 'shop' });
-    await Database.execute(["UPDATE bot_life_state SET simulationOwner = 'cold_simulation_owner' WHERE characterId = ?", [holder]]);
-    LifeState.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [holder]]))[0]);
-    await AfkTrade.buyFromShop(buyer, AfkTrade.recordStore(holderAd.id), 1864, 3);
-    assert.deepStrictEqual(Database.boardSettlementOwners(), [holder], 'the leased seller\'s 300 adena wait on the board');
+    await Database.execute([`CREATE TEMP TRIGGER inject_board BEFORE DELETE ON main.board_settlements
+        BEGIN SELECT RAISE(ABORT, 'injected settlement failure'); END`]);
+    try {
+        await AfkTrade.buyFromShop(buyer, AfkTrade.recordStore(holderAd.id), 1864, 3);
+    } finally {
+        await Database.execute(['DROP TRIGGER IF EXISTS temp.inject_board']);
+    }
+    assert.deepStrictEqual(Database.boardSettlementOwners(), [holder], 'the far seller\'s 300 adena wait on the board');
     assert.strictEqual((await bag(holder))[57], undefined);
     await AfkTrade._resetForTests();
     await Database.close();
     Database.init();
-    await Database.execute(["UPDATE bot_life_state SET simulationOwner = 'legacy_main' WHERE characterId = ?", [holder]]);
-    LifeState.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [holder]]))[0]);
     assert.deepStrictEqual(Database.boardSettlementOwners(), [holder], 'the settlement is still known after a restart');
     await AfkTrade.init();
     await AfkTrade.settlePending();

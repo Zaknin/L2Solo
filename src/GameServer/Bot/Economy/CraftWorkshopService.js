@@ -126,7 +126,7 @@ function indexState(id, state) {
     if (invoke('GameServer/Bot/Economy/CraftShopService').isServiceCrafter(state)) crafters.set(id, state);
     else recipesChanged(id);
     const shop = state?.stats?.workshop;
-    if (!shop || state.phase !== 'cold' || state.simulation?.ownerId !== 'legacy_main' || Number(state.vitals?.hp) <= 0
+    if (!shop || state.phase !== 'cold' || Number(state.vitals?.hp) <= 0
         || state.partyId || state.party?.partyId || ['dead', 'traveling'].includes(state.activity)) { publishRows(); return; }
     const ids = [];
     for (const entry of shop.entries || []) {

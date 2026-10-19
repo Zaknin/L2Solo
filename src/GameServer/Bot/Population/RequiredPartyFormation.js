@@ -26,7 +26,6 @@ function eligible(state) {
         Number(state?.characterId || 0) > 0
         && state.phase === 'cold'
         && ELIGIBLE_ACTIVITIES.has(state.activity)
-        && String(state.simulation?.ownerId || 'legacy_main') === 'legacy_main'
         && !state.party?.partyId
         && !state.partyId
         && partyTradeAllowed('party', state)
