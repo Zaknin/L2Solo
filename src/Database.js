@@ -27,6 +27,7 @@ const NativeWriteCheckpoint = require('./GameServer/Bot/Population/NativeWriteCh
 const EconomyCommit = require('./GameServer/Bot/Economy/EconomyCommit');
 const Diagnostics = require('./GameServer/Bot/Economy/EconomyDiagnostics');
 const ColdCombatProfile = require('./GameServer/Bot/Population/ColdCombatProfile');
+const SavedStats = require('./GameServer/Bot/SavedStats');
 let nativeDiagnosticFacts = null;
 let nativeDiagnosticCounts = null;
 let nativeDiagnosticOverflow = 0;
@@ -1782,6 +1783,24 @@ function applySchemaMigrations() {
                 OR json_type(statsJson, '$.appearanceVersion') IS NOT NULL OR json_type(statsJson, '$.sex') IS NOT NULL);
         `);
     }]);
+    // The mind (SavedStats.MIND_KEYS: what the worker decided) leaves the stats
+    // for its own column, so a refused body write keeps the decision. The move
+    // copies present keys only and keeps a null value and nested nulls as they
+    // are (json_patch would strip them); a row without a packet gets {}. The
+    // -> operator hands each value back as JSON, so true stays true
+    // (json_extract would turn it into 1).
+    migrations.push([71, () => {
+        const columns = new Set(connection.prepare('PRAGMA table_info(bot_life_state)').all().map((column) => column.name));
+        if (!columns.has('mindJson')) connection.exec("ALTER TABLE bot_life_state ADD COLUMN mindJson TEXT NOT NULL DEFAULT '{}'");
+        const keys = SavedStats.MIND_KEYS.map((key) => `'${key}'`).join(', ');
+        connection.exec(`
+            UPDATE bot_life_state SET
+                mindJson = COALESCE((SELECT json_group_object(key, statsJson -> ('$.' || key))
+                    FROM json_each(statsJson) WHERE key IN (${keys})), '{}'),
+                statsJson = json_remove(statsJson, ${SavedStats.MIND_KEYS.map((key) => `'$.${key}'`).join(', ')})
+            WHERE json_valid(statsJson) AND mindJson = '{}';
+        `);
+    }]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -2276,7 +2295,7 @@ function economyStepUnsafe(characterId, command, kind) {
     }
     if (tuple[1] !== 0 || command[2] !== tuple[0]) throw Error('economy_sequence_changed');
     economyOwnerUnsafe(characterId, command.authority, true);
-    const state = { level: Number(row.level), phase: row.phase, stats: jsonObject(row.statsJson),
+    const state = { level: Number(row.level), phase: row.phase, stats: SavedStats.merge(row.statsJson, row.mindJson),
         inventory: jsonObject(row.inventorySummary) };
     // Current own protection is prepared once inside the atomic boundary,
     // never inferred from the worker's spending proposal.
@@ -2293,8 +2312,10 @@ function completeEconomyStepUnsafe(characterId, step, result, changedIds, mp = n
             recipeId: step.command[1] === EconomyCommit.KINDS.craft ? Number(result.nativeId || 0) : undefined });
     const patch = { ...statsPatch, economyCommit: tuple, ...(learning ? { lastRecipeBookLearning: learning } : {}) };
     if (step.row.phase === 'cold') return writeColdInventorySnapshotUnsafe(characterId, step.row, changedIds, mp, patch);
-    write("UPDATE bot_life_state SET statsJson=json_patch(COALESCE(statsJson,'{}'),json(?)) WHERE characterId=?",
-        [JSON.stringify(patch), Number(characterId)]);
+    const { body, mind } = SavedStats.split(patch);
+    write(`UPDATE bot_life_state SET statsJson=json_patch(COALESCE(statsJson,'{}'),json(?)),
+        mindJson=CASE WHEN ? IS NULL THEN mindJson ELSE json_patch(mindJson,json(?)) END WHERE characterId=?`,
+    [JSON.stringify(body), ...mindPatchParams(mind), Number(characterId)]);
     return normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId=?', [Number(characterId)]));
 }
 
@@ -2306,7 +2327,7 @@ function equipColdPurchaseUnsafe(characterId, step, itemId, autoEquip, heldItemI
     if (template?.etc?.stackable || !(Number(template?.etc?.slot) > 0)) return null;
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
     const physical = all('SELECT * FROM items WHERE characterId=? AND amount>0', [characterId]);
-    const stats = jsonObject(step.row.statsJson);
+    const stats = SavedStats.merge(step.row.statsJson, step.row.mindJson);
     const crystalState = { stats };
     const held = new Set([...heldItemIds, ...(stats.equipmentPlan?.materials || [])
         .filter(row => invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(crystalState, row.selfId))
@@ -2336,7 +2357,7 @@ function equipColdPurchaseUnsafe(characterId, step, itemId, autoEquip, heldItemI
 
 function checkEconomyFundingUnsafe(characterId, step, amount, funding = {}, walletOverride = null, packetOverride = null) {
     if (!step) return;
-    const stats = jsonObject(step.row.statsJson), packet = packetOverride || stats.money;
+    const stats = SavedStats.merge(step.row.statsJson, step.row.mindJson), packet = packetOverride || stats.money;
     if (!Array.isArray(packet) || packet.length < 4) throw Error('economy_funding_missing');
     const wallet = walletOverride === null ? Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=57', [characterId]).amount) : walletOverride;
     const { r, itemId, valueHours, survivalCost, clanPart } = funding;
@@ -2356,7 +2377,7 @@ function checkEconomyFundingUnsafe(characterId, step, amount, funding = {}, wall
 // clan and explicit item reservations still belong to their original owner.
 function prepareCraftReservationsUnsafe(step, recipe) {
     if (!step || !recipe) return;
-    const stats = jsonObject(step.row.statsJson), plan = stats.equipmentPlan;
+    const stats = SavedStats.merge(step.row.statsJson, step.row.mindJson), plan = stats.equipmentPlan;
     if (plan?.strategy !== 'craft' || plan.clanGoal?.clanId
         || !['active', 'component_ready', 'ready_to_craft'].includes(plan.status)) return;
     const unsealSource = Number(plan.unseal?.sourceId) === Number(recipe.productId)
@@ -2376,7 +2397,7 @@ function prepareCraftReservationsUnsafe(step, recipe) {
 
 function checkEconomyMaterialProtectionUnsafe(characterId, step, selfId, used) {
     if (!step) return;
-    const stats = jsonObject(step.row.statsJson), inventory = jsonObject(step.row.inventorySummary);
+    const stats = SavedStats.merge(step.row.statsJson, step.row.mindJson), inventory = jsonObject(step.row.inventorySummary);
     // Bilateral market acceptance also rechecks the current gear/craft/clan
     // reserves inside its transaction, without a prepared economy command.
     step.reserved ??= invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts({
@@ -2402,6 +2423,15 @@ function fenceColdInventoryUnsafe(characterId, changedIds) {
     return writeColdInventorySnapshotUnsafe(characterId, row, changedIds);
 }
 
+// The bound parameters of a mind patch (SavedStats.split of a stats patch):
+// null twice when the patch moves no mind key, so the column stays as it is.
+// json_patch drops a key patched to null, so clearing a mind key must go
+// through a whole write of the column.
+function mindPatchParams(mind) {
+    const json = Object.keys(mind).length ? JSON.stringify(mind) : null;
+    return [json, json];
+}
+
 // The summary entries of changedIds and adena from the physical rows, and the
 // next simulationRevision, for a row its caller has checked.
 function writeColdInventorySnapshotUnsafe(characterId, row, changedIds, mp = null, statsPatch = null) {
@@ -2415,12 +2445,12 @@ function writeColdInventorySnapshotUnsafe(characterId, row, changedIds, mp = nul
         else delete inventory[id];
     }
     const adena = Number(physical[57]?.amount || 0);
-    statsPatch = { ...statsPatch, hennas: nativeHennaSlotsUnsafe(characterId) };
+    const { body, mind } = SavedStats.split({ ...statsPatch, hennas: nativeHennaSlotsUnsafe(characterId) });
     write(`UPDATE bot_life_state SET inventorySummary = ?, adena = ?, mp = COALESCE(?, mp),
-        statsJson = CASE WHEN ? IS NULL THEN statsJson ELSE json_patch(statsJson,json(?)) END,
+        statsJson = json_patch(statsJson,json(?)),
+        mindJson = CASE WHEN ? IS NULL THEN mindJson ELSE json_patch(mindJson,json(?)) END,
         simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
-    [JSON.stringify(inventory), adena, mp, statsPatch ? JSON.stringify(statsPatch) : null,
-        statsPatch ? JSON.stringify(statsPatch) : null, now(), Number(characterId)]);
+    [JSON.stringify(inventory), adena, mp, JSON.stringify(body), ...mindPatchParams(mind), now(), Number(characterId)]);
     const inventoryPatch = Object.fromEntries(ids
         .map(id => [id, physical[id] || null]));
     return { ...normalizeRow(coldSimulationRow(characterId)), inventoryPatch };
@@ -2606,7 +2636,7 @@ const COLD_SIMULATION_PATCH_COLUMNS = new Set([
     'level', 'exp', 'sp', 'adena', 'homeRegion', 'currentRegion', 'spotId',
     'activity', 'phase', 'activityStartedAt', 'nextResolveAt', 'lastResolvedAt',
     'lastHotAt', 'locX', 'locY', 'locZ', 'hp', 'maxHp', 'mp', 'maxMp',
-    'targetLevelBand', 'deathCount', 'partyId', 'inventorySummary', 'statsJson', 'updatedAt'
+    'targetLevelBand', 'deathCount', 'partyId', 'inventorySummary', 'statsJson', 'mindJson', 'updatedAt'
 ]);
 
 // bot_life_state columns (migration 68): the stored bag summary, the learned
@@ -2972,6 +3002,11 @@ const COLD_COMMIT_RETURNING = `characterId, simulationRevision, inventoryRevisio
 // what an AFTER trigger writes, and a statement that moved it leaves the
 // trigger nothing to do. The owner and lease columns are set to their constant
 // values. Null when the guard refused.
+// The mind column rides this UPDATE; when the guard refused, a phase-only
+// UPDATE writes it alone: the worker decided it, and phase cold alone says the
+// worker owns the row (a phase_hot refusal leaves it to main's save). A
+// stale_revision refusal hands back a row with the worker's newest mind, so
+// the rebase keeps the held build.
 function writeColdCommitUnsafe(fields, patch) {
     const { characterId, expectedRevision, timestamp } = fields;
     const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
@@ -2983,9 +3018,13 @@ function writeColdCommitUnsafe(fields, patch) {
     }
     assignments.push('simulationRevision = ?', 'simulationOwner = ?', 'simulationLeaseId = NULL', 'simulationLeaseUntil = 0');
     params.push(expectedRevision + 1, LEGACY_SIMULATION_OWNER);
-    return one(`UPDATE bot_life_state SET ${assignments.join(', ')}
+    const written = one(`UPDATE bot_life_state SET ${assignments.join(', ')}
         WHERE characterId = ? AND phase = 'cold' AND simulationRevision = ?
         RETURNING ${COLD_COMMIT_RETURNING}`, [...params, characterId, expectedRevision]) || null;
+    if (!written && patch.mindJson !== undefined) {
+        write("UPDATE bot_life_state SET mindJson = ? WHERE characterId = ? AND phase = 'cold'", [patch.mindJson, characterId]);
+    }
+    return written;
 }
 
 function ensureSocialEntityUnsafe(entity, timestamp) {
@@ -3842,8 +3881,8 @@ function reconcileBotBuyAdsUnsafe(characterId, held, configs, timestamp) {
     // other kind's escrow or settlement enters this allowance.
     const additions = wanted.filter(row => !row.previous || row.count > Number(row.previous.lines[0].count));
     if (additions.length) {
-        const life = one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId]);
-        const stats = jsonObject(life?.statsJson);
+        const life = one('SELECT statsJson, mindJson FROM bot_life_state WHERE characterId = ?', [characterId]);
+        const stats = SavedStats.merge(life?.statsJson, life?.mindJson);
         if (life && (!Array.isArray(stats.money) || stats.money.length < 4)) throw Error('economy_funding_missing');
         if (Array.isArray(stats.money)) {
             const wallet = Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=57', [characterId]).amount);
@@ -4239,14 +4278,15 @@ const Database = {
                 phase = 'write_admission';
                 checkCapturedWriteAdmission(admission, admission.nativeProof ? statement[1][0] : null);
                 // The upsert moves a far row's revision (MOVE_FAR_REVISION) and
-                // hands back the row's own, the number the caller's cache takes.
-                const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson` : 'simulationRevision, statsJson';
+                // hands back the row's own, the number the caller's cache takes;
+                // the mind comes back too: over a far row it is the worker's.
+                const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson, mindJson` : 'simulationRevision, statsJson, mindJson';
                 let params = statement[1] || [];
                 if (characterId !== undefined) {
-                    // BotLifeState.save supplies its native 31-column ROW.
+                    // BotLifeState.save supplies its native 32-column ROW.
                     // Read skills inside this queued job, after admission and
                     // immediately before SQL, so an earlier await cannot age it.
-                    if (!Number.isSafeInteger(characterId) || characterId <= 0 || params.length !== 31 || params[0] !== characterId)
+                    if (!Number.isSafeInteger(characterId) || characterId <= 0 || params.length !== 32 || params[0] !== characterId)
                         throw new TypeError('invalid_bot_life_skill_snapshot');
                     const stats = jsonObject(params[27]);
                     const combat = stats.coldCombat || jsonObject(one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId])?.statsJson).coldCombat;
@@ -4262,7 +4302,7 @@ const Database = {
                 const row = one(`${statement[0]} RETURNING ${returning}`, params);
                 phase = 'advance';
                 if (row && admission.nativeProof) NativeWriteCheckpoint.advance(admission.nativeProof, row);
-                return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson, simulationRevision: row?.simulationRevision };
+                return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson, mindJson: row?.mindJson, simulationRevision: row?.simulationRevision };
             } catch (error) {
                 reportBotLifeSaveFailure(phase, error, statement);
                 throw error;
@@ -7548,7 +7588,7 @@ const Database = {
                     || slot !== Number(template.etc?.slot || 0))) throw Error('npc_item_template_changed');
                 if (seller && step && slot > 0) {
                     const blocker = invoke('GameServer/Bot/Population/BotLifeState').marketPurchaseBlocker({
-                        level: Number(step.row.level), stats: jsonObject(step.row.statsJson), inventory: jsonObject(step.row.inventorySummary)
+                        level: Number(step.row.level), stats: SavedStats.merge(step.row.statsJson, step.row.mindJson), inventory: jsonObject(step.row.inventorySummary)
                     }, { selfId: itemId }, count);
                     if (blocker) throw Error(blocker);
                 }
@@ -7574,7 +7614,7 @@ const Database = {
             const wallet = one('SELECT id, amount FROM items WHERE characterId=? AND selfId=57 ORDER BY id LIMIT 1', [characterId]);
             let remainingWallet = Number(wallet?.amount || 0);
             const Funding = require('./GameServer/Bot/Economy/PurchaseFunding');
-            let remainingPacket = step ? jsonObject(step.row.statsJson).money : null;
+            let remainingPacket = step ? SavedStats.merge(step.row.statsJson, step.row.mindJson).money : null;
             const parts = [];
             for (const [index, line] of lines.entries()) {
                 const fundingParts = line.fundingParts || [{ amount: line.amount, funding: line.funding, order: index }];
@@ -7993,7 +8033,7 @@ const Database = {
                 const Life = invoke('GameServer/Bot/Population/BotLifeState');
                 const physical = all('SELECT * FROM items WHERE characterId = ? AND amount > 0 ORDER BY id', [characterId]);
                 const source = { characterId, level: Number(character?.level), clanId: Number(character?.clanId),
-                    stats: { ...jsonObject(life?.statsJson), classId: Number(character?.classId) },
+                    stats: { ...SavedStats.merge(life?.statsJson, life?.mindJson), classId: Number(character?.classId) },
                     inventory: Life.inventorySummaryFromItems(physical) };
                 const protectedInventory = jsonObject(life?.inventorySummary);
                 for (const id of Object.keys(source.inventory))
@@ -8040,7 +8080,7 @@ const Database = {
                 const life = one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]);
                 const Life = invoke('GameServer/Bot/Population/BotLifeState');
                 const source = { characterId, level: Number(character?.level), clanId: Number(character?.clanId),
-                    stats: { ...jsonObject(life?.statsJson), classId: Number(character?.classId) },
+                    stats: { ...SavedStats.merge(life?.statsJson, life?.mindJson), classId: Number(character?.classId) },
                     inventory: Life.inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId = ? ORDER BY id', [characterId])) };
                 const protectedInventory = jsonObject(life?.inventorySummary);
                 for (const id of Object.keys(source.inventory))
@@ -8110,8 +8150,8 @@ const Database = {
             } else throw Error('invalid_bot_improvement');
             guard();
             if (state) {
-                const current = one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId]);
-                const stats = jsonObject(current.statsJson);
+                const current = one('SELECT statsJson, mindJson FROM bot_life_state WHERE characterId = ?', [characterId]);
+                const stats = SavedStats.merge(current.statsJson, current.mindJson);
                 Object.assign(stats, equipmentPatch);
                 stats.lastImprovement = { kind: proposal.kind, result, at: now(), objectId: proposal.objectId || null };
                 if (hennas) stats.hennas = hennas;
@@ -8122,7 +8162,8 @@ const Database = {
                     stats.dormantWishes = [[proposal.key || 'enchant', result, 0, Number(proposal.price || 0), Number(stats.playedHours || 0), 0.5], ...(stats.dormantWishes || [])].slice(0,4);
                     stats.wishFocus = null;
                 }
-                mutate('UPDATE bot_life_state SET statsJson = ? WHERE characterId = ?', [JSON.stringify(stats), characterId]);
+                const columns = SavedStats.statsColumns(stats);
+                mutate('UPDATE bot_life_state SET statsJson = ?, mindJson = ? WHERE characterId = ?', [columns.statsJson, columns.mindJson, characterId]);
             }
             const coldLifeRow = syncEconomySnapshotUnsafe(characterId, state, changedIds);
             return { result, coldLifeRow, hennas, questStarted: result === 'crystal_quest', changedIds, items: all('SELECT * FROM items WHERE characterId = ? ORDER BY id', [characterId]) };

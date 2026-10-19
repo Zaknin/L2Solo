@@ -8,6 +8,7 @@ const DB = invoke('Database'), Data = invoke('GameServer/DataCache');
 const Life = invoke('GameServer/Bot/Population/BotLifeState'), Goals = invoke('GameServer/Bot/Goals/GoalState');
 const Commit = require('../src/GameServer/Bot/Economy/EconomyCommit');
 const Basket = require('../src/GameServer/Bot/Economy/NpcPurchaseBasket');
+const SavedStats = require('../src/GameServer/Bot/SavedStats');
 const Native = require('./helpers/nativeMarketFixture');
 Data.init();
 const seller = Basket.sellerFor(2509, 'Dion', 18);
@@ -138,8 +139,8 @@ async function run() {
     assert(fundedBasket.ok); assert.equal(await amount(9519, 57), 0);
     assert.equal(await amount(9519, 2509), 50); assert.equal(await amount(9519, 1060), 5);
     assert.deepEqual(fundedBasket.state.stats.money, [1000, .001, 0, 0, .1, 0, 2509, .05, 0, 1060]);
-    const fundedRow = (await DB.execute(['SELECT statsJson FROM bot_life_state WHERE characterId=9519']))[0];
-    assert.deepEqual(JSON.parse(fundedRow.statsJson).money, fundedBasket.state.stats.money,
+    const fundedRow = (await DB.execute(['SELECT statsJson, mindJson FROM bot_life_state WHERE characterId=9519']))[0];
+    assert.deepEqual(SavedStats.merge(fundedRow.statsJson, fundedRow.mindJson).money, fundedBasket.state.stats.money,
         'native receipt persists consumed protection for the next seller');
     const armourSeller = Basket.sellerFor(45, 'Dion', 37560);
     assert(armourSeller && armourSeller.sourceId !== seller.sourceId, 'native second seller is the actual different armour NPC');
@@ -160,7 +161,8 @@ async function run() {
     try { await assert.rejects(originalBasket.call(DB, 9522, { seller, lines: fundedLines, economyCommand: pending.command }), /funding rollback/); }
     finally { Commit.finish(9522, pending.command); }
     assert.equal(await amount(9522, 57), 1440);
-    assert.deepEqual(JSON.parse((await DB.execute(['SELECT statsJson FROM bot_life_state WHERE characterId=9522']))[0].statsJson).money, fundedPacket,
+    const rolledBack = (await DB.execute(['SELECT statsJson, mindJson FROM bot_life_state WHERE characterId=9522']))[0];
+    assert.deepEqual(SavedStats.merge(rolledBack.statsJson, rolledBack.mindJson).money, fundedPacket,
         'rollback restores original cumulative protection as well as cash');
     await DB.execute(['DROP TRIGGER fail_funding_basket']);
     state = await seed(9523, 1140, { money: [1000, .001, 0, 0, .1, 600, 2509, .05, 1140, 1060] });

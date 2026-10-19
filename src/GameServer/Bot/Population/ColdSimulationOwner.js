@@ -4,6 +4,7 @@ const Database = invoke('Database');
 const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const C4Unseal = invoke('GameServer/Items/C4Unseal');
 const BotErrands = require('./BotErrands');
+const SavedStats = require('../SavedStats');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 
 const OWNER_ID = 'cold_simulation_owner';
@@ -76,7 +77,7 @@ function persistencePatch(state = {}, timestamp = Date.now(),
         deathCount: Number(state.stats?.deaths || 0),
         partyId: state.party?.partyId || null,
         inventorySummary,
-        statsJson: JSON.stringify(state.stats || {}),
+        ...SavedStats.statsColumns(state.stats),
         updatedAt: Number(state.updatedAt || timestamp)
     };
 }
@@ -101,7 +102,7 @@ function withPersistedStats(state, result) {
     const row = result?.row;
     if (!state || !row) return state;
     try {
-        const stats = typeof row.statsJson === 'string' ? JSON.parse(row.statsJson) : withEconomyLeaf(state.stats, row.economyCommit);
+        const stats = typeof row.statsJson === 'string' ? SavedStats.merge(row.statsJson, row.mindJson) : withEconomyLeaf(state.stats, row.economyCommit);
         if (!stats || typeof stats !== 'object') return state;
         // The row's revisions (Database.stateRevisions) ride on the state, so
         // readers of the cached state ask whether the bag or the kit moved.
