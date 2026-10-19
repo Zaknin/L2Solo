@@ -49,11 +49,6 @@ const WORKER_TYPES = new Set([
     'fault'
 ]);
 
-function positiveInteger(value) {
-    const number = Number(value);
-    return Number.isSafeInteger(number) && number > 0;
-}
-
 function byteLength(value) {
     try {
         return Buffer.byteLength(JSON.stringify(value));
