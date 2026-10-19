@@ -8,7 +8,7 @@ function authorityOf(state) {
     return { revision: Number(state.simulation?.revision || 0) };
 }
 
-function sameAuthority(state, expected) {
+function sameRevision(state, expected) {
     return authorityOf(state).revision === expected.revision;
 }
 
@@ -191,7 +191,7 @@ class HotBoardReviewService {
                 return this.running && this.generation === generation && this.afk.isBoardReady()
                     && current?.token === record.token && current.session === record.session
                     && current.actor === record.actor && !!usableOwner(current) && !!life
-                    && sameAuthority(life, hotAuthority);
+                    && sameRevision(life, hotAuthority);
             };
             const result = await this.market.applyReview(id, review, { hotAuthority, canCommitReview });
             if (!this.running || this.generation !== generation) return;
