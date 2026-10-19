@@ -798,13 +798,17 @@ function rowFromState(state) {
     };
 }
 
-// The session's own snapshots carry the phase of its row: after markHot what
-// the actor writes from them (a hot merchant's sale, its haggling) keeps the
-// row hot, while a cold job's older snapshot is still rejected by save(); after
-// the hand-back a late write that copies the phase from them stays cold.
-function setSessionSnapshotsPhase(session, phase) {
+// The session's own snapshots carry the authority of its row just saved
+// (phase, revision, hot time): after markHot what the actor writes from them (a
+// hot merchant's sale, its haggling) keeps the row hot and passes the economy
+// admission, though markHot's save moved the far row's revision and stamped its
+// hot time; a cold job's older snapshot is still rejected by save(); after the
+// hand-back a late write that copies the phase from them stays cold.
+function setSessionSnapshotsAuthority(session, saved) {
+    const { phase, simulation } = saved, lastHotAt = saved.timing?.lastHotAt ?? null;
     for (const key of ['coldLifeState', 'coldMarketState', 'coldCraftState']) {
-        if (session?.[key]) session[key] = { ...session[key], phase };
+        if (session?.[key]) session[key] = { ...session[key], phase, simulation,
+            timing: { ...session[key].timing, lastHotAt } };
     }
     RefreshPartyMemberships([session], invoke);
 }
@@ -1952,7 +1956,7 @@ const BotLifeState = {
             const snapshot = normalize(row);
             const current = cache.get(characterId);
             cache.set(characterId, snapshot);
-            setSessionSnapshotsPhase(session, 'hot');
+            setSessionSnapshotsAuthority(session, snapshot);
             notifyMarketReviewState(snapshot, current);
             return snapshot;
         }).catch((err) => {
@@ -1971,7 +1975,7 @@ const BotLifeState = {
 
     markCold(session, reason = 'cooldown') {
         return this.writeColdRow(session, reason).then((saved) => {
-            if (saved) setSessionSnapshotsPhase(session, 'cold');
+            if (saved) setSessionSnapshotsAuthority(session, saved);
             return saved;
         });
     },
@@ -4123,7 +4127,7 @@ const BotLifeState = {
 
 BotLifeState.canonicalizeAreaState = canonicalizeAreaState;
 BotLifeState.inventorySummaryFromItems = inventorySummaryFromItems;
-BotLifeState.setSessionSnapshotsPhase = setSessionSnapshotsPhase;
+BotLifeState.setSessionSnapshotsAuthority = setSessionSnapshotsAuthority;
 BotLifeState.equipmentSummaryFromInventory = equipmentSummaryFromInventory;
 BotLifeState.marketPurchaseBlocker = marketPurchaseBlocker;
 BotLifeState.normalizeInventoryStackability = normalizeInventoryStackability;
