@@ -89,8 +89,8 @@ async function main() {
         assert.equal(pooled[1869].amount, 17);
 
         // Level zero keeps personal stock; an active craft at level four collects
-        // only its inputs. Party membership and
-        // worker ownership must survive an atomic, revision-fenced deposit.
+        // only its inputs. Party membership must survive an atomic,
+        // revision-fenced deposit.
         await add(ids[2], 1864, 20);
         await add(ids[2], 2005, 5);
         let clan = await projection();
@@ -111,6 +111,9 @@ async function main() {
         assert(partyState.simulationRevision > 0);
         const coal = (await Database.fetchClanWarehouseItems(clanId)).find(row => row.selfId === 1870);
         assert.equal(coal.amount, 30);
+        // The same stale projection deposits nothing twice: the revision moved.
+        await Warehouse.resolveClan(clan, { batchSize: 8 });
+        assert.equal((await Database.fetchClanWarehouseItems(clanId)).find(row => row.selfId === 1870).amount, 30);
 
         // The visible bot uses its real backpack and the native warehouse transaction.
         await add(ids[2], 1865, 11);
