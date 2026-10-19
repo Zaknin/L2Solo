@@ -1532,6 +1532,52 @@ function claimAck(kernel, payload) {
         assert.strictEqual(claimRequestIds.get(reviewKernel).has(60), true, 'the answered review gives the bot back to its schedule');
     }
 
+    {
+        // A plan the step stamped as sent that no review runs (refused, skipped
+        // on a full window, its send failed, or not named after a forced
+        // cleanup) is forgotten as sent, so the refresh reproducing it sends it
+        // again; the bot's next state still asks for that refresh.
+        const at = 60000;
+        const plan = { sell: [], withdraw: [9], buyAds: [], travel: null };
+        let sendFails = false;
+        const planKernel = recordingKernel({ resolveSolo: () => null, now: () => at,
+            emit: type => !(sendFails && type === 'command_request') });
+        const commitWithPlan = (id, review, inFlightOnly = false) => {
+            const base = state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
+            const token = { characterId: id, ownerId: 'cold_simulation_owner', revision: 4, leaseId: `plan-${id}`, leaseUntil: at + 30000 };
+            planKernel.upsert({ state: base });
+            Object.assign(planKernel.states.get(id), { economyPending: 2, economyPlanHash: 1234 });
+            planKernel.inFlight.set(id, { state: base, grant: token });
+            planKernel.dirty.set(id, { proposalId: `plan:${id}`, characterId: id, token, priority: 'P1', enqueuedAt: at,
+                nextState: base, result: { events: [] }, economyPlan: plan });
+            planKernel.flush(null, true);
+            if (inFlightOnly) return;
+            commitAck(planKernel, { results: [{ ok: true, characterId: id, revision: 5, review,
+                state: state(id, { simulation: { ...base.simulation, revision: 5 }, timing: { lastResolvedAt: at, nextResolveAt: at } }) }] });
+        };
+        const sent = id => planKernel.states.get(id).economyPlanHash;
+        commitWithPlan(70, ['plan']);
+        assert.strictEqual(sent(70), 1234, 'a review on its way keeps the plan as sent');
+        commandAck(planKernel, { characterId: 70, ok: false, reason: 'stale_command', state: planKernel.states.get(70).state });
+        assert.strictEqual(sent(70), null, 'a refused review forgets its plan as sent');
+        assert.strictEqual(planKernel.states.get(70).economyPending, 2, 'the next state still asks for a refresh');
+        commitWithPlan(71, ['buff']);
+        assert.strictEqual(sent(71), null, 'a plan main did not name is forgotten as sent');
+        commitWithPlan(75, undefined);
+        assert.strictEqual(sent(75), null, 'a plan of an ack naming no review is forgotten as sent');
+        sendFails = true;
+        commitWithPlan(72, ['plan']);
+        assert.strictEqual(sent(72), null, 'a review whose send failed forgets its plan as sent');
+        assert.strictEqual(planKernel.reviewsSkipped, 1, 'a review whose send failed counts as skipped');
+        assert.strictEqual(planKernel.commanding.has(72), false, 'a review whose send failed frees its slot');
+        sendFails = false;
+        planKernel.setMaxInFlight(1);
+        commitWithPlan(73, ['plan'], true);
+        commitWithPlan(74, ['plan']);
+        assert.strictEqual(sent(74), null, 'a review skipped on a full window forgets its plan as sent');
+        assert.strictEqual(planKernel.reviewsSkipped, 2);
+    }
+
     // A party run with no member result (no spot): the whole roster commits
     // the party row, fenced on the revision the run read, with the resolver's
     // next due and a goal review; every member stays claimed until the ACK.

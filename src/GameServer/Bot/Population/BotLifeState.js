@@ -3539,6 +3539,37 @@ const BotLifeState = {
         return next;
     },
 
+    // One member's plan from its party's requirement refresh
+    // (PopulationService.applyWorkerPartyRequirements), built on the copy main
+    // read before: only the plan is written, held on that copy's revision, and
+    // the write moves it. A write that moved the row in between (the member's
+    // own review: its training or buff) wins and nothing is written; the
+    // party's next requirement refresh (a kit move, a party event) plans this
+    // member again (ColdSimulationKernel partyRequirementProgress). A clan-locked plan or a foreign
+    // clan's goal is not replaced, as the full save would not replace it.
+    writePartyRequirementPlan(member, plan = null) {
+        const id = Number(member?.characterId), reason = 'party_requirement_refresh';
+        if (!id) return Promise.resolve(null);
+        const next = preserveClanOwnedEquipmentState({ ...member, stats: { ...(member.stats || {}), equipmentPlan: plan } },
+            reason, member);
+        if (next.stats.equipmentPlan !== plan || ClanMembershipPolicy.reconcileState(next).stats.equipmentPlan !== plan) {
+            return Promise.resolve(null);
+        }
+        return this.serializeClanLevelUp(id, () => Database.execute([`UPDATE ${TABLE}
+            SET statsJson = json_set(COALESCE(statsJson, '{}'), '$.equipmentPlan', json(?), '$.lastReason', ?),
+                simulationRevision = simulationRevision + 1, updatedAt = ?
+            WHERE characterId = ? AND phase = 'cold' AND simulationRevision = ?
+            RETURNING *`, [JSON.stringify(plan), reason, now(), id, Number(member.simulation?.revision || 0)], { read: true }]))
+            .then(([row] = []) => {
+                const snapshot = row ? this.acceptNewerLifecycleRow(row) : null;
+                if (snapshot) notifyColdSnapshot(snapshot, reason, { critical: true });
+                return snapshot;
+            }).catch((error) => {
+                utils.infoWarn('BotLife', 'failed party requirement plan for %s: %s', id, error.message);
+                return null;
+            });
+    },
+
     acceptClanLevelSpState(row) {
         const snapshot = normalize(row);
         cache.set(snapshot.characterId, snapshot);

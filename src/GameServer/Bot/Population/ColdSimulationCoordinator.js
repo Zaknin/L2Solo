@@ -1896,9 +1896,10 @@ class ColdSimulationCoordinator {
         if (sourceCurrent() && entry.proposal.inventoryCleanupForced && entry.proposal.economyPlan)
             this.requestEconomyRefresh(id);
         await step('announce', () => GlobalChat.maybeAnnounce(state, entry.proposal.result?.events || []));
-        // onResults starts it after the flush, so the review reads the trained state of
-        // every member of the batch and the plans it writes are not overwritten by it.
-        // A replaced worker or a stop skips the rest: its kernel no longer holds these
+        // onResults starts it after the flush. A member's own review command (its
+        // training, buff, plan) runs meanwhile: a party write holds on the revision
+        // it read (LifeState.writePartyRequirementPlan), so a member write landing
+        // in between wins and the party write is skipped. A replaced worker or a stop skips the rest: its kernel no longer holds these
         // members inFlight.
         if (deferred.length) entry.deferred = async () => {
             for (const work of deferred) {
@@ -2102,6 +2103,14 @@ class ColdSimulationCoordinator {
             // Each request answered once, in order.
             requests.forEach(({ request }, index) => request.kind === 'review' && this.countReview(request, results[index]));
             this.postCollections('command_ack', { results }, message.msgId);
+            // A refused review ran no plan and its ack made the worker forget it
+            // as sent (ColdSimulationKernel.forgetSentPlan): it plans afresh, as
+            // after a forced cleanup. A hot or fenced bot plans on its own side.
+            requests.forEach(({ request }, index) => {
+                const id = Number(request.characterId);
+                if (request.kind === 'review' && request.economyPlan && !results[index]?.ok
+                    && LifeState.cachedState(id)?.phase === 'cold' && !this.fencedBots.has(id)) this.requestEconomyRefresh(id);
+            });
         }).catch((error) => { if (sourceCurrent()) this.recordError(error); });
     }
 

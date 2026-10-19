@@ -2512,27 +2512,42 @@ class ColdSimulationKernel {
         refused.forEach(id => this.requeueAtDue(id));
         if (reviews.length && this.emit('command_request', { requests: reviews.map(review => review.request) }) === false) {
             for (const { request, attempt } of reviews) {
-                if (this.cancelCommand(request.characterId, attempt)) this.ensureScheduled(request.characterId);
+                if (!this.cancelCommand(request.characterId, attempt)) continue;
+                this.reviewsSkipped += 1;
+                if (attempt.economyPlan) this.forgetSentPlan(request.characterId);
+                this.ensureScheduled(request.characterId);
             }
         }
         return accepted;
+    }
+
+    // The plan the step stamped as sent (ColdSimulationWorker economyPlanHash)
+    // that no review ran: a refresh reproducing it sends it again instead of
+    // dropping it as already sent. economyPending stays: the bot's next state
+    // still asks for that refresh.
+    forgetSentPlan(characterId) {
+        const record = this.states.get(Number(characterId));
+        if (record) record.economyPlanHash = null;
     }
 
     // A `review` command for the steps main named on the commit ack (Protocol
     // REVIEW_STEPS), with the plan and offer this thread kept from the proposal.
     // No state on the wire: main runs the steps on its own cache.
     beginReview(characterId, named, active) {
-        if (!Array.isArray(named)) return null;
-        const steps = new Set(named.filter(step => Protocol.REVIEW_STEPS.includes(step)));
+        const steps = new Set(Array.isArray(named) ? named.filter(step => Protocol.REVIEW_STEPS.includes(step)) : []);
         const economyPlan = steps.has('plan') ? active.economyPlan : undefined;
         const buffOffer = steps.has('buff') ? active.buffOffer : undefined;
+        // A plan main did not name (a forced cleanup replaced it) runs nowhere.
+        if (active.economyPlan && !economyPlan) this.forgetSentPlan(characterId);
         if (!economyPlan && !buffOffer && !steps.has('training')) return null;
         const attempt = this.beginCommand(characterId, 'review');
         if (!attempt) {
             this.reviewsSkipped += 1;
+            if (economyPlan) this.forgetSentPlan(characterId);
             return null;
         }
         attempt.sent = true;
+        attempt.economyPlan = !!economyPlan;
         return { attempt, request: { characterId, kind: 'review', commandId: attempt.commandId,
             commandCheckpoint: attempt.checkpoint,
             ...(economyPlan ? { economyPlan } : {}), ...(buffOffer ? { buffOffer } : {}),
@@ -2572,6 +2587,8 @@ class ColdSimulationKernel {
             || attempt.commandId !== identity.commandId
             || !Protocol.sameCommandCheckpoint(attempt.checkpoint, identity.checkpoint)) return false;
         this.cancelCommand(id, attempt);
+        // A refused review did not run its plan; main asks for a refresh.
+        if (attempt.kind === 'review' && payload.ok === false && attempt.economyPlan) this.forgetSentPlan(id);
         let output = payload.state;
         if (output) {
             const outputCheckpoint = Protocol.commandCheckpoint(output), latest = Protocol.commandCheckpoint(current.state);
@@ -2708,12 +2725,6 @@ class ColdSimulationKernel {
         const oldestDueAt = due.reduce((oldest, entry) => (
             Math.min(oldest, this.dueAt(entry.state, now))
         ), now);
-        const oldestDirtyAt = [...this.dirty.values()].reduce((oldest, proposal) => (
-            Math.min(oldest, Number(proposal.enqueuedAt || now))
-        ), now);
-        const oldestCommandAt = [...this.commandStartedAt.values()].reduce((oldest, startedAt) => (
-            Math.min(oldest, Number((typeof startedAt === 'object' ? startedAt.startedAt : startedAt) || now))
-        ), now);
         const dueFences = due.reduce((counts, entry) => {
             const id = Number(entry.state.characterId);
             if (this.claiming.has(id)) counts.claiming += 1;
@@ -2724,23 +2735,10 @@ class ColdSimulationKernel {
             return counts;
         }, { scheduled: 0, claiming: 0, inFlight: 0, commanding: 0, orphaned: 0 });
         return {
-            ...(DiagnosticConfig.developerDiagnostics ? this.stats : { diagnosticsEnabled: false }),
-            states: this.states.size,
-            heap: this.heap.size,
+            ...this.heartbeatSnapshot(),
             due: due.length,
             dueAgeMs: due.length ? Math.max(0, now - oldestDueAt) : 0,
-            dueFences,
-            claiming: this.claiming.size,
-            inFlight: this.inFlight.size,
-            dirty: this.dirty.size,
-            dirtyAgeMs: this.dirty.size ? Math.max(0, now - oldestDirtyAt) : 0,
-            commanding: this.commanding.size,
-            commandingAgeMs: this.commanding.size ? Math.max(0, now - oldestCommandAt) : 0,
-            reviewsSkipped: this.reviewsSkipped,
-            maxInFlight: this.maxInFlight,
-            maxAtomicPartySize: this.maxAtomicPartySize,
-            paused: this.paused,
-            stopping: this.stopping
+            dueFences
         };
     }
 }

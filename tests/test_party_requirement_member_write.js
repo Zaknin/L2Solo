@@ -1,0 +1,86 @@
+// A party's requirement refresh writes a far member's plan from the copy main
+// read before; the member's own review (its class training) runs meanwhile.
+// The plan write holds on the revision of that copy and moves it: with no write
+// in between it lands, and a training publish landing in between wins: the
+// party write is skipped and the row keeps the trained sp and combat profile.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+require('../src/Global');
+const Database = invoke('Database');
+const Life = invoke('GameServer/Bot/Population/BotLifeState');
+const Population = invoke('GameServer/Bot/Population/PopulationService');
+const Data = invoke('GameServer/DataCache');
+const Config = invoke('GameServer/Bot/Population/PopulationConfig');
+
+const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l2solo-party-requirement-member-write-'));
+const ACCOUNT = 'bot_party_requirement_write';
+const PARTY = 'bgp-requirement-write';
+
+async function row(id) {
+    return (await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [id]]))[0];
+}
+const plan = target => ({ status: 'active', strategy: 'direct_drop', partyNeed: 'required', requiresParty: true,
+    target: { selfId: target, name: `Probe ${target}`, slot: 7 }, next: { spotId: 'requirement-spot', npcId: 0, itemId: target } });
+
+(async () => {
+    try {
+        options.default.Database.path = path.join(directory, 'world.sqlite');
+        options.default.Database.historyPath = path.join(directory, 'history.sqlite');
+        Config.knowledgeErrorsEnabled = false;
+        await new Promise(resolve => Database.init(resolve));
+        Data.init();
+        await Database.createAccount(ACCOUNT, 'fixture');
+        await Life.init();
+        const id = Number((await Database.createCharacter(ACCOUNT, { name: 'PartyMember',
+            race: 0, classId: 0, maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0,
+            locX: 1, locY: 1, locZ: 0 })).insertId);
+        await Life.upsertState({ characterId: id, accountName: ACCOUNT, name: 'PartyMember',
+            phase: 'cold', activity: 'hunting', level: 20, inventory: {},
+            party: { partyId: PARTY, role: 'member', leaderId: id },
+            stats: { classId: 0, generatedCold: true },
+            loc: { locX: 1, locY: 1, locZ: 0 }, vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
+            timing: { nextResolveAt: Date.now() + 86400000 } }, 'party_requirement_write_fixture');
+        const party = { partyId: PARTY, status: 'active', leaderId: id, memberIds: [id], stats: {} };
+        assert.equal(Life.cachedState(id).party?.partyId, PARTY, 'fixture: the member is in the party');
+
+        // No write in between: the plan lands on the revision read and moves it.
+        const read = Number(Life.cachedState(id).simulation.revision);
+        await Population.applyWorkerPartyRequirements(party, { memberPlans: [{ characterId: id, plan: plan(9101) }] });
+        const planned = await row(id);
+        assert.equal(Number(planned.simulationRevision), read + 1, 'the party write moves the member revision once');
+        assert.equal(JSON.parse(planned.statsJson).equipmentPlan?.target?.selfId, 9101, 'the row holds the party plan');
+        assert.equal(Life.cachedState(id).stats.equipmentPlan?.target?.selfId, 9101, 'the cache holds the party plan');
+        assert.equal(Life.cachedState(id).simulation.revision, read + 1, 'the cache takes the written revision');
+
+        // The member's review trains it (serialized on the member like
+        // reviewTrainingAfterCommit, moving the revision) while the leader's
+        // deferred party write is read from the copy before it.
+        const coldCombat = { probe: 'trained' };
+        const training = Life.serializeClanLevelUp(id, async () => {
+            const [trained] = await Database.execute([`UPDATE bot_life_state SET sp = 777,
+                statsJson = json_set(statsJson, '$.coldCombat', json(?)), simulationRevision = simulationRevision + 1
+                WHERE characterId = ? RETURNING *`, [JSON.stringify(coldCombat), id], { read: true }]);
+            return Life.acceptLifecycleRow(trained);
+        });
+        const partyWrite = Population.applyWorkerPartyRequirements(party, { memberPlans: [{ characterId: id, plan: plan(9202) }] });
+        await Promise.all([training, partyWrite]);
+        const after = await row(id);
+        assert.equal(Number(after.simulationRevision), read + 2, 'only the training moved the row');
+        assert.equal(Number(after.sp), 777, 'the row keeps the trained sp');
+        const stats = JSON.parse(after.statsJson);
+        assert.deepEqual(stats.coldCombat, coldCombat, 'the row keeps the trained combat profile');
+        assert.equal(stats.equipmentPlan?.target?.selfId, 9101, 'the skipped party write leaves the plan');
+        const cached = Life.cachedState(id);
+        assert.equal(cached.sp, 777, 'the cache keeps the trained sp');
+        assert.equal(cached.stats.equipmentPlan?.target?.selfId, 9101, 'nothing is published on a skip');
+        console.log('PASS a party requirement write holds on the member revision it read');
+    } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
+    }
+    process.exit(0);
+})().catch(error => {
+    console.error(error);
+    process.exit(1);
+});

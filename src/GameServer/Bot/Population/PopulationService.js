@@ -2495,8 +2495,10 @@ const PopulationService = {
             const member = LifeState.cachedState(characterId);
             if (!member || member.phase !== 'cold' || member.party?.partyId !== party.partyId) continue;
             if (acquisitionRequirementKey(member.stats?.equipmentPlan) === acquisitionRequirementKey(plan)) continue;
-            changed = !!await LifeState.upsertState({ ...member, stats: { ...(member.stats || {}), equipmentPlan: plan } },
-                'party_requirement_refresh') || changed;
+            // Held on the revision of the copy read above: the member's own
+            // review runs meanwhile, and a skipped write waits for the party's
+            // next requirement refresh (LifeState.writePartyRequirementPlan).
+            changed = !!await LifeState.writePartyRequirementPlan(member, plan) || changed;
         }
         // ARCH-NOTE: A bounded worker refresh may span resolves; release members only after its complete projection.
         if (!resolution.requirementRefreshedAt) return [];
