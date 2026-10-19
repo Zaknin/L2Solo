@@ -101,12 +101,9 @@ const DEFAULTS = {
     // The persistent world is resolved in bounded batches so population
     // expansion never becomes a database spike after a restart.
     maxResolvesPerTick: 25,
-    // Historical gear debt is repaired only while the server is player-idle.
-    // Each pass advances by owner id and performs at most one tiny atomic
-    // transaction per owner, so cleanup cannot become a startup table sweep.
     // Append-only diagnostics and AI memory have explicit lifecycles. Run a
-    // single indexed delete statement per idle tick and stagger it behind the
-    // warehouse repair so both jobs never form a startup write burst.
+    // single indexed delete statement per idle tick, delayed after start so it
+    // never joins the startup write burst.
     stateRetentionEnabled: true,
     stateRetentionStartDelayMs: 90000,
     stateRetentionIntervalMs: 1000,

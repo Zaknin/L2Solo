@@ -236,7 +236,7 @@ function travelToShopTown(state, board, timestamp) {
 }
 
 // A merchant without a stall: the board replaced the stalls (step 3.3), and
-// an old state, or historical cleanup, can still say merchant. There is no
+// an old state can still say merchant. There is no
 // expiry event to release it: it goes back to its trip or its hunt.
 function resolve(state, timestamp = Date.now()) {
     if (!state || state.activity !== 'merchant') return Promise.resolve({ state, closed: false });
