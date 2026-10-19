@@ -216,7 +216,10 @@ function open(state, options = {}) {
 // keeps its way back to its spot; the visit there opens the shop. When it
 // cannot travel, its lines wait in the bag for the next visit.
 function travelToShopTown(state, board, timestamp) {
-    const stats = { ...(state.stats || {}), shopTown: state.stats?.shopTown || { town: board.shopTown, at: timestamp } };
+    // The visit saved its sale retry before answering buy ads (open); the trip
+    // to the shop town is not a new sale trip and must not wait behind it.
+    const stats = { ...(state.stats || {}), marketSellRetryAfter: null,
+        shopTown: state.stats?.shopTown || { town: board.shopTown, at: timestamp } };
     const goal = { type: 'sell_inventory', status: 'active',
         plan: { expectedBenefit: 'market_sale_inventory', marketTown: board.shopTown } };
     // A sale trip that cannot pay the gatekeeper falls back to the town the
