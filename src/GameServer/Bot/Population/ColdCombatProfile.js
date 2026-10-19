@@ -607,6 +607,7 @@ function fightProfile(state = {}, timestamp = Date.now(), options = {}) {
 
 // The saved kit of a bot that fights before any capture: the kit fields
 // capture writes, from its kit profile (copies: the stored one is shared),
+// the henna totals its base already counts (gatherKit adds only the delta),
 // and its cp at timestamp. The fight writes effects, cooldowns, charges and
 // the summon over it.
 function seedSnapshot(state = {}, timestamp = Date.now()) {
@@ -614,6 +615,7 @@ function seedSnapshot(state = {}, timestamp = Date.now()) {
     return {
         ...structuredClone({ version: profile.version, capturedAt: profile.capturedAt, classId: profile.classId,
             base: profile.base, equipment: profile.equipment, skills: profile.skills }),
+        henna: hennaTotals(state.stats?.hennas),
         cp: currentCp(state, profile, timestamp), cpAt: timestamp
     };
 }
@@ -689,8 +691,8 @@ function gatherKit(state, timestamp) {
         worn, classStats: template.stats || {}
     };
     const henna = hennaTotals(state.stats?.hennas);
-    // Captured hot base stats already include the same paid symbols. Only
-    // the delta from that capture is added when the cold inventory changes.
+    // Captured base stats (hot capture, seedSnapshot) already include the
+    // symbols in saved.henna. Only the delta from them is added.
     for (const stat of BASE_STATS) {
         const captured = number(saved?.henna?.[stat]);
         kitPart.base[stat.toLowerCase()] = number(kitPart.base[stat.toLowerCase()], 1) + henna[stat] - captured;

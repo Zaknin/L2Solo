@@ -195,7 +195,7 @@ function resolve({ sides, roles, timestamp, rng, personaFor, step = null, openin
                     readyAt: Math.ceil(timestamp + f.readyAt),
                     flagUntil: dead ? 0 : step ? f.flagUntil : f.flagged ? until : 0,
                     ...(dead ? { recoverUntil: until + RECOVERY_MS } : {}) },
-                coldCombat: { ...(f.state.stats?.coldCombat || f.profile), cp: dead ? 0 : f.cp, cpAt: step ? step.until : until,
+                coldCombat: { ...(f.state.stats?.coldCombat || { ...Profile.seedSnapshot(f.state, timestamp), effects: f.profile.effects }), cp: dead ? 0 : f.cp, cpAt: step ? step.until : until,
                     cooldowns: dead ? {} : f.cooldowns,
                     charges: dead ? 0 : f.charges, chargeExpiresAt: dead ? null : f.chargeExpiresAt,
                     ...(dead ? { effects: [], charges: 0, chargeExpiresAt: null, summon: null } : {}) } } };
