@@ -43,7 +43,7 @@ async function runWorker(state, predicate, followUp = null) {
         await until(message => message.type === 'ready' && message.msgId === 'init');
         send('snapshot_page', { rows: [{ state }], initial: true, done: true });
         const result = await until(predicate);
-        if (followUp) await followUp({ result, until, post: row => send('snapshot_page', { rows: [{ state: row }], initial: false, done: true }) });
+        if (followUp) await followUp({ result, until, received, post: row => send('snapshot_page', { rows: [{ state: row }], initial: false, done: true }) });
         assert(!received.some(message => message.type === 'fault'));
         send('shutdown', {}, 'shutdown');
         await until(message => message.type === 'drained' && message.msgId === 'shutdown');
@@ -76,15 +76,50 @@ async function runWorker(state, predicate, followUp = null) {
     const decidedAt = (until, seq) => until(message => message.type === 'ready'
         && message.payload.phase === 'economy_decided' && message.payload.near?.nearSeq === seq);
     await runWorker({ ...state, characterId: 765413 }, message => message.type === 'ready'
-        && message.payload.phase === 'economy_decided', async ({ result: first, until, post }) => {
+        && message.payload.phase === 'economy_decided', async ({ result: first, until, received, post }) => {
         const own = first.payload.near.statsPacket.decisionSeq;
-        const raised = { ...state, characterId: 765413, nearSeq: 4, updatedAt: now + 1, raise: { seq: 1, bits: 1, impossible: false } };
+        const raised = { ...state, characterId: 765413, nearSeq: 4, updatedAt: now + 1,
+            raise: { seq: 1, bits: 1, impossible: true, impossibleSeq: 1 } };
         post(raised);
-        const one = (await decidedAt(until, 4)).payload.near.statsPacket;
+        const answer = (await decidedAt(until, 4)).payload.near, one = answer.statsPacket;
         assert.equal(one.decisionSeq, own + 1, 'a raise main posted is taken once, on the worker\'s mind');
+        assert(answer.shots && Number.isFinite(answer.shots.ownedUsePerHour), 'the decision carries its build\'s auto-shot verdict');
+        // A writer's copy of the cached row (no post number) is older than the
+        // record's post: the record stands and no decision answers it.
+        const cached = { ...state };
+        delete cached.nearSeq;
+        post({ ...cached, characterId: 765413, updatedAt: now + 3 });
+        // Nothing answers it; a build on it would land within this wait.
+        const unposted = message => message.payload?.phase === 'economy_decided' && message.payload.near?.nearSeq === 0;
+        for (const deadline = Date.now() + 3000; Date.now() < deadline && !received.some(unposted);)
+            await new Promise(resolve => setTimeout(resolve, 20));
+        assert(!received.some(unposted), 'a hot row without a newer post number is not decided on');
         post({ ...raised, nearSeq: 5, updatedAt: now + 2 });
         const two = (await decidedAt(until, 5)).payload.near.statsPacket;
         assert.equal(two.decisionSeq, one.decisionSeq, 'a later post naming the same raise neither raises again nor rolls the mind back');
+        // The pending bag is cumulative: a later raise still carries the
+        // impossible mark of raise 1, which the worker already applied.
+        post({ ...raised, nearSeq: 6, updatedAt: now + 4, raise: { seq: 2, bits: 1, impossible: true, impossibleSeq: 1 } });
+        const three = (await decidedAt(until, 6)).payload.near.statsPacket;
+        assert.equal(three.decisionSeq, two.decisionSeq + 1, 'the new raise is taken');
+        assert.equal(three.activityLeaf, two.activityLeaf, 'an impossible mark already applied does not drop the held step again');
+        // A clan expulsion's row (a writer's copy, newer membership) joins the
+        // record's body and is decided on as the record's post.
+        const sent = received.length;
+        post({ ...cached, characterId: 765413, updatedAt: now + 5, simulation: { revision: 2 },
+            stats: { ...state.stats, clanId: 0, clanMembershipVersion: now + 5 } });
+        const expelled = await until(message => received.indexOf(message) >= sent
+            && message.type === 'ready' && message.payload.phase === 'economy_decided');
+        assert.equal(expelled.payload.near.nearSeq, 6, 'the record keeps its post number');
+        assert(!(Decisions.compact(expelled.payload.economyDecision).clan?.huntPerHour > 0), 'the expelled bot has no clan valuation');
+        // A newer revision without a newer membership is a new life: its row
+        // replaces the record and its first post is decided on.
+        post({ ...cached, characterId: 765413, updatedAt: now + 6, simulation: { revision: 3 },
+            stats: { ...state.stats, clanId: 0, clanMembershipVersion: now + 5 } });
+        await decidedAt(until, 0);
+        post({ ...cached, characterId: 765413, nearSeq: 1, updatedAt: now + 7, simulation: { revision: 3 },
+            stats: { ...state.stats, clanId: 0, clanMembershipVersion: now + 5 } });
+        await decidedAt(until, 1);
     });
 
     const instances = Array.from({ length: 2075 }, (_, index) => ({ id: 900000 + index,

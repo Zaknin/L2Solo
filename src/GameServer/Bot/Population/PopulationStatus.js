@@ -26,6 +26,9 @@ const PathfindingWorkerPool = invoke('GameServer/Geodata/PathfindingWorkerPool')
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
 let lastMoneyPacketMissing = 0;
+// The body's fact posts (BotLifeState.notifyNearFacts reasons); any other
+// near post reason is a named raise.
+const NEAR_FACTS = Object.freeze(['bag', 'equip', 'level', 'death', 'revive', 'near_spot', 'activated']);
 
 function isBotSession(session) {
     return session && session.accountId && String(session.accountId).startsWith('bot_');
@@ -81,12 +84,15 @@ const PopulationStatus = {
     // The near bots' line, always on (logSummary prints it without
     // diagnostics), from the coordinator's snapshot: nearFacts=bag/equip/
     // level/death/revive/near_spot/activated, their fact posts queued since
-    // start; nearDecisions=accepted/refused, the decisions their bodies took
-    // or refused as older than the one held.
+    // start; nearRaises=, the posts a named raise made (DecisionEvents
+    // raiseDecision: town, money, revived, sources, ...); nearDecisions=
+    // accepted/refused/dropped, the decisions their bodies took, refused as
+    // older than the one held, or dropped as the bot cooled before they came.
     nearText(coordinator) {
         const nearFacts = coordinator?.snapshots?.nearFacts || {}, decisions = coordinator?.nearDecisions || {};
-        return `nearFacts=${['bag', 'equip', 'level', 'death', 'revive', 'near_spot', 'activated']
-            .map(reason => nearFacts[reason] || 0).join('/')} nearDecisions=${decisions.accepted || 0}/${decisions.refused || 0}`;
+        const raises = Object.entries(nearFacts).reduce((sum, [reason, count]) => NEAR_FACTS.includes(reason) ? sum : sum + count, 0);
+        return `nearFacts=${NEAR_FACTS.map(reason => nearFacts[reason] || 0).join('/')} nearRaises=${raises}`
+            + ` nearDecisions=${decisions.accepted || 0}/${decisions.refused || 0}/${decisions.dropped || 0}`;
     },
 
     summary() {

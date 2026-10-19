@@ -2058,6 +2058,7 @@ const BotLifeState = {
                 stats: { ...(craftState.stats || {}), ...membershipStats, pvpEnemies: BotEnemyMemory.snapshot(session), lastReason: reason },
                 inventory: parseJson(row.inventorySummary, {})
             };
+            DecisionEvents.settleNearRaise(session, nextState.stats);
             return this.upsertState(nextState, reason, { releaseHot: true });
         }
 
@@ -2069,6 +2070,7 @@ const BotLifeState = {
                 loc: preserved.loc,
                 nextResolveAt: now() + 30000 + Math.round(Math.random() * 90000)
             });
+            DecisionEvents.settleNearRaise(session, nextState.stats);
             session.coldLifeState = nextState;
             RefreshPartyMemberships([session], invoke);
             return this.upsertState(nextState, reason, { releaseHot: true });

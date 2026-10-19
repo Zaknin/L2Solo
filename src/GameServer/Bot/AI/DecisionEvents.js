@@ -38,7 +38,9 @@ function applyRaise(stats, bits, impossible = false) {
 // A near bot (a body on main) takes its decisions on the background thread:
 // the raise waits on the session (nearRaise, ORed while pending) and rides its
 // next post (BotLifeState.notifyNearFacts); the decision that consumed it
-// clears it (receive). Any other bot raises on its stats.
+// clears it (receive). impossibleSeq is the raise that proved the held step
+// impossible: the worker drops the step only for that raise, never again for
+// a later raise of the same pending bag. Any other bot raises on its stats.
 function raiseDecision(session, reason, { impossible = false } = {}) {
     if (!reasons.has(reason)) throw new TypeError('unknown_decision_event');
     const stats = statsFor(session);
@@ -52,7 +54,7 @@ function raiseDecision(session, reason, { impossible = false } = {}) {
         const raise = session.nearRaise ||= { seq: 0, bits: 0, impossible: false };
         raise.seq = session.raiseSeq = Number(session.raiseSeq || 0) + 1;
         raise.bits |= bits;
-        raise.impossible ||= impossible;
+        if (impossible) { raise.impossible = true; raise.impossibleSeq = raise.seq; }
         Life.notifyNearFacts(session, reason);
         return;
     }
@@ -74,6 +76,15 @@ function rejectedState(current, accepted = current) {
     applyRaise(next.stats, reasonBits.sources, true);
     return next;
 }
+// A near bot's pending raise when its body cools (BotLifeState.writeColdRow):
+// no decision will answer it, so it lands on the cold row's stats, the step
+// dropped only while its impossible raise is still unanswered.
+function settleNearRaise(session, stats) {
+    const raise = session?.nearRaise;
+    if (!raise) return;
+    session.nearRaise = null;
+    applyRaise(stats, Number(raise.bits) || 0, raise.impossible === true);
+}
 // A hot body's rejection: one impossible raise while it waits for its
 // decision, a second rejection in that window adds nothing.
 function rejectSession(session, accepted) {
@@ -87,15 +98,20 @@ function rejectSession(session, accepted) {
 // The near decision the background thread took for this body
 // (economy_decided, the coordinator's admission): its mind keys join the
 // body's stats, the view over its card is what the body's readers take
-// (held), and the raise it consumed no longer waits.
+// (held), and the raise it consumed no longer waits; a later raise still
+// pending keeps its bits, but an impossible raise this decision answered no
+// longer marks it. The auto-shot verdict is the worker's, from the same
+// build's shot stock (near.shots).
 function receive(session, card, near) {
     const actor = session.actor;
     Object.assign(statsFor(session), near.statsPacket);
     const state = Economy.stateForActor(actor, session);
     session.heldEconomy = Object.assign(Decisions.view(state, card), near);
     session.heldNearSeq = Number(near.nearSeq || 0);
-    if (session.nearRaise && Number(near.raiseSeq || 0) >= session.nearRaise.seq) session.nearRaise = null;
-    ShotStock.enableAutoShot(actor, { stock: ShotStock.usePolicy(state) });
+    const raise = session.nearRaise, answered = Number(near.raiseSeq || 0);
+    if (raise && answered >= raise.seq) session.nearRaise = null;
+    else if (raise?.impossible && answered >= Number(raise.impossibleSeq || 0)) { raise.impossible = false; raise.impossibleSeq = 0; }
+    if (near.shots) ShotStock.enableAutoShot(actor, { stock: near.shots });
     return session.heldEconomy;
 }
 // The decision a near body holds: the last one received, else (before the
@@ -134,4 +150,4 @@ function raiseSections(before, after, ...lists) {
     stats.wishDirty = (Number(stats.wishDirty) || 0) | bits;
     return bits;
 }
-module.exports = { statsFor, decisionStatsFor, applyRaise, raiseDecision, receive, held, checkWallet, rejectedState, rejectSession, raiseSections };
+module.exports = { statsFor, decisionStatsFor, applyRaise, raiseDecision, settleNearRaise, receive, held, checkWallet, rejectedState, rejectSession, raiseSections };
