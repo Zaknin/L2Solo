@@ -31,7 +31,7 @@ const World = invoke('GameServer/World/World');
 const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
 const HotBoardReview = invoke('GameServer/Bot/Economy/HotBoardReviewService');
 const Protocol = require('./ColdSimulationProtocol');
-const { ColdEconomyDecisions, wireAdvisory, echoHolds, compact } = require('./ColdEconomyDecision');
+const { ColdEconomyDecisions, echoHolds, compact } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
 const ColdStateDelta = require('./ColdStateDelta');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
@@ -1374,27 +1374,9 @@ class ColdSimulationCoordinator {
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([Number(state.characterId)]);
         await this.ensureCraftRecipes(state);
         this.fencedBots.delete(Number(state.characterId));
-        const entry = { state }, advice = this.economyDecisions.advisoryFor(state);
-        if (advice) {
-            // The handoff card rides on the row; the kernel takes it off.
-            const transfer = wireAdvisory(advice);
-            if (transfer) entry.wishAdvisory = transfer;
-            else EconomyDiagnostics.count('card', 'drop', 'handoff_unproved');
-        }
-        const payload = StateWire.packPayload('snapshot_page', {
-            rows: [entry],
-            done: false,
-            ack: true,
-            initial: false
-        });
-        const worker = this.worker, epoch = this.workerEpoch;
-        const frame = Protocol.envelope('snapshot_page', epoch, payload);
-        if (entry.wishAdvisory && Protocol.validateEnvelope(frame,
-            'main', { workerEpoch: this.workerEpoch }).reason === 'message_too_large') {
-            delete entry.wishAdvisory;
-            EconomyDiagnostics.count('card', 'drop', 'handoff_oversize');
-        }
-        const msgId = this.post('snapshot_page', payload, frame.msgId);
+        // The row alone: the worker's copy keeps the bot's decision and its
+        // first far row restores the card from the bot's saved copy.
+        const msgId = this.post('snapshot_page', { rows: [{ state }], done: false, ack: true, initial: false });
         if (!msgId) return { ok: false, reason: 'state_send_failed' };
         let timer = null;
         try {
@@ -1402,10 +1384,6 @@ class ColdSimulationCoordinator {
                 timer = setTimeout(() => reject(new Error('cold_worker_accept_timeout')), Math.max(50, Number(timeoutMs) || 500));
                 this.waiters.set(msgId, { resolve, reject });
             });
-            const current = LifeState.cachedState(state.characterId);
-            if (entry.wishAdvisory && this.worker === worker && this.workerEpoch === epoch
-                && current?.phase === 'cold')
-                this.economyDecisions.releaseAdvisory(state.characterId, advice);
             return { ok: true, reason: 'accepted', ...payload };
         } catch (error) {
             this.waiters.delete(msgId);
@@ -2031,12 +2009,11 @@ class ColdSimulationCoordinator {
 
     async fenceBot(characterId, timeoutMs = 500) {
         const id = Number(characterId);
-        this.economyDecisions.fence(id);
+        this.economyDecisions.forget(id);
         EconomyContext.forget(id);
         if (!this.worker || !this.ready) return { ok: true, reason: 'worker_not_ready' };
         this.fencedBots.add(id);
         DiagnosticConfig.developerDiagnostics && (this.counters.fences += 1);
-        const worker = this.worker, epoch = this.workerEpoch;
         const msgId = this.post('fence', { characterId: id, deadlineAt: Date.now() + timeoutMs });
         if (!msgId) return { ok: false, reason: 'fence_send_failed' };
         let timer = null;
@@ -2052,13 +2029,6 @@ class ColdSimulationCoordinator {
             const command = this.commandInflight.get(id);
             if (command) await Promise.race([command.catch(() => null), wait(timeoutMs)]);
             await this.queue.flushCharacter(id);
-            if (fenced.wishAdvisory) {
-                const state = LifeState.cachedState(id);
-                if (this.worker !== worker || this.workerEpoch !== epoch || !state
-                    || !this.economyDecisions.retainAdvisory(state, fenced.wishAdvisory)) {
-                    EconomyDiagnostics.count('card', 'drop', 'handoff_stale');
-                }
-            }
             return { ok: true, reason: 'fenced', ...fenced };
         } catch (error) {
             DiagnosticConfig.developerDiagnostics && (this.counters.fenceTimeouts += 1);

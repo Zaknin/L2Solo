@@ -1558,23 +1558,9 @@ function survivalReserve(state = {}) {
     return Array.isArray(state.stats?.money) ? positive(state.stats.money[2]) : basics(state).survivalReserve;
 }
 function forActor(actor, session, deps = {}) {
-    const state = stateForActor(actor, session);
-    if (!isMainThread) return forState(state, deps);
-    // lazy: cycle the coordinator publishes hot handoffs through this owner.
-    const coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
-    const accepted = coordinator.economyDecisions?.advisoryFor(state);
-    if (!accepted) return forState(state, deps);
-    // The same accepted memory owner serves hot and cold validity. Reading
-    // the original advisory is not permission to execute its selected act.
-    // lazy: worker main thread only (returned above in the worker); its repository reaches the Database.
-    const memory = invoke('GameServer/Social/InteractionMemoryRuntime');
-    const input = { ...deps, memory: memory.snapshot(Number(state.characterId)),
-        memoryIdentity: memory.contentIdentity(Number(state.characterId)),
-        routeRows: deps.routeRows || preparedRouteRows(state) };
-    // Not collected: the worker's card never carries main's held proof.
-    const prepared = {};
-    const refreshed = ColdEconomyDecision.refreshAdvisory(state, accepted, input, { prepared });
-    return refreshed?.economy || forState(state, { ...input, eventVerdict: prepared.eventVerdict });
+    // The worker owns the near mind (DecisionEvents); no card crossed the
+    // handoff, so main builds from the row alone.
+    return forState(stateForActor(actor, session), deps);
 }
 function craftIncome(state) {
     // The guarded worker publication is the only production income reader on
@@ -1721,6 +1707,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, preparedRouteRows, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

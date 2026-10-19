@@ -509,11 +509,11 @@ const occupationPlanner = new ColdOccupationPlanner({
         const owner = kernel?.states.get(id);
         if (shuttingDown || owner?.state !== input.sourceState) return;
         if (meta.stale) {
-            const echo = ColdEconomyDecision.stateEcho(input.state);
-            // The same mark main's staleWorkshop sets on its copy.
+            // The same mark main's staleWorkshop sets on its copy. A near row's
+            // slot recomputes on its next post; main's copy is current by nearSeq.
             if (owner?.published && ColdEconomyDecision.current(input.state, owner.published)) owner.published.workshopStale = true;
-            send('ready', { phase: 'economy_workshop_stale', characterId: id,
-                updatedAt: Number(input.state.updatedAt || 0), echo });
+            if (input.state.phase !== 'hot') send('ready', { phase: 'economy_workshop_stale', characterId: id,
+                updatedAt: Number(input.state.updatedAt || 0), echo: ColdEconomyDecision.stateEcho(input.state) });
         } else if (input.mode === 'near' && workshop?.decision) {
             // The near bot's decision on its post: the card, and beside it the
             // mind keys the body takes and the post and raise it answers.
@@ -1635,10 +1635,10 @@ function startKernel(config = {}) {
     // scratch is cancelled on a newer canonical owner; it is never LRU-evicted.
     const nativeSet = kernel.states.set.bind(kernel.states), nativeDelete = kernel.states.delete.bind(kernel.states);
     const nativeClear = kernel.states.clear.bind(kernel.states);
-    kernel.states.set = (id, entry, card) => {
+    kernel.states.set = (id, entry) => {
         const previousEntry = kernel.states.get(Number(id)), previous = previousEntry?.state;
         if (previous && previous !== entry.state && entry.state.phase === 'hot') nearEvents(id, previousEntry, entry);
-        const result = nativeSet(id, entry, card);
+        const result = nativeSet(id, entry);
         if (previous !== entry.state) {
             const route = routeRequests.get(Number(id));
             if (route && route.sourceState !== entry.state) cancelRoute(id);
@@ -1929,13 +1929,8 @@ async function handle(message) {
     case 'fence': {
         occupationPlanner.cancel(payload.characterId);
         cancelRoute(payload.characterId);
-        const result = kernel?.fence(payload.characterId) || { characterId: Number(payload.characterId), proposal: null };
-        if (result.wishAdvisory && Protocol.validateEnvelope(Protocol.envelope('fence_ack', epoch, result, message.msgId),
-            'worker', { workerEpoch: epoch }).reason === 'message_too_large') {
-            delete result.wishAdvisory;
-            economyDiagnostics.count('card', 'drop', 'handoff_oversize');
-        }
-        send('fence_ack', result, message.msgId);
+        send('fence_ack', kernel?.fence(payload.characterId) || { characterId: Number(payload.characterId), proposal: null },
+            message.msgId);
         break;
     }
     case 'pause':
