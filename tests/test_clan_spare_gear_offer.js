@@ -66,10 +66,12 @@ async function main() {
     await Database.initClanHalls();
     await LifeState.init();
     for (const { giver, mate } of clans) { await Personas.load(giver); await Personas.load(mate); }
-    // The third giver hates its only clanmate.
+    // The third giver hates its only clanmate. One clock: a reason later
+    // than its row is refused as invalid.
+    const hatedAt = Date.now();
     Memory.accept({ version: 1, ownerId: 4800021, revision: 1, replayFloor: 0, recent: [], relations: [{
-        kind: 'character', targetId: 4800022, at: Date.now(), order: 1,
-        affinity: -20, trust: -20, hostility: 30, fear: 0, familiarity: 3, reasons: [{ type: 'attacked', at: Date.now() }]
+        kind: 'character', targetId: 4800022, at: hatedAt, order: 1,
+        affinity: -20, trust: -20, hostility: 30, fear: 0, familiarity: 3, reasons: [{ type: 'attacked', at: hatedAt }]
     }] });
     const spare = async (id) => Number((await Database.execute(['SELECT COUNT(*) AS n FROM items WHERE characterId = ? AND selfId = ?', [id, EARRING]]))[0].n);
     const stored = async (clanId) => Number((await Database.execute(['SELECT COALESCE(SUM(amount), 0) AS n FROM clan_warehouse_items WHERE clanId = ? AND selfId = ?', [clanId, EARRING]]))[0].n);
