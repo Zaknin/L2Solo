@@ -2469,6 +2469,10 @@ const PopulationService = {
             return [];
         }
         let changed = false, skipped = false;
+        const skip = () => {
+            skipped = true;
+            Config.developerDiagnostics && Diagnostics.count('party_requirement', 'member_write', 'skipped');
+        };
         for (const { characterId, plan } of resolution.memberPlans || []) {
             const member = LifeState.cachedState(characterId);
             if (!member || member.phase !== 'cold' || member.party?.partyId !== party.partyId) continue;
@@ -2477,10 +2481,7 @@ const PopulationService = {
             // review runs meanwhile; a write it beat is skipped and the
             // party's re-plan is marked due again below.
             const written = await LifeState.writePartyRequirementPlan(member, plan);
-            if (written === false) {
-                skipped = true;
-                Config.developerDiagnostics && Diagnostics.count('party_requirement', 'member_write', 'skipped');
-            }
+            if (written === false) skip();
             changed = !!written || changed;
         }
         // ARCH-NOTE: A bounded worker refresh may span resolves; release members only after its complete projection.
@@ -2499,12 +2500,15 @@ const PopulationService = {
         const departures = refreshedMembers.length - releasable.length >= Config.partyMinSize
             ? releasable
             : [];
-        await departures.reduce((chain, member) => chain.then(() => (
-            LifeState.leaveParty(member, 'party_objective_complete')
-        )), Promise.resolve());
-        const retainedMembers = refreshedMembers.filter((member) => (
-            !departures.some((departure) => Number(departure.characterId) === Number(member.characterId))
-        ));
+        // Held on the revision of the copy read above, as the plan writes: a
+        // member write in between keeps the member in the party, re-planned.
+        const departed = new Set();
+        await departures.reduce((chain, member) => chain.then(async () => {
+            const left = await LifeState.leaveParty(member, 'party_objective_complete', { heldOnRevision: true });
+            if (left) departed.add(Number(member.characterId));
+            else if (left === false) skip();
+        }), Promise.resolve());
+        const retainedMembers = refreshedMembers.filter((member) => !departed.has(Number(member.characterId)));
         const objectiveMember = retainedMembers.find((member) => (
             member.stats?.equipmentPlan?.partyNeed === 'required'
         )) || retainedMembers.find((member) => partyObjectiveForState(member));
@@ -2532,7 +2536,7 @@ const PopulationService = {
         // writes (leaveParty, createOrUpdate publish inside their awaits).
         if (skipped) this.markPartyRequirementReplan(party.partyId);
         else this.clearPartyRequirementDue(party.partyId);
-        return changed || departures.length ? [party.partyId] : [];
+        return changed || departed.size ? [party.partyId] : [];
     },
 
     // The answer of a pending join's recruit check, from the leader's step

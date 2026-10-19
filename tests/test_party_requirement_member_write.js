@@ -4,6 +4,8 @@
 // in between it lands, and a training publish landing in between wins: the
 // party write is skipped, the row keeps the trained sp and combat profile, and
 // the party's re-plan is marked due again so the member is planned anew.
+// The same refresh releasing a member no longer required (its departure) holds
+// on the revision of the copy it read the same way.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -14,10 +16,12 @@ const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Population = invoke('GameServer/Bot/Population/PopulationService');
 const Data = invoke('GameServer/DataCache');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
+const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l2solo-party-requirement-member-write-'));
 const ACCOUNT = 'bot_party_requirement_write';
 const PARTY = 'bgp-requirement-write';
+const DEPARTURE_PARTY = 'bgp-requirement-departure';
 
 async function row(id) {
     return (await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [id]]))[0];
@@ -34,15 +38,20 @@ const plan = target => ({ status: 'active', strategy: 'direct_drop', partyNeed: 
         Data.init();
         await Database.createAccount(ACCOUNT, 'fixture');
         await Life.init();
-        const id = Number((await Database.createCharacter(ACCOUNT, { name: 'PartyMember',
-            race: 0, classId: 0, maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0,
-            locX: 1, locY: 1, locZ: 0 })).insertId);
-        await Life.upsertState({ characterId: id, accountName: ACCOUNT, name: 'PartyMember',
-            phase: 'cold', activity: 'hunting', level: 20, inventory: {},
-            party: { partyId: PARTY, role: 'member', leaderId: id },
-            stats: { classId: 0, generatedCold: true },
-            loc: { locX: 1, locY: 1, locZ: 0 }, vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
-            timing: { nextResolveAt: Date.now() + 86400000 } }, 'party_requirement_write_fixture');
+        await Parties.init();
+        const member = async (name, partyId, leaderId, stats = {}) => {
+            const characterId = Number((await Database.createCharacter(ACCOUNT, { name,
+                race: 0, classId: 0, maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0,
+                locX: 1, locY: 1, locZ: 0 })).insertId);
+            await Life.upsertState({ characterId, accountName: ACCOUNT, name,
+                phase: 'cold', activity: 'hunting', level: 20, inventory: {},
+                party: { partyId, role: 'member', leaderId: leaderId || characterId },
+                stats: { classId: 0, generatedCold: true, leaderId: leaderId || characterId, ...stats },
+                loc: { locX: 1, locY: 1, locZ: 0 }, vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
+                timing: { nextResolveAt: Date.now() + 86400000 } }, 'party_requirement_write_fixture');
+            return characterId;
+        };
+        const id = await member('PartyMember', PARTY);
         const party = { partyId: PARTY, status: 'active', leaderId: id, memberIds: [id], stats: {} };
         assert.equal(Life.cachedState(id).party?.partyId, PARTY, 'fixture: the member is in the party');
 
@@ -79,6 +88,51 @@ const plan = target => ({ status: 'active', strategy: 'direct_drop', partyNeed: 
         assert.equal(cached.stats.equipmentPlan?.target?.selfId, 9101, 'nothing is published on a skip');
         assert.equal(Population.partyRequirementRefreshDue.has(PARTY), true, 'a skipped write marks the party re-plan due again');
         console.log('PASS a party requirement write holds on the member revision it read');
+
+        // A required party of two members who still need it and one who no
+        // longer does: the refresh releases the third.
+        const leader = await member('DepartureLead', DEPARTURE_PARTY, 0, { equipmentPlan: plan(9301) });
+        const needing = await member('DepartureNeed', DEPARTURE_PARTY, leader, { equipmentPlan: plan(9302) });
+        const done = await member('DepartureDone', DEPARTURE_PARTY, leader);
+        const required = { partyId: DEPARTURE_PARTY, status: 'active', leaderId: leader, memberIds: [leader, needing, done],
+            spotId: 'requirement-spot', stats: { objective: { priority: 'required', spotId: 'requirement-spot' } } };
+        const refresh = { memberPlans: [], requirementRefreshedAt: Date.now() };
+        const doneRead = Number(Life.cachedState(done).simulation.revision);
+
+        // Its own review moves the released member while the departure is
+        // built from the copy before it: the review wins, the member stays.
+        const doneTraining = Life.serializeClanLevelUp(done, async () => {
+            const [trained] = await Database.execute([`UPDATE bot_life_state SET sp = 888,
+                simulationRevision = simulationRevision + 1 WHERE characterId = ? RETURNING *`, [done], { read: true }]);
+            return Life.acceptLifecycleRow(trained);
+        });
+        Population.partyRequirementRefreshDue.clear();
+        const beaten = Population.applyWorkerPartyRequirements(required, refresh);
+        await Promise.all([doneTraining, beaten]);
+        const kept = await row(done);
+        assert.equal(Number(kept.simulationRevision), doneRead + 1, 'only the review moved the released member');
+        assert.equal(kept.partyId, DEPARTURE_PARTY, 'a beaten departure leaves the member in the party');
+        assert.equal(Number(kept.sp), 888, 'the row keeps the reviewed sp');
+        assert.equal(Life.cachedState(done).party?.partyId, DEPARTURE_PARTY, 'nothing is published on a skipped departure');
+        assert.deepEqual(Parties.find(DEPARTURE_PARTY)?.memberIds?.map(Number), [leader, needing, done],
+            'the party row keeps the member whose departure was skipped');
+        assert.equal(Population.partyRequirementRefreshDue.has(DEPARTURE_PARTY), true,
+            'a skipped departure marks the party re-plan due again');
+
+        // No write in between: the departure lands on the revision read and moves it.
+        const departed = await Population.applyWorkerPartyRequirements(Parties.find(DEPARTURE_PARTY), refresh);
+        assert.deepEqual(departed, [DEPARTURE_PARTY], 'the landed departure changes the party');
+        const left = await row(done);
+        assert.equal(Number(left.simulationRevision), doneRead + 2, 'the departure moves the member revision once');
+        assert.equal(left.partyId, null, 'the landed departure clears the member party');
+        assert.equal(Number(left.sp), 888, 'the departure writes only its own fields');
+        assert.equal(JSON.parse(left.statsJson).partyBreakReason, 'party_objective_complete');
+        assert.equal(Life.cachedState(done).party?.partyId, null, 'the cache takes the departure');
+        assert.equal(Life.cachedState(done).simulation.revision, doneRead + 2, 'the cache takes the written revision');
+        assert.deepEqual(Parties.find(DEPARTURE_PARTY)?.memberIds?.map(Number), [leader, needing],
+            'the party row drops the departed member');
+        assert.equal(Population.partyRequirementRefreshDue.has(DEPARTURE_PARTY), false, 'a landed departure clears the re-plan mark');
+        console.log('PASS a party departure holds on the member revision it read');
     } finally {
         fs.rmSync(directory, { recursive: true, force: true });
     }
