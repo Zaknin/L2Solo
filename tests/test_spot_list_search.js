@@ -2,9 +2,9 @@
 // ARCH-08-b: a spot search reads the game table's spot list for the bot's
 // role and level and takes the first spot it may hunt whose level fits; the
 // crowd enters only as the room filter (ROUTE-ROOM: the worker's own index;
-// ROUTE-ROOM-4: main's world index for a solo search on main). The real
-// table; a catalogue of its own spots built from its authored reward rows (no
-// World in a test); one level 29 mage.
+// ROUTE-ROOM-4: main's world index for a search on main, a party's counting
+// all its members). The real table; a catalogue of its own spots built from
+// its authored reward rows (no World in a test); one level 29 mage.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -222,6 +222,32 @@ Spots.cache = originalCache;
             'the bot\'s own spot is never full to it');
         assert.equal(Spots.findForState(bot, search(listed, ['a'], () => true))?.id, 'a',
             'a filter the caller passes is read instead of main\'s index');
+
+        // A party search on main (formation, retreat) counts the whole party
+        // (capacityStates) against main's index; its own members standing
+        // there are not counted against it. Spot 'c' holds 9: 7 stand there.
+        const room = Routes.roomForSpot(listed[2]);
+        const crowd = Array.from({ length: room - 2 }, (_, i) => 990960 + i);
+        for (const characterId of crowd) {
+            LifeState.acceptLifecycleRow({ characterId, accountName: `bot_${characterId}`,
+                characterName: `Camp${characterId}`, level: 25, phase: 'cold', activity: 'hunting', spotId: 'c',
+                statsJson: '{}', inventorySummary: '{}' });
+        }
+        const member = characterId => ({ ...bot, characterId });
+        const partySearch = members => Spots.findForState(members[0],
+            { ...search(listed, ['c']), mode: 'party', capacityStates: members })?.id;
+        assert.notEqual(partySearch([member(990980), member(990981), member(990982)]), 'c',
+            'a party of 3 is refused at a spot with 2 free places');
+        assert.equal(partySearch([member(990980), member(990981)]), 'c', 'a party of 2 fits the 2 free places');
+        assert.equal(partySearch([member(990980), member(990981), member(crowd[0])]), 'c',
+            'a member standing there is not counted against its own party');
+        assert.equal(Spots.findForState(bot, search(listed, ['c']))?.id, 'c', 'a solo bot still takes one free place');
+        const index = LifeState.occupancyIndex();
+        assert.equal(Spots.roomFilterFor(index, listed, [member(990980), member(990981), member(990982)])('c'), false,
+            'the filter: 7 standing + 3 arriving > 9');
+        assert.equal(Spots.roomFilterFor(index, listed, [member(crowd[0]), member(crowd[1]), member(990980)])('c'), true,
+            'the filter: the party\'s own 2 excluded, 5 + 3 <= 9');
+        assert.equal(Spots.roomFilterFor(index, listed, [member(990980)])('c'), true, 'the filter: a solo bot, 7 + 1 <= 9');
 
         // A party-wait search on main (PartyWaitFallback.spotFor, no filter
         // passed) reads the same index: a full planned spot is no fallback,

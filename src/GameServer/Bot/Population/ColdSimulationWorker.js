@@ -948,7 +948,7 @@ function roomAtArrival(spotId, arriving, overflow = 0) {
 function routeTrip(state, context, leaf, timestamp) {
     return BotRoute.trip(kernel.states.get(Number(state.characterId)), state, leaf,
         { spots: planningSpots, currentSpot: context?.spot || null, timestamp,
-            hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, state) });
+            hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, [state]) });
 }
 function dropRoute(characterId, why) {
     BotRoute.drop(kernel.states.get(Number(characterId)), why);
@@ -985,8 +985,11 @@ function soloArrival(state, result) {
 // sources raised on the leader; the members arrive and stand. The party's own
 // objective spot (a clan goal, a material party) admits it: a pass read from
 // the goal the party carries, not a place held for it, so a full roster does
-// not bounce between its objective and a fallback spot.
-function partyArrival({ party, members, spotId }) {
+// not bounce between its objective and a fallback spot. cause: the trip's
+// (party.stats.travel.cause): competition_avoid (main's retreat),
+// position_mismatch or death_pressure (the run's search); none: 'route', the
+// run's search that picked a new spot.
+function partyArrival({ party, members, spotId, cause = null }) {
     const arriving = new Set((party?.memberIds || []).map(String));
     if (!spotId || !arriving.size) return null;
     if (String(spotId) === String(party.stats?.objective?.spotId ?? '')) {
@@ -997,6 +1000,7 @@ function partyArrival({ party, members, spotId }) {
     economyDiagnostics.count('roomAtArrival', 'party', 'checked');
     if (room) return null;
     economyDiagnostics.count('roomAtArrival', 'party', 'full');
+    economyDiagnostics.count('roomAtArrival', 'party_full', cause || 'route');
     const leaderId = Number(party.leaderId || 0);
     return {
         party: PartySpotRiskPolicy.withCapacityBackoff(party, spotId),
@@ -1241,8 +1245,10 @@ function startKernel(config = {}) {
             buyOrderEscrow: escrowFor(state.characterId)
         }),
         partyArrival,
+        // The party's spot search skips a spot with no room for the whole
+        // party (its own members not counted against it).
         partyRoute: ({ leader, party, members, spot, timestamp }) => BotRoute.route(leader, spot, party, members,
-            { spots: planningSpots, timestamp }),
+            { spots: planningSpots, timestamp, hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, members) }),
         projectResolve: async (state, result, timestamp, lifecyclePlan = null) => {
             const owner = kernel.states.get(Number(state.characterId));
             // Room at arrival, before the projection: a full spot's mark rides
@@ -1478,7 +1484,7 @@ function startKernel(config = {}) {
             const partyFallback = partyRouteWaiting
                 ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots,
                     { excludedSpotIds, timestamp,
-                        hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, state) })
+                        hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, [state]) })
                 : null;
             const fallbackSpot = partyFallback?.spot || null;
             const plannedStats = { ...(state.stats || {}), ...economy.statsPacket, equipmentPlan: acquisitionPlan };

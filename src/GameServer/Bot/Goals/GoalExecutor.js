@@ -142,7 +142,7 @@ function finishVisit(state, timestamp, options) {
     // search, which then picks another spot (ROUTE-ROOM-4). With no other
     // spot the bot still goes home; the room is read again at arrival.
     const refused = !!savedSpot && !clanReturn
-        && !SpotProfiles.roomFilterFor(BotLifeState.occupancyIndex(), SpotProfiles.ensure(), state)(savedSpot.id);
+        && !SpotProfiles.roomFilterFor(BotLifeState.occupancyIndex(), SpotProfiles.ensure(), [state])(savedSpot.id);
     const selectedSpot = clanReturn ? savedSpot : returnState
         ? SpotProfiles.findForState(returnState, { timestamp, excludedSpotIds: refused ? [savedSpot.id] : [] })
             || (spotBackoff ? null : savedSpot)

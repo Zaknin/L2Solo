@@ -134,22 +134,24 @@ function spotRoom(spots, spotId) {
     return !spot || spot.raidBoss === true ? Infinity : LevelingRoutes.roomForSpot(spot);
 }
 
-// The room filter of a solo bot's route (ROUTE-ROOM): a spot has room for
-// this bot when every bot `index` has there, those on their way included,
-// other than this bot, plus this bot fit; re-checked at arrival. index: the
-// worker's own (kernel.occupancy) or main's world index
-// (BotLifeState.occupancyIndex()), the one of the thread that plans.
-function roomFilterFor(index, spots, state) {
-    const self = new Set([stateKey(state)]);
-    return (spotId) => index.physicalCount(spotId, { excludeKeys: self }) + 1 <= spotRoom(spots, spotId);
+// The room filter of a route (ROUTE-ROOM): a spot has room for the routed
+// bots (members: [state] for a solo bot, the whole party for a party) when
+// every bot `index` has there, those on their way included, other than these
+// bots, plus all of them fit; re-checked at arrival. A party's own members are
+// not counted against it. index: the worker's own (kernel.occupancy) or main's
+// world index (BotLifeState.occupancyIndex()), the one of the thread that plans.
+function roomFilterFor(index, spots, members) {
+    const own = new Set(members.map(stateKey));
+    return (spotId) => index.physicalCount(spotId, { excludeKeys: own }) + members.length <= spotRoom(spots, spotId);
 }
 
-// The room filter a search takes when its caller passes none: a solo search
-// on main reads main's world index (ROUTE-ROOM-4); the worker always passes
-// its own, and a party search has no filter (null).
-function defaultRoomFilter(state, mode, spots) {
-    return isMainThread && mode !== 'party'
-        ? roomFilterFor(BotLifeState.occupancyIndex(), spots, state) : null;
+// The room filter a search takes when its caller passes none: a search on
+// main reads main's world index (ROUTE-ROOM-4) for the routed bots (members:
+// the search's capacityStates, else the bot alone); the worker always passes
+// its own (null here).
+function defaultRoomFilter(state, spots, members = null) {
+    return isMainThread
+        ? roomFilterFor(BotLifeState.occupancyIndex(), spots, members?.length ? members : [state]) : null;
 }
 
 // A solo fallback search must not become a travel loop between comparable
@@ -244,10 +246,12 @@ const SpotProfiles = {
         // spot, the planned source, the list walk and the near-level
         // fallback; a refused candidate counts as absent. A bot's own spot is
         // never full to it; the room is checked again at arrival. The worker
-        // passes its own index's filter (options.hasRoom); a solo search on
-        // main (market return, competition retreat, a command's trip) reads
-        // main's world index (ROUTE-ROOM-4); a party search has no filter.
-        const hasRoom = options.hasRoom ?? defaultRoomFilter(state, mode, profiles);
+        // passes its own index's filter (options.hasRoom); a search on main
+        // (market return, competition retreat, a command's trip, a party's
+        // formation) reads main's world index (ROUTE-ROOM-4). A party search
+        // counts the whole party (options.capacityStates), its own members
+        // excluded.
+        const hasRoom = options.hasRoom ?? defaultRoomFilter(state, profiles, options.capacityStates);
         const full = (spot) => {
             if (!hasRoom || (currentSpot && spot.id === currentSpot.id)
                 || hasRoom(spot.id)) return false;

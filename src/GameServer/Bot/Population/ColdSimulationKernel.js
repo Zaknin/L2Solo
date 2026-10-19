@@ -1888,8 +1888,10 @@ class ColdSimulationKernel {
                     arrivedParty = materialArrival.party;
                 }
                 // The party is checked once, as a whole, here; its members'
-                // own arrivals are not.
-                const crowded = this.partyArrival?.({ party: arrivedParty, members: arrivedMembers, spotId: partyTravel.spotId });
+                // own arrivals are not. cause: why the trip started (the
+                // full arrival's counter reads it).
+                const crowded = this.partyArrival?.({ party: arrivedParty, members: arrivedMembers,
+                    spotId: partyTravel.spotId, cause: partyTravel.cause });
                 if (crowded) {
                     arrivedMembers.splice(0, arrivedMembers.length, ...crowded.members);
                     arrivedParty = crowded.party;
@@ -1943,6 +1945,7 @@ class ColdSimulationKernel {
                             spotId: route.spotId,
                             startedAt,
                             arrivalAt,
+                            ...(route.cause ? { cause: route.cause } : {}),
                             ...(route.materialEvacuation ? { materialEvacuation: true } : {})
                         }
                     }

@@ -226,7 +226,10 @@ function groupBySpot(states, options = {}) {
         .map((group) => group.states);
 }
 
-function partySpotForLeader(leader, objectiveSpotId = null) {
+// The forming party's spot: its objective's, else the leader's party search,
+// which skips a spot with no room for all its members (members: the search's
+// capacityStates, read by its room filter on main's world index).
+function partySpotForLeader(leader, objectiveSpotId = null, members = [leader]) {
     if (objectiveSpotId) {
         const objectiveSpot = SpotProfiles.findById(objectiveSpotId);
         if (objectiveSpot) return objectiveSpot;
@@ -244,7 +247,8 @@ function partySpotForLeader(leader, objectiveSpotId = null) {
             ...(leader.stats || {}),
             routeMode: 'party'
         }
-    }, { mode: 'party', role: PartyComposition.roleForState(leader) }) || SpotProfiles.findById(leader.spotId);
+    }, { mode: 'party', role: PartyComposition.roleForState(leader), capacityStates: members })
+        || SpotProfiles.findById(leader.spotId);
 }
 
 function leaderIdForMembers(party, members = []) {
@@ -930,7 +934,7 @@ async function createBackgroundParty(members = [], objectiveOverride = null, opt
         && member.stats?.partyRequest?.priority === 'required'
     )) || members.find((member) => partyObjectiveForState(member)) || leader;
     const objective = objectiveOverride || partyObjectiveForState(objectiveMember);
-    const partySpot = partySpotForLeader(leader, objective?.spotId || null);
+    const partySpot = partySpotForLeader(leader, objective?.spotId || null, members);
     const timestamp = Date.now();
     const partyId = `bgp_${timestamp.toString(36)}_${leader.characterId}`;
     const coverage = PartyComposition.roleCoverage(members);
