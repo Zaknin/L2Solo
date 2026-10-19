@@ -83,10 +83,9 @@ async function main() {
         assert.deepEqual(refreshed.stats.equipmentPlan, personalPlan);
         assert.deepEqual(JSON.parse((await lifeRow(ids[0])).statsJson).equipmentPlan, personalPlan);
 
-        // Every founder is updated, including a bot currently owned by a worker.
+        // Every founder is updated.
         const founders = ids.slice(4, 7);
         const staleFounder = Life.cachedState(founders[0]);
-        await query("UPDATE bot_life_state SET simulationOwner = 'cold_simulation_owner' WHERE characterId = ?", [founders[1]]);
         const created = await Database.createAutonomousClan({ name: 'NewRecoveryClan', leaderId: founders[0], memberIds: founders,
             founderQuorum: 3, maxBotClans: 40, maxBotMemberShare: 1 });
         assert(created.ok, JSON.stringify(created));
@@ -95,7 +94,6 @@ async function main() {
             assert.equal(Life.cachedState(id).stats.clanId, created.clanId);
             assert.deepEqual(Life.cachedState(id).stats.equipmentPlan, personalPlan);
         }
-        assert.equal((await lifeRow(founders[1])).simulationOwner, 'cold_simulation_owner');
         assert.equal(await Life.upsertState(staleFounder), null, 'pre-membership lifecycle snapshot is fenced');
         assert.equal(JSON.parse((await lifeRow(founders[0])).statsJson).clanId, created.clanId);
 

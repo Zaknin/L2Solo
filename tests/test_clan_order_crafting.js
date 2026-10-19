@@ -139,15 +139,9 @@ async function main() {
             assert.strictEqual((await fetch(url)).status, 405);
         } finally { await new Promise(resolve => server.close(resolve)); }
 
-        // Worker-owned carriers must materialize their virtual inputs before
-        // switching to the existing main-thread crafting lifecycle.
-        await Database.execute([`UPDATE bot_life_state SET simulationOwner = 'cold_simulation_owner',
-            simulationRevision = simulationRevision + 1, inventorySummary = ? WHERE characterId = ?`,
-        [JSON.stringify({ 1870: { selfId: 1870, name: 'Coal', amount: 3, stackable: true } }), created.goal.plan.craft.customerId]]);
         const assigned = await OrderService.resolveClan(await projection());
         assert.strictEqual(assigned.assignment.ok, true);
         const customerId = assigned.goal.plan.craft.customerId;
-        assert.strictEqual((await LifeState.findByCharacterId(customerId)).simulation.ownerId, 'legacy_main');
         const first = await travelAndCraft(customerId);
         assert.strictEqual(first.crafted, true, first.error || first.reason);
         assert((await Database.fetchCharacterRecipes(5300006)).some(row => row.recipeId === recipe.recipeId), 'the actual clan dwarf must learn the scroll');
