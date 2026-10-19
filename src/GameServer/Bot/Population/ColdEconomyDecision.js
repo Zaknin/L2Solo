@@ -445,6 +445,16 @@ function view(state, decision, deps = {}, preparedBase = null) {
         set: value => { Object.defineProperty(economy, key, { value, writable: true, enumerable: true, configurable: true }); } });
     return Object.assign(economy, own);
 }
+// The view main reads for a bot that is not far (a near body's card, or none
+// before its first one; a player). Its worth is the full build's
+// (EconomyContext valueReaders): usefulness over the money price, 0 for an
+// item off the card, so a near bot never bids or budgets an item at its market
+// price. A far bot's view keeps that price for an item off its card.
+function nearView(state, decision, deps = {}) {
+    const economy = view(state, decision, deps);
+    economy.worth = id => economy.moneyPrice > 0 ? economy.itemUsefulness(id) / economy.moneyPrice : null;
+    return economy;
+}
 // A bot's economy as main reads it: a far bot's from its card, a near bot's
 // the decision its body holds (DecisionEvents.held), a state without a body
 // a view without a card. The background thread builds it.
@@ -460,7 +470,7 @@ function economyFor(state, deps = {}) {
     // the timestamp or the board are not reapplied; the next near decision
     // refreshes it (1-4 per minute). A player's session never holds one.
     // lazy: cycle DecisionEvents requires this module at its top.
-    return session?.actor && World.isBotSession(session) ? invoke('GameServer/Bot/AI/DecisionEvents').held(session) : view(state, null, deps);
+    return session?.actor && World.isBotSession(session) ? invoke('GameServer/Bot/AI/DecisionEvents').held(session) : nearView(state, null, deps);
 }
 // A compact accepted decision is advisory calculation data, never a lease,
 // quote or permission to spend. Keep it at the existing worker entry owner;
@@ -765,5 +775,5 @@ class ColdEconomyDecisions {
     }
 }
 
-module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateEcho, echoHolds, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, restoreAdvisory, advisoryPublicationHolds, sameEconomicOutput, current, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, cardWithShot, kindCode, kindFor, compact, workshopValues,
+module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateEcho, echoHolds, CompactActivity, ColdEconomyDecisions, economyFor, view, nearView, advisory, restoreAdvisory, advisoryPublicationHolds, sameEconomicOutput, current, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, cardWithShot, kindCode, kindFor, compact, workshopValues,
     unknownWorkshop, MAX_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };

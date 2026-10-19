@@ -132,8 +132,7 @@ function nearFields(economy, state) {
 function receive(session, card, near) {
     const actor = session.actor;
     Object.assign(statsFor(session), near.statsPacket);
-    const state = Economy.stateForActor(actor, session);
-    session.heldEconomy = Object.assign(Decisions.view(state, card), near);
+    session.heldEconomy = Object.assign(Decisions.nearView(Economy.stateForActor(actor, session), card), near);
     session.heldNearSeq = Number(near.nearSeq || 0);
     const raise = session.nearRaise, answered = Number(near.raiseSeq || 0);
     if (raise && answered >= raise.seq) session.nearRaise = null;
@@ -146,7 +145,7 @@ function receive(session, card, near) {
 function held(session) {
     if (session?.heldEconomy) return session.heldEconomy;
     if (!session?.actor) return null;
-    const view = Decisions.view(Economy.stateForActor(session.actor, session), null);
+    const view = Decisions.nearView(Economy.stateForActor(session.actor, session), null);
     view.statsPacket = statsFor(session);
     return session.heldEconomy = view;
 }
