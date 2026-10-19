@@ -612,13 +612,6 @@ function inventoryCleanupTravelState(state, timestamp = Date.now(), simulation =
     };
 }
 
-// E314: a sale visit ended on a shot meeting it staged stays in town, without
-// new market travel, while that same preparation is still open.
-function shotDealLive(state) {
-    const deal = state?.stats?.townVisit?.completed === true && state.stats.townVisit.shotDeal;
-    return !!deal && TradeMeetingService.preparationOf(state.characterId) === deal;
-}
-
 // An ended visit is saved in town only while a meeting preparation holds the
 // bot (E314); it starts no market travel until that preparation ends.
 function heldVisit(state) {
@@ -3391,20 +3384,11 @@ const PopulationService = {
             }
             if (listingResult.listed && listingState.activity !== 'shopping') return listingState;
             const sale = saleVisit(listingState);
-            return ColdMarketService.finishTownErrands(listingState, { saleVisit: sale,
-                shotDealLive: shotDealLive(listingState) }).then((restockedState) => {
+            return ColdMarketService.finishTownErrands(listingState, { saleVisit: sale }).then((restockedState) => {
                 if (LifeState.hotRow(restockedState.characterId)) return LifeState.hotRow(restockedState.characterId);
-                // A deal in preparation keeps the bot in town; a sale visit it
-                // ended on this pass is saved with its sale retry, not lost in
-                // memory (E314), on the fresh row as the pending sale above (a
-                // meeting marker). Other visit reasons keep the author's path.
-                if (TradeMeetingService.hasPreparation(restockedState.characterId)) {
-                    if (!sale || restockedState.stats?.townVisit?.completed !== true) return restockedState;
-                    const live = LifeState.cachedState(restockedState.characterId) || restockedState, { stats } = restockedState;
-                    const ended = { ...live, stats: { ...live.stats, marketSellRetryAfter: stats.marketSellRetryAfter,
-                        visitEvery: stats.visitEvery, townVisit: stats.townVisit } };
-                    return LifeState.upsertState(ended, 'market_visit_held').then((saved) => saved || ended);
-                }
+                // A deal in preparation keeps the bot in town: a sale visit saved its
+                // end before the meeting was staged (ColdMarketService.finishTownErrands).
+                if (TradeMeetingService.hasPreparation(restockedState.characterId)) return restockedState;
                 const improvement = invoke('GameServer/Bot/Economy/BotImprovementService');
                 const continuation = improvement.acquisitionTravel(restockedState,
                     ColdSimulationCoordinator.economyDecisions.activity(restockedState));
