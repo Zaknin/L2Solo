@@ -607,15 +607,27 @@ function fightProfile(state = {}, timestamp = Date.now(), options = {}) {
 
 // The saved kit of a bot that fights before any capture: the kit fields
 // capture writes, from its kit profile (copies: the stored one is shared),
+// the henna totals its base already counts (gatherKit adds only the delta),
 // and its cp at timestamp. The fight writes effects, cooldowns, charges and
 // the summon over it.
 function seedSnapshot(state = {}, timestamp = Date.now()) {
-    const profile = profileFor(state, timestamp);
+    const { kitPart, profile } = kitEntry(state, timestamp, {});
     return {
         ...structuredClone({ version: profile.version, capturedAt: profile.capturedAt, classId: profile.classId,
-            base: profile.base, equipment: profile.equipment, skills: profile.skills }),
+            base: profile.base, henna: kitPart.henna, equipment: profile.equipment, skills: profile.skills }),
         cp: currentCp(state, profile, timestamp), cpAt: timestamp
     };
+}
+
+// A seed saved before 2e3af7fa0: a base with the hennas of that moment and
+// no henna totals, which gatherKit would count again. The copy without that
+// base (gatherKit rebuilds it from the class template with the current
+// hennas), or null when the snapshot is not such a seed.
+function oldSeedRepair(snapshot) {
+    if (!snapshot?.base || snapshot.henna) return null;
+    const kit = { ...snapshot };
+    delete kit.base;
+    return kit;
 }
 
 // The saved CP plus its regeneration since saved.cpAt at the profile's rate.
@@ -663,7 +675,7 @@ function kitSlot(state, timestamp, kit) {
 
 // The gather part of a profile: class template, worn gear, the kit effects
 // (armour sets and item effects of the worn gear), skills, the base stats
-// with the henna delta. No buff, no clock.
+// with the henna delta, the henna totals (henna). No buff, no clock.
 function gatherKit(state, timestamp) {
     const saved = state.stats?.coldCombat;
     const classId = number(saved?.classId, number(state.stats?.classId, number(state.classId)));
@@ -688,9 +700,9 @@ function gatherKit(state, timestamp) {
         // the what-if of a candidate (candidateProfiles).
         worn, classStats: template.stats || {}
     };
-    const henna = hennaTotals(state.stats?.hennas);
-    // Captured hot base stats already include the same paid symbols. Only
-    // the delta from that capture is added when the cold inventory changes.
+    const henna = kitPart.henna = hennaTotals(state.stats?.hennas);
+    // Captured base stats (hot capture, seedSnapshot) already include the
+    // symbols in saved.henna. Only the delta from them is added.
     for (const stat of BASE_STATS) {
         const captured = number(saved?.henna?.[stat]);
         kitPart.base[stat.toLowerCase()] = number(kitPart.base[stat.toLowerCase()], 1) + henna[stat] - captured;
@@ -812,20 +824,20 @@ function formulaPower(terms, equipment, base, stats) {
 // - { skill: { selfId, level } }: the skill is learnt.
 // A gear or henna change returns the power numbers (formulaPower) only, the
 // kit profile with the skill a whole profile. The reader keeps the prepared
-// worn rows and the kit's henna totals for its candidates; they die with it.
+// worn rows for its candidates; they die with it.
 function candidateProfiles(state = {}, timestamp = Date.now(), options = {}) {
     const entry = withBuildSite('gain', () => kitEntry(state, timestamp, options));
-    let worn, hennas;
+    let worn;
     const after = change => change.skill ? skillCandidate(entry, change.skill, timestamp)
-        : change.hennas ? hennaCandidate(entry, hennas ||= hennaTotals(state.stats?.hennas), change.hennas)
+        : change.hennas ? hennaCandidate(entry, change.hennas)
             : gearCandidate(state, entry, worn ||= entry.kitPart.worn.map(prepareWorn), change, timestamp);
     return { before: entry.profile, after };
 }
 function prepareWorn(row) {
     return preparedEquipment(row.template, row.selfId, row.objectId, row.enchant, row.slot);
 }
-function hennaCandidate({ kitPart, terms }, now, next) {
-    const then = hennaTotals(next), base = { ...kitPart.base };
+function hennaCandidate({ kitPart, terms }, next) {
+    const now = kitPart.henna, then = hennaTotals(next), base = { ...kitPart.base };
     for (const stat of BASE_STATS) base[stat.toLowerCase()] = number(base[stat.toLowerCase()], 1) + then[stat] - now[stat];
     return formulaPower(terms, kitPart.equipment, base, effectiveStats(terms, base));
 }
@@ -1155,7 +1167,7 @@ function kitStoreSize() { return kitProfiles.size; }
 
 module.exports = {
     PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs, withBuildSite,
-    fightProfile, currentCp, seedSnapshot, candidateProfiles, fightSources, combatView, kitHash, wornPart, liveSkillsPart, capturePart, skillsFor, forgetBuild, kitStoreSize,
+    fightProfile, currentCp, seedSnapshot, oldSeedRepair, candidateProfiles, fightSources, combatView, kitHash, wornPart, liveSkillsPart, capturePart, skillsFor, forgetBuild, kitStoreSize,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add
