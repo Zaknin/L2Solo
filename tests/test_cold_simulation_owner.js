@@ -79,8 +79,12 @@ function state(characterId, revision, activity = 'hunting') {
         equipmentPlan: { status: 'deferred', strategy: 'none' } } }).ok,
     'an abandoned craft return point is not an active crafting service');
 
+    // The load (its startup repair save) lands before the counted writes.
+    await BotLifeState.init();
     const initialState = state(characterId, 0);
     BotLifeState.acceptSimulationOwnership(characterId, initialState.simulation, initialState);
+    const beforeWrites = Number((await Database.execute([
+        'SELECT simulationRevision FROM bot_life_state WHERE characterId = ?', [characterId]]))[0].simulationRevision);
     const queuedBeforeMigration = BotLifeState.upsertState({
         ...initialState,
         stats: { generatedCold: true, generatedIndex: 700 }
@@ -104,13 +108,13 @@ function state(characterId, revision, activity = 'hunting') {
     assert.deepStrictEqual([versioned.characterName, Number(versioned.nameGeneratorVersion), Number(versioned.appearanceVersion)],
         ['NewOwnerNick', 3, 2], 'the name and look versions live in their own columns');
 
-    // The generated look and name writes each moved the far row's revision
-    // once, and the cache carries the written number.
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, 2,
+    // The queued save, the generated look and the name write each moved the
+    // far row's revision once, and the cache carries the written number.
+    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, beforeWrites + 3,
         'each main write to a far row moves its revision once');
     const [invalidPatch] = await Database.commitAndReleaseColdSimulationLeases([{
         characterId,
-        expectedRevision: 2,
+        expectedRevision: beforeWrites + 3,
         timestamp: 1800,
         patch: { arbitraryColumn: 1 }
     }]);

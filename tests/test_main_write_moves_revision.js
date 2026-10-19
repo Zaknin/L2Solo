@@ -113,8 +113,8 @@ function coordinatorProbe() {
         assert.equal(Life.cachedState(far).simulation.revision, Number(latest.simulationRevision), 'the reload moves the cache');
         assert.equal(commands.coordinator.snapshot().refusals.staleCommand, 1);
 
-        // A far karma bot that dies under a worker command drops its PK items
-        // in a write that moves the row; the command still publishes its death.
+        // A far karma bot that dies under a worker command drops its PK items:
+        // the command's save and drop move the row once; it still publishes its death.
         const pk = await create('cold', { restUntil: Date.now() + 30000 });
         await Database.execute(['UPDATE characters SET karma = 100, pk = 6 WHERE id = ?', [pk]]);
         const dying = Life.snapshot(pk);
