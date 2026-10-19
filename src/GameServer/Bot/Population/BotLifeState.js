@@ -3761,9 +3761,9 @@ const BotLifeState = {
             oldest: null
         };
 
-        // ARCH-NOTE(ARCH-13-d): this file is 13-e's; the loan holder (owner,
-        // lease end) left with its one reader, PopulationService.logSummary's
-        // claimed_by reason. The owner SQL here stays for 13-e.
+        // The owner and lease end left this summary with their one reader,
+        // PopulationService.logSummary's claimed_by reason; the owner SQL in
+        // this file goes with the lease columns.
         const noteOldest = (state, dueAt, ageMs) => {
             if (ageMs <= summary.oldestAgeMs && summary.oldest) return;
             summary.oldestAgeMs = Math.max(0, ageMs);
