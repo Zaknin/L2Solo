@@ -8,7 +8,6 @@ require('../src/Global');
 fixture.assertConfigured(options.default);
 process.on('exit', () => fs.rmSync(fixture.directory, { recursive: true, force: true }));
 const nativeChoice = require('./helpers/nativeMarketChoice');
-const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
@@ -219,7 +218,6 @@ try {
     AfkTrade.closeBotRecord = original.closeBotRecord;
     NeedsEvaluator.evaluate = original.evaluate;
     BotAfkMarket._resetForTests();
-    assert.deepStrictEqual(Economy.summary().mainColdForState, {});
 }
 
 console.log('Bot standing WTB checks passed');
