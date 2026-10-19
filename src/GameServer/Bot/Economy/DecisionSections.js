@@ -84,7 +84,10 @@ const COMPUTED = Object.freeze({
     foundation: sectionMask(['build', 'combat', 'supply', 'occupation', 'relations']),
     sources: sectionMask(['build', 'relations', 'occupation', 'sources', 'money']),
     weighing: sectionMask(SECTIONS),
-    route: sectionMask(['build', 'relations', 'occupation', 'sources'])
+    route: sectionMask(['build', 'relations', 'occupation', 'sources']),
+    // The source walk's per-spot ground verdict (GearAcquisitionPlanner.sourceGround):
+    // level and kit matchup; its other reads are checked beside it.
+    sourceGround: sectionMask(['build'])
 });
 // The one table of what a moved fact touches, for near and far bots alike
 // (factEvents over factsOf). build: the kit (class, level, gear, hennas,

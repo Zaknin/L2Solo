@@ -22,7 +22,8 @@ TableChannel.register('memory', {
     key: row => row.ownerId,
     allRows: () => Array.from(memory.snapshots.keys(), id => memory.snapshot(id))
 });
-memory.onAccept = ownerId => TableChannel.changed('memory', memory.snapshot(ownerId));
+// The row is a deep copy: built only when a worker is attached to take it.
+memory.onAccept = ownerId => TableChannel.changed('memory', () => memory.snapshot(ownerId));
 memory.events = new (require('./InteractionEventQueue'))(memory, {
     onError(error) { utils.infoWarn('InteractionMemory', 'episode write failed: %s', error.message); }
 });

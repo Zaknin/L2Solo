@@ -84,7 +84,7 @@ async function main() {
         }
         const membership = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
         assert(membership.ok);
-        Life.acceptPartyAssignments(assigned, membership.lifeRows); Parties.acceptCommit(prepared);
+        Life.acceptPartyAssignments(assigned, membership.lifeRows); Parties.acceptRow(membership.partyRow);
         for (const id of partyIds) { await verify(id, { effects: oldKit.effects }); assert.equal(rank(Life.cachedState(id)), 10); }
         console.log('PASS party membership commits and cache publication use native skill ranks');
         const claims = await Owner.claimBatch(partyIds.map(id => Life.cachedState(id)), { allowParty: true, allowLifecycle: true });

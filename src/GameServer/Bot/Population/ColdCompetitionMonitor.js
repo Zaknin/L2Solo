@@ -210,9 +210,9 @@ class ColdCompetitionMonitor {
                 spotId: group.spotId, npcId: group.npcId, contextVersion: 1, decisionRolls,
                 demand: group.demand, capacity: group.capacity, pressure: group.pressure,
                 actor: { id: actor.id, name: actor.name, size: actor.size, activeSize: actor.hunters.length, partyId: actor.partyId,
-                    partyUpdatedAt: parties.get(actor.partyId)?.updatedAt, revision: Number(actor.state.simulation?.revision || 0), memoryRevision: ab.revision },
+                    partyRevision: parties.get(actor.partyId)?.revision, revision: Number(actor.state.simulation?.revision || 0), memoryRevision: ab.revision },
                 peer: { id: peer.id, name: peer.name, size: peer.size, activeSize: peer.hunters.length, partyId: peer.partyId,
-                    partyUpdatedAt: parties.get(peer.partyId)?.updatedAt, revision: Number(peer.state.simulation?.revision || 0), memoryRevision: ba.revision },
+                    partyRevision: parties.get(peer.partyId)?.revision, revision: Number(peer.state.simulation?.revision || 0), memoryRevision: ba.revision },
                 relationship: [ab.disposition, ba.disposition], ...outcome };
             if (!acceptEvent(event)) { this.report.overflow = true; break; }
             this.pairs.set(pairKey, timestamp + PAIR_COOLDOWN_MS);

@@ -132,8 +132,9 @@ async function nativeImpactCases(sessions, registry) {
         // Spawn the actual current canonical classes, rather than old actors.
         sessions.forEach(session => session.actor.setClassId(members.find(member => member.characterId === session.actor.fetchId()).classId));
         const assigned = members.map(member => Life.preparePartyAssignment(member, prepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
-        assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
-        Life.acceptPartyAssignments(assigned); party = Parties.acceptCommit(prepared); await phase('hot');
+        const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+        assert(formed.ok);
+        Life.acceptPartyAssignments(assigned); party = Parties.acceptRow(formed.partyRow); await phase('hot');
         sessions.forEach(session => { session.hotBackgroundPartyId = party.partyId; session.actor.state.setCasts(false); session.actor.state.setHits(false); });
         boss.setHp(1000); boss.state.setDead(false); boss.setDestId(base); boss.raidInstanceId = marker.raidInstanceId;
         const opened = await Lifecycle.openMarkedRaid(party, sessions);
@@ -277,7 +278,7 @@ async function propose(proof, { reward = 100, status = 'active' } = {}) {
     const [raid] = await query('SELECT revision FROM bot_raid_encounters WHERE raidKey=?', ['raid:10137']);
     const revision = Number(raid?.revision || 0);
     const atomicGroup = { id: `full:${grants[0].leaseId}`, memberIds: ids,
-        partyChanges: [{ partyId: party.partyId, memberIds: ids, expectedUpdatedAt: party.updatedAt,
+        partyChanges: [{ partyId: party.partyId, memberIds: ids, expectedPartyRevision: party.revision,
             updatedAt: Math.max(Date.now(), party.updatedAt + 1), status, nextResolveAt: Date.now() + 30000,
             statsJson: JSON.stringify({ ...party.stats, raidAdmission: proof }) }],
         raidCommit: { key: 'raid:10137', expectedRevision: revision, revision: revision + 1,
@@ -301,7 +302,7 @@ async function reject(proof, mutation, restore, detail) {
 async function phase(to) {
     const states = await refreshed(), at = Date.now();
     const result = await Database.transitionBackgroundParty({ partyId: party.partyId, expectedStatus: party.status,
-        expectedUpdatedAt: party.updatedAt, expectedPhase: states[0].phase, phase: to,
+        expectedPartyRevision: party.revision, expectedPhase: states[0].phase, phase: to,
         nextResolveAt: to === 'hot' ? null : at + 30000, statsJson: JSON.stringify(party.stats),
         members: states.map(state => ({ characterId: state.characterId, expectedRevision: state.simulation.revision,
             expectedUpdatedAt: state.updatedAt, patch: Owner.persistencePatch({ ...state, phase: to }, at) })) });
@@ -338,8 +339,9 @@ async function main() {
         const prepared = Parties.prepareCommit({ partyId: 'full-native', leaderId: base, memberIds: ids, spotId: spot.id,
             status: 'active', startedAt: Date.now(), nextResolveAt: Date.now() + 30000, stats: { objective } });
         const assigned = ungrouped.map(member => Life.preparePartyAssignment(member, prepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
-        assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
-        Life.acceptPartyAssignments(assigned); party = Parties.acceptCommit(prepared); members = await refreshed();
+        const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+        assert(formed.ok);
+        Life.acceptPartyAssignments(assigned); party = Parties.acceptRow(formed.partyRow); members = await refreshed();
         const checked = admission(members); assert(checked.ok, checked.reason); const proof = checked.proof;
         assert(Buffer.byteLength(JSON.stringify(proof)) <= 1024);
         for (const count of [7, 8]) assert(!admission(members.slice(0, count)).ok);
@@ -469,8 +471,9 @@ async function main() {
             status: 'active', startedAt: Date.now(), nextResolveAt: Date.now() + 30000, stats: { objective } });
         const hotAssigned = members.map(member => Life.preparePartyAssignment({ ...member,
             stats: { ...member.stats, clanPartyObjective: objective, partyRequest: objective } }, hotPrepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
-        assert((await Database.commitBackgroundPartyMembership({ party: hotPrepared.row, members: hotAssigned })).ok);
-        Life.acceptPartyAssignments(hotAssigned); party = Parties.acceptCommit(hotPrepared); await phase('hot');
+        const hotFormed = await Database.commitBackgroundPartyMembership({ party: hotPrepared.row, members: hotAssigned });
+        assert(hotFormed.ok);
+        Life.acceptPartyAssignments(hotAssigned); party = Parties.acceptRow(hotFormed.partyRow); await phase('hot');
         sessions.forEach(session => { session.hotBackgroundPartyId = party.partyId; delete session.raidOpenedBossId; });
         Runtime.start();
         const opened = await Lifecycle.openMarkedRaid(party, sessions);

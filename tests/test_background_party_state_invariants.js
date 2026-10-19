@@ -10,16 +10,10 @@ require('../src/Global');
 const Database = invoke('Database');
 const BackgroundPartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
 
-const originalInit = BackgroundPartyState.init;
-const originalExecute = Database.execute;
+const stored = async partyId => (await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]]))[0];
 
 (async () => {
-    const queries = [];
-    BackgroundPartyState.init = () => Promise.resolve(true);
-    Database.execute = (...args) => {
-        queries.push(args);
-        return Promise.resolve({ affectedRows: 1 });
-    };
+    Database.init();
 
     const saved = await BackgroundPartyState.createOrUpdate({
         partyId: 'bgp_stale_leader',
@@ -30,9 +24,9 @@ const originalExecute = Database.execute;
     assert(saved, 'a valid party should still be persisted');
     assert.strictEqual(saved.leaderId, 101, 'the persisted leader must belong to the normalized member list');
     assert.deepStrictEqual(saved.memberIds, [101, 102], 'party membership must be deduplicated before persistence');
-    assert.strictEqual(queries.length, 1, 'the invariant check should perform one persistence write after init is supplied');
-    assert.strictEqual(queries[0][0][1][1], 101, 'the SQL leader id must use the normalized attached leader');
-    assert.strictEqual(queries[0][0][1][2], '[101,102]', 'the SQL member list must use normalized ids');
+    const savedRow = await stored('bgp_stale_leader');
+    assert.strictEqual(Number(savedRow.leaderId), 101, 'the persisted leader must be the normalized attached leader');
+    assert.strictEqual(savedRow.memberIdsJson, '[101,102]', 'the persisted member list must use normalized ids');
 
     const dissolved = await BackgroundPartyState.createOrUpdate({
         partyId: 'bgp_empty_dissolved',
@@ -42,8 +36,7 @@ const originalExecute = Database.execute;
     assert(dissolved, 'an empty dissolved party must remain persistable for orphan cleanup');
     assert.strictEqual(dissolved.status, 'dissolved');
     assert.deepStrictEqual(dissolved.memberIds, []);
-    assert.strictEqual(queries.length, 2, 'dissolved orphan cleanup should perform its persistence write');
-    assert.strictEqual(queries[1][0][1][8], 'dissolved', 'the cleanup write must preserve dissolved status');
+    assert.strictEqual((await stored('bgp_empty_dissolved')).status, 'dissolved', 'the cleanup write must preserve dissolved status');
 
     const baseline = (BackgroundPartyState.size?.() ?? BackgroundPartyState.counts().total);
     for (let index = 0; index < 1000; index++) {
@@ -132,8 +125,7 @@ const originalExecute = Database.execute;
 })().catch((error) => {
     console.error(error);
     process.exitCode = 1;
-}).finally(() => {
-    BackgroundPartyState.init = originalInit;
-    Database.execute = originalExecute;
+}).finally(async () => {
+    await Database.close();
     fs.rmSync(directory, { recursive: true, force: true });
 });

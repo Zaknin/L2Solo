@@ -50,7 +50,7 @@ const base = { life: Life, owner: Owner, memory: Memory, parties: Parties, now: 
     pvpEnabled: () => true, incrementalPvp: true, onEncounter: Runtime.register, waitMs: 15000, cooldownMs: 600000, rng: () => 0.5 };
 function event(a, b, key = `handoff:${a}:${b}`) {
     const p = id => { const s = state(id), party = Parties.find(s.party?.partyId); return { id,
-        partyId: party?.partyId || null, partyUpdatedAt: party?.updatedAt, size: party?.memberIds.length || 1,
+        partyId: party?.partyId || null, partyRevision: party?.revision, size: party?.memberIds.length || 1,
         revision: s.simulation.revision, memoryRevision: Memory.snapshot(id).revision }; };
     // U26: each side's can-I-win, rolled once at the dispute and carried on the event.
     return { key, at: clock, pressure: 3, spotId: 'test', npcId: 10, actor: p(a), peer: p(b), action: 'contest', pvpIntent: true, willing: [true, true] };
@@ -59,8 +59,9 @@ async function party(ids) {
     const p = Parties.prepareCommit({ partyId: `enc-party-${ids[0]}`, leaderId: ids[0], memberIds: ids,
         status: 'active', spotId: 'test', startedAt: clock, nextResolveAt: clock + 1000, stats: { objective: { npcId: 10 } } });
     const members = ids.map(id => Life.preparePartyAssignment(state(id), p.row.partyId, 'dps', ids[0], clock + 1000));
-    assert((await DB.commitBackgroundPartyMembership({ party: p.row, members })).ok);
-    Life.acceptPartyAssignments(members); Parties.acceptCommit(p);
+    const formed = await DB.commitBackgroundPartyMembership({ party: p.row, members });
+    assert(formed.ok);
+    Life.acceptPartyAssignments(members); Parties.acceptRow(formed.partyRow);
 }
 async function main() {
     patch(Date, 'now', () => clock);

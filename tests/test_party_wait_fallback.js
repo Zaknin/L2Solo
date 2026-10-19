@@ -19,6 +19,7 @@ const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
 const GlobalChat = invoke('GameServer/Bot/Population/BotGlobalChat');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
 const BotRoute = require('../src/GameServer/Bot/Population/BotRoute');
+const PartyWaitFallback = require('../src/GameServer/Bot/Population/PartyWaitFallback');
 
 invoke('GameServer/DataCache').init();
 
@@ -100,6 +101,19 @@ function routeChecks() {
     assert.strictEqual(route(routeState(3, { equipmentPlan: partyPlan, partyRequest: requiredRequest })).spotId,
         genericFallback.id, 'an unsafe planned fallback gives way to a plan-free level search');
     assert(searches.some((entry) => entry.spotId === null && !entry.plan), 'the generic search drops plan and saved spot');
+
+    // ROUTE-ROOM-3: the worker's room filter refuses a planned fallback spot
+    // with no room (the plan-free level search decides), but not the spot the
+    // bot stands on.
+    GearPlanner.safeFallbackForPlan = () => ({ spotId: plannedFallback.id, npcId: 321 });
+    const fallbackWith = (state, hasRoom) => PartyWaitFallback.spotFor(state, partyPlan, profiles,
+        { excludedSpotIds: new Set(), timestamp: Date.now(), hasRoom })?.spot?.id;
+    assert.strictEqual(fallbackWith(routeState(7, {}), id => id !== plannedFallback.id), genericFallback.id,
+        'a full planned fallback is skipped: the plan-free search decides');
+    assert.strictEqual(fallbackWith(routeState(8, {}, { spotId: plannedFallback.id }), () => false), plannedFallback.id,
+        'the planned fallback the bot stands on is kept even when it counts as full');
+    assert.strictEqual(fallbackWith(routeState(9, {}), () => true), plannedFallback.id,
+        'a fallback with room is taken');
 
     // No fallback at all: the waiter keeps the ordinary route search.
     GearPlanner.safeFallbackForPlan = () => null;

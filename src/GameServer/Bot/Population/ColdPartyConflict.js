@@ -100,7 +100,6 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
             stats: { ...side.party.stats, coldCompetition: Episode.begin(side.party.stats?.coldCompetition, { ...episode, peerId: sides[1 - index].principal.characterId,
                 ...(delayed ? { wait } : {}) }) } });
         prepared.row.updatedAt = Math.max(prepared.row.updatedAt, side.party.updatedAt + 1);
-        prepared.snapshot.updatedAt = prepared.row.updatedAt;
         return prepared;
     });
     const next = sides.flatMap((side, index) => side.members.map(state => {
@@ -165,7 +164,7 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
             ...(pvp?.started ? { pvpContext: sides.map(side => side.members.map(s => ({ id: s.characterId,
                 clanId: Number(s.stats?.clanId || s.clanId || 0), karma: Number(s.stats?.karma || 0) }))) } : {}),
             partyChanges: preparedParties.flatMap((prepared, index) => prepared ? [{
-            partyId: prepared.row.partyId, expectedUpdatedAt: sides[index].party.updatedAt,
+            partyId: prepared.row.partyId, expectedPartyRevision: sides[index].party.revision,
             memberIds: sides[index].party.memberIds, nextResolveAt: prepared.row.nextResolveAt,
             statsJson: prepared.row.statsJson, updatedAt: prepared.row.updatedAt }] : []) };
         const results = await owner.commitAndReleaseBatch(next.map((state, index) => ({
@@ -175,7 +174,8 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
                 result: { memoryEvents: events.filter(e => e.sourceId === state.characterId) } }
         })), { timestamp: now(), journalReason: pvp?.started ? 'pvp' : 'party_conflict' });
         if (results.length !== states.length || results.some(r => !r.ok)) return { ok: false, reason: 'commit_rejected' };
-        preparedParties.filter(Boolean).forEach(prepared => parties.acceptCommit(prepared));
+        // Each side caches its own committed row (Database commitBatch, partyRow).
+        preparedParties.filter(Boolean).forEach(prepared => parties.acceptRow(results.find(r => r.partyRow?.partyId === prepared.row.partyId).partyRow));
         if (encounter) onEncounter(encounter);
         const Journal = require('../../../PvpJournal');
         const partyIds = sides.map(s => s.party?.partyId);

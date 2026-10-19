@@ -45,6 +45,22 @@ async function until(predicate, label, turns = 200) {
     }
     throw new Error(`timed out: ${label}`);
 }
+// Posts one state page the worker never gets. The table page that goes
+// ahead of it (the memory row ensureMany published) reaches the worker.
+async function sendLostStatePage(coordinator, worker, entry) {
+    const post = worker.postMessage;
+    const lost = [];
+    let sent;
+    try {
+        worker.postMessage = message => {
+            if (message.type === 'snapshot_page') lost.push(message.type);
+            else Reflect.apply(post, worker, [message]);
+        };
+        sent = await coordinator.sendSnapshotPage([entry]);
+    } finally { worker.postMessage = post; }
+    assert.deepEqual(lost, ['snapshot_page'], 'the one state page was posted and lost');
+    return sent;
+}
 
 (async () => {
     try {
@@ -162,13 +178,7 @@ async function until(predicate, label, turns = 200) {
         const lostState = Life.acceptLifecycleRow(lostNative);
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([lostId]);
         const prepared = coordinator.snapshotEntry(lostState);
-        const workerPost = coordinator.worker.postMessage;
-        try {
-            coordinator.worker.postMessage = message => {
-                assert.equal(message.type, 'snapshot_page');
-            };
-            assert.equal(await coordinator.sendSnapshotPage([prepared]), true);
-        } finally { coordinator.worker.postMessage = workerPost; }
+        assert.equal(await sendLostStatePage(coordinator, coordinator.worker, prepared), true);
         assert.equal(coordinator.projectedEntryFor(lostId).entry, prepared);
         const lostCheckpoint = Protocol.safetyCheckpoint(lostState);
         assert.equal(coordinator.canRepairSafety(lostCheckpoint), true);
@@ -301,11 +311,7 @@ async function until(predicate, label, turns = 200) {
         const awaitState = Life.acceptLifecycleRow(awaitNative);
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([awaitId]);
         const awaitEntry = coordinator.snapshotEntry(awaitState);
-        const replacementPost = replacement.postMessage;
-        try {
-            replacement.postMessage = message => { assert.equal(message.type, 'snapshot_page'); };
-            await coordinator.sendSnapshotPage([awaitEntry]);
-        } finally { replacement.postMessage = replacementPost; }
+        await sendLostStatePage(coordinator, replacement, awaitEntry);
         let readEntered = false, releaseRead;
         const readGate = new Promise(resolve => { releaseRead = resolve; });
         let heldReads = 0;

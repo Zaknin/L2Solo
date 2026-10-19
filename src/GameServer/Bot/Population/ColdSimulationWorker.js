@@ -669,10 +669,12 @@ tables.watch('parties', {
 });
 // The memory rows are kept packed by the kernel's InteractionMemory, not a
 // second plain copy in the mirror (retain: false); older revisions are refused.
+// Main publishes no removed row: the set is bounded by the owners main
+// accepted, and a full copy (reset) re-sends them, kept views refuse equals.
 tables.watch('memory', {
-    reset: () => {},
+    reset() {},
     put: (key, row) => { if (kernel?.interactionMemory.accept(row)) kernel.decisionEvents?.memoryChanged(Number(key)); },
-    remove: key => kernel?.interactionMemory.forget(Number(key))
+    remove() {}
 }, { retain: false });
 tables.watch('pressure', {
     reset: () => { if (kernel) kernel.pressureRow = null; },
@@ -993,15 +995,20 @@ function spotRoom(spotId) {
     return !spot || spot.raidBoss === true ? Infinity : LevelingRoutes.roomForSpot(spot);
 }
 
+// The room filter of a solo bot's route (ROUTE-ROOM): a spot has room for
+// this bot when every bot indexed there, those on their way included, other
+// than this bot, plus this bot fit; re-checked at arrival.
+function roomFilterFor(state) {
+    const self = new Set([stateKey(state)]);
+    return (spotId) => kernel.occupancy.physicalCount(spotId, { excludeKeys: self }) + 1 <= spotRoom(spotId);
+}
+
 // The step's solo trip and the kept route's drop (BotRoute.trip / drop): the
 // route lives in the bot's kernel record. The search skips a spot with no
-// room for the bot (ROUTE-ROOM): every bot indexed there, those on their
-// way included, other than this bot, plus this bot; re-checked at arrival.
+// room for the bot.
 function routeTrip(state, context, leaf, timestamp) {
-    const self = new Set([stateKey(state)]);
-    const hasRoom = (spotId) => kernel.occupancy.physicalCount(spotId, { excludeKeys: self }) + 1 <= spotRoom(spotId);
     return BotRoute.trip(kernel.states.get(Number(state.characterId)), state, leaf,
-        { spots: planningSpots, currentSpot: context?.spot || null, timestamp, hasRoom });
+        { spots: planningSpots, currentSpot: context?.spot || null, timestamp, hasRoom: roomFilterFor(state) });
 }
 function dropRoute(characterId, why) {
     BotRoute.drop(kernel.states.get(Number(characterId)), why);
@@ -1530,7 +1537,8 @@ function startKernel(config = {}) {
             if (routeDrop) dropRoute(state.characterId, routeDrop);
             const partyRouteWaiting = PartyWaitFallback.waiting(state, acquisitionPlan, partyRequest);
             const partyFallback = partyRouteWaiting
-                ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots, { excludedSpotIds, timestamp })
+                ? PartyWaitFallback.spotFor(state, acquisitionPlan, spots,
+                    { excludedSpotIds, timestamp, hasRoom: roomFilterFor(state) })
                 : null;
             const fallbackSpot = partyFallback?.spot || null;
             const plannedStats = { ...(state.stats || {}), ...economy.statsPacket, equipmentPlan: acquisitionPlan };

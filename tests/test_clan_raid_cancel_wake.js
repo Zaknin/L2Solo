@@ -13,7 +13,7 @@ const ClanActionService = invoke('GameServer/Clan/ClanActionService');
 const ids = Array.from({ length: 9 }, (_, index) => index + 1);
 const marker = { clanId: 7, ownerSection: 'goal', goalKey: 'g1', generation: 'v1', memberIds: ids,
     sourceId: 'raid:123', npcId: 123, raidInstanceId: 'spawn1', minPartySize: 9, maxPartySize: 9 };
-const party = { partyId: 'p1', status: 'active', memberIds: ids, spotId: marker.sourceId, updatedAt: 5,
+const party = { partyId: 'p1', status: 'active', memberIds: ids, spotId: marker.sourceId, updatedAt: 5, revision: 2,
     stats: { objective: { fullRoster: marker } } };
 
 async function main() {
@@ -27,7 +27,7 @@ async function main() {
         await ReviewEvents.drain(null, 1000);
 
         // A stale party (changed since the caller read it) is not cancelled and wakes nothing.
-        stored = { ...party, updatedAt: 6 };
+        stored = { ...party, revision: 3 };
         assert.strictEqual(await Roster.cancelUnopened(party, 'raid_roster_owner_changed'), false);
         assert.deepStrictEqual(await ReviewEvents.drain(null), []);
 

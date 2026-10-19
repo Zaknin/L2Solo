@@ -229,7 +229,7 @@ function nextDueAt(state = {}, timestamp = Date.now(), partySession = {}, meetin
     // The party row is the durable scheduling authority for a party resolve.
     // A freshly assigned leader can briefly carry no personal due time, and
     // later leader snapshots can also lag behind an advanced party schedule.
-    const party = facts.leaderParty(state.characterId);
+    const party = facts.leaderParty(state.characterId, state);
     const partyDue = party ? Number(party.nextResolveAt || 0) : 0;
     const due = partyDue > 0 ? partyDue : stateDue;
     if (party && partyIntegrityInvalid(party, facts.partyMembers(party), partySession)) return timestamp;
@@ -276,7 +276,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
         && ['party_travel', 'party_travel_wait', 'party_arrival'].includes(activity)) {
         party = { ...party, updatedAt: Math.max(timestamp, Number(run.party.updatedAt || 0) + 1) };
         atomicGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
-            expectedUpdatedAt: run.party.updatedAt, updatedAt: party.updatedAt,
+            expectedPartyRevision: run.party.revision, updatedAt: party.updatedAt,
             nextResolveAt: party.nextResolveAt, spotId: party.spotId, status: party.status,
             cohesion: party.cohesion, risk: party.risk, statsJson: JSON.stringify(party.stats) }];
     }
@@ -316,7 +316,7 @@ let PartyMarketBreak, ClanPartyDuty, BotCrystallization;
 
 function lifecycleKind(state = {}, facts = NO_FACTS) {
     if (state.phase !== 'cold' || state.activity === 'pk_hunting') return 'inactive';
-    const leads = facts.leaderParty(state.characterId) !== null;
+    const leads = facts.leaderParty(state.characterId, state) !== null;
     // Paid personal journeys retain the existing group writer.
     if (state.party?.partyId) return leads ? 'party' : 'party_member';
     if (state.stats?.tradeMeeting) return ['traveling', 'dead', 'resting', 'fighting'].includes(state.activity) ? 'resolver' : 'event_driven';
@@ -684,7 +684,7 @@ class ColdSimulationKernel {
     dueAt(state, timestamp = this.now()) {
         // Compact catalog members carry no stats. Read the current roster
         // locally; no additional snapshot fields or population scan.
-        const party = this.leaderParty(state.characterId);
+        const party = this.leaderParty(state.characterId, state);
         const meetingPending = !!state.stats?.tradeMeeting
             || (party?.memberIds || []).some(id => this.states.get(Number(id))?.state.stats?.tradeMeeting);
         if (meetingPending && party) {
@@ -750,10 +750,16 @@ class ColdSimulationKernel {
         return partyId === undefined ? null : this.parties.get(partyId) || null;
     }
 
-    // The party row this bot leads, or null (lifecycleKind, nextDueAt).
-    leaderParty(characterId) {
+    // The party row this bot leads, or null (lifecycleKind, nextDueAt). The
+    // bot's own state wins over the row: main publishes the row after its
+    // later awaits, so a leader that has just left (or not yet joined) is no
+    // party writer. state: the one being read (default: the stored one); a
+    // leader with no state keeps the row.
+    leaderParty(characterId, state = this.states.get(Number(characterId))?.state) {
         const party = this.partyOf(characterId);
-        return party && Number(party.leaderId) === Number(characterId) ? party : null;
+        if (!party || Number(party.leaderId) !== Number(characterId)) return null;
+        if (state && String(state.party?.partyId || state.partyId || '') !== String(party.partyId)) return null;
+        return party;
     }
 
     // The member states of a party row the kernel holds (nextDueAt).
@@ -2050,7 +2056,7 @@ class ColdSimulationKernel {
             if (atomicParty) {
                 resolvedParty.updatedAt = Math.max(startedAt, Number(run.party.updatedAt) + 1);
                 memoryGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
-                    expectedUpdatedAt: run.party.updatedAt, updatedAt: resolvedParty.updatedAt,
+                    expectedPartyRevision: run.party.revision, updatedAt: resolvedParty.updatedAt,
                     nextResolveAt: resolvedParty.nextResolveAt, statsJson: JSON.stringify(resolvedParty.stats),
                     status: resolvedParty.status, cohesion: resolvedParty.cohesion, risk: resolvedParty.risk }];
             }
@@ -2460,7 +2466,7 @@ class ColdSimulationKernel {
                 this.upsert({ state: result.state, context: result.context || this.states.get(id)?.context || {} });
             } else {
                 this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || ''));
-                if (String(result.reason || '').includes('stale')) DiagnosticConfig.developerDiagnostics && (this.stats.stale += 1);
+                if (DiagnosticConfig.developerDiagnostics && Protocol.staleRefusal(result)) this.stats.stale += 1;
                 if (result.state) this.upsert({
                     state: {
                         ...result.state,

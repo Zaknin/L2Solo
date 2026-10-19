@@ -35,7 +35,7 @@ function event(a, b, key = `cold-pvp:${a}:${b}`) {
     const participant = id => {
         const p = Parties.find(state(id).party?.partyId);
         return { id, revision: state(id).simulation.revision, memoryRevision: Memory.snapshot(id).revision,
-            partyId: p?.partyId, partyUpdatedAt: p?.updatedAt, size: p?.memberIds.length || 1 };
+            partyId: p?.partyId, partyRevision: p?.revision, size: p?.memberIds.length || 1 };
     };
     // U26: each side's can-I-win, rolled once at the dispute and carried on the event.
     return { key, at, pressure: 3, spotId: 'test', npcId: 10, action: 'contest', pvpIntent: true, willing: [true, true],
@@ -46,9 +46,10 @@ async function party(members) {
         spotId: 'test', status: 'active', startedAt: at, nextResolveAt: at + 45000,
         stats: ordinaryHunt ? {} : { objective: { npcId: 10 } } });
     const assigned = members.map(id => Life.preparePartyAssignment(state(id), prepared.row.partyId, 'dps', members[0], at + 45000));
-    assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
+    const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+    assert(formed.ok);
     Life.acceptPartyAssignments(assigned);
-    return Parties.acceptCommit(prepared);
+    return Parties.acceptRow(formed.partyRow);
 }
 async function main() {
     invoke('GameServer/DataCache').init();
@@ -235,7 +236,7 @@ async function main() {
     await party([7, 8]);
     const rejected = await Conflict.apply({ ...base, event: event(7, 9), owner: { ...Owner,
         commitAndReleaseBatch: async (entries, options) => {
-            await Database.execute(['UPDATE bot_background_parties SET updatedAt=updatedAt+1 WHERE partyId=?', ['pvp-party-7']]);
+            await Database.execute(['UPDATE bot_background_parties SET revision=revision+1 WHERE partyId=?', ['pvp-party-7']]);
             return Owner.commitAndReleaseBatch(entries, options);
         } } });
     assert.strictEqual(rejected.ok, false);

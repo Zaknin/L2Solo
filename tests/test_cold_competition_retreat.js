@@ -34,14 +34,15 @@ async function createParty(ids) {
     const p = Party.prepareCommit({ partyId: `p${ids[0]}`, leaderId: ids[0], memberIds: ids,
         spotId: 'test', status: 'active', startedAt: at, nextResolveAt: at + 45000, stats: { objective: ids[0] <= 22 ? null : { npcId: 10 }, ...(ids[0] <= 22 ? { coldCompetition: oldEpisode } : {}) } });
     const assigned = ids.map(id => Life.preparePartyAssignment(state(id), p.row.partyId, 'dps', ids[0], at + 45000));
-    assert((await Database.commitBackgroundPartyMembership({ party: p.row, members: assigned })).ok);
-    Life.acceptPartyAssignments(assigned); Party.acceptCommit(p);
+    const formed = await Database.commitBackgroundPartyMembership({ party: p.row, members: assigned });
+    assert(formed.ok);
+    Life.acceptPartyAssignments(assigned); Party.acceptRow(formed.partyRow);
 }
 function event(a, b, action = 'avoid') {
     const participant = id => {
         const party = Party.find(state(id).party?.partyId);
         return { id, revision: state(id).simulation.revision, memoryRevision: Memory.snapshot(id).revision,
-            partyId: party?.partyId, partyUpdatedAt: party?.updatedAt, size: party?.memberIds.length || 1 };
+            partyId: party?.partyId, partyRevision: party?.revision, size: party?.memberIds.length || 1 };
     };
     return { key: `retreat:${a}:${b}`, at, pressure: 3, spotId: 'test', npcId: 10, action, actor: participant(a), peer: participant(b) };
 }
@@ -119,6 +120,10 @@ async function run() {
         const prior = Party.find(`p${a}`)?.nextResolveAt || state(a).timing.nextResolveAt, peerDue = state(b).timing.nextResolveAt;
         const result = await actions.apply(event(a, b, 'yield'));
         assert(result.ok, JSON.stringify(result));
+        for (const partyId of [`p${a}`, `p${b}`].filter(id => Party.find(id))) {
+            const [saved] = await Database.execute(['SELECT revision FROM bot_background_parties WHERE partyId=?', [partyId]]);
+            assert.strictEqual(Party.find(partyId).revision, Number(saved.revision), 'each side caches its own committed party row');
+        }
         for (const id of [...actorIds, ...peerIds]) {
             assert.strictEqual(state(id).stats.coldCompetition.outcome, 'yield');
             assert.strictEqual(state(id).stats.coldCompetition.endedAt, undefined);
@@ -148,7 +153,7 @@ async function run() {
     assert(!state(23).simulation.leaseId);
     const fresh = event(23, 25);
     const race = new ColdCompetitionActions({ ...base, owner: { ...Owner, commitAndReleaseBatch: async (entries, opts) => {
-        await Database.execute(['UPDATE bot_background_parties SET updatedAt=updatedAt+1 WHERE partyId=?', ['p23']]);
+        await Database.execute(['UPDATE bot_background_parties SET revision=revision+1 WHERE partyId=?', ['p23']]);
         return Owner.commitAndReleaseBatch(entries, opts);
     } } });
     assert.strictEqual((await race.apply(fresh)).reason, 'commit_rejected');

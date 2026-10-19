@@ -29,7 +29,7 @@ function party(state, participant, event, { resume = null, revenge = false, retr
     const fail = (detail, context) => failed('party_changed', detail, participant, participant.id, context);
     if (!state) return fail('party_missing');
     if (state.status !== 'active') return fail('party_inactive', { actual: state.status });
-    if (state.updatedAt !== participant.partyUpdatedAt) return fail('party_revision_changed', { expected: participant.partyUpdatedAt, actual: state.updatedAt });
+    if (state.revision !== participant.partyRevision) return fail('party_revision_changed', { expected: participant.partyRevision, actual: state.revision });
     const ids = state.memberIds;
     if (ids.length !== participant.size) return fail('party_size_changed', { expected: participant.size, actual: ids.length });
     if (ids.length < 2 || ids.length > 9) return fail('party_size_invalid', { actual: ids.length });

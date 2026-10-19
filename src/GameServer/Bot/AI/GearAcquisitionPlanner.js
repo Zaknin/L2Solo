@@ -46,6 +46,7 @@ const BotTargetScorer = invoke('GameServer/Bot/AI/BotTargetScorer');
 const BotTargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
 const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
+const BotHuntingGroundPolicy = invoke('GameServer/Bot/AI/BotHuntingGroundPolicy');
 
 const RANKS = ['none', 'd', 'c', 'b', 'a', 's'];
 const { equipmentSlotKey, equipmentReplacementConflict } = BotEquipmentCompatibility;
@@ -2076,22 +2077,55 @@ function writeReadySourceFact(fact, kind, spotId, npcId, itemId, units, expected
     return fact;
 }
 // A source is executable only on ground the solo route executor admits.
-// Share profiles and spot verdicts for one projection, then discard them.
-// options.matchupProfiles: the state's solo profiles at this timestamp, when
-// the caller already read them (the build's income route).
+// The bot's ground verdict per planning spot: the clauses only its build
+// moves (the spot's raid flag, the level fit, the kit matchup of the bot
+// alone), 2 bits per spot at its ordinal in `spots` (SpotIndex.ordinalFor):
+// 0 unknown, 1 allowed, 2 refused, filled as the walk asks. The wish build
+// keeps the record with the bot's held build (EconomyContext, dropped when a
+// step's sections hit COMPUTED.sourceGround); kept = that record, or null.
+// The reads no section of that mask names are checked by each reader against
+// the copies beside the bits: the list's length, the economic hunt (the
+// bot's wish focus), the recovery level penalty (SpotRiskPolicy, its clean
+// wins move no section) and the party ground flag (BotHuntingGroundPolicy).
+// The spot exclusions (step-counted marks, no section) are never kept.
+const GROUND_ALLOWED = 1, GROUND_REFUSED = 2;
+function sourceGround(spots = [], kept = null) {
+    return kept?.spots === spots ? kept : { spots, length: -1, economicHunt: null, penalty: -1, grouped: null, cells: null };
+}
+// Diagnostics only: one reused reader in 64 also checks its kept cells
+// against a fresh verdict (source_route:ground:checked|disagree).
+let groundShadows = 0;
+// options.ground: a sourceGround record to read and fill (counted as
+// source_route:ground:reuse|build); without one a call-local record over
+// options.spots. options.matchupProfiles: the state's solo profiles at this
+// timestamp, when the caller already read them (the build's income route).
 function sourceRouteReader(state, options = {}) {
-    const allowed = new WeakMap();
     const timestamp = options.timestamp ?? Date.now();
     const excluded = SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp);
     const Spots = invoke('GameServer/Bot/AI/SpotService');
     const economicHunt = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state);
+    const penalty = Number(SpotRiskPolicy.recoveryFor(state)?.levelPenalty) || 0;
+    // The hunting-ground clause admits party-only ground to a grouped bot.
+    const grouped = BotHuntingGroundPolicy.isParty(state, { mode: 'solo' });
     const level = Number(state.level || 1);
+    const ground = options.ground || sourceGround(options.spots || []);
+    const spots = ground.spots;
+    const reused = ground.cells !== null && ground.length === spots.length
+        && ground.economicHunt === economicHunt && ground.penalty === penalty && ground.grouped === grouped;
+    if (!reused) Object.assign(ground, { length: spots.length, economicHunt, penalty, grouped,
+        cells: new Uint8Array((spots.length + 3) >> 2) });
+    const cells = ground.cells, diagnostic = Diagnostics.active();
+    if (diagnostic && options.ground) Diagnostics.count('source_route', 'ground', reused ? 'reuse' : 'build');
+    // A sampled reader notes the ordinals it checked or filled itself.
+    const shadow = diagnostic && reused && (Diagnostics.enabled(state.characterId) || (++groundShadows & 63) === 0)
+        ? new Set() : null;
+    // An excluded spot counts once per reader, as each refusal used to.
+    const countedExcluded = diagnostic ? new Set() : null;
     let profiles = null;
-    // The first clause that refuses the spot, cheap ones first: the matchup
-    // verdict (profiles, NPC verdicts) is the costly one.
+    // The first kept clause that refuses the spot, cheap ones first: the
+    // matchup verdict (profiles, NPC verdicts) is the costly one.
     const refusal = spot => {
         if (spot.raidBoss === true) return 'raid';
-        if (excluded.has(String(spot.id))) return 'excluded';
         const soloOptions = { timestamp, mode: 'solo' };
         if (!Spots.isSuitable(spot, level, soloOptions)
             && !(economicHunt && Number(spot.avgLevel || spot.minLevel || 1) >= level - 15)) return 'level';
@@ -2100,12 +2134,28 @@ function sourceRouteReader(state, options = {}) {
         return null;
     };
     return spot => {
-        if (!allowed.has(spot)) {
-            const refused = refusal(spot);
-            if (refused && Diagnostics.active()) Diagnostics.count('source_route', 'refused', refused);
-            allowed.set(spot, !refused);
+        const at = SpotIndex.ordinalFor(spots, spot), shift = (at & 3) << 1;
+        let cell = at < 0 ? 0 : cells[at >> 2] >> shift & 3;
+        if (shadow && cell && !shadow.has(at)) {
+            shadow.add(at);
+            Diagnostics.count('source_route', 'ground', 'checked');
+            if ((refusal(spot) ? GROUND_REFUSED : GROUND_ALLOWED) !== cell) Diagnostics.count('source_route', 'ground', 'disagree');
         }
-        return allowed.get(spot);
+        if (cell === GROUND_REFUSED) return false;
+        if (excluded.size && excluded.has(String(spot.id))) {
+            if (countedExcluded && !countedExcluded.has(spot)) {
+                countedExcluded.add(spot);
+                Diagnostics.count('source_route', 'refused', 'excluded');
+            }
+            return false;
+        }
+        if (!cell) {
+            const refused = refusal(spot);
+            if (refused && diagnostic) Diagnostics.count('source_route', 'refused', refused);
+            cell = refused ? GROUND_REFUSED : GROUND_ALLOWED;
+            if (at >= 0) { cells[at >> 2] |= cell << shift; shadow?.add(at); }
+        }
+        return cell === GROUND_ALLOWED;
     };
 }
 
@@ -2955,6 +3005,7 @@ module.exports.sourceCacheSize = sourceCacheSize;
 module.exports.sourceYieldReaderFor = sourceYieldReaderFor;
 module.exports.sourceFacts = sourceFacts;
 module.exports.sourceRouteReader = sourceRouteReader;
+module.exports.sourceGround = sourceGround;
 
 // Only the exports that judge a bot against several sources share readiness.
 for (const name of ['preferredTarget', 'preferredDropTarget', 'preferredNoGradeTarget', 'staticNpcUpgradePlan',

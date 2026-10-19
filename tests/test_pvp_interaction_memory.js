@@ -10,13 +10,16 @@ const Enemy = invoke('GameServer/Bot/AI/BotEnemyMemory');
 const Social = invoke('GameServer/Social/InteractionMemoryRuntime');
 const Bridge = invoke('GameServer/Social/PvpInteractionMemory');
 const Repository = invoke('GameServer/Social/InteractionMemoryRepository');
-const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
+const TableChannel = require('../src/GameServer/Bot/Population/ColdTableChannel').shared;
+const TableMirror = require('../src/GameServer/Bot/Population/TableMirror');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'l2-pvp-relations-'));
 options.default.Database.path = path.join(dir, 'memory.sqlite');
-const originalDirty = Coordinator.markDirty;
 const originalEnqueue = Social.events.enqueue;
-const originalOnCommit = Social.events.onCommit;
 const delivered = [];
+// The worker side of the 'memory' table: every memory row main publishes.
+const channelTarget = {};
+const mirror = new TableMirror();
+mirror.watch('memory', { reset() {}, put: (_key, row) => delivered.push(row), remove() {} }, { retain: false });
 const at = Date.now() - 90000;
 
 async function run() {
@@ -28,7 +31,7 @@ async function run() {
     }
     assert(await Life.init());
     await Social.ensureMany([1]);
-    Coordinator.markDirty = (state, options) => delivered.push({ id: state.characterId, options });
+    TableChannel.attach(channelTarget, 'pvp-memory-test', payload => { mirror.apply(payload.tables); return true; });
     const state = await Life.upsertState({ characterId: 1, name: 'Actor1', accountName: 'bot_test_1',
         level: 10, phase: 'hot', activity: 'hunting', stats: { classId: 0 }, inventory: {},
         loc: { locX: 0, locY: 0, locZ: 0 }, vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 } });
@@ -52,7 +55,8 @@ async function run() {
     await Social.events.flush();
     assert.strictEqual(Social.assess({ id: 1 }, { id: 2 }).disposition, 'hostile');
     assert.strictEqual(Social.snapshot(1).revision, 2);
-    assert(delivered.some(e => e.id === 1 && e.options?.reason === 'interaction_memory'), 'worker receives the new relationship');
+    TableChannel.flush();
+    assert(delivered.some(row => row.ownerId === 1 && row.revision === 2), 'worker receives the new relationship');
     Social.events.enqueue(first);
     await Social.events.flush();
     assert.strictEqual(Social.snapshot(1).revision, 2, 'replay is idempotent in SQLite');
@@ -134,8 +138,7 @@ async function run() {
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
     Social.events.enqueue = originalEnqueue;
     await Social.events.drain();
-    Social.events.onCommit = originalOnCommit;
-    Coordinator.markDirty = originalDirty;
+    TableChannel.detach(channelTarget);
     await Database.close();
     fs.rmSync(dir, { recursive: true, force: true });
 });

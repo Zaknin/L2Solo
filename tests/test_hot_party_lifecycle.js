@@ -45,9 +45,10 @@ async function createParty(ids, extraStats = {}) {
             coldCompetition: { conflictUntil: at + 600000 }, ...extraStats } });
     const assigned = ids.map((id, index) => Life.preparePartyAssignment(Life.cachedState(id), prepared.row.partyId,
         index ? 'mage' : 'tank', ids[0], at + 1000));
-    assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
+    const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+    assert(formed.ok);
     Life.acceptPartyAssignments(assigned);
-    activeParty = Parties.acceptCommit(prepared);
+    activeParty = Parties.acceptRow(formed.partyRow);
     return activeParty;
 }
 
@@ -178,7 +179,7 @@ async function run() {
     const hotRows = await Database.execute(['SELECT phase,partyId,statsJson FROM bot_life_state WHERE partyId=?', [party.partyId]]);
     assert.strictEqual(hotRows.length, 9); assert(hotRows.every(r => r.phase === 'hot'));
     const hot = Parties.find(party.partyId), current = hot.memberIds.map(id => Life.cachedState(id));
-    const invalid = await Database.transitionBackgroundParty({ partyId: hot.partyId, expectedStatus: 'hot', expectedUpdatedAt: hot.updatedAt,
+    const invalid = await Database.transitionBackgroundParty({ partyId: hot.partyId, expectedStatus: 'hot', expectedPartyRevision: hot.revision,
         expectedPhase: 'hot', phase: 'cold', nextResolveAt: at + 30000, statsJson: '{}',
         members: current.map((s, index) => ({characterId:s.characterId, expectedRevision:s.simulation.revision + Number(index === 8),
             expectedUpdatedAt:s.updatedAt, patch: Owner.persistencePatch({...s, phase:'cold'})})) });

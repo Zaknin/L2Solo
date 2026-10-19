@@ -76,14 +76,13 @@ class ColdCompetitionCandidates {
         const metadata = this.parties.get(key);
         if (!metadata) return;
         for (const id of metadata.members) drop(this.memberParties, id, key);
-        const ordered = [...metadata.contributors].sort((a, b) => a[metaKey].sequence - b[metaKey].sequence);
+        // One row per party with one leader: at most one contributor leads it.
         let winner = null, winnerParty = null;
-        for (const record of ordered) {
+        for (const record of metadata.contributors) {
             const party = this.leaderParty(record.id);
             if (!party || party.partyId !== key) continue;
-            if (!winnerParty || Number(party.updatedAt || 0) > Number(winnerParty.updatedAt || 0)) {
-                winner = record; winnerParty = party;
-            }
+            winner = record; winnerParty = party;
+            break;
         }
         metadata.winner = winner;
         const ids = winnerParty?.memberIds;

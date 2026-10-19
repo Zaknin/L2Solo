@@ -784,7 +784,7 @@ function joinPartyRecruits(party, members, recruits, joint) {
         ...recruits
     ];
     const commitMembers = Database.isReady() ? allMembers : changedMembers;
-    return commitPartyMembership(nextParty, commitMembers, recruitEvent, { expectedPartyUpdatedAt: party.updatedAt })
+    return commitPartyMembership(nextParty, commitMembers, recruitEvent, { expectedPartyRevision: party.revision })
         .then(({ party: updatedParty, failed, eventCommitted }) => {
             if (!updatedParty || failed.length) return null;
             const eventWrite = eventCommitted
@@ -849,10 +849,10 @@ function commitPartyMembership(party, members = [], event = null, options = {}) 
         party: preparedParty.row,
         members: preparedMembers,
         event,
-        expectedPartyUpdatedAt: options.expectedPartyUpdatedAt ?? null
+        expectedPartyRevision: options.expectedPartyRevision ?? null
     }).then((result) => {
         if (!result?.ok) return { party: null, assigned: [], failed: selected, eventCommitted: false, reason: result?.reason || 'commit_failed' };
-        const committedParty = result.partyRow ? BackgroundPartyState.acceptRow(result.partyRow) : BackgroundPartyState.acceptCommit(preparedParty);
+        const committedParty = BackgroundPartyState.acceptRow(result.partyRow);
         for (const row of result.lifeRows || []) {
             const entry = preparedMembers.find(member => Number(member.row.characterId) === Number(row.characterId));
             if (entry) entry.snapshot = LifeState.acceptNewerLifecycleRow(row) || entry.snapshot;
@@ -2553,7 +2553,7 @@ const PopulationService = {
         if (recruits.length !== (check.recruitIds || []).length || !PartyGoalCalculation.matches(recruits, check.sources))
             return count('stale_recruit');
         const current = BackgroundPartyState.find(partyId);
-        if (current?.updatedAt !== party.updatedAt) return count('stale_party');
+        if (current?.revision !== party.revision) return count('stale_party');
         return count(await joinPartyRecruits(party, members, recruits, check.joint) ? 'joined' : 'refused');
     },
 
@@ -2665,7 +2665,7 @@ const PopulationService = {
                     const leader = members.find(member => Number(member.characterId) === Number(party.leaderId));
                     if (leader?.phase === 'cold' && hydratedRecruits.every(recruit => recruit.phase === 'cold')) {
                         const current = BackgroundPartyState.find(party.partyId);
-                        if (current?.status !== 'active' || current.updatedAt !== party.updatedAt) return null;
+                        if (current?.status !== 'active' || current.revision !== party.revision) return null;
                         claim(true);
                         Config.developerDiagnostics && Diagnostics.count('party_assembly', 'recruit_join', 'pending');
                         return BackgroundPartyState.createOrUpdate({ ...current, stats: { ...(current.stats || {}),

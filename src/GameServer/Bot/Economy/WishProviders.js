@@ -359,7 +359,10 @@ function buildProjection(state, ctx, deps) {
     let labour = null;
     const craftLabour = () => labour ??= Occupation.craftLabour(state, timestamp, profile);
     const sourceTrips = new Map(), farmFacts = new Map();
-    const routeAllowed = Planner.sourceRouteReader(state, { timestamp, matchupProfiles: deps.soloProfiles });
+    // The bot's ground verdict per spot, kept with its held build while no
+    // source section moved (deps.sourceGround, EconomyContext's).
+    const sourceGround = Planner.sourceGround(deps.spots || [], deps.sourceGround);
+    const routeAllowed = Planner.sourceRouteReader(state, { timestamp, matchupProfiles: deps.soloProfiles, ground: sourceGround });
     const knownRecipes = new Set(recipeIds(state, deps));
     const preparingItems = new Set();
     const purchaseFor = need('./WishPurchaseEvidence').reader(state, ctx, deps);
@@ -1197,7 +1200,7 @@ function buildProjection(state, ctx, deps) {
     if (Diagnostics.active()) Diagnostics.count('source_memo', 'size', sourceBytes < 0 ? 'unmeasured'
         : sourceBytes > 8192 || sourceSections ? Diagnostics.sizeBucket(sourceBytes) : 'uncloneable');
     blocks?.lap('tail'); blocks?.done();
-    return { nodes: keptNodes, roots: cut.roots, values, moneyPaths, horizon, admission, sourceSections };
+    return { nodes: keptNodes, roots: cut.roots, values, moneyPaths, horizon, admission, sourceSections, sourceGround };
 }
 // Only public recipe rows and a prepared route can prove a usable service.
 // This bounded indexed read is shared by visible and distant bots. No private
