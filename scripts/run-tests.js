@@ -276,6 +276,7 @@ const tests = [
     'tests/test_llm_configured_supply_store.js',
     'tests/test_afk_trade_database.js',
     'tests/test_afk_trade_cold_lease.js',
+    'tests/test_afk_trade_cold_equip.js',
     'tests/test_board_records.js',
     'tests/test_board_deal_atomicity.js',
     'tests/test_board_market_audit.js',
