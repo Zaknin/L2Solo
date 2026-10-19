@@ -1492,7 +1492,7 @@ function forActor(actor, session, deps = {}) {
     if (!accepted) return forState(state, deps);
     // The same accepted memory owner serves hot and cold validity. Reading
     // the original advisory is not permission to execute its selected act.
-    // lazy: cycle the native memory runtime also calls economic consumers.
+    // lazy: worker main thread only (returned above in the worker); its repository reaches the Database.
     const memory = invoke('GameServer/Social/InteractionMemoryRuntime');
     const input = { ...deps, memory: memory.snapshot(Number(state.characterId)),
         memoryIdentity: memory.contentIdentity(Number(state.characterId)),
