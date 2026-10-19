@@ -42,7 +42,7 @@ try {
         gates++; assert.equal(options.mode, 'solo'); assert.equal(options.timestamp, timestamp); return true;
     };
     Matchup.stateProfiles = (...args) => { profiles++; return original.profiles(...args); };
-    const routeAllowed = Planner.sourceRouteReader(state, { timestamp });
+    const routeAllowed = Planner.sourceRouteReader(state, { timestamp, spots: [spot] });
     assert(facts({ routeAllowed }).some(row => row.status === 'ready'), 'an allowed source remains available');
     facts({ routeAllowed });
     assert.equal(gates, 1, 'one spot gate per projection, not per material or NPC');
@@ -53,4 +53,27 @@ try {
     Routes.isSpotAllowedForState = () => false;
     assert.deepEqual(facts({ readyOnly: true }), [], 'a fresh decision discards the old allowed verdict');
 } finally { Routes.isSpotAllowedForState = original.gate; Matchup.stateProfiles = original.profiles; }
+
+// The bot's ground verdict kept with its held build (Planner.sourceGround,
+// handed back while no source section moved) still follows what moves no
+// section: a lower spot is ground for this bot only while its wish focus is
+// an economic hunt, and a spot exclusion refuses it only while the mark lasts.
+{
+    const nakondas = Data.npcs.find(npc => npc.selfId === 713);
+    const low = { id: '8_42', name: 'Nakondas field', minLevel: 42, maxLevel: 42, avgLevel: 42, capacity: 8, density: 6,
+        levelCounts: { 42: 6 }, tags: [], center: spot.center,
+        npcEntries: [{ selfId: nakondas.selfId, level: 42, count: 6 }], npcSelfIds: [nakondas.selfId] };
+    const spots = [spot, low];
+    const ground = Planner.sourceGround(spots);
+    const allowed = (bot, kept = ground) => Planner.sourceRouteReader(bot, { timestamp, ground: Planner.sourceGround(spots, kept) })(low);
+    const economic = { ...state, stats: { ...state.stats, wishFocus: ['power:101:7', 1, 50], stepCount: 10 } };
+    assert.equal(allowed(state), false, 'a spot 13 levels below the bot is no ground for an ordinary hunt');
+    assert.equal(allowed(economic), true, 'an economic-hunt focus admits it within the held build');
+    assert.equal(allowed(state), false, 'the ordinary focus refuses it again');
+    assert.equal(allowed(economic), true, 'fixture: allowed before the mark');
+    const marked = { ...economic, stats: { ...economic.stats, spotBackoffs: [{ spotId: low.id, untilStep: 12 }] } };
+    assert.equal(allowed(marked), false, 'a spot exclusion marked after the build refuses the spot');
+    assert.equal(allowed({ ...marked, stats: { ...marked.stats, stepCount: 12 } }), true,
+        'the expired mark leaves the spot allowed, with no section moved');
+}
 console.log('test_source_route_admission: ok');

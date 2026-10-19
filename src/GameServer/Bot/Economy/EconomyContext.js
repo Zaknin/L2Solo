@@ -997,6 +997,9 @@ function forState(state = {}, deps = {}) {
     // the equipment plan and the crafter's MP.
     const keptBase = held && !(mask & Sections.COMPUTED.foundation) ? held.plan : null;
     const keptSources = held?.sourceSections && !(mask & Sections.COMPUTED.sources) ? held : null;
+    // The source walk's per-spot ground verdict: the same section rule,
+    // without the memo's size cap (GearAcquisitionPlanner.sourceGround).
+    const keptGround = !(mask & Sections.COMPUTED.sources) ? held?.sourceGround || null : null;
     const started = diagnostic ? performance.now() : 0;
     // The build's cause, one of a few names (its duration layer). An
     // input-name mismatch is named as a dependency change; it does not claim
@@ -1143,7 +1146,7 @@ function forState(state = {}, deps = {}) {
         Diagnostics.count('context', 'caller', deps.caller || 'economy_context');
         Diagnostics.count('context', 'foundation', keptBase ? 'kept' : 'built');
     }
-    const projection = Providers.build(state, context, { ...deps, sourceSections, nodes: [...(deps.nodes || []), ...extra],
+    const projection = Providers.build(state, context, { ...deps, sourceSections, sourceGround: keptGround, nodes: [...(deps.nodes || []), ...extra],
         soloProfiles: incomeRecord?.route?.matchupProfiles });
     context.projection = projection;
     if (productive) projection.moneyPaths.push({ activity: 'crafting', kind: 'production', recipeId: workshop.recipeId,
@@ -1247,11 +1250,12 @@ function forState(state = {}, deps = {}) {
         heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key });
     const plan = planOf(context, base, { key, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
-    // Source memo belongs only to the held build entry (bounded by
-    // RETAIN_LIMIT, each memo by WishProviders' cap). A planning view or a
-    // group closure must never retain a second copy.
-    const retainedSourceMemo = projection.sourceSections;
-    projection.sourceSections = null;
+    // Source memo and ground verdict belong only to the held build entry
+    // (bounded by RETAIN_LIMIT, each memo by WishProviders' cap, each ground
+    // by 2 bits per planning spot). A planning view or a group closure must
+    // never retain a second copy.
+    const retainedSourceMemo = projection.sourceSections, retainedGround = projection.sourceGround;
+    projection.sourceSections = projection.sourceGround = null;
     if (deps.rememberContext !== false) {
         if (diagnostic && !cache.has(actorKey) && cache.size >= RETAIN_LIMIT) Diagnostics.count('context', 'eviction', 'capacity');
         // The main thread keeps the graph nodes as before (its group solve
@@ -1268,7 +1272,7 @@ function forState(state = {}, deps = {}) {
             craftReservations: leaf?.activity === 'crafting' ? CraftInputReservations.heldCraftRows(state, plan.network.craftNeeds) : undefined,
             readIds: Int32Array.from(readIds), plan, stateRef: new WeakRef(state), gearThreat,
             activity: state.activity,
-            sourceSections: retainedSourceMemo, mp: Number(state.vitals?.mp),
+            sourceSections: retainedSourceMemo, sourceGround: retainedGround, mp: Number(state.vitals?.mp),
             projection: isMainThread ? projection : null }, RETAIN_LIMIT);
     }
     readIds = null;
