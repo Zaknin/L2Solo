@@ -389,7 +389,12 @@ function eventProofHolds(state, proof, deps = {}, options = {}) {
     if (options.verdict) {
         const first = verdict.firstSections;
         Object.assign(options.verdict, { valid: verdict.valid, reason: verdict.reason, touchedSections: first, movedSections: first });
-        if (options.collect === true && !verdict.valid) options.verdict.collected = { verdict, state, proof, deps, options };
+        // Only what handedVerdict compares, no deps or options.
+        if (options.collect === true && !verdict.valid) options.verdict.collected = { verdict, state, proof,
+            baseline: options.baseline, activity: options.activity, mp: options.mp,
+            units: options.heldUnits ?? options.leaf?.heldAtDecision ?? null,
+            reservations: options.craftReservations ?? options.leaf?.craftReservations,
+            routeRows: deps.routeRows, tripCost: deps.tripCost };
     }
     if (!verdict.valid) options.why?.push(verdict.reason);
     return verdict.valid;
@@ -406,11 +411,11 @@ function eventProofHolds(state, proof, deps = {}, options = {}) {
 const reservedRows = rows => rows?.length ? JSON.stringify(rows) : '';
 function handedVerdict(handed, state, held, deps) {
     if (!handed || !held || handed.state !== state || handed.proof !== held.plan.eventProof) return null;
-    const card = handed.options, leaf = held.plan.network?.activity;
-    if (card.baseline !== held.plan.statsPacket.wishSections || card.activity !== held.activity
-        || !Object.is(card.mp, held.mp) || handed.deps.routeRows !== deps.routeRows || handed.deps.tripCost !== deps.tripCost
-        || (card.heldUnits ?? card.leaf?.heldAtDecision ?? null) !== (held.heldUnits ?? leaf?.heldAtDecision ?? null)
-        || leaf?.activity === 'crafting' && reservedRows(card.craftReservations ?? card.leaf?.craftReservations)
+    const leaf = held.plan.network?.activity;
+    if (handed.baseline !== held.plan.statsPacket.wishSections || handed.activity !== held.activity
+        || !Object.is(handed.mp, held.mp) || handed.routeRows !== deps.routeRows || handed.tripCost !== deps.tripCost
+        || handed.units !== (held.heldUnits ?? leaf?.heldAtDecision ?? null)
+        || leaf?.activity === 'crafting' && reservedRows(handed.reservations)
             !== reservedRows(held.craftReservations ?? leaf.craftReservations)) return null;
     return handed.verdict.leaf !== undefined && handed.verdict.leaf === activityIdentity(leaf) ? handed.verdict : null;
 }
@@ -1000,6 +1005,8 @@ function forState(state = {}, deps = {}) {
     // The card's verdict of this step serves when it judged this entry on
     // the same inputs (handedVerdict), else it is computed here.
     const handed = handedVerdict(deps.eventVerdict?.collected, state, held, deps);
+    // Read once: the hand-off ends here, served or not.
+    if (deps.eventVerdict?.collected) deps.eventVerdict.collected = null;
     if (diagnostic && handed) Diagnostics.count('context', 'held_verdict', 'reused');
     const eventVerdict = handed || heldBuildVerdict(state, held?.plan.eventProof, deps, {
         baseline: held?.plan.statsPacket.wishSections, activity: held?.activity,
