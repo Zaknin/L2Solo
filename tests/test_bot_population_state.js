@@ -40,6 +40,7 @@ const originalFetchSkills = Database.fetchSkills;
 const originalFetchSkill = Database.fetchSkill;
 const originalSetSkill = Database.setSkill;
 const originalUpdateSkillLevel = Database.updateSkillLevel;
+const originalCreateColdTrainingGuard = Database.createColdTrainingGuard;
 const originalUpdateCharacterClassId = Database.updateCharacterClassId;
 const originalReconcileClanMembership = Database.reconcileBotClanMembership;
 const statements = [];
@@ -81,6 +82,8 @@ try {
     Database.fetchSkill = () => Promise.resolve([]);
     Database.setSkill = () => Promise.resolve();
     Database.updateSkillLevel = () => Promise.resolve();
+    // Skill writes are stubbed above; their row fence would read probes that are not in the table.
+    Database.createColdTrainingGuard = () => () => {};
     Database.updateCharacterClassId = (characterId, classId) => {
         classUpdates.push({ characterId, classId });
         return Promise.resolve();
@@ -385,6 +388,8 @@ try {
                         name: 'PartyTelemetryProbe',
                         level: 20,
                         phase: 'cold',
+                        simulation: { revision: 0 },
+                        updatedAt: 1000,
                         activity: 'grouped',
                         party: { partyId: 'bgp_probe' },
                         timing: { nextResolveAt: 9000 },
@@ -446,6 +451,8 @@ try {
                         name: 'DeadPartyRequestProbe',
                         level: 20,
                         phase: 'cold',
+                        simulation: { revision: 0 },
+                        updatedAt: 1000,
                         activity: 'hunting',
                         exp: 500,
                         sp: 50,
@@ -559,6 +566,7 @@ try {
         Database.fetchSkill = originalFetchSkill;
         Database.setSkill = originalSetSkill;
         Database.updateSkillLevel = originalUpdateSkillLevel;
+        Database.createColdTrainingGuard = originalCreateColdTrainingGuard;
         Database.updateCharacterClassId = originalUpdateCharacterClassId;
         Database.reconcileBotClanMembership = originalReconcileClanMembership;
         Database.reconcileBotClanGoals = originalReconcileClanGoals;
@@ -580,6 +588,7 @@ try {
     Database.fetchSkill = originalFetchSkill;
     Database.setSkill = originalSetSkill;
     Database.updateSkillLevel = originalUpdateSkillLevel;
+    Database.createColdTrainingGuard = originalCreateColdTrainingGuard;
     Database.updateCharacterClassId = originalUpdateCharacterClassId;
     Database.reconcileBotClanMembership = originalReconcileClanMembership;
     Database.reconcileBotClanGoals = originalReconcileClanGoals;
