@@ -89,7 +89,12 @@ const COMPUTED = Object.freeze({
     route: sectionMask(['build', 'relations', 'occupation', 'sources']),
     // The source walk's per-spot ground verdict (GearAcquisitionPlanner.sourceGround):
     // level and kit matchup; its other reads are checked beside it.
-    sourceGround: sectionMask(['build'])
+    sourceGround: sectionMask(['build']),
+    // The crafter's workshop (its best recipe and income per hour, the
+    // occupation planner's answer), kept with the held build: its kit and
+    // recipes (build), its bag and stores (supply), its wallet and the
+    // watched market (money).
+    workshop: sectionMask(['build', 'supply', 'money'])
 });
 // The one table of what a moved fact touches, for near and far bots alike
 // (factEvents over factsOf). build: the kit (class, level, gear, hennas,

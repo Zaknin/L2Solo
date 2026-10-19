@@ -705,7 +705,6 @@ function resolved(state, deps, production = true) {
     // Stock, survival and own shot-use readers need only the hunt foundation.
     // Production sources and recipe books belong to the full wish review.
     if (production) {
-        if (typeof deps.workshop === 'function') deps.workshop = deps.workshop(state.characterId);
         if (typeof deps.knownRecipes === 'function') deps.knownRecipes = deps.knownRecipes(state.characterId);
         if (!deps.fixedProductionOffersFor) deps.fixedProductionOffersFor = invoke('GameServer/Bot/Population/ColdOccupationSources').fixedBuyerOffersFor;
         if (!deps.producerSource && deps.board) deps.producerSource = defaultProducerSource;
@@ -1178,8 +1177,9 @@ function forState(state = {}, deps = {}) {
                 for (const [id] of input.bag || []) if (id === -1) context.nodeInputs.wholeBag(); else context.nodeInputs.bag(id); } },
         readScope: { open: () => (scope = new Set()), close: () => { scope = null; },
             keep: kept => { for (const id of kept) read(id); } } };
+    // A worker build given no workshop keeps the held build's (keptWorkshop).
     const workshop = Object.hasOwn(deps, 'workshop') ? deps.workshop : isMainThread
-        ? craftIncome(state, { hourAdena: base.hourAdena, worth: price, timestamp }) : null;
+        ? craftIncome(state, { hourAdena: base.hourAdena, worth: price, timestamp }) : keptWorkshop(held, mask, state);
     context.workshop = workshop || { recipeId: 0, productId: 0, incomePerHour: NaN, cycleHours: NaN };
     const productive = workshop?.known !== false && workshop?.incomePerHour > 0 && Number.isFinite(workshop.incomePerHour)
         && workshop.cycleHours > 0 && Number.isFinite(workshop.cycleHours);
@@ -1661,6 +1661,27 @@ function forGroup(group, members, deps = {}) {
     }
     return context;
 }
+// The held build's workshop (the occupation planner's answer it was built
+// with) while none of its sections moved (mask, Sections.COMPUTED.workshop),
+// on the same route and known; else null: the caller asks again.
+function heldWorkshopOf(held, mask, state) {
+    const workshop = held?.plan.workshop;
+    return workshop && !(Number(mask) & Sections.COMPUTED.workshop) && held.plan.routeKey === Trip.key(state)
+        && workshop.known !== false && Number.isFinite(workshop.incomePerHour) ? workshop : null;
+}
+// A worker build given no workshop (forState): the held one, else an unknown
+// one, which the next build does not keep (it asks or stays unknown).
+function keptWorkshop(held, mask, state) {
+    const workshop = heldWorkshopOf(held, mask, state);
+    if (workshop) return workshop;
+    if (Diagnostics.active()) Diagnostics.count('occupation', 'workshop', 'unknown');
+    return ColdEconomyDecision.unknownWorkshop();
+}
+// The worker's decision point (planLifecycle): the bot's held workshop under
+// the step's moved sections, or null (ask the occupation planner).
+function heldWorkshop(state, mask) {
+    return heldWorkshopOf(cache.get(`character:${Number(state.characterId)}`), mask, state);
+}
 function preparedRouteRows(state) {
     const plan = cache.get(`character:${Number(state.characterId)}`)?.plan;
     return plan?.routeKey === Trip.key(state) ? plan.routeRows : null;
@@ -1696,5 +1717,5 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, preparedRouteRows, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, preparedRouteRows, heldWorkshop, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome };
