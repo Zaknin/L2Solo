@@ -5,14 +5,13 @@
 // evacuation may exceed the spot by one bot; a party is checked as a whole,
 // except at its own objective spot;
 // a party run's spot search skips a spot with no room for the whole party;
-// a near bot's spot change on main reaches the worker's index and counts.
+// a near bot's spot assignment on main (its near fact post) reaches the worker's index and counts.
 const assert = require('node:assert/strict');
 const path = require('node:path');
 require('../src/Global');
 const { Worker } = require('node:worker_threads');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const Policy = require('../src/GameServer/Social/InteractionMemoryPolicy');
 invoke('GameServer/Clan/ClanService').syncColdMember = () => {};
 invoke('GameServer/Social/InteractionMemoryRuntime').repository = { loadMany: async ids => ids.map(Policy.empty) };
@@ -220,22 +219,39 @@ function bot(characterId, extra = {}) {
         assert.equal(await probe({ kind: 'party', spotId: room.id, party, remove: [101] }), null,
             'a party that fits the spot arrives without a mark');
 
-        // Two near bots (run on main) move onto the spot: the publication of
-        // their state write marks them dirty and the next snapshot page brings
-        // them into the worker's index, where they count at arrival.
-        const coordinator = new ColdSimulationCoordinator();
+        // Two near bots (run on main) move onto the spot: the spot assignment
+        // posts their body facts (BotLifeState.notifyNearFacts) and the next
+        // snapshot page brings them into the worker's index, where they count
+        // at arrival.
+        const coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
         const pages = [];
         Object.assign(coordinator, { workerEpoch: epoch, ready: true, started: true,
             worker: { postMessage: message => {
                 if (message.type === 'snapshot_page') pages.push(message.payload);
                 worker.postMessage(message);
             } } });
-        const near = (characterId, spot) => LifeState.acceptClanCraftState({ characterId, characterName: `Near${characterId}`,
-            phase: 'hot', activity: 'hunting', level: 20, spotId: spot.id, currentRegion: spot.name,
-            locX: spot.center.locX, locY: spot.center.locY, locZ: spot.center.locZ, statsJson: '{}', updatedAt: Date.now() });
-        near(120, away); near(121, away);
+        const Actor = invoke('GameServer/Actor/Actor'), SpotService = invoke('GameServer/Bot/AI/SpotService');
+        const template = utils.crushOb(invoke('GameServer/DataCache').classTemplates.find(row => Number(row.classId) === 0));
+        const moveTo = (session, spot) => {
+            session.actor.setLocXYZ({ ...spot.center });
+            SpotService.assignSpot(session, { ...spot, npcNames: [] });
+        };
+        const near = (characterId, spot) => {
+            LifeState.acceptClanCraftState({ characterId, characterName: `Near${characterId}`,
+                phase: 'hot', activity: 'hunting', level: 20, spotId: spot.id, currentRegion: spot.name,
+                locX: spot.center.locX, locY: spot.center.locY, locZ: spot.center.locZ, statsJson: '{}', updatedAt: Date.now() });
+            const session = { accountId: `bot_room_${characterId}`, plan: 'hunting',
+                dataSendToMe() {}, dataSendToOthers() {}, dataSendToMeAndOthers() {} };
+            session.actor = new Actor(session, { ...template, id: characterId, name: `Near${characterId}`, level: 20,
+                ...spot.center, items: [], paperdoll: utils.tupleAlloc(16, {}) });
+            moveTo(session, spot);
+            return session;
+        };
+        const nearBots = [near(120, away), near(121, away)];
+        await new Promise(resolve => setImmediate(resolve));
         await coordinator.sendSnapshots();
-        near(120, room); near(121, room);
+        nearBots.forEach(session => moveTo(session, room));
+        await new Promise(resolve => setImmediate(resolve));
         pages.length = 0;
         coordinator.snapshotBootstrapPending = false;
         await coordinator.sendSnapshots();
