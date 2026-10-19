@@ -77,6 +77,13 @@ async function bodyMoney(id) {
         await Life.upsertState(fixtureState(near, 'MindColumn2', 'hot', { money: NEW_MONEY }), 'mind_column_near');
         assert.deepEqual(JSON.parse((await row(near)).mindJson).money, NEW_MONEY, 'a hot save writes the new mind');
         assert.equal(await bodyMoney(near), null, 'the body still holds no money');
+        // The hot->cold hand-off carries main's mind into the far row.
+        const HANDOFF_MONEY = [99000, 0, 17000, 0];
+        await Life.upsertState(fixtureState(near, 'MindColumn2', 'cold', { money: HANDOFF_MONEY }), 'mind_column_handoff',
+            { releaseHot: true });
+        const handedOff = await row(near);
+        assert.equal(handedOff.phase, 'cold', 'fixture: the row is handed to the worker');
+        assert.deepEqual(JSON.parse(handedOff.mindJson).money, HANDOFF_MONEY, 'the hand-off writes main\'s mind');
 
         // (3) A main save over a far row writes the body but keeps the row's
         // mind: the worker's newer mind is not written back with main's copy.
