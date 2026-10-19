@@ -486,7 +486,8 @@ class RetainedStateMap extends Map {
         for (const [id, packet] of this.entries()) Reflect.apply(callback, thisArg, [packet, id, this]);
     }
 
-    set(id, entry) {
+    // incomingCard: the card a snapshot row carried (undefined: none came).
+    set(id, entry, incomingCard = undefined) {
         const current = this.get(id);
         this.shotIndex?.update(entry.state);
         try { this.sources.publish(id, entry); }
@@ -503,24 +504,21 @@ class RetainedStateMap extends Map {
             }
             throw error;
         }
-        // Worker calculation advice belongs to this existing native owner.
-        // Publication replaces transport context, but is not a new decision.
-        // Decoded advice stays off enumerable context DTOs; only its bounded
-        // restart prefix lives in stats. Readers prove every dependency before
-        // reuse, and retirement releases the owner.
-        const published = this.get(id), publishedContext = published?.context;
-        const supplied = Object.hasOwn(entry.context || {}, 'wishAdvisory');
-        const previousAdvice = current?.context?.wishAdvisory;
-        const incomingAdvice = supplied ? ColdEconomyDecision.receiveAdvisory(entry.context.wishAdvisory)
-            : !current && this.#skillDtos ? ColdEconomyDecision.restoreAdvisory(published.state, this.now()) : null;
-        const wishAdvisory = ColdEconomyDecision.advisoryPublicationHolds(published.state, incomingAdvice, previousAdvice)
-            ? incomingAdvice : ColdEconomyDecision.advisoryPublicationHolds(published.state, previousAdvice) ? previousAdvice : null;
-        if (this.#skillDtos && (supplied || wishAdvisory) && publishedContext
-            && Object.isExtensible(publishedContext)) {
-            Reflect.defineProperty(publishedContext, 'wishAdvisory', {
-                value: published.state?.phase === 'cold' ? wishAdvisory : null,
-                writable: true, configurable: true, enumerable: false
-            });
+        // Worker calculation advice belongs to this existing native owner, as
+        // a field of its record (the record never leaves this thread). A new
+        // record is not a new decision: the card it carried over is checked
+        // against the new state. Only its bounded restart prefix lives in
+        // stats. Readers prove every dependency before reuse, and retirement
+        // releases the owner.
+        const record = this.get(id);
+        const supplied = incomingCard !== undefined;
+        const previousAdvice = current?.wishAdvisory;
+        const incomingAdvice = supplied ? ColdEconomyDecision.receiveAdvisory(incomingCard)
+            : !current && this.#skillDtos ? ColdEconomyDecision.restoreAdvisory(record.state, this.now()) : null;
+        const wishAdvisory = ColdEconomyDecision.advisoryPublicationHolds(record.state, incomingAdvice, previousAdvice)
+            ? incomingAdvice : ColdEconomyDecision.advisoryPublicationHolds(record.state, previousAdvice) ? previousAdvice : null;
+        if (this.#skillDtos && record && (supplied || wishAdvisory || record.wishAdvisory)) {
+            record.wishAdvisory = record.state?.phase === 'cold' ? wishAdvisory : null;
         }
         if (this.#skillDtos) {
             let staged;
@@ -841,6 +839,10 @@ class ColdSimulationKernel {
         // not new consent. Changed bags/timing/ownership still invalidate it.
         if (this.commandStartedAt.get(characterId)?.kind === 'meeting'
             && current && isDeepStrictEqual(current.state, state)) state = current.state;
+        // The card a hot-to-far handoff carried: off the row before the store,
+        // handed to the record's write (RetainedStateMap.set).
+        const card = Object.hasOwn(entry.context || {}, 'wishAdvisory') ? entry.context.wishAdvisory : undefined;
+        if (card !== undefined) delete entry.context.wishAdvisory;
         const incomingRevision = Math.max(0, Number(state.simulation?.revision || 0));
         const currentRevision = Math.max(0, Number(current?.state?.simulation?.revision || 0));
         if (current && incomingRevision < currentRevision) {
@@ -880,7 +882,7 @@ class ColdSimulationKernel {
                 ...current,
                 state,
                 context: nextContext
-            });
+            }, card);
             this.occupancy.update(state);
             this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
             DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
@@ -892,11 +894,13 @@ class ColdSimulationKernel {
         }
         const version = Number(this.versions.get(characterId) || 0) + 1;
         this.versions.set(characterId, version);
-        // The bot's one record; its kept route (BotRoute.trip) survives a new
-        // state: only its step's drops clear it. The material memo is the
-        // background thread's own (partyRequestForPlan).
-        this.states.set(characterId, { state, context: nextContext, version, route: current?.route || null,
-            ...(current?.materialMemo ? { materialMemo: current.materialMemo } : {}) });
+        // The bot's one record: { state, version, route, materialMemo,
+        // economyPending, economyPlanHash, wishAdvisory, published }. Every
+        // field but the state and version is this thread's own and survives a
+        // new state: the kept route (BotRoute.trip) until its step's drops,
+        // the material memo (partyRequestForPlan), the economy plan sent and
+        // its hash, the card it holds and the decision it published.
+        this.states.set(characterId, { route: null, ...current, state, context: nextContext, version }, card);
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
         DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
@@ -2589,7 +2593,7 @@ class ColdSimulationKernel {
         const id = Number(characterId);
         const proposal = this.dirty.get(id) || null;
         const active = this.inFlight.get(id) || null;
-        const accepted = this.states.get(id)?.context?.wishAdvisory;
+        const accepted = this.states.get(id)?.wishAdvisory;
         const wishAdvisory = accepted ? ColdEconomyDecision.wireAdvisory(accepted) : null;
         if (accepted && !wishAdvisory && EconomyDiagnostics.active()) EconomyDiagnostics.count('card', 'drop', 'handoff_unproved');
         this.remove(id);

@@ -77,13 +77,14 @@ module.exports.goalProbe = async (id) => {
         const plan = await kernel.planLifecycle({ state, context, timestamp: at });
         const projection = await kernel.projectResolve(plan.plannedState || state, { patch: {}, debug: {}, events: [],
             materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: at + 60000 }, at, plan);
-        kernel.states.set(id, { state: projection.state, context });
+        // The step's own record write: the record keeps its fields (the card).
+        kernel.states.set(id, { ...kernel.states.get(id), state: projection.state });
         return builds - before;
     };
     try {
         await step(timestamp); await step(timestamp + 1000);
         const same = await step(timestamp + 2000);
-        const ask = () => ColdEconomyDecision.refusal(kernel.states.get(id).state, context.wishAdvisory,
+        const ask = () => ColdEconomyDecision.refusal(kernel.states.get(id).state, kernel.states.get(id).wishAdvisory,
             { goalRevision: goalRevision(id), timestamp: timestamp + 3000 });
         const held = ask();
         tables.apply([{ name: 'goals', from: 0, to: 1, full: false, rows: [[id, goal(2)]], removed: [], last: true }]);
