@@ -306,7 +306,7 @@ async function main() {
             }
         });
         assert.equal(lifecycleKind(state, kernel), 'command', 'a bot that needs its hall is a command');
-        kernel.upsert({ state, context: {} });
+        kernel.upsert({ state });
         const commandAttempt = kernel.beginCommand(id);
         assert(commandAttempt, 'hall fixture admits an actual current command attempt');
         await kernel.resolveCommand(id, commandAttempt);

@@ -23,11 +23,11 @@ for (const row of recipe.materials) record(row.selfId, 1, 1, row.amount);
 const pages = rows => [{ tables: [{ name: 'board', from: null, to: 0, full: true, rows, removed: [], last: true },
     { name: 'market', from: null, to: 0, full: true, rows: [], removed: [], last: true }] }];
 (async () => {
-    const result = await probe(state, { recipeEarning: true, context: { recipeBook: Codec.pack([]) }, tablePages: pages(records) });
+    const result = await probe(state, { recipeEarning: true, recipes: { recipeBook: Codec.pack([]) }, tablePages: pages(records) });
     assert.equal(result.selected?.wealth?.recipeId, recipe.recipeId, 'actual worker empty-book search selects offered profitable D recipe');
     assert.deepEqual(result.selected.wealth.scroll, [9101010, 1], 'worker preserves selected public scroll authority');
     const withoutScroll = records.filter(([key]) => key !== 910101);
-    const known = await probe(state, { recipeEarning: true, context: { recipeBook: Codec.pack([recipe.recipeId]) }, tablePages: pages(withoutScroll) });
+    const known = await probe(state, { recipeEarning: true, recipes: { recipeBook: Codec.pack([recipe.recipeId]) }, tablePages: pages(withoutScroll) });
     assert.equal(known.selected?.wealth?.recipeId, recipe.recipeId, 'full book is authoritative even with an empty public portfolio');
     assert(!known.selected.wealth.scroll, 'learned scroll is not bought twice');
     console.log('PASS actual worker unknown recipe admission, empty book, selected source and uncapped knowledge');

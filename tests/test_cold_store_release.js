@@ -47,7 +47,7 @@ async function run() {
     const party = { partyId: 'release-party', leaderId: 9, memberIds: [9, 10], stats: {}, nextResolveAt: now - 1 };
     for (let id = 1; id <= 10; id++) {
         const bot = members.find(member => member.characterId === id) || state(id);
-        kernel.upsert({ state: bot, context: {} });
+        kernel.upsert({ state: bot });
         // The memory table's row (the worker's memory watch).
         kernel.interactionMemory.accept(Policy.empty(id));
         Economy.forState(bot, dependencies);

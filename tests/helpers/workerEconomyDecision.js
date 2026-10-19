@@ -11,12 +11,12 @@ const Protocol = require('../../src/GameServer/Bot/Population/ColdSimulationProt
 const observer = String.raw`
 module.exports.nativeRecipeEarning = async (id, timestamp, refreshEconomy = false) => {
     const entry = kernel.states.get(Number(id));
-    const result = await occupationFor(entry.state, timestamp, entry.context, refreshEconomy ? 'refresh' : 'action');
+    const result = await occupationFor(entry.state, timestamp, {}, refreshEconomy ? 'refresh' : 'action');
     return { ...result, forbiddenLoaded: Object.keys(require.cache).filter(key => /\/(?:Database|Network)\/|\/src\/Database\.js$|\/World\/World\.js$|\/Bot\/BotManager\.js$/.test(key)) };
 };
 module.exports.nativeTownVisit = async (id, timestamp) => {
     const entry = kernel.states.get(Number(id));
-    const lifecycle = await kernel.planLifecycle({ state: entry.state, context: entry.context, timestamp });
+    const lifecycle = await kernel.planLifecycle({ state: entry.state, timestamp });
     // The plan as main receives it: the step's economy stays in the worker.
     const plan = lifecycle && { ...lifecycle };
     if (plan) delete plan.economy;
@@ -32,7 +32,7 @@ module.exports.nativeMeetingPreparation = async (id, timestamp, request) => {
 };
 module.exports.nativeEconomyDecision = async (id, timestamp, nativeRoutes = false) => {
     const state = kernel.states.get(Number(id)).state;
-    const routeRows = nativeRoutes ? await occupationFor(state, timestamp, kernel.states.get(Number(id)).context, 'wish') : undefined;
+    const routeRows = nativeRoutes ? await occupationFor(state, timestamp, {}, 'wish') : undefined;
     const economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(state, { timestamp, ...(nativeRoutes ? { routeRows } : {}) });
     const decision = require('./ColdEconomyDecision').capture(economy, state);
     // Inputs from this worker's own native catalogue and price counters. A
@@ -67,7 +67,8 @@ parentPort.on('message', async message => {
     catch (error) { parentPort.postMessage({ probeId: message.msgId, error: error.stack }); }
 });`;
 
-module.exports = async function workerEconomyDecision(state, { context = {}, timestamp = Date.now(),
+// recipes: the bot's row of main's 'recipes' table ({ recipeBook, knownShotRecipes }), if any.
+module.exports = async function workerEconomyDecision(state, { recipes = null, timestamp = Date.now(),
     boardRows = [], extraStates = [], tablePages = [], tables = [], recipeEarning = false, refreshEconomy = false, nativeRoutes = false, townVisit = false, meetingRequest = null } = {}) {
     const epoch = `native:economy-decision:${state.characterId}`;
     const messages = [];
@@ -104,7 +105,9 @@ module.exports = async function workerEconomyDecision(state, { context = {}, tim
             ? require('../../src/GameServer/Bot/Population/ColdTableChannel').shared.pages(tables).map(page => page.payload)
             : [{ tables: [{ name: 'board', from: null, to: 0, full: true, rows: boardRows, removed: [], last: true }] }];
         for (const page of pages) send('table_page', page);
-        send('snapshot_page', { rows: [{ state, context }, ...extraStates], ack: true }, 'state');
+        if (recipes) send('table_page', { tables: [{ name: 'recipes', from: null, to: 0, full: true, removed: [], last: true,
+            rows: [[Number(state.characterId), { characterId: Number(state.characterId), ...recipes }]] }] });
+        send('snapshot_page', { rows: [{ state }, ...extraStates], ack: true }, 'state');
         await wait(message => message.type === 'ready' && message.msgId === 'state');
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'native-economy'), nativeEconomyDecision: true,
             characterId: state.characterId, timestamp, recipeEarning, refreshEconomy, nativeRoutes, townVisit, meetingRequest });

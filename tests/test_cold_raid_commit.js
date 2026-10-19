@@ -129,7 +129,7 @@ async function run() {
     const held = new Map(members.map(member => [member.characterId, { characterId: member.characterId,
         ownerId: Owner.OWNER_ID, leaseId: 'kernel', revision: 1, leaseUntil: at + 30000 }]));
     for (const member of members) {
-        kernel.upsert({ state: member, context: {} });
+        kernel.upsert({ state: member });
         kernel.inFlight.set(member.characterId, { state: member, grant: held.get(member.characterId),
             partyId: a.partyId, claimRequestId: 'raid-claim' });
     }

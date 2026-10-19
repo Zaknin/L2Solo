@@ -39,18 +39,27 @@ function state(characterId = 1, overrides = {}) {
 const claimRequestIds = new WeakMap();
 const sentProposals = new WeakMap();
 const sentCommands = new WeakMap();
+// The spot the worker finds a bot standing at (its spotOf), as the fixture states it.
+const standing = new WeakMap();
+function standOn(kernel, entry, spot) {
+    standing.get(kernel).set(Number(entry.state.characterId), spot);
+    return entry;
+}
 function recordingKernel(options) {
     let kernel;
     const requests = new Map();
     const proposals = new Map();
     const commands = new Map();
-    kernel = new ColdSimulationKernel({ ...options, emit: (type, payload, msgId, ...rest) => {
+    const spots = new Map();
+    kernel = new ColdSimulationKernel({ spotOf: value => spots.get(Number(value?.characterId)) || null,
+        ...options, emit: (type, payload, msgId, ...rest) => {
         if (type === 'claim_request') for (const candidate of payload.candidates) requests.set(candidate.characterId, msgId);
         if (type === 'proposal_batch') for (const proposal of payload.proposals) proposals.set(proposal.characterId, proposal);
         if (type === 'command_request') for (const request of payload.requests) commands.set(request.characterId, request);
         return options.emit?.(type, payload, msgId, ...rest);
     } });
     claimRequestIds.set(kernel, requests);
+    standing.set(kernel, spots);
     sentProposals.set(kernel, proposals);
     sentCommands.set(kernel, commands);
     return kernel;
@@ -90,7 +99,7 @@ function claimAck(kernel, payload) {
         const probe = recordingKernel({ resolveSolo: () => null, now: () => at, maxInFlight: 1 });
         probe.tick();
         assert.strictEqual(added('worker_tick:empty:heap_empty'), 1);
-        probe.upsert({ state: state(91, { timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }), context: {} });
+        probe.upsert({ state: state(91, { timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }) });
         probe.tick();
         assert.strictEqual(added('worker_tick:empty:not_due'), 1);
         assert.strictEqual(added('worker_tick_gap:lt1s:unknown'), 1);
@@ -106,7 +115,7 @@ function claimAck(kernel, payload) {
         // work but sent no claim, so it is not idle even though the head is not due.
         const encounter = recordingKernel({ resolveSolo: () => null, now: () => at, maxInFlight: 1 });
         encounter.upsert({ state: state(93, { stats: { pvpEncounter: { expiresAt: at + 5000 } },
-            timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }), context: {} });
+            timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }) });
         encounter.tick();
         assert.strictEqual(added('worker_tick:empty:no_claim'), 1);
         assert.strictEqual(added('worker_tick:empty:not_due'), 1, 'a requeued bot is not counted as an idle tick');
@@ -148,7 +157,7 @@ function claimAck(kernel, payload) {
         flushTargetMs: 2000,
         flushHardMs: 5000
     });
-    kernel.upsert({ state: state(), context: { spot: { id: 'spot', rewards: {} } } });
+    kernel.upsert(standOn(kernel, { state: state() }, { id: 'spot', rewards: {} }));
     kernel.tick();
     const claimRequest = emitted.shift();
     assert.strictEqual(claimRequest.type, 'claim_request');
@@ -213,15 +222,13 @@ function claimAck(kernel, payload) {
         })
     }] });
     assert.strictEqual(kernel.snapshot().inFlight, 0);
-    assert.strictEqual(kernel.upsert({ state: state(1), context: { spot: { id: 'refreshed-context' } } }), false,
+    assert.strictEqual(kernel.upsert({ state: state(1) }), false,
         'an out-of-order catalog snapshot must not replace a newer committed revision');
     assert.strictEqual(kernel.states.get(1).state.simulation.revision, 5,
         'worker ownership revisions must remain monotonic across catalog refreshes');
-    assert.strictEqual(kernel.states.get(1).context.spot.id, 'refreshed-context',
-        'a stale state page may still refresh non-authoritative routing context');
     const heapBeforeRefresh = kernel.heap.size;
     const currentState = kernel.states.get(1).state;
-    assert.strictEqual(kernel.upsert({ state: { ...currentState }, context: { spot: { id: 'same-due-context' } } }), true);
+    assert.strictEqual(kernel.upsert({ state: { ...currentState } }), true);
     assert.strictEqual(kernel.heap.size, heapBeforeRefresh,
         'same-revision catalog refresh must coalesce without growing the due heap');
 
@@ -303,15 +310,14 @@ function claimAck(kernel, payload) {
         emit: () => {},
         now: () => 5000
     });
-    routeKernel.upsert({
+    routeKernel.upsert(standOn(routeKernel, {
         state: state(71, {
             level: 16,
             spotId: 'starter-field',
             loc: { locX: 115000, locY: -176000, locZ: -1000 },
             timing: { lastResolvedAt: 1000, nextResolveAt: 2000 }
-        }),
-        context: { spot: { id: 'starter-field' } }
-    });
+        })
+    }, { id: 'starter-field' }));
     routeKernel.tick();
     claimAck(routeKernel, { grants: [{
         ok: true, characterId: 71, ownerId: 'cold_simulation_owner', revision: 4,
@@ -353,13 +359,13 @@ function claimAck(kernel, payload) {
     assert.strictEqual(lifecycleKind(state(2, { party: { partyId: 'party' } }), leading({ partyId: 'party', leaderId: 2 })), 'party');
 
     // The worker's own hunting pick is the target for the native solo
-    // resolver (the context carries no target).
+    // resolver (the record carries no target).
     let pickedTarget = 0;
     const pickKernel = recordingKernel({ now: () => 5000,
         resolveSolo: input => { pickedTarget = input.targetNpcId; return resolver(input); },
         planLifecycle: ({ state }) => ({ plannedState: state, targetNpcId: 0,
             activityPick: { activity: 'hunting', npcId: 20101, spotId: 'worker-ground' } }) });
-    pickKernel.upsert({ state: state(79), context: { spot: { id: 'worker-ground' } } });
+    pickKernel.upsert(standOn(pickKernel, { state: state(79) }, { id: 'worker-ground' }));
     pickKernel.tick();
     claimAck(pickKernel, { grants: [{ ok: true, characterId: 79, ownerId: 'cold_simulation_owner', revision: 4,
         leaseId: 'pick-lease', leaseUntil: 35000 }] });
@@ -385,7 +391,7 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => commandMessages.push({ type, payload }),
         now: () => now
     });
-    commandKernel.upsert({ state: state(3, { activity: 'shopping' }), context: {} });
+    commandKernel.upsert({ state: state(3, { activity: 'shopping' }) });
     commandKernel.tick();
     await commandKernel.resolveChain;
     const commandRequest = commandMessages.find((entry) => entry.type === 'command_request');
@@ -401,10 +407,10 @@ function claimAck(kernel, payload) {
     assert.strictEqual(commandKernel.snapshot().commandingAgeMs, 0,
         'command age starts at zero on the deterministic test clock');
     const commandState = commandKernel.states.get(3).state;
-    commandKernel.upsert({ state: { ...commandState }, context: { refreshed: true } });
+    commandKernel.upsert({ state: { ...commandState } });
     assert.strictEqual(commandKernel.scheduleTokens.has(3), false,
         'a catalog refresh must not create a second writer while the command is in flight');
-    commandAck(commandKernel, { characterId: 3, state: { ...commandState }, context: { refreshed: true } });
+    commandAck(commandKernel, { characterId: 3, state: { ...commandState } });
     assert.strictEqual(commandKernel.scheduleTokens.has(3), true,
         'a same-revision command ACK must restore the consumed due token');
     assert.strictEqual(commandKernel.snapshot().commanding, 0);
@@ -419,7 +425,7 @@ function claimAck(kernel, payload) {
     const waitingMembers = [720, 721, 722].map(id => state(id, { party: { partyId: 'after-commands' },
         timing: { nextResolveAt: now - 1000 } }));
     const waitingParty = { partyId: 'after-commands', leaderId: 720, memberIds: [720, 721, 722] };
-    waitingMembers.forEach(s => commandPressureKernel.upsert({ state: s, context: {} }));
+    waitingMembers.forEach(s => commandPressureKernel.upsert({ state: s }));
     commandPressureKernel.partyPut(waitingParty.partyId, waitingParty);
     commandPressureKernel.tick();
     assert.strictEqual(commandPressureKernel.commanding.size, 2,
@@ -427,15 +433,15 @@ function claimAck(kernel, payload) {
     await commandPressureKernel.resolveChain;
     for (const s of blockedCommands.slice(0, 2)) {
         commandAck(commandPressureKernel, { characterId: s.characterId, ok: false,
-            reason: 'missing_spot', retryAfterMs: 30000, state: s, context: {} });
-        commandPressureKernel.upsert({ state: s, context: { refreshed: true } });
+            reason: 'missing_spot', retryAfterMs: 30000, state: s });
+        commandPressureKernel.upsert({ state: s });
         assert.strictEqual(commandPressureKernel.scheduleTokens.get(s.characterId).dueAt, now + 30000,
             'a failed command with an unchanged state must respect retry delay after a catalog refresh');
     }
     commandPressureKernel.tick();
     await commandPressureKernel.resolveChain;
     commandAck(commandPressureKernel, { characterId: 712, ok: false, reason: 'missing_spot',
-        retryAfterMs: 30000, state: blockedCommands[2], context: {} });
+        retryAfterMs: 30000, state: blockedCommands[2] });
     commandPressureKernel.tick();
     const resumedParty = commandPressureMessages.find(m => m.type === 'claim_request');
     assert.deepStrictEqual(resumedParty?.payload.candidates.map(c => c.characterId), [720, 721, 722],
@@ -447,7 +453,7 @@ function claimAck(kernel, payload) {
         emit: () => {},
         now: () => now
     });
-    transitionKernel.upsert({ state: state(5, { activity: 'shopping' }), context: {} });
+    transitionKernel.upsert({ state: state(5, { activity: 'shopping' }) });
     transitionKernel.tick();
     await transitionKernel.resolveChain;
     const transitioned = state(5, {
@@ -455,16 +461,16 @@ function claimAck(kernel, payload) {
         timing: { lastResolvedAt: now, nextResolveAt: now - 1 },
         updatedAt: now
     });
-    transitionKernel.upsert({ state: transitioned, context: {} });
+    transitionKernel.upsert({ state: transitioned });
     transitionKernel.tick();
     assert.strictEqual(transitionKernel.scheduleTokens.has(5), false,
         'an interim durable refresh can be consumed while the lifecycle ACK is pending');
-    commandAck(transitionKernel, { characterId: 5, state: transitioned, context: {} });
+    commandAck(transitionKernel, { characterId: 5, state: transitioned });
     assert.strictEqual(transitionKernel.scheduleTokens.has(5), true,
         'the lifecycle ACK must restore a transition node consumed during the command');
 
     const memberOnlyKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => now });
-    memberOnlyKernel.upsert({ state: state(4, { party: { partyId: 'member-only' } }), context: {} });
+    memberOnlyKernel.upsert({ state: state(4, { party: { partyId: 'member-only' } }) });
     assert.strictEqual(memberOnlyKernel.heap.values.filter(entry => entry.kind !== 'alarm').length, 0,
         'party members must be scheduled only through their leader');
     assert.strictEqual([...memberOnlyKernel.alarms.values()].filter(entry => entry.alarmKind === 'worker_safety').length, 0);
@@ -478,7 +484,7 @@ function claimAck(kernel, payload) {
         now: () => recoveryNow,
         claimAckTimeoutMs: 5000
     });
-    recoveryKernel.upsert({ state: state(6), context: { spot: { id: 'spot' } } });
+    recoveryKernel.upsert(standOn(recoveryKernel, { state: state(6) }, { id: 'spot' }));
     recoveryKernel.tick();
     assert.strictEqual(recoveryKernel.snapshot().claiming, 1);
     recoveryNow += 5001;
@@ -506,10 +512,9 @@ function claimAck(kernel, payload) {
     assert.strictEqual(recoveryKernel.scheduleTokens.has(6), true);
 
     const orphanKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => recoveryNow });
-    orphanKernel.upsert({
-        state: state(7, { timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow + 3600000 } }),
-        context: { spot: { id: 'spot' } }
-    });
+    orphanKernel.upsert(standOn(orphanKernel, {
+        state: state(7, { timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow + 3600000 } })
+    }, { id: 'spot' }));
     const orphanedEntry = orphanKernel.heap.values.find(entry => entry.kind !== 'alarm' && entry.characterId === 7);
     assert.strictEqual(orphanKernel.heap.remove(orphanedEntry), true);
     orphanKernel.consumeHeapEntry(orphanedEntry);
@@ -529,9 +534,9 @@ function claimAck(kernel, payload) {
         emit: () => {},
         now: () => recoveryNow
     });
-    ackRaceKernel.upsert({ state: state(8, {
+    ackRaceKernel.upsert(standOn(ackRaceKernel, { state: state(8, {
         timing: { lastResolvedAt: recoveryNow - 1000, nextResolveAt: recoveryNow }
-    }), context: { spot: { id: 'spot' } } });
+    }) }, { id: 'spot' }));
     ackRaceKernel.tick();
     claimAck(ackRaceKernel, { grants: [{
         ok: true, characterId: 8, ownerId: 'cold_simulation_owner', revision: 4,
@@ -539,10 +544,10 @@ function claimAck(kernel, payload) {
     }] });
     await ackRaceKernel.resolveChain;
     ackRaceKernel.flush(null, true);
-    ackRaceKernel.upsert({ state: state(8, {
+    ackRaceKernel.upsert(standOn(ackRaceKernel, { state: state(8, {
         timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow },
         simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
-    }), context: { spot: { id: 'newer-catalog' } } });
+    }) }, { id: 'newer-catalog' }));
     assert.strictEqual(ackRaceKernel.scheduleTokens.has(8), false,
         'a newer catalog snapshot must not schedule a second writer while the prior revision is in flight');
     commitAck(ackRaceKernel, { results: [{
@@ -578,22 +583,21 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => partyMessages.push({ type, payload }),
         now: () => now
     });
-    partyKernel.upsert({ state: members[0], context: { spot: { id: 'party-spot' } } });
+    partyKernel.upsert(standOn(partyKernel, { state: members[0] }, { id: 'party-spot' }));
     partyKernel.partyPut(party.partyId, party);
-    partyKernel.upsert({ state: members[1], context: {} });
+    partyKernel.upsert({ state: members[1] });
     partyKernel.upsert({
         state: {
             ...members[1],
             simulation: { ownerId: 'legacy_main', revision: 9, leaseId: null, leaseUntil: 0 }
-        },
-        context: {}
+        }
     });
     partyKernel.tick();
     const partyClaim = partyMessages.shift();
     assert.strictEqual(partyClaim.type, 'claim_request');
     assert.deepStrictEqual(partyClaim.payload.candidates.map((candidate) => candidate.characterId), [20, 21]);
     assert.deepStrictEqual(partyClaim.payload.candidates.map((candidate) => candidate.expectedRevision), [3, 9],
-        'party claims must use current member revisions instead of the leader context snapshot');
+        'party claims must use current member revisions instead of the leader snapshot');
     assert(partyClaim.payload.candidates.every((candidate) => candidate.purpose.kind === 'party'));
     claimAck(partyKernel, {
         grants: partyClaim.payload.candidates.map((candidate) => ({
@@ -625,8 +629,8 @@ function claimAck(kernel, payload) {
         planPartyRequirement: ({ state }) => { refreshed.push(state.characterId); return { acquisitionPlan: state.characterId === 120
             ? { status: 'active', strategy: 'market', target: { selfId: 55 } } : state.stats.equipmentPlan }; },
         emit: (type, payload) => refreshMessages.push({ type, payload }) });
-    refreshKernel.upsert({ state: refreshMembers[0], context: { spot: { id: 'refresh-spot' } } });
-    refreshKernel.upsert({ state: refreshMembers[1], context: {} });
+    refreshKernel.upsert(standOn(refreshKernel, { state: refreshMembers[0] }, { id: 'refresh-spot' }));
+    refreshKernel.upsert({ state: refreshMembers[1] });
     refreshKernel.partyPut(refreshParty.partyId, { ...refreshParty, requirementRefresh: true }); refreshKernel.tick();
     const refreshClaim = refreshMessages.find(message => message.type === 'claim_request');
     claimAck(refreshKernel, { grants: refreshClaim.payload.candidates.map(candidate => ({ ok: true,
@@ -649,8 +653,8 @@ function claimAck(kernel, payload) {
             projectResolve: state => ({ state, kitMoved: moved && state.characterId === 121 }),
             planPartyRequirement: ({ state }) => { kitPlanned.push(state.characterId); return { acquisitionPlan: state.stats.equipmentPlan }; },
             emit: (type, payload) => kitMessages.push({ type, payload }) });
-        kitKernel.upsert({ state: refreshMembers[0], context: { spot: { id: 'refresh-spot' } } });
-        kitKernel.upsert({ state: refreshMembers[1], context: {} });
+        kitKernel.upsert(standOn(kitKernel, { state: refreshMembers[0] }, { id: 'refresh-spot' }));
+        kitKernel.upsert({ state: refreshMembers[1] });
         kitKernel.partyPut(refreshParty.partyId, refreshParty); kitKernel.tick();
         const kitClaim = kitMessages.find(message => message.type === 'claim_request');
         claimAck(kitKernel, { grants: kitClaim.payload.candidates.map(candidate => ({ ok: true,
@@ -682,11 +686,11 @@ function claimAck(kernel, payload) {
                 return outcome === 'accepted' ? { memberGoals: [], incomeReviews: [], lastIncomeReviewAt: now, agreement: null } : null;
             },
             emit: (type, payload) => joinMessages.push({ type, payload }) });
-        joinKernel.upsert({ state: joinMembers[0], context: { spot: { id: 'refresh-spot' } } });
-        joinKernel.upsert({ state: joinMembers[1], context: {} });
+        joinKernel.upsert(standOn(joinKernel, { state: joinMembers[0] }, { id: 'refresh-spot' }));
+        joinKernel.upsert({ state: joinMembers[1] });
         joinKernel.partyPut(joinParty.partyId, joinParty);
         // The recruit is not due: it waits idle, not claimed by this tick.
-        if (outcome !== 'gone') joinKernel.upsert({ state: state(122, { timing: { lastResolvedAt: now, nextResolveAt: now + 3600000 } }), context: {} });
+        if (outcome !== 'gone') joinKernel.upsert({ state: state(122, { timing: { lastResolvedAt: now, nextResolveAt: now + 3600000 } }) });
         if (outcome === 'unavailable') { const busy = joinKernel.busy.bind(joinKernel);
             joinKernel.busy = id => Number(id) === 122 || busy(id); }
         joinKernel.tick();
@@ -727,8 +731,8 @@ function claimAck(kernel, payload) {
             projectResolve: state => ({ state }),
             planPartyRequirement: () => { throw Error('a material hunt rebuilt its wish plan'); },
             emit: (type, payload) => materialMessages.push({ type, payload }) });
-        materialKernel.upsert({ state: materialMembers[0], context: { spot: { id: objective.spotId } } });
-        materialKernel.upsert({ state: materialMembers[1], context: {} });
+        materialKernel.upsert(standOn(materialKernel, { state: materialMembers[0] }, { id: objective.spotId }));
+        materialKernel.upsert({ state: materialMembers[1] });
         materialKernel.partyPut(materialParty.partyId, { ...materialParty, requirementRefresh: true }); materialKernel.tick();
         const claim = materialMessages.find(message => message.type === 'claim_request');
         claimAck(materialKernel, { grants: claim.payload.candidates.map(candidate => ({ ok: true,
@@ -765,8 +769,8 @@ function claimAck(kernel, payload) {
         emit: (type, payload, msgId) => stalePartyMessages.push({ type, payload, msgId }),
         now: () => stalePartyNow
     });
-    stalePartyKernel.upsert({ state: stalePartyMembers[0], context: { spot: { id: 'stale-party-spot' } } });
-    stalePartyKernel.upsert({ state: stalePartyMembers[1], context: {} });
+    stalePartyKernel.upsert(standOn(stalePartyKernel, { state: stalePartyMembers[0] }, { id: 'stale-party-spot' }));
+    stalePartyKernel.upsert({ state: stalePartyMembers[1] });
     stalePartyKernel.partyPut(staleParty.partyId, staleParty);
     stalePartyKernel.tick();
     const stalePartyClaim = stalePartyMessages.shift();
@@ -794,7 +798,6 @@ function claimAck(kernel, payload) {
             actualRevision: 9,
             actualOwner: 'legacy_main',
             state: refreshedMember,
-            context: {},
             purpose: memberCandidate.purpose
         }]
     });
@@ -810,8 +813,7 @@ function claimAck(kernel, payload) {
         state: {
             ...stalePartyMembers[0],
             simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
-        },
-        context: { spot: { id: 'stale-party-spot' } }
+        }
     }] });
     stalePartyNow += 1000;
     stalePartyKernel.tick();
@@ -852,8 +854,8 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => expiredPartyMessages.push({ type, payload }),
         now: () => now
     });
-    expiredPartyKernel.upsert({ state: expiredPartyMembers[0], context: { spot: { id: 'old-party-spot' } } });
-    expiredPartyKernel.upsert({ state: expiredPartyMembers[1], context: {} });
+    expiredPartyKernel.upsert(standOn(expiredPartyKernel, { state: expiredPartyMembers[0] }, { id: 'old-party-spot' }));
+    expiredPartyKernel.upsert({ state: expiredPartyMembers[1] });
     expiredPartyKernel.partyPut(expiredParty.partyId, expiredParty);
     expiredPartyKernel.tick();
     const expiredClaim = expiredPartyMessages.shift();
@@ -906,8 +908,8 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => expiryScheduleMessages.push({ type, payload }),
         now: () => expiryScheduleNow
     });
-    expiryScheduleKernel.upsert({ state: expiryScheduleMembers[0], context: { spot: { id: 'scheduled-expiry-spot' } } });
-    expiryScheduleKernel.upsert({ state: expiryScheduleMembers[1], context: {} });
+    expiryScheduleKernel.upsert(standOn(expiryScheduleKernel, { state: expiryScheduleMembers[0] }, { id: 'scheduled-expiry-spot' }));
+    expiryScheduleKernel.upsert({ state: expiryScheduleMembers[1] });
     expiryScheduleKernel.partyPut(expiryScheduleParty.partyId, expiryScheduleParty);
     expiryScheduleKernel.tick();
     assert.strictEqual(expiryScheduleMessages.length, 0,
@@ -947,8 +949,8 @@ function claimAck(kernel, payload) {
         nextResolveAt: expiryScheduleNow
     };
     const partyCapacityKernel = recordingKernel({ now: () => expiryScheduleNow, resolveSolo: resolver });
-    partyCapacityKernel.upsert({ state: partyDueLeader, context: {} });
-    partyCapacityKernel.upsert({ state: partyDueMember, context: {} });
+    partyCapacityKernel.upsert({ state: partyDueLeader });
+    partyCapacityKernel.upsert({ state: partyDueMember });
     partyCapacityKernel.partyPut(priorityParty.partyId, priorityParty);
     assert.deepStrictEqual(partyCapacityKernel.dueCandidates(expiryScheduleNow, 1), [],
         'an atomic party claim must wait when the current capacity cannot fit every member');
@@ -976,7 +978,7 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => singletonMessages.push({ type, payload }),
         now: () => singletonNow
     });
-    singletonKernel.upsert({ state: singletonMember, context: { spot: { id: 'singleton-spot' } } });
+    singletonKernel.upsert(standOn(singletonKernel, { state: singletonMember }, { id: 'singleton-spot' }));
     singletonKernel.partyPut(singletonParty.partyId, singletonParty);
     singletonKernel.tick();
     const singletonClaim = singletonMessages.shift();
@@ -1048,15 +1050,14 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => partyRouteMessages.push({ type, payload }),
         now: () => now
     });
-    partyRouteKernel.upsert({ state: partyRouteMembers[0], context: { spot: { id: 'starter-field' } } });
-    partyRouteKernel.upsert({ state: partyRouteMembers[1], context: {} });
+    partyRouteKernel.upsert(standOn(partyRouteKernel, { state: partyRouteMembers[0] }, { id: 'starter-field' }));
+    partyRouteKernel.upsert({ state: partyRouteMembers[1] });
     partyRouteKernel.partyPut(partyRouteParty.partyId, partyRouteParty);
     // A member's kept solo route: a new state keeps it, the party run's
     // claim takes the member and drops it.
     partyRouteKernel.states.get(31).route = { spotId: 'solo-kept' };
     partyRouteKernel.upsert({ state: { ...partyRouteMembers[1], level: 17,
-        simulation: { ...partyRouteMembers[1].simulation, revision: Number(partyRouteMembers[1].simulation?.revision || 0) + 1 } },
-    context: {} });
+        simulation: { ...partyRouteMembers[1].simulation, revision: Number(partyRouteMembers[1].simulation?.revision || 0) + 1 } } });
     assert.deepStrictEqual(partyRouteKernel.states.get(31).route, { spotId: 'solo-kept' }, 'a committed state keeps the bot\'s route');
     partyRouteKernel.tick();
     assert.strictEqual(partyRouteKernel.states.get(31).route, null, 'the party claim drops the member\'s solo route');
@@ -1090,7 +1091,7 @@ function claimAck(kernel, payload) {
     });
     const compactLeader = state(35, { party: { partyId: 'compact-party' } });
     // The member's state never reached this kernel: the party waits for it.
-    compactFallbackKernel.upsert({ state: compactLeader, context: {} });
+    compactFallbackKernel.upsert({ state: compactLeader });
     compactFallbackKernel.partyPut('compact-party', { partyId: 'compact-party', leaderId: 35, memberIds: [35, 36] });
     compactFallbackKernel.tick();
     assert(!compactFallbackMessages.some((entry) => entry.type === 'claim_request'),
@@ -1104,10 +1105,9 @@ function claimAck(kernel, payload) {
         maxBatch: 64,
         maxInFlight: 3
     });
-    for (let id = 80; id < 85; id++) burstKernel.upsert({
-        state: state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: now - 1 } }),
-        context: { spot: { id: 'spot' } }
-    });
+    for (let id = 80; id < 85; id++) burstKernel.upsert(standOn(burstKernel, {
+        state: state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: now - 1 } })
+    }, { id: 'spot' }));
     burstKernel.tick();
     const burstClaim = burstMessages.find((entry) => entry.type === 'claim_request');
     assert.strictEqual(burstClaim.payload.candidates.length, 3,
@@ -1122,11 +1122,10 @@ function claimAck(kernel, payload) {
         leaseId: 'renewal-lease',
         leaseUntil: now + 1000
     };
-    renewalKernel.upsert({ state: state(90), context: {} });
+    renewalKernel.upsert({ state: state(90) });
     renewalKernel.inFlight.set(90, {
         grant: renewalGrant,
         state: state(90),
-        context: {},
         startedAt: now
     });
     renewalKernel.onLeaseRenewal({ renewals: [{
@@ -1142,11 +1141,10 @@ function claimAck(kernel, payload) {
     // The tick skips the expiry scan until the earliest lease can be due; a
     // lease added later with an earlier deadline lowers that bound.
     assert.strictEqual(renewalKernel.inFlight.checkAt, now + 10000);
-    renewalKernel.upsert({ state: state(92), context: {} });
+    renewalKernel.upsert({ state: state(92) });
     renewalKernel.inFlight.set(92, {
         grant: { ...renewalGrant, characterId: 92, leaseId: 'early-lease', leaseUntil: now + 4000 },
         state: state(92),
-        context: {},
         startedAt: now
     });
     assert.strictEqual(renewalKernel.inFlight.checkAt, now + 4000);
@@ -1208,7 +1206,6 @@ function claimAck(kernel, payload) {
     oversizedKernel.inFlight.set(91, {
         grant: oversizedProposal.token,
         state: oversizedState,
-        context: {},
         startedAt: now
     });
     oversizedKernel.dirty.set(91, oversizedProposal);
@@ -1263,10 +1260,9 @@ function claimAck(kernel, payload) {
         flushHardMs: 5000
     });
     const capacityFlushStates = Array.from({ length: 8 }, (_, index) => state(200 + index));
-    capacityFlushStates.forEach((entry) => capacityFlushKernel.upsert({
-        state: entry,
-        context: { spot: { id: 'spot', rewards: {} } }
-    }));
+    capacityFlushStates.forEach((entry) => capacityFlushKernel.upsert(standOn(capacityFlushKernel, {
+        state: entry
+    }, { id: 'spot', rewards: {} })));
     capacityFlushKernel.tick();
     const capacityFlushClaim = capacityFlushMessages.shift();
     assert.strictEqual(capacityFlushClaim.payload.candidates.length, 8);
@@ -1308,12 +1304,12 @@ function claimAck(kernel, payload) {
     const partialKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
         maxInFlight: 8, maxAtomicPartySize: 9, emit: (type, payload) => partialMessages.push({ type, payload }) });
     const clanMembers = Array.from({ length: 9 }, (_, i) => state(500 + i, { party: { partyId: 'nine' } }));
-    clanMembers.forEach(s => partialKernel.upsert({ state: s, context: {} }));
+    clanMembers.forEach(s => partialKernel.upsert({ state: s }));
     partialKernel.partyPut('nine', { partyId: 'nine', leaderId: 500, memberIds: clanMembers.map(m => m.characterId) });
     for (let id = 600; id < 605; id++) {
         const pending = { ...oversizedProposal, characterId: id, enqueuedAt: now,
             token: { ...oversizedProposal.token, characterId: id }, baseState: state(id), nextState: state(id), result: { events: [], debug: {} } };
-        partialKernel.upsert({ state: pending.baseState, context: {} });
+        partialKernel.upsert({ state: pending.baseState });
         partialKernel.inFlight.set(id, { state: pending.baseState, grant: pending.token });
         partialKernel.dirty.set(id, pending);
     }
@@ -1323,7 +1319,7 @@ function claimAck(kernel, payload) {
     assert.strictEqual(drained.payload.capacityBlocked, true, 'main must receive the atomic capacity pressure');
     assert.strictEqual(partialKernel.inFlight.size, 5, 'slots remain owned until the commit acknowledgement');
     commitAck(partialKernel, { results: drained.payload.proposals.map(p => ({ ok: true, characterId: p.characterId,
-        state: state(p.characterId, { timing: { nextResolveAt: now + 60000 } }), context: {} })) });
+        state: state(p.characterId, { timing: { nextResolveAt: now + 60000 } }) })) });
     assert.strictEqual(partialKernel.dueCandidates(now + 1000, 8).length, 9, 'the complete clan party can run after the owners commit');
 
     const throttledPartyMessages = [];
@@ -1343,12 +1339,12 @@ function claimAck(kernel, payload) {
         leaderId: 40,
         memberIds: throttledPartyMembers.map((member) => member.characterId)
     };
-    throttledPartyKernel.upsert({ state: state(39), context: { spot: { id: 'spot' } } });
-    throttledPartyMembers.forEach((member, index) => throttledPartyKernel.upsert({
-        state: member, context: index === 0 ? { spot: { id: 'spot' } } : {}
-    }));
+    throttledPartyKernel.upsert(standOn(throttledPartyKernel, { state: state(39) }, { id: 'spot' }));
+    throttledPartyMembers.forEach((member, index) => throttledPartyKernel.upsert(
+        index === 0 ? standOn(throttledPartyKernel, { state: member }, { id: 'spot' }) : { state: member }
+    ));
     throttledPartyKernel.partyPut(throttledParty.partyId, throttledParty);
-    throttledPartyKernel.upsert({ state: state(100), context: { spot: { id: 'spot' } } });
+    throttledPartyKernel.upsert(standOn(throttledPartyKernel, { state: state(100) }, { id: 'spot' }));
     throttledPartyKernel.tick();
     const throttledClaim = throttledPartyMessages.find((entry) => entry.type === 'claim_request');
     assert.deepStrictEqual(throttledClaim.payload.candidates.map((candidate) => candidate.characterId), [39],
@@ -1369,9 +1365,9 @@ function claimAck(kernel, payload) {
         maxInFlight: 2,
         maxAtomicPartySize: 5
     });
-    throttledPartyMembers.forEach((member, index) => atomicBurstKernel.upsert({
-        state: member, context: index === 0 ? { spot: { id: 'spot' } } : {}
-    }));
+    throttledPartyMembers.forEach((member, index) => atomicBurstKernel.upsert(
+        index === 0 ? standOn(atomicBurstKernel, { state: member }, { id: 'spot' }) : { state: member }
+    ));
     atomicBurstKernel.partyPut(throttledParty.partyId, throttledParty);
     atomicBurstKernel.tick();
     const atomicBurstClaim = atomicBurstMessages.find((entry) => entry.type === 'claim_request');
@@ -1400,11 +1396,11 @@ function claimAck(kernel, payload) {
         leaderId: 50,
         memberIds: oversizedPartyMembers.map((member) => member.characterId)
     };
-    oversizedPartyMembers.forEach((member, index) => boundedBurstKernel.upsert({
-        state: member, context: index === 0 ? { spot: { id: 'spot' } } : {}
-    }));
+    oversizedPartyMembers.forEach((member, index) => boundedBurstKernel.upsert(
+        index === 0 ? standOn(boundedBurstKernel, { state: member }, { id: 'spot' }) : { state: member }
+    ));
     boundedBurstKernel.partyPut(oversizedParty.partyId, oversizedParty);
-    boundedBurstKernel.upsert({ state: state(100), context: { spot: { id: 'spot' } } });
+    boundedBurstKernel.upsert(standOn(boundedBurstKernel, { state: state(100) }, { id: 'spot' }));
     boundedBurstKernel.tick();
     const boundedBurstClaim = boundedBurstMessages.find((entry) => entry.type === 'claim_request');
     assert.deepStrictEqual(boundedBurstClaim.payload.candidates.map((candidate) => candidate.characterId), [100],
@@ -1423,10 +1419,9 @@ function claimAck(kernel, payload) {
     });
     const capacityMembers = Array.from({ length: 5 }, (_, index) => state(40 + index, { party: { partyId: 'capacity-party' } }));
     const capacityParty = { partyId: 'capacity-party', leaderId: 40, memberIds: capacityMembers.map((member) => member.characterId) };
-    capacityMembers.forEach((member, index) => capacityKernel.upsert({
-        state: member,
-        context: index === 0 ? { spot: { id: 'spot' } } : {}
-    }));
+    capacityMembers.forEach((member, index) => capacityKernel.upsert(
+        index === 0 ? standOn(capacityKernel, { state: member }, { id: 'spot' }) : { state: member }
+    ));
     capacityKernel.partyPut(capacityParty.partyId, capacityParty);
     for (let id = 1000; id < 1062; id++) capacityKernel.claiming.add(id);
     capacityKernel.tick();
@@ -1440,7 +1435,7 @@ function claimAck(kernel, payload) {
         'the next eligible tick must admit the entire party atomically');
 
     const fenceKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => now });
-    fenceKernel.upsert({ state: state(9), context: { spot: { id: 'spot' } } });
+    fenceKernel.upsert(standOn(fenceKernel, { state: state(9) }, { id: 'spot' }));
     fenceKernel.tick();
     claimAck(fenceKernel, { grants: [{
         ok: true, characterId: 9, ownerId: 'cold_simulation_owner', revision: 4, leaseId: 'fence-lease', leaseUntil: now + 30000
@@ -1457,7 +1452,7 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => errorMessages.push({ type, payload }),
         now: () => now
     });
-    errorKernel.upsert({ state: state(30), context: { spot: { id: 'spot' } } });
+    errorKernel.upsert(standOn(errorKernel, { state: state(30) }, { id: 'spot' }));
     errorKernel.tick();
     claimAck(errorKernel, { grants: [{
         ok: true, characterId: 30, ownerId: 'cold_simulation_owner', revision: 4,
@@ -1479,7 +1474,7 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => marketMessages.push({ type, payload }),
         now: () => now
     });
-    marketKernel.upsert({ state: state(40), context: { spot: { id: 'spot', rewards: {} } } });
+    marketKernel.upsert(standOn(marketKernel, { state: state(40) }, { id: 'spot', rewards: {} }));
     marketKernel.tick();
     claimAck(marketKernel, { grants: [{
         ok: true, characterId: 40, ownerId: 'cold_simulation_owner', revision: 4, leaseId: 'market-lease', leaseUntil: now + 30000
@@ -1495,7 +1490,7 @@ function claimAck(kernel, payload) {
     marketKernel.lookSeen.set(40, new Map([[6, { deals: 3, at: now }]]));
     marketKernel.fence(40);
     assert.strictEqual(marketKernel.lookSeen.has(40), false, 'hot handoff deletes worker line observations');
-    marketKernel.upsert({ state: state(41), context: {} });
+    marketKernel.upsert({ state: state(41) });
     marketKernel.lookSeen.set(41, new Map([[7, { deals: 3, at: now }]]));
     marketKernel.remove(41);
     assert.strictEqual(marketKernel.lookSeen.has(41), false);
@@ -1520,7 +1515,7 @@ function claimAck(kernel, payload) {
     const emptyMembers = [250, 251].map(id => state(id, { party: { partyId: 'empty-party', leaderId: 250 } }));
     const emptyParty = { partyId: 'empty-party', leaderId: 250, memberIds: [250, 251], stats: {}, status: 'active',
         nextResolveAt: emptyNow - 5000, updatedAt: emptyNow - 5000, revision: 4 };
-    emptyMembers.forEach(member => emptyKernel.upsert({ state: member, context: {} }));
+    emptyMembers.forEach(member => emptyKernel.upsert({ state: member }));
     emptyKernel.partyPut(emptyParty.partyId, emptyParty);
     const emptyRound = async (lease) => {
         emptyMessages.length = 0;
@@ -1545,7 +1540,7 @@ function claimAck(kernel, payload) {
     assert.strictEqual(emptyLeaderCommit.partyResolution.reviewGoals, true, 'main reviews the party\'s goals');
     assert(emptyKernel.busy(250) && emptyKernel.busy(251), 'every member stays claimed until the commit ACK');
     emptyKernel.partyPut(emptyParty.partyId, { ...emptyParty, nextResolveAt: emptyNow + 60000, revision: 5 });
-    commitAck(emptyKernel, { results: emptyCommits.map(proposal => ({ ok: true, characterId: proposal.characterId, context: {},
+    commitAck(emptyKernel, { results: emptyCommits.map(proposal => ({ ok: true, characterId: proposal.characterId,
         state: { ...proposal.nextState, simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 } } })) });
     assert.strictEqual(emptyKernel.busy(250), false);
     assert.strictEqual(emptyKernel.scheduleTokens.get(250).dueAt, emptyNow + 60000, 'the leader is due at the row\'s next due');
@@ -1556,7 +1551,7 @@ function claimAck(kernel, payload) {
     emptyNow += 60000;
     const refusedCommits = await emptyRound('refused');
     commitAck(emptyKernel, { results: refusedCommits.map(proposal => ({ ok: false, characterId: proposal.characterId,
-        reason: 'party_group_aborted', detail: 'party_revision_stale', context: {},
+        reason: 'party_group_aborted', detail: 'party_revision_stale',
         state: { ...proposal.baseState, simulation: { ownerId: 'legacy_main', revision: 6, leaseId: null, leaseUntil: 0 } } })) });
     assert.strictEqual(emptyKernel.busy(250), false);
     assert(emptyKernel.scheduleTokens.get(250).dueAt >= emptyNow + 1000,

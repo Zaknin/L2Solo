@@ -111,7 +111,7 @@ async function boundedAndCorrelation() {
         for (const [kind, rows] of [['other', []], ['presence', {}], ['presence', Array.from({ length: 65 }, (_, i) => checkpoint(i + 1))],
             ['presence', [checkpoint(1), checkpoint(1)]], ['presence', [{ ...checkpoint(1), simulationRevision: -1 }]],
             ['repair', [{ edgeId: 'oversize', kind: 'state', checkpoint: checkpoint(1), expectedWorkerVersion: 0,
-                entry: { state: {}, context: { payload: 'x'.repeat(Protocol.MAX_MESSAGE_BYTES) } } }]]]) {
+                entry: { state: { payload: 'x'.repeat(Protocol.MAX_MESSAGE_BYTES) } } }]]]) {
             assert.strictEqual((await f.transport.request(kind, rows)).ok, false);
         }
         assert.strictEqual(f.sent.length, 0, 'invalid/oversize/duplicate rows and oversize bytes are not posted');

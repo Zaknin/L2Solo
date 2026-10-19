@@ -48,7 +48,7 @@ async function proposals(party, route, at) {
         emit: (type, payload) => messages.push({ type, payload }) });
     for (const member of members) {
         const current = Life.cachedState(member.characterId);
-        kernel.upsert({ state: current, context: {} });
+        kernel.upsert({ state: current });
         kernel.inFlight.set(member.characterId, { state: current, grant: held.get(member.characterId),
             partyId: party.partyId, claimRequestId: requestId });
     }

@@ -62,7 +62,10 @@ function post(type, payload, id) { worker.postMessage(Protocol.envelope(type, ep
     post('init', { config: { pvpAggression: 0 } }, 'init');
     await wait(message => message.type === 'ready' && message.payload.phase === 'running');
     post('pause', {}, 'pause');
-    post('snapshot_page', { rows: members.map(state => ({ state, context: { recipeBook: null, knownShotRecipes: [999] } })),
+    // An older 'recipes' row the query's own knowledge must replace.
+    post('table_page', { tables: [{ name: 'recipes', from: null, to: 0, full: true, removed: [], last: true,
+        rows: members.map(state => [state.characterId, { characterId: state.characterId, recipeBook: null, knownShotRecipes: [999] }]) }] });
+    post('snapshot_page', { rows: members.map(state => ({ state })),
         initial: true, done: true, ack: true }, 'snapshot');
     await wait(message => message.msgId === 'snapshot');
     const request = { party, members, escrows: [0, 0], recipeKnowledge: members.map(() => ({ recipeBook: null, knownShotRecipes: [] })),
@@ -98,7 +101,7 @@ function post(type, payload, id) { worker.postMessage(Protocol.envelope(type, ep
     const prepared = await wait(message => message.probe === 'canonical');
     assert.equal(prepared.slots.filter(row => row.id > 0).length, 2);
     assert(prepared.slots.filter(row => row.id > 0).every(row => row.knownShotRecipes.length === 0),
-        'current query knowledge replaces the old worker recipe context');
+        'current query knowledge replaces the worker\'s recipes row');
     const incomeSpot = { id: '-10_10', minLevel: 14, maxLevel: 14, avgLevel: 14, density: 20,
         tagsAuthoritative: true, tags: ['starter', 'normal_hp'], npcEntries: [], center: { locX: 0, locY: 0 } };
     post('catalog_page', { catalog: 'spots', rows: [incomeSpot], done: true }, 'income-spots');

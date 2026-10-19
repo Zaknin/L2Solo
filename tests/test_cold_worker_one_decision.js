@@ -43,7 +43,7 @@ module.exports.stepProbe = async (id) => {
     let builds = 0;
     Economy.forState = (...args) => { builds++; return original(...args); };
     try {
-        const plan = await kernel.planLifecycle({ state: entry.state, context: entry.context, timestamp });
+        const plan = await kernel.planLifecycle({ state: entry.state, timestamp });
         const decided = builds;
         const state = plan.plannedState || entry.state;
         const projection = await kernel.projectResolve(state, { patch: {}, debug: {}, events: [],
@@ -64,7 +64,7 @@ module.exports.stepProbe = async (id) => {
 // The first quiet round records the hunt cycle (an income event), so the
 // second step is the warm one.
 module.exports.goalProbe = async (id) => {
-    const context = kernel.states.get(id).context, timestamp = Date.now();
+    const timestamp = Date.now();
     // The goal revision is the worker's 'goals' table row, as main publishes it.
     const goal = revision => ({ characterId: id, nextReviewAt: 0, revision });
     tables.apply([{ name: 'goals', from: null, to: 0, full: true, rows: [[id, goal(1)]], removed: [], last: true }]);
@@ -74,7 +74,7 @@ module.exports.goalProbe = async (id) => {
     Economy.forState = (...args) => { builds++; return original(...args); };
     const step = async at => {
         const before = builds, state = kernel.states.get(id).state;
-        const plan = await kernel.planLifecycle({ state, context, timestamp: at });
+        const plan = await kernel.planLifecycle({ state, timestamp: at });
         const projection = await kernel.projectResolve(plan.plannedState || state, { patch: {}, debug: {}, events: [],
             materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: at + 60000 }, at, plan);
         // The step's own record write: the record keeps its fields (the card).
@@ -164,7 +164,7 @@ parentPort.on('message', message => {
         send('table_page', { tables: [{ name: 'board', from: null, to: 0, full: true, rows: [], removed: [], last: true },
             { name: 'market', from: null, to: 0, full: true, rows: [], removed: [], last: true },
             { name: 'personal_warehouse', from: null, to: 0, full: true, rows: [], removed: [], last: true }] });
-        send('snapshot_page', { rows: [{ state, context: {} }], ack: true }, 'state');
+        send('snapshot_page', { rows: [{ state }], ack: true }, 'state');
         await wait(message => message.type === 'ready' && message.msgId === 'state');
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'probe'), stepProbe: id });
         const response = await wait(message => message.probeId === 'probe'); if (response.error) throw Error(response.error);

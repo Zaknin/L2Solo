@@ -298,6 +298,16 @@ const SpotService = {
         return spots ? SpotIndex.spotById(spots, spotIdAt(loc).id) : this.findById(spotIdAt(loc).id);
     },
 
+    // The spot a bot stands at, in `spots`: a declared raid profile first (it
+    // is virtual and sits inside an ordinary sector; the party resolver needs
+    // the boss profile, not the field around it), else the spot under its
+    // position, else its declared spot.
+    standingSpot(state, spots) {
+        const declared = SpotIndex.spotById(spots, state?.spotId || '');
+        if (declared?.raidBoss === true) return declared;
+        return this.findCurrentSpot(state?.loc, spots) || declared;
+    },
+
     containsLocation(spot, loc) {
         if (!loc || !['locX', 'locY', 'locZ'].every(key => Number.isFinite(Number(loc[key])))) return false;
         if (spot?.raidBoss === true) {

@@ -2,6 +2,9 @@
 const Profit = require('./CraftProfitPolicy');
 const Commit = require('./EconomyCommit');
 const Diagnostics = require('./EconomyDiagnostics');
+const ShotCraftPolicy = require('./ShotCraftPolicy');
+const { isMainThread } = require('node:worker_threads');
+const TableChannel = require('../Population/ColdTableChannel').shared;
 const recipes = () => invoke('GameServer/Items/C4RecipeItems');
 const life = () => invoke('GameServer/Bot/Population/BotLifeState');
 const byRecipe = new Map();
@@ -248,6 +251,7 @@ async function knownFor(id) {
     if (!known) {
         known = (await invoke('Database').fetchCharacterRecipes(id)).map(row => Number(row.recipeId));
         knownRecipes.set(id, known);
+        TableChannel.changed('recipes', () => recipeRow(id));
     }
     return known;
 }
@@ -258,6 +262,18 @@ function bookFor(id) {
     if (!encodedRecipes.has(id)) encodedRecipes.set(id, invoke('GameServer/Bot/Economy/RecipeBookCodec').pack(knownRecipes.get(id)));
     return encodedRecipes.get(id);
 }
+// A bot's recipe knowledge for planning: the packed book and its packed shot
+// recipes; empty until knownFor has loaded the bot's recipes.
+function knowledgeFor(id) {
+    return { knownShotRecipes: ShotCraftPolicy.packKnown(cachedRecipes(id)), recipeBook: bookFor(id) };
+}
+const recipeRow = id => ({ characterId: Number(id), ...knowledgeFor(id) });
+// The 'recipes' table: one row per bot whose recipes main has loaded; the cold
+// worker plans a far service crafter from it. A cache drop (recipesChanged)
+// keeps the row until the next load replaces it, so the worker plans on the
+// last known book meanwhile, not on none.
+if (isMainThread) TableChannel.register('recipes', { key: row => row.characterId,
+    allRows: () => [...knownRecipes.keys()].map(recipeRow) });
 async function review(state) {
     init();
     const rules = invoke('GameServer/Bot/Economy/CraftShopService');
@@ -388,4 +404,4 @@ async function publishDemand(state, recipe, productPrice, context) {
     }
     return state;
 }
-module.exports = { init, register, remove, recipesChanged, knownFor, cachedRecipes, bookFor, review, find, publicForRecipe, publicRecipeRows, publicRows, publicRecipeDigest, publicScopeDigest, itemFingerprint: publicRecipeDigest, quote, discount, boardRecords, lookup, craft, inputSources, inputStateFor, crafterCandidates, publishDemand };
+module.exports = { init, register, remove, recipesChanged, knownFor, cachedRecipes, bookFor, knowledgeFor, review, find, publicForRecipe, publicRecipeRows, publicRows, publicRecipeDigest, publicScopeDigest, itemFingerprint: publicRecipeDigest, quote, discount, boardRecords, lookup, craft, inputSources, inputStateFor, crafterCandidates, publishDemand };

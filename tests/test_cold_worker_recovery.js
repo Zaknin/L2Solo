@@ -62,8 +62,7 @@ function wait(ms) {
             inputToken: { characterId: index + 1, ownerId: 'cold_simulation_owner', revision: 1,
                 leaseId: `lease-${index + 1}`, leaseUntil: Date.now() + 30000 },
             proposalId: `proposal-${index + 1}`,
-            state: { characterId: index + 1, stats: { padding: 'x'.repeat(40000) } },
-            context: {}
+            state: { characterId: index + 1, stats: { padding: 'x'.repeat(40000) } }
         }));
         const pages = coordinator.postCollections('commit_ack', { results });
         const batchMessages = second.messages.slice(beforeBatches);

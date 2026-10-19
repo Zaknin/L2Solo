@@ -109,7 +109,6 @@ async function run() {
         const { ColdSimulationCoordinator } = require(gameRoot + '/src/GameServer/Bot/Population/ColdSimulationCoordinator');
         const kernel = new ColdSimulationKernel({ resolveSolo: () => ({}) });
         const coordinator = new ColdSimulationCoordinator();
-        coordinator.contextIndex = () => ({ spots: new Map() });
         // The worker's 'memory' table over the real channel: a full copy at
         // attach, then every snapshot main accepts, accepted as the worker does.
         const mirror = new TableMirror();
@@ -120,11 +119,10 @@ async function run() {
         assert.strictEqual(mirror.rows('memory').size, 0, 'the worker keeps the accepted snapshots, not a second row copy');
         const coldState = { characterId: 1, phase: 'cold', activity: 'hunting', stats: {},
             simulation: { revision: 5 }, timing: { nextResolveAt: Date.now() + 60000 } };
-        const oldPage = coordinator.snapshotEntry(coldState);
+        const oldPage = { state: coldState };
         kernel.upsert(oldPage);
         assert.deepStrictEqual(kernel.interactionMemory.assess({ id: 1 }, { id: 2 }, {}, timestamp),
             runtime.assess({ id: 1 }, { id: 2 }, {}, timestamp));
-        assert(!kernel.states.get(1).context.interactionMemory, 'worker stores one indexed view, not an extra context copy');
         await runtime.recordBatch([event('ack:memory')]);
         TableChannel.flush();
         assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'a committed episode reaches the worker as a memory row');

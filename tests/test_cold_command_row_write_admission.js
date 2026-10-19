@@ -95,7 +95,7 @@ async function seed() {
 }
 function requestFor(state) {
     return { kind:'lifecycle',characterId:state.characterId,commandId:`row-write:${serial}`,
-        commandCheckpoint:Protocol.commandCheckpoint(state),state,context:{},
+        commandCheckpoint:Protocol.commandCheckpoint(state),state,
         precomputedResult:{patch:{activity:'resting',vitals:{...state.vitals,hp:90},stats:{restUntil:Date.now()+60000}},
             events:[],materialize:{exp:0,sp:0,adena:0,items:[]},nextResolveAt:Date.now()+60000} };
 }
@@ -114,7 +114,6 @@ async function queued(mode) {
     c.worker=worker('A');const originalWorker=c.worker,originalEpoch=c.workerEpoch;
     let admission,prepareCalls=0,nativeBarrier,stop,dbOptions;
     c.population={executeWorkerLifecycleCommand(...args){admission=args[2]?.workerAdmission;return Population.executeWorkerLifecycleCommand(...args);}};
-    c.contextIndex=()=>({});c.contextFor=()=>({});
     const prepare=Life.prepareResolve,save=Database.saveBotLifeState;
     Database.saveBotLifeState=function(...args){
         savedStatement=clone(args[0]);dbOptions=args[1];

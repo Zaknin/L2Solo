@@ -69,13 +69,6 @@ const originalClaimBatch = Owner.claimBatch;
     });
 
     const coordinator = new ColdSimulationCoordinator();
-    coordinator.contextIndex = () => ({
-        spots: new Map(),
-        profiles: [],
-        occupancy: {},
-        parties: new Map(),
-        compactPartyMembers: true
-    });
     let response = null;
     coordinator.postCollections = (type, payload) => {
         response = { type, payload };

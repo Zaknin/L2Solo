@@ -100,10 +100,10 @@ function settleSnapshot() {
     )), 'party detachment must publish a critical worker snapshot');
 
     const kernel = new ColdSimulationKernel({ now: () => Date.now(), resolveSolo: () => ({}) });
-    kernel.upsert({ state: assigned, context: {} });
+    kernel.upsert({ state: assigned });
     assert.strictEqual(lifecycleKind(assigned), 'party_member');
     assert.strictEqual(kernel.snapshot().heap, 0, 'attached party member must not own a solo schedule');
-    kernel.upsert({ state: detached, context: {} });
+    kernel.upsert({ state: detached });
     assert.strictEqual(lifecycleKind(detached), 'resolver');
     assert.strictEqual(kernel.snapshot().heap, 1, 'detachment snapshot must recreate the solo schedule without a restart');
 

@@ -389,7 +389,7 @@ async function main() {
         try {
             const grants = new Map(members.map(member => [member.characterId, { characterId: member.characterId,
                 ownerId: Owner.OWNER_ID, leaseId: 'full-wire', revision: 1, leaseUntil: at + 30000 }]));
-            for (const member of members) { kernel.upsert({ state: member, context: {} });
+            for (const member of members) { kernel.upsert({ state: member });
                 kernel.inFlight.set(member.characterId, { state: member, grant: grants.get(member.characterId), partyId: party.partyId, claimRequestId: 'full-claim' }); }
             // The run carries the raid owner its parties table row published.
             kernel.partyRuns.set(party.partyId, { party, members, spot, requestId: 'full-claim', grants, raidOwner: currentOwner });

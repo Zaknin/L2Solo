@@ -12,21 +12,21 @@ function kernel() {
     return new ColdSimulationKernel({ now: () => 100000, resolveSolo: () => null });
 }
 const first = kernel();
-first.upsert({ state: state(1, 1000), context: {} });
-first.upsert({ state: state(30, 99000, true), context: {} });
-first.upsert({ state: state(31, 99000, true), context: {} });
+first.upsert({ state: state(1, 1000) });
+first.upsert({ state: state(30, 99000, true) });
+first.upsert({ state: state(31, 99000, true) });
 assert.deepEqual(first.dueCandidates(100000, 2).map(row => row.characterId), [30, 1],
     'one paid arrival precedes the old hunt backlog while ordinary work retains a slot');
 const future = kernel();
-future.upsert({ state: state(1, 1000), context: {} });
-future.upsert({ state: state(30, 101000, true), context: {} });
+future.upsert({ state: state(1, 1000) });
+future.upsert({ state: state(30, 101000, true) });
 assert.equal(future.dueCandidates(100000, 1)[0].characterId, 1, 'arrival priority does not shorten travel');
 // The player's waits come from the 'meetings' table; its row arriving
 // reschedules the bot (the worker's watch calls ensureScheduled).
 function playerKernel(waits) {
     const built = new ColdSimulationKernel({ now: () => 100000, resolveSolo: () => null, playerWaiting: id => waits.has(id) });
-    built.upsert({ state: state(30, 99000, true), context: {} });
-    built.upsert({ state: state(31, 99500, true), context: {} });
+    built.upsert({ state: state(30, 99000, true) });
+    built.upsert({ state: state(31, 99500, true) });
     return built;
 }
 assert.equal(playerKernel(new Set()).dueCandidates(100000, 1)[0].characterId, 30, 'no wait: the earlier arrival goes first');
@@ -36,8 +36,8 @@ waits.add(31);
 player.ensureScheduled(31);
 assert.equal(player.dueCandidates(100000, 1)[0].characterId, 31, 'a waiting player keeps first priority');
 const changed = kernel(), travelling = state(30, 99000, true);
-changed.upsert({ state: travelling, context: {} });
-changed.upsert({ state: { ...travelling, stats: { ...travelling.stats, tradeMeeting: null } }, context: {} });
+changed.upsert({ state: travelling });
+changed.upsert({ state: { ...travelling, stats: { ...travelling.stats, tradeMeeting: null } } });
 assert.equal(changed.heap.peekMeeting(), null, 'released custody leaves no derived priority node');
 const heap = new DueHeap(), rows = [];
 for (let id = 1; id <= 120; id++) {

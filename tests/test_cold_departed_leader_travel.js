@@ -39,7 +39,7 @@ async function main() {
     const kernel = new ColdSimulationKernel({ now: () => at, resolveSolo: input => Resolver.resolveSolo(input),
         projectResolve: (state, result, timestamp) => Life.prepareResolve(state, result, { timestamp, persist: false }),
         emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
-    kernel.upsert({ state: paid, context: {} });
+    kernel.upsert({ state: paid });
     assert.equal(kernel.leaderParty(id), null, 'a departed leader leads no party row');
     assert.equal(kernel.scheduleTokens.get(id).dueAt, paid.timing.nextResolveAt, 'arrival owns the deadline, not the old hunt');
     kernel.tick();
@@ -65,17 +65,17 @@ async function main() {
     assert.equal(amounts[57], 479600, 'arrival does not charge the trip twice');
     assert.equal(amounts[736], 1);
     kernel.onCommitAck({ results: [{ characterId: id, ok: true, inputToken: proposal.token,
-        proposalId: proposal.proposalId, state: saved, context: {} }] });
+        proposalId: proposal.proposalId, state: saved }] });
     assert.equal(lifecycleKind(kernel.states.get(id).state, kernel), 'command',
         'town errands can run after the arrival receipt');
-    kernel.upsert({ state: paid, context: {} });
+    kernel.upsert({ state: paid });
     assert.equal(kernel.states.get(id).state.activity, 'shopping', 'an older snapshot cannot roll arrival back');
 
     const attached = { ...paid, characterId: id + 10, party: { partyId: oldParty.partyId } };
     const follower = { ...paid, characterId: id + 11, party: attached.party, activity: 'grouped', stats: {},
         timing: { lastResolvedAt: at - 1000, nextResolveAt: at + 3600000 } };
-    kernel.upsert({ state: attached, context: {} });
-    kernel.upsert({ state: follower, context: {} });
+    kernel.upsert({ state: attached });
+    kernel.upsert({ state: follower });
     kernel.partyPut(oldParty.partyId, { ...oldParty, leaderId: attached.characterId,
         memberIds: [attached.characterId, follower.characterId] });
     assert.equal(lifecycleKind(attached, kernel), 'party',
@@ -95,10 +95,10 @@ async function main() {
         stats: { ...paid.stats, travel: { ...paid.stats.travel, startedAt: at - 1000, arrivalAt: leftAt } } };
     const staleParty = { partyId: 'stale-departed-party', status: 'active', leaderId: departed.characterId,
         memberIds: [departed.characterId, id + 21, id + 22], nextResolveAt: at + 3600000 };
-    soloKernel.upsert({ state: departed, context: {} });
+    soloKernel.upsert({ state: departed });
     for (const followerId of [id + 21, id + 22]) {
         soloKernel.upsert({ state: { ...follower, characterId: followerId,
-            party: { partyId: staleParty.partyId, leaderId: departed.characterId } }, context: {} });
+            party: { partyId: staleParty.partyId, leaderId: departed.characterId } } });
     }
     soloKernel.partyPut(staleParty.partyId, staleParty);
     assert.equal(soloKernel.leaderParty(departed.characterId), null, 'a solo state leads no stale party row');
