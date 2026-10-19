@@ -140,7 +140,7 @@ async function release(token) {
         numbersKernel.flush(null, true);
         const numbersProposal = { proposalId: 'numbers-proposal', token: numbersToken, nextState: proposedState,
             result: { events: [] }, enqueuedAt: at };
-        const [numbersCommit] = await Owner.commitAndReleaseBatch([{ token: numbersToken, nextState: proposedState,
+        const [numbersCommit] = await Owner.commitBatch([{ revision: numbersToken.revision, nextState: proposedState,
             proposal: numbersProposal, options: { allowLifecycle: true } }]);
         assert(numbersCommit.ok);
         assert.equal(Life.cachedState(numbersId), numbersCommit.cached, 'the commit names the cache entry it built');
