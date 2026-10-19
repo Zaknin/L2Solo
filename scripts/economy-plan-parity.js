@@ -21,7 +21,7 @@ const states = rows.map(row => ({ characterId: row.characterId, name: row.charac
     spotId: row.spotId, updatedAt: row.updatedAt, loc: { locX: row.locX, locY: row.locY, locZ: row.locZ },
     vitals: { hp: row.hp, maxHp: row.maxHp, mp: row.mp, maxMp: row.maxMp },
     timing: { lastResolvedAt: row.lastResolvedAt, nextResolveAt: row.nextResolveAt },
-    simulation: { ownerId: 'legacy_main', revision: row.simRevision || 0 },
+    simulation: { revision: row.simRevision || 0 },
     party: row.partyId ? { partyId: row.partyId } : null, stats: json(row.statsJson), inventory: json(row.inventorySummary) }));
 db.close();
 const spots = invoke('GameServer/Bot/Population/SpotProfiles').ensure(), catalog = npcPlanningCatalogRows();

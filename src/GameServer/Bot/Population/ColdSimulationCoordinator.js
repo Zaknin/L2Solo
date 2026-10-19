@@ -1492,10 +1492,7 @@ class ColdSimulationCoordinator {
             }
             const queued = this.queue.enqueue(proposal, Array.isArray(sizes) ? sizes[index] : null);
             if (!queued.ok) rejected.push({ ok: false, characterId: proposal.characterId, reason: queued.reason, proposal });
-            else {
-                this.trackCommitAcknowledgement(proposal, source);
-                Metrics.recordColdOwnerResolved();
-            }
+            else this.trackCommitAcknowledgement(proposal, source);
         });
         if (rejected.length) this.handleCommitResults(rejected).catch((error) => this.recordError(error));
     }

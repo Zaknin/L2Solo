@@ -3798,11 +3798,14 @@ const BotLifeState = {
             oldest: null
         };
 
-        const noteOldest = (state, dueAt, ageMs, owner) => {
+        // The owner and lease end left this summary with their one reader,
+        // PopulationService.logSummary's claimed_by reason; the owner SQL in
+        // this file goes with the lease columns.
+        const noteOldest = (state, dueAt, ageMs) => {
             if (ageMs <= summary.oldestAgeMs && summary.oldest) return;
             summary.oldestAgeMs = Math.max(0, ageMs);
             summary.oldest = { characterId: state.characterId, name: state.name, activity: state.activity,
-                dueAt, lastResolvedAt: Number(state.timing?.lastResolvedAt || 0), owner };
+                dueAt, lastResolvedAt: Number(state.timing?.lastResolvedAt || 0) };
         };
         cache.forEach((state) => {
             if (state.phase !== 'cold'
@@ -3815,15 +3818,6 @@ const BotLifeState = {
             // resolve deadline is not a task waiting in the worker's heap.
             if (state.stats?.tradeMeeting
                 && require('./ColdSimulationKernel').lifecycleKind(state) === 'event_driven') return;
-            const owner = String(state.simulation?.ownerId || 'legacy_main');
-            if (owner !== 'legacy_main') {
-                // Claimed: its turn runs in the worker, not a due bot. A lease
-                // past its end and still held is a stall: name it.
-                const leaseUntil = Number(state.simulation?.leaseUntil || 0);
-                if (leaseUntil > 0 && timestamp > leaseUntil) noteOldest(state, leaseUntil, timestamp - leaseUntil, owner);
-                return;
-            }
-
             const nextResolveAt = Number(state.timing?.nextResolveAt || 0);
             if (nextResolveAt > timestamp && !hasStaleRateModelPlan(state)) return;
 
@@ -3837,7 +3831,7 @@ const BotLifeState = {
             }
 
             const dueAt = nextResolveAt > 0 ? nextResolveAt : Number(state.updatedAt || timestamp);
-            noteOldest(state, dueAt, timestamp - dueAt, owner);
+            noteOldest(state, dueAt, timestamp - dueAt);
         });
 
         return summary;
