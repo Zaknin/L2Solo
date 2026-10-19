@@ -91,14 +91,12 @@ function coordinatorProbe() {
         assert.equal(ack.ok, false);
         assert.equal(ack.state.name, 'RenamedUnderStep', 'the ack state carries the main write');
         assert.equal(ack.state.simulation.revision, Number(read.simulationRevision), 'the ack state is the row the commit read');
-        assert.equal(ack.state.simulation.ownerId, read.simulationOwner);
         assert.equal(commits.coordinator.snapshot().refusals.commitRefused.stale_revision, 1);
 
         // A stale_command answers with the row read back, not the cached copy.
         const cached = Life.cachedState(far);
         const stale = { ...JSON.parse(JSON.stringify(cached)), updatedAt: cached.updatedAt - 1 };
         const staleCheckpoint = Protocol.safetyCheckpoint(stale);
-        delete staleCheckpoint.simulationLeaseUntil;
         await Database.updateGeneratedBotName(far, 'RenamedBehindCache', 5);
         const commands = coordinatorProbe();
         commands.coordinator.handleCommandRequest({ payload: { requests: [{ characterId: far, kind: 'lifecycle',

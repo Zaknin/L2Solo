@@ -31,7 +31,7 @@ function state(characterId, revision, activity = 'hunting') {
         party: { partyId: null },
         stats: {},
         inventory: {},
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision, leaseId: null, leaseUntil: 0 },
+        simulation: { revision },
         updatedAt: 1000
     };
 }
@@ -53,8 +53,9 @@ function state(characterId, revision, activity = 'hunting') {
     ]);
 
     const columns = await Database.execute(['PRAGMA table_info(bot_life_state)', []]);
-    for (const column of ['simulationOwner', 'simulationRevision', 'simulationLeaseId', 'simulationLeaseUntil']) {
-        assert(columns.some((entry) => entry.name === column), `migration must add ${column}`);
+    assert(columns.some((entry) => entry.name === 'simulationRevision'), 'migration must add simulationRevision');
+    for (const column of ['simulationOwner', 'simulationLeaseId', 'simulationLeaseUntil']) {
+        assert(!columns.some((entry) => entry.name === column), `migration 72 must drop ${column}`);
     }
     const migrations = await Database.execute(['SELECT version FROM schema_migrations WHERE version = 10', []]);
     assert.strictEqual(migrations.length, 1, 'ownership schema migration must be recorded exactly once');
@@ -174,8 +175,6 @@ function state(characterId, revision, activity = 'hunting') {
     assert.strictEqual(Number(committedCharacter.sex), 1,
         'the same migration transaction must update the physical character appearance');
 
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.LEGACY_OWNER_ID,
-        'a commit returns the bot to main');
 
     const staleCommit = await commitOn(step, { ...resting, activity: 'hunting' }, 2100);
     assert.strictEqual(staleCommit.reason, 'stale_revision', 'an old step must never overwrite a newer revision');
@@ -187,21 +186,6 @@ function state(characterId, revision, activity = 'hunting') {
     assert.strictEqual(handoff.revision, committed.revision + 1, 'a hot activation moves the revision before spawning');
     const postHandoffCommit = await commitOn(committed.revision, resting, 3200);
     assert.strictEqual(postHandoffCommit.reason, 'stale_revision', 'handoff must fence a late cold commit');
-
-    // A loan an older server left in the row returns to main at startup.
-    await Database.execute([`UPDATE bot_life_state SET simulationOwner = ?, simulationLeaseId = 'lease-old',
-        simulationLeaseUntil = 99999999999999 WHERE characterId = ?`, [Owner.OWNER_ID, characterId]]);
-    assert.strictEqual((await Owner.recoverStartupLeases()).affectedRows, 1, 'a startup loan must recover to legacy_main');
-    const recovered = (await Database.execute([
-        'SELECT simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil FROM bot_life_state WHERE characterId = ?',
-        [characterId]
-    ]))[0];
-    assert.strictEqual(recovered.simulationOwner, Owner.LEGACY_OWNER_ID);
-    assert.strictEqual(recovered.simulationRevision, handoff.revision + 1);
-    assert.strictEqual(recovered.simulationLeaseId, null);
-    assert.strictEqual(recovered.simulationLeaseUntil, 0);
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.LEGACY_OWNER_ID, 'recovery must return cached ownership to main');
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, recovered.simulationRevision, 'recovery must reflect its revision in cache');
 
     await Database.execute([
         `UPDATE bot_life_state
@@ -228,7 +212,7 @@ function state(characterId, revision, activity = 'hunting') {
     assert.strictEqual(compacted.rowsRemoved, 1);
     assert.strictEqual(compacted.units, 1);
     assert.strictEqual(compacted.payout, 50);
-    assert.strictEqual(Number(compacted.state.simulationRevision), Number(recovered.simulationRevision) + 1,
+    assert.strictEqual(Number(compacted.state.simulationRevision), Number(handoff.revision) + 1,
         'the compaction moves the far row revision once');
     assert.strictEqual(Number(compacted.state.adena), 150);
     assert.strictEqual(JSON.parse(compacted.state.inventorySummary)['57'].amount, 150);
@@ -261,7 +245,6 @@ function state(characterId, revision, activity = 'hunting') {
     const [afterRace] = await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]]);
     assert.strictEqual(afterRace.inventorySummary, inventoryAfterClanWrite, 'a refused commit preserves the new inventory');
     assert.strictEqual(JSON.parse(afterRace.statsJson).clanInventoryRevision, raceRevision + 1);
-    assert.strictEqual(afterRace.simulationOwner, Owner.LEGACY_OWNER_ID);
 
     // Developer diagnostics: an item read counts under its call-site tag.
     await Database.fetchItems(characterId, 'owner_probe');
@@ -269,7 +252,7 @@ function state(characterId, revision, activity = 'hunting') {
 
     const dbStats = Database.stats();
     assert.strictEqual(path.resolve(dbStats.path), path.resolve(databasePath), 'all owner operations must use the one configured SQLite gateway');
-    console.log('Cold simulation owner revision fence, handoff, and recovery checks passed');
+    console.log('Cold simulation owner revision fence and handoff checks passed');
 })().catch((error) => {
     console.error(error);
     process.exitCode = 1;

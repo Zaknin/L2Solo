@@ -26,13 +26,13 @@ async function run() {
             assert.equal(Number(JSON.parse(row.inventorySummary)[1864]?.amount || 0), 0);
             assert.equal(row.adena, 100000);
         };
-        for (const [column, value] of [['simulationOwner', 'cold_simulation_owner'], ['phase', 'hot'],
+        for (const [column, value] of [['phase', 'hot'],
             ['activity', 'shopping'], ['partyId', 'party-other']]) {
             await Database.execute([`UPDATE bot_life_state SET ${column}=? WHERE characterId=?`, [value, id]]);
             await assert.rejects(withdraw, /economy_state_changed/, `${column} is checked inside the withdrawal transaction`);
             await untouched();
-            await Database.execute(['UPDATE bot_life_state SET simulationOwner=?,phase=?,activity=?,partyId=NULL WHERE characterId=?',
-                ['legacy_main', 'cold', 'hunting', id]]);
+            await Database.execute(['UPDATE bot_life_state SET phase=?,activity=?,partyId=NULL WHERE characterId=?',
+                ['cold', 'hunting', id]]);
         }
         await Database.execute(['UPDATE bot_life_state SET simulationRevision=simulationRevision+1 WHERE characterId=?', [id]]);
         await assert.rejects(withdraw, /economy_state_changed/, 'stale revision cannot move warehouse stock');

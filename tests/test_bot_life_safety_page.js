@@ -12,9 +12,8 @@ const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 // live characters or population workers.
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l2solo-safety-page-'));
 const previous = { path: options.default.Database.path, historyPath: options.default.Database.historyPath };
-const fields = ['characterId', 'phase', 'activity', 'simulationOwner', 'simulationRevision',
-    'simulationLeaseId', 'simulationLeaseUntil', 'activityStartedAt', 'nextResolveAt',
-    'lastResolvedAt', 'lastHotAt', 'updatedAt'];
+const fields = ['characterId', 'phase', 'activity', 'simulationRevision', 'activityStartedAt',
+    'nextResolveAt', 'lastResolvedAt', 'lastHotAt', 'updatedAt'];
 const range = `SELECT ${fields.join(', ')} FROM bot_life_state
     WHERE characterId > ? AND characterId <= ? ORDER BY characterId ASC LIMIT ?`;
 const activities = ['hunting', 'resting', 'shopping', 'dead', 'quest', 'crafting', 'fixture_activity'];
@@ -25,15 +24,12 @@ let opened = false;
 
 async function seedLifecycle() {
     await execute.call(Database, [`INSERT INTO bot_life_state
-        (characterId, phase, activity, simulationOwner, simulationRevision, simulationLeaseId,
-         simulationLeaseUntil, activityStartedAt, nextResolveAt, lastResolvedAt, lastHotAt,
-         updatedAt, statsJson, inventorySummary)
+        (characterId, phase, activity, simulationRevision, activityStartedAt, nextResolveAt,
+         lastResolvedAt, lastHotAt, updatedAt, statsJson, inventorySummary)
         SELECT id, CASE WHEN id % 2 = 0 THEN 'hot' ELSE 'cold' END,
         CASE id % 7 WHEN 0 THEN 'hunting' WHEN 1 THEN 'resting' WHEN 2 THEN 'shopping'
         WHEN 3 THEN 'dead' WHEN 4 THEN 'quest' WHEN 5 THEN 'crafting' ELSE 'fixture_activity' END,
-        CASE WHEN id % 3 = 0 THEN 'fixture_worker' ELSE 'legacy_main' END, id,
-        CASE WHEN id % 3 = 0 THEN 'lease-' || id ELSE NULL END,
-        id * 1000, id * 10, id * 100, id * 20, id * 30, id * 40, ?, ?
+        id, id * 10, id * 100, id * 20, id * 30, id * 40, ?, ?
         FROM characters WHERE id <= 70`,
     [JSON.stringify({ fixture: 'x'.repeat(20000), equipmentPlan: { status: 'active', next: { spotId: 'fixture' } } }),
         JSON.stringify({ 1864: { amount: 123 } })]], 'fixture:safety-seed');
@@ -70,8 +66,7 @@ async function controls() {
     assert.deepEqual(new Set(first.map(row => row.phase)), new Set(['hot', 'cold']));
     assert(first.every(row => Object.keys(row).join(',') === fields.join(',')), 'only compact scalar columns');
     assert.deepEqual(first[0], { characterId: 1, phase: 'cold', activity: 'resting',
-        simulationOwner: 'legacy_main', simulationRevision: 1, simulationLeaseId: null,
-        simulationLeaseUntil: 1000, activityStartedAt: 10, nextResolveAt: 100,
+        simulationRevision: 1, activityStartedAt: 10, nextResolveAt: 100,
         lastResolvedAt: 20, lastHotAt: 30, updatedAt: 40 }, 'native scalar payload positive control');
     await execute.call(Database, ['DELETE FROM bot_life_state WHERE characterId IN (65, 70)', []]);
     await execute.call(Database, ['UPDATE bot_life_state SET updatedAt = 9000000 - characterId', []]);
@@ -98,8 +93,7 @@ async function contracts() {
     assert.deepEqual(first.rows.map(row => row.characterId), Array.from({ length: 64 }, (_, i) => i + 1));
     assert(first.rows.every(row => Object.keys(row).join(',') === fields.join(',')));
     assert.deepEqual(first.rows[0], { characterId: 1, phase: 'cold', activity: 'resting',
-        simulationOwner: 'legacy_main', simulationRevision: 1, simulationLeaseId: null,
-        simulationLeaseUntil: 1000, activityStartedAt: 10, nextResolveAt: 100,
+        simulationRevision: 1, activityStartedAt: 10, nextResolveAt: 100,
         lastResolvedAt: 20, lastHotAt: 30, updatedAt: 40 }, 'no normalization of authority/timing');
     const compact = sqlReads.find(entry => /WHERE\s+characterId\s*>/i.test(entry.sql));
     assert(compact && compact.count === 64 && compact.params[2] === 64, 'actual LIMIT is64, never65');
