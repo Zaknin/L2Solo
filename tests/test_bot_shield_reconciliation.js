@@ -36,14 +36,12 @@ const fixtureDatabaseMethods = { ...fixtureDatabase };
         const Database = invoke('Database');
         const originalReconcileClanGoals = Database.reconcileBotClanGoals;
         const DataCache = invoke('GameServer/DataCache');
-        const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 
         DataCache.init();
 
         const originalExecute = Database.execute;
         const originalSyncInventorySummary = Database.syncInventorySummary;
         const originalFetchItems = Database.fetchItems;
-        const originalRecoverStartupLeases = ColdSimulationOwner.recoverStartupLeases;
         const originalReconcileClanMembership = Database.reconcileBotClanMembership;
 
         function persistedShieldRow(characterId, name) {
@@ -102,7 +100,6 @@ const fixtureDatabaseMethods = { ...fixtureDatabase };
             return Promise.resolve([]);
         };
         Database.syncInventorySummary = () => Promise.resolve();
-        ColdSimulationOwner.recoverStartupLeases = () => Promise.resolve({ affectedRows: 0 });
         Database.reconcileBotClanMembership = () => Promise.resolve({ repairedMembers: 0, repairedParties: 0 });
         Database.reconcileBotClanGoals = async () => ({ repairedMembers: 0, repairedParties: 0 });
 
@@ -148,7 +145,6 @@ const fixtureDatabaseMethods = { ...fixtureDatabase };
                 Database.execute = originalExecute;
                 Database.syncInventorySummary = originalSyncInventorySummary;
                 Database.fetchItems = originalFetchItems;
-                ColdSimulationOwner.recoverStartupLeases = originalRecoverStartupLeases;
                 Database.reconcileBotClanMembership = originalReconcileClanMembership;
                 Database.reconcileBotClanGoals = originalReconcileClanGoals;
             }

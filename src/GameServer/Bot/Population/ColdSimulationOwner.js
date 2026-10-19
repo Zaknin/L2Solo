@@ -7,8 +7,6 @@ const BotErrands = require('./BotErrands');
 const SavedStats = require('../SavedStats');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 
-const OWNER_ID = 'cold_simulation_owner';
-const LEGACY_OWNER_ID = 'legacy_main';
 const SIMPLE_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const LEGACY_PLAN_STRATEGIES = new Set(['market', 'craft']);
 
@@ -132,16 +130,6 @@ function reflect(result, committedState = null) {
         require('../../Actor/Generics/PkDeathDrop').spawn(result.characterId,
             { locX: row.locX, locY: row.locY, locZ: row.locZ }, result.pkDrops);
     }
-    return result;
-}
-
-function reflectRecovery(result = {}) {
-    (result.rows || []).forEach((row) => LifeState.acceptSimulationOwnership(row.characterId, {
-        ownerId: row.simulationOwner,
-        revision: row.simulationRevision,
-        leaseId: row.simulationLeaseId,
-        leaseUntil: row.simulationLeaseUntil
-    }));
     return result;
 }
 
@@ -282,19 +270,11 @@ function handoffToMain(state, options = {}) {
     }).catch(recordFailure);
 }
 
-function recoverStartupLeases() {
-    if (!Database.isReady()) return Promise.resolve({ affectedRows: 0, rows: [] });
-    return Database.recoverColdSimulationLeases().then(reflectRecovery).catch(recordFailure);
-}
-
 module.exports = {
-    OWNER_ID,
-    LEGACY_OWNER_ID,
     SIMPLE_ACTIVITIES,
     LEGACY_PLAN_STRATEGIES,
     eligibility,
     persistencePatch,
     commitBatch,
-    handoffToMain,
-    recoverStartupLeases
+    handoffToMain
 };

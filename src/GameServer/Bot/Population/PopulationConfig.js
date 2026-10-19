@@ -101,20 +101,9 @@ const DEFAULTS = {
     // The persistent world is resolved in bounded batches so population
     // expansion never becomes a database spike after a restart.
     maxResolvesPerTick: 25,
-    // Historical gear debt is repaired only while the server is player-idle.
-    // Each pass advances by owner id and performs at most one tiny atomic
-    // transaction per owner, so cleanup cannot become a startup table sweep.
-    warehouseCleanupEnabled: true,
-    warehouseCleanupStartDelayMs: 60000,
-    warehouseCleanupIntervalMs: 500,
-    warehouseCleanupPassPauseMs: 60000,
-    warehouseCleanupIdlePauseMs: 6 * 60 * 60 * 1000,
-    warehouseCleanupOwnersPerTick: 1,
-    warehouseCleanupUnitsPerOwner: 32,
-    warehouseCleanupBudgetMs: 12,
     // Append-only diagnostics and AI memory have explicit lifecycles. Run a
-    // single indexed delete statement per idle tick and stagger it behind the
-    // warehouse repair so both jobs never form a startup write burst.
+    // single indexed delete statement per idle tick, delayed after start so it
+    // never joins the startup write burst.
     stateRetentionEnabled: true,
     stateRetentionStartDelayMs: 90000,
     stateRetentionIntervalMs: 1000,
@@ -292,14 +281,6 @@ const ENV_KEYS = {
     partyHistoryRetentionMs: 'BOT_PARTY_HISTORY_RETENTION_MS',
     partyHistoryCleanupBatchSize: 'BOT_PARTY_HISTORY_CLEANUP_BATCH_SIZE',
     partyHistoryCleanupIntervalMs: 'BOT_PARTY_HISTORY_CLEANUP_INTERVAL_MS',
-    warehouseCleanupEnabled: 'BOT_WAREHOUSE_CLEANUP_ENABLED',
-    warehouseCleanupStartDelayMs: 'BOT_WAREHOUSE_CLEANUP_START_DELAY_MS',
-    warehouseCleanupIntervalMs: 'BOT_WAREHOUSE_CLEANUP_INTERVAL_MS',
-    warehouseCleanupPassPauseMs: 'BOT_WAREHOUSE_CLEANUP_PASS_PAUSE_MS',
-    warehouseCleanupIdlePauseMs: 'BOT_WAREHOUSE_CLEANUP_IDLE_PAUSE_MS',
-    warehouseCleanupOwnersPerTick: 'BOT_WAREHOUSE_CLEANUP_OWNERS_PER_TICK',
-    warehouseCleanupUnitsPerOwner: 'BOT_WAREHOUSE_CLEANUP_UNITS_PER_OWNER',
-    warehouseCleanupBudgetMs: 'BOT_WAREHOUSE_CLEANUP_BUDGET_MS',
     stateRetentionEnabled: 'BOT_STATE_RETENTION_ENABLED',
     stateRetentionStartDelayMs: 'BOT_STATE_RETENTION_START_DELAY_MS',
     stateRetentionIntervalMs: 'BOT_STATE_RETENTION_INTERVAL_MS',

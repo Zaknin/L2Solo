@@ -56,7 +56,7 @@ const fightResult = () => ({
             realPlayerSessions: () => [],
             prepareInventoryCleanupProposal: (...args) => PopulationService.prepareInventoryCleanupProposal(...args)
         };
-        const simulation = { ownerId: 'legacy_main', revision: 3, leaseId: null, leaseUntil: 0 };
+        const simulation = { revision: 3 };
         const base = hunter(7301, simulation);
         const proposal = {
             characterId: 7301,

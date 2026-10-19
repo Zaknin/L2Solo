@@ -1,7 +1,8 @@
 // The mind (SavedStats.MIND_KEYS: the worker's decision, its money packet) is
-// saved in its own column. A far commit refused on its revision still keeps
-// the worker's mind; main's saves write the mind of a near bot and never write
-// over a far bot's; the clan goal member repair writes the body only.
+// saved in its own column. A far commit refused on its revision writes
+// nothing, the mind included; main's saves write the mind of a near bot, and of a far
+// bot only when built on the row's revision (an older copy never writes over
+// the worker's); the clan goal member repair writes the body only.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -50,14 +51,15 @@ async function bodyMoney(id) {
         await Database.createAccount(ACCOUNT, 'fixture');
         await Life.init();
 
-        // (1) A far commit refused on its revision writes no body column and
-        // does not move the revision, but it keeps the worker's mind and hands
-        // back the row with it.
+        // (1) A far commit refused on its revision writes nothing: no body
+        // column, no mind, no revision move. It hands back the row as it is,
+        // and a main save built on the row's revision then writes its own mind.
         const far = await create('cold', { money: OLD_MONEY });
         const stepRevision = Life.cachedState(far).simulation.revision;
         const proposed = { ...Life.cachedState(far),
             stats: { ...Life.cachedState(far).stats, proposalProbe: true, money: NEW_MONEY } };
         await Database.updateGeneratedBotName(far, 'MindRenamed', 3);
+        const mainCopy1 = Life.cachedState(far);
         const before = await row(far);
         const [refused] = await Owner.commitBatch([{ revision: stepRevision, nextState: proposed,
             proposal: { revision: stepRevision } }]);
@@ -67,8 +69,17 @@ async function bodyMoney(id) {
         assert.equal(after.simulationRevision, before.simulationRevision, 'the refused commit leaves the revision');
         assert.equal(after.statsJson, before.statsJson, 'the refused commit leaves the body');
         assert.equal(after.activity, before.activity, 'the refused commit leaves the activity');
-        assert.deepEqual(JSON.parse(after.mindJson).money, NEW_MONEY, 'the refused commit keeps the worker\'s mind');
-        assert.deepEqual(JSON.parse(refused.row.mindJson).money, NEW_MONEY, 'the refusal hands back the row with that mind');
+        assert.equal(after.mindJson, before.mindJson, 'a refused commit writes nothing, the mind included');
+        assert.equal(refused.row.mindJson, before.mindJson, 'the refusal hands back the row with the mind it had');
+        // A main save built on the row's revision writes its own mind; nothing
+        // of the refused proposal is on the row or in main's cache.
+        const MAIN_MONEY = [77000, 0, 15000, 0];
+        await Life.upsertState({ ...mainCopy1, stats: { ...mainCopy1.stats, money: MAIN_MONEY } }, 'mind_column_refused_main_save');
+        const resaved = await row(far);
+        assert.deepEqual(JSON.parse(resaved.mindJson).money, MAIN_MONEY, 'the row holds main\'s mind after its save');
+        assert.equal(resaved.mindJson.includes(String(NEW_MONEY[0])), false, 'no mind value of the refused proposal is on the row');
+        assert.deepEqual(Life.cachedState(far).stats.money, MAIN_MONEY, 'main\'s cache holds main\'s mind, none of the refused one');
+        assert.equal(Life.cachedState(far).stats.proposalProbe, undefined, 'main\'s cache holds none of the refused proposal');
 
         // (2) A near bot's save writes its money into the mind column, not the body.
         const near = await create('hot', { money: OLD_MONEY });
@@ -100,6 +111,13 @@ async function bodyMoney(id) {
         assert.equal(saved.activity, 'trading', 'the main save writes the body');
         assert.deepEqual(JSON.parse(saved.mindJson).money, NEW_MONEY, 'the main save keeps the far row\'s mind');
         assert.deepEqual(Life.cachedState(cold).stats.money, NEW_MONEY, 'main\'s cache takes the far row\'s mind back');
+        // A main save built on the row's revision (a worker packet main
+        // applies for a lifecycle step) writes its mind into the far row.
+        const APPLIED_MONEY = [66000, 0, 14000, 0];
+        const current = Life.cachedState(cold);
+        await Life.upsertState({ ...current, stats: { ...current.stats, money: APPLIED_MONEY } }, 'mind_column_applied');
+        assert.deepEqual(JSON.parse((await row(cold)).mindJson).money, APPLIED_MONEY, 'a save on the row\'s revision writes its mind');
+        assert.deepEqual(Life.cachedState(cold).stats.money, APPLIED_MONEY, 'main\'s cache keeps the applied mind');
 
         // (4) The clan goal member repair writes the body and leaves the mind.
         const member = await create('cold', { money: NEW_MONEY });
@@ -110,7 +128,7 @@ async function bodyMoney(id) {
         const memberAfter = await row(member);
         assert.equal(JSON.parse(memberAfter.statsJson).goalRepairProbe, true, 'the goal write writes the body');
         assert.equal(memberAfter.mindJson, memberBefore.mindJson, 'the goal write leaves the mind');
-        console.log('PASS the mind column: refused far commits keep it, main saves never write a far row\'s');
+        console.log('PASS the mind column: refused far commits write nothing, main saves write a far row\'s only on its revision');
     } finally {
         fs.rmSync(directory, { recursive: true, force: true });
     }

@@ -109,7 +109,7 @@ async function run() {
     // completes before the subsequent awaited location/experience/vitals/cache.
     transition = LifeState.upsertState({ ...LifeState.snapshot(id), phase: 'cold' }, 'hot_durable_handoff', { releaseHot: true });
     await locationReady;
-    const durable = (await Database.execute(['SELECT phase, simulationOwner, simulationRevision, simulationLeaseId FROM bot_life_state WHERE characterId = ?', [id]]))[0];
+    const durable = (await Database.execute(['SELECT phase, simulationRevision FROM bot_life_state WHERE characterId = ?', [id]]))[0];
     assert.equal(durable.phase, 'cold');
     assert.equal(LifeState.cachedState(id).phase, 'hot', 'real producer cache publication remains behind awaited location');
     assert(cacheOnly(), 'cache-only prototype guard still permits the retired durable authority');

@@ -60,15 +60,6 @@ function emptyCounters() {
         coldSafetyOrphanRepairs: 0,
         partySafetyRepairs: 0,
         legacyOwnershipConflicts: 0,
-        warehouseCleanupRuns: 0,
-        warehouseCleanupOwners: 0,
-        warehouseCleanupCompacted: 0,
-        warehouseCleanupRows: 0,
-        warehouseCleanupUnits: 0,
-        warehouseCleanupPayout: 0,
-        warehouseCleanupDeferrals: 0,
-        warehouseCleanupErrors: 0,
-        warehouseCleanupBudgetStops: 0,
         stateRetentionRuns: 0,
         stateRetentionRows: 0,
         stateRetentionDeferrals: 0,
@@ -129,8 +120,6 @@ const PopulationMetrics = {
         coldOwnerCommitDurationsMs: [],
         coldOwnerLegacyReasons: new DiagnosticMetricMap(),
         coldOwnerRejectReasons: new DiagnosticMetricMap(),
-        warehouseCleanupDurationsMs: [],
-        warehouseCleanupDeferralReasons: new DiagnosticMetricMap(),
         stateRetentionDurationsMs: [],
         stateRetentionDeferralReasons: new DiagnosticMetricMap(),
         stateRetentionPolicyRows: new DiagnosticMetricMap()
@@ -391,37 +380,6 @@ const PopulationMetrics = {
         this.counters.legacyOwnershipConflicts += 1;
     },
 
-    recordWarehouseCleanup(result = {}, durationMs = 0) {
-        if (!Config.developerDiagnostics) return;
-        this.counters.warehouseCleanupRuns += 1;
-        this.counters.warehouseCleanupOwners += Math.max(0, Number(result.ownersScanned || 0));
-        this.counters.warehouseCleanupCompacted += Math.max(0, Number(result.ownersCompacted || 0));
-        this.counters.warehouseCleanupRows += Math.max(0, Number(result.rowsRemoved || 0));
-        this.counters.warehouseCleanupUnits += Math.max(0, Number(result.units || 0));
-        this.counters.warehouseCleanupPayout += Math.max(0, Number(result.payout || 0));
-        this.counters.warehouseCleanupErrors += Math.max(0, Number(result.errors || 0));
-        if (result.budgetStopped) this.counters.warehouseCleanupBudgetStops += 1;
-        this.schedulerState = {
-            ...this.schedulerState,
-            warehouseCleanupCursor: Math.max(0, Number(result.cursor || 0)),
-            warehouseCleanupExhausted: !!result.exhausted
-        };
-        this.interval.warehouseCleanupDurationsMs.push(Math.max(0, Number(durationMs) || 0));
-        if (this.interval.warehouseCleanupDurationsMs.length > Config.resolveSampleLimit) {
-            this.interval.warehouseCleanupDurationsMs.shift();
-        }
-    },
-
-    recordWarehouseCleanupDeferral(reason = 'unknown') {
-        if (!Config.developerDiagnostics) return;
-        const key = String(reason || 'unknown');
-        this.counters.warehouseCleanupDeferrals += 1;
-        this.interval.warehouseCleanupDeferralReasons.set(
-            key,
-            Number(this.interval.warehouseCleanupDeferralReasons.get(key) || 0) + 1
-        );
-    },
-
     recordStateRetention(result = {}, durationMs = 0, overBudget = false) {
         if (!Config.developerDiagnostics) return;
         const rows = Math.max(0, Number(result.rowsRemoved || 0));
@@ -587,8 +545,6 @@ const PopulationMetrics = {
         const activationFloorReasons = Object.fromEntries(this.interval.activationFloorReasons.entries());
         const coldOwnerLegacyReasons = Object.fromEntries(this.interval.coldOwnerLegacyReasons.entries());
         const coldOwnerRejectReasons = Object.fromEntries(this.interval.coldOwnerRejectReasons.entries());
-        const warehouseCleanupStats = stats(this.interval.warehouseCleanupDurationsMs);
-        const warehouseCleanupDeferralReasons = Object.fromEntries(this.interval.warehouseCleanupDeferralReasons.entries());
         const stateRetentionStats = stats(this.interval.stateRetentionDurationsMs);
         const stateRetentionDeferralReasons = Object.fromEntries(this.interval.stateRetentionDeferralReasons.entries());
         const stateRetentionPolicyRows = Object.fromEntries(this.interval.stateRetentionPolicyRows.entries());
@@ -602,8 +558,6 @@ const PopulationMetrics = {
         this.interval.activationFloorReasons = new DiagnosticMetricMap();
         this.interval.coldOwnerLegacyReasons = new DiagnosticMetricMap();
         this.interval.coldOwnerRejectReasons = new DiagnosticMetricMap();
-        this.interval.warehouseCleanupDurationsMs = [];
-        this.interval.warehouseCleanupDeferralReasons = new DiagnosticMetricMap();
         this.interval.stateRetentionDurationsMs = [];
         this.interval.stateRetentionDeferralReasons = new DiagnosticMetricMap();
         this.interval.stateRetentionPolicyRows = new DiagnosticMetricMap();
@@ -630,12 +584,6 @@ const PopulationMetrics = {
                 commit: coldOwnerCommitStats,
                 legacyReasons: coldOwnerLegacyReasons,
                 rejectReasons: coldOwnerRejectReasons
-            },
-            warehouseCleanup: {
-                ...warehouseCleanupStats,
-                cursor: this.schedulerState.warehouseCleanupCursor || 0,
-                exhausted: !!this.schedulerState.warehouseCleanupExhausted,
-                deferralReasons: warehouseCleanupDeferralReasons
             },
             stateRetention: {
                 ...stateRetentionStats,

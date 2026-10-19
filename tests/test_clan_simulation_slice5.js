@@ -174,7 +174,7 @@ async function main() {
         ]);
         assert.strictEqual(activeMembers.length, 5);
         const activeMemberIds = activeMembers.map((member) => Number(member.characterId));
-        const activeStates = await LifeState.statesByIds(activeMemberIds, { ownerId: 'legacy_main' });
+        const activeStates = await LifeState.statesByIds(activeMemberIds);
         const competingParty = BackgroundPartyState.prepareCommit({
             partyId: 'competing-party',
             leaderId: activeMemberIds[0],
@@ -200,7 +200,7 @@ async function main() {
             'atomic ordinary-party commit must respect the clan operation reservation');
         const reservedCandidates = await LifeState.statesByIds(
             activeMemberIds,
-            { ownerId: 'legacy_main', unassigned: true }
+            { unassigned: true }
         );
         assert.deepStrictEqual(reservedCandidates, [], 'active clan operation members must be excluded from ordinary party hydration');
 

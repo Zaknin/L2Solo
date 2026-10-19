@@ -9,7 +9,7 @@ const epoch = 'party-goal-native';
 const members = [701, 702].map(characterId => ({ characterId, phase: 'cold', updatedAt: timestamp,
     level: 20, activity: 'resting', adena: 10000, inventory: {},
     spotId: 'execution-ground', stats: { classId: 0 }, timing: { nextResolveAt: timestamp + 3600000 },
-    simulation: { ownerId: 'legacy_main', revision: 2, leaseId: null },
+    simulation: { revision: 2 },
     vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 } }));
 const party = { partyId: 'goal-worker', memberIds: [701, 702], leaderId: 701,
     stats: { objective: { clanGoalKey: 'clan-native', spotId: 'protected' } } };

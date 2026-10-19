@@ -6,7 +6,7 @@ const { ColdSimulationKernel, priorityForResult, DueHeap } = require('../src/Gam
 function state(id, dueAt, meeting = false) {
     return { characterId: id, phase: 'cold', activity: meeting ? 'traveling' : 'hunting', level: 20,
         stats: meeting ? { tradeMeeting: [7, 1], travel: { arrivalAt: dueAt } } : {},
-        timing: { nextResolveAt: dueAt }, simulation: { ownerId: 'legacy_main', revision: 3 } };
+        timing: { nextResolveAt: dueAt }, simulation: { revision: 3 } };
 }
 function kernel() {
     return new ColdSimulationKernel({ now: () => 100000, resolveSolo: () => null });

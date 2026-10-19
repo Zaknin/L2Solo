@@ -142,7 +142,7 @@ async function checkWorkerSafety() {
     const states = members.slice(0, 3).map(m => ({ ...m, activity: 'grouped',
         party: { partyId: 'unsafe', leaderId: 1 },
         timing: { lastResolvedAt: at - 1000, nextResolveAt: at - 1 },
-        simulation: { ownerId: 'legacy_main', revision: 3 },
+        simulation: { revision: 3 },
         stats: { ...m.stats, clanPartyObjective: objective } }));
     const party = { partyId: 'unsafe', leaderId: 1, memberIds: [1, 2, 3], spotId: 'tower',
         stats: { objective, sessionExpiresAt: at + 3600000 } };

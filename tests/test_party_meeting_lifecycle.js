@@ -18,7 +18,7 @@ const members = [1, 2].map(characterId => ({ characterId, phase: 'cold', name: `
     loc: { locX: 0, locY: 0, locZ: 0 }, party: { partyId: party.partyId, leaderId: 1 },
     vitals: { hp: 100, maxHp: 100, mp: 50, maxMp: 50 },
     timing: { lastResolvedAt: at - 1000, nextResolveAt: at, activityStartedAt: at - 1000 },
-    simulation: { ownerId: 'legacy_main', revision: 1, leaseId: null, leaseUntil: 0 },
+    simulation: { revision: 1 },
     stats: characterId === 1 ? {} : { tradeMeeting: [7, 1], travel: { from: { locX: 0, locY: 0, locZ: 0 },
         to, startedAt: at - 1000, arrivalAt: at, method: 'walk', reason: 'trade_meeting', meetingId: 7,
         arrivalActivity: 'shopping', arrivalEvent: 'trade_meeting_arrival' } } }));

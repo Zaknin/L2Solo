@@ -1,4 +1,5 @@
 const assert = require('assert');
+require('../src/Global');
 
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');

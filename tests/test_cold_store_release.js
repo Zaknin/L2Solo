@@ -21,7 +21,7 @@ const state = id => ({ characterId: id, updatedAt: 10, level: 20, phase: 'cold',
     stats: { classId: 1 }, inventory: { 1: { selfId: 1, amount: 1, equipped: true, slot: 7 } },
     timing: { lastResolvedAt: now - 60000, nextResolveAt: now - 1 }, currentRegion: 'Giran',
     loc: { locX: 80000, locY: 148000, locZ: -3500 }, vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 },
-    simulation: { ownerId: 'legacy_main', revision: 3, leaseId: null, leaseUntil: 0 } });
+    simulation: { revision: 3 } });
 const resolution = () => ({ patch: {}, events: [], materialize: { items: [] }, nextResolveAt: now + 60000 });
 
 async function run() {

@@ -9,8 +9,7 @@ const transportPath = process.env.COLD_SAFETY_TRANSPORT_PATH
 const Protocol = require(path.join(path.dirname(transportPath), 'ColdSimulationProtocol'));
 const epoch = 'transport-fixture-epoch';
 const checkpoint = characterId => ({ characterId, phase: 'cold', activity: 'hunting',
-    simulationOwner: 'legacy_main', simulationRevision: 1, simulationLeaseId: null,
-    simulationLeaseUntil: 0, activityStartedAt: 100, nextResolveAt: 900000,
+    simulationRevision: 1, activityStartedAt: 100, nextResolveAt: 900000,
     lastResolvedAt: 0, lastHotAt: 0, updatedAt: 1000 });
 const safety = (stateRepairs = 0, orphanRepairs = 0, coverageRepairs = 0) =>
     ({ stateRepairs, orphanRepairs, coverageRepairs });

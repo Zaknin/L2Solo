@@ -10,7 +10,6 @@ const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const PartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
-const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const databasePath = path.join(process.cwd(), 'tmp', 'test-cold-worker-party-coordinator.sqlite');
@@ -139,8 +138,7 @@ let coordinator = null;
     let rows = [];
     while (Date.now() < deadline) {
         rows = await Database.execute([
-            `SELECT characterId, exp, lastResolvedAt, simulationOwner, simulationRevision,
-                    simulationLeaseId, simulationLeaseUntil
+            `SELECT characterId, exp, lastResolvedAt, simulationRevision
              FROM bot_life_state WHERE partyId = 'worker-party' ORDER BY characterId`, []
         ]);
         if (rows.length === 2 && rows.every((row) => Number(row.simulationRevision) >= 2 && Number(row.lastResolvedAt) > dueAt)) break;
@@ -161,7 +159,7 @@ let coordinator = null;
         [...requiredIds].sort((a, b) => a - b),
         'worker proposal must contain the compatible unassigned required requests'
     );
-    const goalMembers = await LifeState.statesByIds(requiredIds, { ownerId: 'legacy_main', unassigned: true });
+    const goalMembers = await LifeState.statesByIds(requiredIds, { unassigned: true });
     const goalParty = { partyId: 'worker-first-goal', memberIds: goalMembers.map(member => member.characterId),
         leaderId: goalMembers[0].characterId, stats: { objective: { sourceKind: 'raid', spotId: spot.id } } };
     const goalResult = await coordinator.requestPartyGoals(goalParty, goalMembers);
@@ -213,8 +211,6 @@ let coordinator = null;
     assert(preserved.every(row => JSON.parse(row.statsJson).transportFixture.length === 140000),
         'sparse transport must preserve unchanged durable state for every party member');
     assert(rows.every((row) => Number(row.lastResolvedAt) > dueAt));
-    assert(rows.every((row) => row.simulationOwner === Owner.LEGACY_OWNER_ID
-        && row.simulationLeaseId === null && Number(row.simulationLeaseUntil) === 0));
     assert(Number(partyRow.nextResolveAt) > dueAt, 'leader commit must durably advance the party schedule');
     assert(Number(JSON.parse(partyRow.statsJson).fightsResolved || 0) >= 1);
     const memories = (await Database.loadInteractionMemories(memberIds)).map(snapshot => ({ ownerId: snapshot.ownerId, snapshotJson: JSON.stringify(snapshot) }));
@@ -235,14 +231,12 @@ let coordinator = null;
 
     await coordinator.stop();
     const cachedState = LifeState.cachedState;
-    const claimed = { characterId: 99, simulation: { ownerId: 'worker', revision: 4, leaseId: 'lease' }, stats: { keep: 1 } };
+    const claimed = { characterId: 99, simulation: { revision: 4 }, stats: { keep: 1 } };
     LifeState.cachedState = () => claimed;
     try {
         const delta = require('../src/GameServer/Bot/Population/ColdStateDelta').create(claimed, { ...claimed, hp: 25 });
-        assert.strictEqual(await coordinator.prepareProposal({ characterId: 99, token: { ownerId: 'worker', revision: 3, leaseId: 'lease' }, nextStateDelta: delta }), null,
+        assert.strictEqual(await coordinator.prepareProposal({ characterId: 99, revision: 3, nextStateDelta: delta }), null,
             'a sparse result must never be applied to a newer revision');
-        assert.strictEqual(await coordinator.prepareProposal({ characterId: 99, token: { ownerId: 'worker', revision: 4, leaseId: 'different' }, nextStateDelta: delta }), null,
-            'a sparse result must never be applied to another lease');
     } finally { LifeState.cachedState = cachedState; }
     console.log('Cold worker party compute and durable batch-CAS integration checks passed');
 })().catch((error) => {

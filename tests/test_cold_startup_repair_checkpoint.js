@@ -20,8 +20,8 @@ async function run() {
     await Native.character(Database, id, 'RepairCheckpoint', 'bot_repair_checkpoint', loc);
     await Database.execute([`INSERT INTO bot_life_state (characterId,accountName,characterName,level,
         phase,activity,currentRegion,locX,locY,locZ,hp,maxHp,mp,maxMp,inventorySummary,statsJson,
-        activityStartedAt,nextResolveAt,lastResolvedAt,updatedAt,simulationOwner,simulationRevision)
-        VALUES (?,?,'RepairCheckpoint',18,'cold','hunting','Skeleton fields',?,?,?,100,100,100,100,'{}',?,?,?,?,?,'legacy_main',17)`,
+        activityStartedAt,nextResolveAt,lastResolvedAt,updatedAt,simulationRevision)
+        VALUES (?,?,'RepairCheckpoint',18,'cold','hunting','Skeleton fields',?,?,?,100,100,100,100,'{}',?,?,?,?,?,17)`,
         [id, 'bot_repair_checkpoint', loc.locX, loc.locY, loc.locZ,
             JSON.stringify({ classId: 0, role: 'dps', coldCombat: { skillSource: 'hot', skills: [] } }),
             old, old + 30000, old, old]]);

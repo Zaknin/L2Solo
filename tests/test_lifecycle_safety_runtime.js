@@ -76,11 +76,11 @@ async function sendLostStatePage(coordinator, worker, entry) {
             locX: 1, locY: 1, locZ: 0 });
         const characterId = Number((await Database.fetchCharacters('bot_safety_runtime_fixture'))[0].id);
         await Database.execute([`INSERT INTO bot_life_state
-            (characterId, accountName, characterName, phase, activity, simulationOwner,
-             simulationRevision, simulationLeaseUntil, activityStartedAt, nextResolveAt,
+            (characterId, accountName, characterName, phase, activity,
+             simulationRevision, activityStartedAt, nextResolveAt,
              lastResolvedAt, updatedAt, statsJson, inventorySummary, hp, maxHp, mp, maxMp)
             VALUES (?, 'bot_safety_runtime_fixture', 'SafetyRuntimeFixture', 'cold', 'resting',
-                'legacy_main', 4, 0, 100, 9999999999999, 100, 1234, '{}', '{}', 100, 100, 100, 100)`, [characterId]]);
+                4, 100, 9999999999999, 100, 1234, '{}', '{}', 100, 100, 100, 100)`, [characterId]]);
         const page = await Life.safetyPage({ limit: 64 });
         assert.equal(page.rows.length, 1);
         assert.equal(page.rows[0].characterId, characterId);
@@ -169,11 +169,11 @@ async function sendLostStatePage(coordinator, worker, entry) {
             classId: 0, maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0, locX: 1, locY: 1, locZ: 0 });
         const lostId = Number((await Database.fetchCharacters('bot_safety_runtime_fixture')).find(row => row.name === 'SafetyLostFixture').id);
         await execute.call(Database, [`INSERT INTO bot_life_state
-            (characterId, accountName, characterName, phase, activity, simulationOwner,
-             simulationRevision, simulationLeaseUntil, activityStartedAt, nextResolveAt,
+            (characterId, accountName, characterName, phase, activity,
+             simulationRevision, activityStartedAt, nextResolveAt,
              lastResolvedAt, updatedAt, statsJson, inventorySummary, hp, maxHp, mp, maxMp)
             VALUES (?, 'bot_safety_runtime_fixture', 'SafetyLostFixture', 'cold', 'resting',
-                'legacy_main', 4, 0, 100, 9999999999999, 100, 1234, '{}', '{}', 100, 100, 100, 100)`, [lostId]]);
+                4, 100, 9999999999999, 100, 1234, '{}', '{}', 100, 100, 100, 100)`, [lostId]]);
         const lostNative = (await execute.call(Database, ['SELECT * FROM bot_life_state WHERE characterId = ?', [lostId]]))[0];
         const lostState = Life.acceptLifecycleRow(lostNative);
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([lostId]);
@@ -299,11 +299,11 @@ async function sendLostStatePage(coordinator, worker, entry) {
             classId: 0, maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0, locX: 1, locY: 1, locZ: 0 });
         const awaitId = Number((await Database.fetchCharacters('bot_safety_runtime_fixture')).find(row => row.name === 'SafetyAwaitFixture').id);
         await execute.call(Database, [`INSERT INTO bot_life_state
-            (characterId, accountName, characterName, phase, activity, simulationOwner,
-             simulationRevision, simulationLeaseUntil, activityStartedAt, nextResolveAt,
+            (characterId, accountName, characterName, phase, activity,
+             simulationRevision, activityStartedAt, nextResolveAt,
              lastResolvedAt, updatedAt, statsJson, inventorySummary, hp, maxHp, mp, maxMp)
-            SELECT ?, accountName, 'SafetyAwaitFixture', phase, activity, simulationOwner,
-                simulationRevision, simulationLeaseUntil, activityStartedAt, nextResolveAt,
+            SELECT ?, accountName, 'SafetyAwaitFixture', phase, activity,
+                simulationRevision, activityStartedAt, nextResolveAt,
                 lastResolvedAt, updatedAt, statsJson, inventorySummary, hp, maxHp, mp, maxMp
             FROM bot_life_state WHERE characterId = ?`, [awaitId, characterId]]);
         const awaitNative = (await execute.call(Database, ['SELECT * FROM bot_life_state WHERE characterId = ?', [awaitId]]))[0];

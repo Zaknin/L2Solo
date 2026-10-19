@@ -31,7 +31,7 @@ function state(characterId, revision, activity = 'hunting') {
         party: { partyId: null },
         stats: {},
         inventory: {},
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision, leaseId: null, leaseUntil: 0 },
+        simulation: { revision },
         updatedAt: 1000
     };
 }
@@ -53,8 +53,9 @@ function state(characterId, revision, activity = 'hunting') {
     ]);
 
     const columns = await Database.execute(['PRAGMA table_info(bot_life_state)', []]);
-    for (const column of ['simulationOwner', 'simulationRevision', 'simulationLeaseId', 'simulationLeaseUntil']) {
-        assert(columns.some((entry) => entry.name === column), `migration must add ${column}`);
+    assert(columns.some((entry) => entry.name === 'simulationRevision'), 'migration must add simulationRevision');
+    for (const column of ['simulationOwner', 'simulationLeaseId', 'simulationLeaseUntil']) {
+        assert(!columns.some((entry) => entry.name === column), `migration 72 must drop ${column}`);
     }
     const migrations = await Database.execute(['SELECT version FROM schema_migrations WHERE version = 10', []]);
     assert.strictEqual(migrations.length, 1, 'ownership schema migration must be recorded exactly once');
@@ -174,8 +175,6 @@ function state(characterId, revision, activity = 'hunting') {
     assert.strictEqual(Number(committedCharacter.sex), 1,
         'the same migration transaction must update the physical character appearance');
 
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.LEGACY_OWNER_ID,
-        'a commit returns the bot to main');
 
     const staleCommit = await commitOn(step, { ...resting, activity: 'hunting' }, 2100);
     assert.strictEqual(staleCommit.reason, 'stale_revision', 'an old step must never overwrite a newer revision');
@@ -188,21 +187,6 @@ function state(characterId, revision, activity = 'hunting') {
     const postHandoffCommit = await commitOn(committed.revision, resting, 3200);
     assert.strictEqual(postHandoffCommit.reason, 'stale_revision', 'handoff must fence a late cold commit');
 
-    // A loan an older server left in the row returns to main at startup.
-    await Database.execute([`UPDATE bot_life_state SET simulationOwner = ?, simulationLeaseId = 'lease-old',
-        simulationLeaseUntil = 99999999999999 WHERE characterId = ?`, [Owner.OWNER_ID, characterId]]);
-    assert.strictEqual((await Owner.recoverStartupLeases()).affectedRows, 1, 'a startup loan must recover to legacy_main');
-    const recovered = (await Database.execute([
-        'SELECT simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil FROM bot_life_state WHERE characterId = ?',
-        [characterId]
-    ]))[0];
-    assert.strictEqual(recovered.simulationOwner, Owner.LEGACY_OWNER_ID);
-    assert.strictEqual(recovered.simulationRevision, handoff.revision + 1);
-    assert.strictEqual(recovered.simulationLeaseId, null);
-    assert.strictEqual(recovered.simulationLeaseUntil, 0);
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.LEGACY_OWNER_ID, 'recovery must return cached ownership to main');
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, recovered.simulationRevision, 'recovery must reflect its revision in cache');
-
     await Database.execute([
         `UPDATE bot_life_state
          SET activity = 'resting', phase = 'cold', adena = 100,
@@ -210,48 +194,10 @@ function state(characterId, revision, activity = 'hunting') {
          WHERE characterId = ?`,
         [JSON.stringify({ 57: { selfId: 57, name: 'Adena', amount: 100 } }), characterId]
     ]);
-    await Database.execute(['DELETE FROM items WHERE characterId = ? AND selfId = 57', [characterId]]);
-    await Database.execute([
-        "INSERT INTO items (selfId, name, amount, equipped, slot, characterId) VALUES (57, 'Adena', 100, 0, 0, ?)",
-        [characterId]
-    ]);
-    const storedGear = [];
-    for (const enchant of [3, 2, 0]) {
-        const inserted = await Database.execute([
-            "INSERT INTO warehouse_items (selfId, name, amount, enchant, characterId) VALUES (94, 'Bec de Corbin', 1, ?, ?)",
-            [enchant, characterId]
-        ]);
-        storedGear.push({ id: Number(inserted.insertId), selfId: 94, amount: 1, enchant, npcPrice: 50 });
-    }
-    const compacted = await Database.liquidateWarehouseGear(characterId, [storedGear[2]], { source: 'test_cleanup' });
-    assert.strictEqual(compacted.ok, true, 'legacy-main cold owners may compact a selected warehouse object atomically');
-    assert.strictEqual(compacted.rowsRemoved, 1);
-    assert.strictEqual(compacted.units, 1);
-    assert.strictEqual(compacted.payout, 50);
-    assert.strictEqual(Number(compacted.state.simulationRevision), Number(recovered.simulationRevision) + 1,
-        'the compaction moves the far row revision once');
-    assert.strictEqual(Number(compacted.state.adena), 150);
-    assert.strictEqual(JSON.parse(compacted.state.inventorySummary)['57'].amount, 150);
-    assert.strictEqual(JSON.parse(compacted.state.statsJson).lastWarehouseCompaction.source, 'test_cleanup');
-    assert.deepStrictEqual((await Database.fetchWarehouseItems(characterId))
-        .filter((item) => Number(item.selfId) === 94)
-        .map((item) => Number(item.enchant)).sort((a, b) => b - a), [3, 2],
-    'the explicit low-enchant surplus row must be removed while the two keepers survive');
-    assert.strictEqual(Number((await Database.fetchItems(characterId)).find((item) => Number(item.selfId) === 57).amount), 150,
-        'physical Adena must commit in the same transaction as warehouse removal and life-state payout');
-    await assert.rejects(
-        Database.liquidateWarehouseGear(characterId, [{ ...storedGear[0], enchant: 99 }], { source: 'stale_test' }),
-        /warehouse gear changed/,
-        'a stale object snapshot must roll the whole cleanup transaction back'
-    );
-    assert.strictEqual(Number((await Database.fetchItems(characterId)).find((item) => Number(item.selfId) === 57).amount), 150,
-        'failed cleanup must not credit Adena');
-    assert((await Database.fetchWarehouseItems(characterId)).some((item) => Number(item.id) === storedGear[0].id),
-        'failed cleanup must not remove the selected warehouse object');
-
     // A clan inventory write moves the row under a step: the step's commit is
     // refused and the row keeps the new inventory.
-    const raceRevision = Number(compacted.state.simulationRevision);
+    const [beforeRace] = await Database.execute(['SELECT simulationRevision FROM bot_life_state WHERE characterId = ?', [characterId]]);
+    const raceRevision = Number(beforeRace.simulationRevision);
     const inventoryAfterClanWrite = JSON.stringify({ '1869': { selfId: 1869, amount: 42 } });
     await Database.execute([`UPDATE bot_life_state SET simulationRevision = simulationRevision + 1,
         inventorySummary = ?, statsJson = ? WHERE characterId = ?`,
@@ -261,7 +207,6 @@ function state(characterId, revision, activity = 'hunting') {
     const [afterRace] = await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]]);
     assert.strictEqual(afterRace.inventorySummary, inventoryAfterClanWrite, 'a refused commit preserves the new inventory');
     assert.strictEqual(JSON.parse(afterRace.statsJson).clanInventoryRevision, raceRevision + 1);
-    assert.strictEqual(afterRace.simulationOwner, Owner.LEGACY_OWNER_ID);
 
     // Developer diagnostics: an item read counts under its call-site tag.
     await Database.fetchItems(characterId, 'owner_probe');
@@ -269,7 +214,7 @@ function state(characterId, revision, activity = 'hunting') {
 
     const dbStats = Database.stats();
     assert.strictEqual(path.resolve(dbStats.path), path.resolve(databasePath), 'all owner operations must use the one configured SQLite gateway');
-    console.log('Cold simulation owner revision fence, handoff, and recovery checks passed');
+    console.log('Cold simulation owner revision fence and handoff checks passed');
 })().catch((error) => {
     console.error(error);
     process.exitCode = 1;

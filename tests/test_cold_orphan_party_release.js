@@ -106,7 +106,7 @@ const originalCachedState = LifeState.cachedState;
     assert.strictEqual(persistedParty[0].status, 'dissolved');
 
     const persistedMembers = await Database.execute([
-        `SELECT partyId, activity, nextResolveAt, statsJson, simulationOwner
+        `SELECT partyId, activity, nextResolveAt, statsJson
          FROM bot_life_state WHERE characterId IN (?, ?, ?) ORDER BY characterId`,
         memberIds
     ]);
@@ -118,7 +118,6 @@ const originalCachedState = LifeState.cachedState;
         assert(Number(member.nextResolveAt) > Date.now(), 'released member must receive a bounded solo due time');
         assert.strictEqual(stats.backgroundPartyId, null, 'runtime dissolve must clear backgroundPartyId');
         assert.strictEqual(stats.partyBreakReason, 'orphaned_dissolved_party');
-        assert.strictEqual(member.simulationOwner, 'legacy_main');
     });
 
     console.log('Cold orphan party durable member release checks passed');

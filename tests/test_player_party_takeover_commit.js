@@ -20,8 +20,8 @@ async function run() {
             VALUES (?,?,?,0,0,100,100,0,0,0,0,0,0,0)`, [id, `bot_takeover_${id}`, `Takeover${id}`]]);
         await Database.execute([`INSERT INTO bot_life_state(
             characterId,accountName,characterName,phase,activity,partyId,hp,maxHp,mp,maxMp,level,
-            nextResolveAt,lastResolvedAt,updatedAt,statsJson,simulationOwner,simulationRevision
-        ) VALUES (?,?,?,'hot','grouped',?,100,100,100,100,20,NULL,?,?,?,'legacy_main',3)`, [
+            nextResolveAt,lastResolvedAt,updatedAt,statsJson,simulationRevision
+        ) VALUES (?,?,?,'hot','grouped',?,100,100,100,100,20,NULL,?,?,?,3)`, [
             id,
             `bot_takeover_${id}`,
             `Takeover${id}`,
