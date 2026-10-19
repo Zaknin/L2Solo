@@ -1757,6 +1757,14 @@ function applySchemaMigrations() {
             BEGIN ${bump('hennaRevision', 'OLD.characterId')} END;
         `);
     }]);
+    // A party row carries a revision that every party write moves in its own
+    // statement; every party fence compares it (updatedAt is only a time).
+    migrations.push([69, () => {
+        const columns = connection.prepare('PRAGMA table_info(bot_background_parties)').all();
+        if (!columns.some((column) => column.name === 'revision')) {
+            connection.exec('ALTER TABLE bot_background_parties ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+        }
+    }]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -4253,8 +4261,8 @@ const Database = {
         try {
             return performTransaction(() => {
                 const row = one('SELECT * FROM bot_background_parties WHERE partyId=?', [request.partyId]);
-                if (!row || row.status !== 'hot' || Number(row.updatedAt) !== Number(request.expectedUpdatedAt))
-                    return { ok: false, reason: 'party_changed' };
+                if (!row || row.status !== 'hot' || !Number.isSafeInteger(request.expectedPartyRevision)
+                    || Number(row.revision) !== request.expectedPartyRevision) return { ok: false, reason: 'party_changed' };
                 const party = { ...row, memberIds: JSON.parse(row.memberIdsJson), stats: jsonObject(row.statsJson) };
                 if (!Roster.admitted(party) || Roster.held(party) || !Roster.exact(request.members?.map(member => member.characterId), party.memberIds))
                     return { ok: false, reason: 'raid_roster_not_opened' };
@@ -4264,8 +4272,8 @@ const Database = {
                 const stats = { ...party.stats, raidAdmission: proof };
                 const reason = raidRosterCommitReason(row, stats, null, request.members, true);
                 if (reason) return { ok: false, reason };
-                write('UPDATE bot_background_parties SET statsJson=?,updatedAt=? WHERE partyId=? AND updatedAt=?',
-                    [JSON.stringify(stats), at, row.partyId, row.updatedAt]);
+                write('UPDATE bot_background_parties SET statsJson=?,updatedAt=?,revision=revision+1 WHERE partyId=? AND revision=?',
+                    [JSON.stringify(stats), at, row.partyId, row.revision]);
                 return { ok: true, party: one('SELECT * FROM bot_background_parties WHERE partyId=?', [row.partyId]) };
             }, 'party:marked-raid-impact');
         } catch (_) { return { ok: false, reason: 'party_opening_rollback' }; }
@@ -5457,7 +5465,8 @@ const Database = {
                 leaderId = excluded.leaderId, memberIdsJson = excluded.memberIdsJson,
                 spotId = excluded.spotId, nextResolveAt = excluded.nextResolveAt,
                 cohesion = excluded.cohesion, risk = excluded.risk, status = excluded.status,
-                roleCoverageJson = excluded.roleCoverageJson, statsJson = excluded.statsJson, updatedAt = excluded.updatedAt`,
+                roleCoverageJson = excluded.roleCoverageJson, statsJson = excluded.statsJson, updatedAt = excluded.updatedAt,
+                revision = bot_background_parties.revision + 1`,
             [row.partyId, row.leaderId, row.memberIdsJson, row.spotId, row.startedAt, row.nextResolveAt,
                 row.cohesion, row.risk, row.status, row.roleCoverageJson, row.statsJson,
                 Math.max(Number(row.updatedAt), Number(previous?.updatedAt || 0) + 1)]);
@@ -5466,7 +5475,7 @@ const Database = {
         }, 'bot-party:save-agreement');
     },
 
-    commitBackgroundPartyGoals({ partyId, expectedUpdatedAt, leaderId, memberIds, sources, statsJson, updatedAt } = {}) {
+    commitBackgroundPartyGoals({ partyId, expectedPartyRevision, leaderId, memberIds, sources, statsJson, updatedAt } = {}) {
         const ids = Array.isArray(memberIds) ? memberIds : [];
         if (!partyId || ids.length < 1 || ids.length > 9 || new Set(ids).size !== ids.length
             || !ids.every(id => Number.isSafeInteger(id) && id > 0) || !ids.includes(leaderId)
@@ -5475,8 +5484,8 @@ const Database = {
             || sources.some(source => !ids.includes(source.characterId) || source.phase !== 'cold'
                 || source.partyId !== partyId || !Number.isSafeInteger(source.updatedAt)
                 || !Number.isSafeInteger(source.revision) || source.revision < 0)
-            || !Number.isSafeInteger(expectedUpdatedAt) || !Number.isSafeInteger(updatedAt)
-            || updatedAt <= expectedUpdatedAt || typeof statsJson !== 'string')
+            || !Number.isSafeInteger(expectedPartyRevision) || expectedPartyRevision < 0
+            || !Number.isSafeInteger(updatedAt) || typeof statsJson !== 'string')
             return Promise.resolve({ ok: false, reason: 'invalid_party_goals' });
         return inTransaction(() => {
             const party = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]);
@@ -5485,7 +5494,7 @@ const Database = {
                 previousStats.objective.fullRoster, proposedStats.objective?.fullRoster)
                 || JSON.stringify(previousStats.raidAdmission) !== JSON.stringify(proposedStats.raidAdmission)))
                 return { ok: false, reason: 'party_roster_changed' };
-            if (party?.status !== 'active' || Number(party.updatedAt) !== expectedUpdatedAt
+            if (party?.status !== 'active' || Number(party.revision) !== expectedPartyRevision
                 || Number(party.leaderId) !== leaderId || party.memberIdsJson !== JSON.stringify(ids))
                 return { ok: false, reason: 'party_goals_changed' };
             const rows = all(`SELECT characterId, phase, partyId, updatedAt, simulationOwner,
@@ -5500,13 +5509,13 @@ const Database = {
                     || Number(row.simulationRevision || 0) !== source.revision
                     || String(row.simulationLeaseId || '') !== source.leaseId;
             })) return { ok: false, reason: 'party_goal_member_changed' };
-            write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ? WHERE partyId = ?',
+            write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                 [statsJson, updatedAt, partyId]);
             return { ok: true, partyRow: one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]) };
         });
     },
 
-    commitBackgroundPartyMembership({ party, members = [], event = null, review = false, expectedPartyUpdatedAt = null,
+    commitBackgroundPartyMembership({ party, members = [], event = null, review = false, expectedPartyRevision = null,
         expectedPhase = 'cold', canCommitHot = null, preserveClanOperations = false } = {}) {
         const batch = Array.isArray(members) ? members.slice(0, 40) : [];
         const characterIds = [...new Set(batch.map((entry) => Number(entry?.row?.characterId)).filter((id) => (
@@ -5521,23 +5530,23 @@ const Database = {
             if (!['cold', 'hot'].includes(expectedPhase)) return { ok: false, reason: 'invalid_membership_phase' };
             if (expectedPhase === 'hot') {
                 const declared = JSON.parse(party.memberIdsJson || '[]').map(Number);
-                const existing = one('SELECT status, memberIdsJson, updatedAt FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
+                const existing = one('SELECT status, memberIdsJson, revision FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
                 const previousIds = existing ? JSON.parse(existing.memberIdsJson || '[]').map(Number) : [];
                 if (review || party.status !== 'hot' || declared.length < 2 || declared.length > 9
                     || declared.length !== characterIds.length || !declared.includes(Number(party.leaderId))
                     || new Set(declared).size !== declared.length || declared.some(id => !characterIds.includes(id))
                     || batch.some(e => e.row.partyId !== party.partyId || (e.expectedPartyId && e.expectedPartyId !== party.partyId))
-                    || (expectedPartyUpdatedAt === null ? !!existing : existing?.status !== 'hot'
-                        || Number(existing.updatedAt) !== Number(expectedPartyUpdatedAt)
+                    || (expectedPartyRevision === null ? !!existing : existing?.status !== 'hot'
+                        || Number(existing.revision) !== Number(expectedPartyRevision)
                         || previousIds.some(id => !characterIds.includes(id))
                         || batch.some(e => !!e.expectedPartyId !== previousIds.includes(Number(e.row.characterId))))
                     || typeof canCommitHot !== 'function' || !canCommitHot()) return { ok: false, reason: 'hot_party_context_changed' };
             }
             if (review) {
-                const existing = one('SELECT status, memberIdsJson, updatedAt FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
+                const existing = one('SELECT status, memberIdsJson, revision FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
                 const ids = existing ? JSON.parse(existing.memberIdsJson || '[]').map(Number) : [];
                 const retained = JSON.parse(party.memberIdsJson || '[]').map(Number);
-                if (existing?.status !== 'active' || Number(existing.updatedAt) !== Number(expectedPartyUpdatedAt)
+                if (existing?.status !== 'active' || Number(existing.revision) !== Number(expectedPartyRevision)
                     || ids.length !== characterIds.length || ids.some(id => !characterIds.includes(id))
                     || retained.some(id => !characterIds.includes(id))
                     || batch.some(entry => entry.expectedPartyId !== party.partyId
@@ -5545,11 +5554,11 @@ const Database = {
                     return { ok: false, reason: 'party_review_membership_changed' };
                 }
             }
-            if (expectedPhase === 'cold' && !review && expectedPartyUpdatedAt !== null) {
-                const existing = one('SELECT status, memberIdsJson, updatedAt FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
+            if (expectedPhase === 'cold' && !review && expectedPartyRevision !== null) {
+                const existing = one('SELECT status, memberIdsJson, revision FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
                 const ids = existing ? JSON.parse(existing.memberIdsJson || '[]').map(Number) : [];
                 const declared = JSON.parse(party.memberIdsJson || '[]').map(Number);
-                if (existing?.status !== 'active' || Number(existing.updatedAt) !== Number(expectedPartyUpdatedAt)
+                if (existing?.status !== 'active' || Number(existing.revision) !== Number(expectedPartyRevision)
                     || ids.some(id => !characterIds.includes(id)) || declared.length !== characterIds.length
                     || declared.some(id => !characterIds.includes(id)) || !declared.includes(Number(party.leaderId))
                     || batch.some(entry => Boolean(entry.expectedPartyId) !== ids.includes(Number(entry.row.characterId))))
@@ -5606,7 +5615,8 @@ const Database = {
                 status = excluded.status,
                 roleCoverageJson = excluded.roleCoverageJson,
                 statsJson = excluded.statsJson,
-                updatedAt = excluded.updatedAt`, [
+                updatedAt = excluded.updatedAt,
+                revision = bot_background_parties.revision + 1`, [
                 party.partyId, party.leaderId, party.memberIdsJson, party.spotId,
                 party.startedAt, party.nextResolveAt, party.cohesion, party.risk,
                 party.status, party.roleCoverageJson, party.statsJson, party.updatedAt
@@ -5658,7 +5668,7 @@ const Database = {
             }
 
             const payment = partyAgreementUnsafe(previousParty, party);
-            write('UPDATE bot_background_parties SET statsJson = ? WHERE partyId = ?', [payment.row.statsJson, party.partyId]);
+            write('UPDATE bot_background_parties SET statsJson = ?, revision = revision + 1 WHERE partyId = ?', [payment.row.statsJson, party.partyId]);
             return { ok: true, partyId: party.partyId, characterIds,
                 partyRow: one('SELECT * FROM bot_background_parties WHERE partyId = ?', [party.partyId]),
                 lifeRows: characterIds.map(coldSimulationRow) };
@@ -5920,14 +5930,21 @@ const Database = {
                 failure = !Array.isArray(changes) || changes.length > 2
                     || new Set(changes.map(change => change.partyId)).size !== changes.length;
                 if (!failure) for (const change of changes) {
-                    const party = one('SELECT status, memberIdsJson, updatedAt FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
+                    const party = one('SELECT status, memberIdsJson, revision FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
                     const ids = party ? JSON.parse(party.memberIdsJson || '[]').map(Number) : [];
                     const expected = change.memberIds || [];
-                    if (party?.status !== 'active' || Number(party.updatedAt) !== Number(change.expectedUpdatedAt)
+                    // A fresh revision-0 party cannot match a missing revision.
+                    if (party && (!Number.isSafeInteger(change.expectedPartyRevision)
+                        || Number(party.revision) !== change.expectedPartyRevision)) {
+                        failure = true;
+                        reason = 'party_revision_stale';
+                        break;
+                    }
+                    if (party?.status !== 'active'
                         || ids.length < 2 || ids.length > 9 || ids.length !== expected.length
                         || new Set(expected).size !== expected.length || ids.some(id => !expected.includes(id) || !presentIds.has(id)
                             || memberRows.get(id)?.partyId !== change.partyId)
-                        || !Number.isSafeInteger(change.updatedAt) || change.updatedAt <= Number(party.updatedAt)
+                        || !Number.isSafeInteger(change.updatedAt)
                         || (change.nextResolveAt !== null && (!Number.isSafeInteger(change.nextResolveAt) || change.nextResolveAt < 0))
                         || (change.spotId !== undefined && (typeof change.spotId !== 'string' || !change.spotId.length || change.spotId.length > 256))
                         || (change.status !== undefined && !['active', 'dissolved'].includes(change.status))
@@ -5936,7 +5953,7 @@ const Database = {
                         break;
                     }
                 }
-                if (failure) reason = 'party_context_changed';
+                if (failure) reason ||= 'party_context_changed';
             }
             if (!failure && raidCommit) {
                 const change = group[0].atomicGroup.partyChanges[0];
@@ -6066,10 +6083,10 @@ const Database = {
                     const payment = partyAgreementUnsafe(previous, { ...previous, ...change });
                     change.statsJson = payment.row.statsJson;
                     const updated = write(`UPDATE bot_background_parties SET nextResolveAt = ?, statsJson = ?, updatedAt = ?, spotId = COALESCE(?, spotId),
-                        status = COALESCE(?, status), cohesion = COALESCE(?, cohesion), risk = COALESCE(?, risk)
-                        WHERE partyId = ? AND status = 'active' AND updatedAt = ?`,
+                        status = COALESCE(?, status), cohesion = COALESCE(?, cohesion), risk = COALESCE(?, risk), revision = revision + 1
+                        WHERE partyId = ? AND status = 'active' AND revision = ?`,
                     [change.nextResolveAt, change.statsJson, change.updatedAt, change.spotId ?? null,
-                        change.status ?? null, change.cohesion ?? null, change.risk ?? null, change.partyId, change.expectedUpdatedAt]);
+                        change.status ?? null, change.cohesion ?? null, change.risk ?? null, change.partyId, change.expectedPartyRevision]);
                     if (updated.affectedRows !== 1) throw new Error('party conflict: party changed during commit');
                     let partyRow, partyRowRead = false;
                     for (const request of group) {
@@ -6080,6 +6097,9 @@ const Database = {
                         result.row = row;
                         result.revision = Number(result.row.simulationRevision);
                         if (payment.touched.has(result.characterId)) result.partyPayment = true;
+                        // A two-party group: each member gets its own party's row
+                        // (the roster was matched to change.memberIds above).
+                        if (!change.memberIds.includes(result.characterId)) continue;
                         if (!partyRowRead) {
                             partyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
                             partyRowRead = true;
@@ -6240,7 +6260,7 @@ const Database = {
                 if (stats?.coldCompetition?.key !== key) continue;
                 if (JSON.parse(party.memberIdsJson).some(id => coldSimulationRow(id)?.simulationLeaseId)) { complete = false; continue; }
                 stats.coldCompetition = { ...stats.coldCompetition, wait: null, outcome, endedAt: timestamp };
-                write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ? WHERE partyId = ?',
+                write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                     [JSON.stringify(stats), Math.max(timestamp, Number(party.updatedAt) + 1), partyId]);
                 parties.push(one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]));
             }
@@ -6300,7 +6320,7 @@ const Database = {
                 const stats = JSON.parse(party.statsJson || '{}');
                 stats.hotLifecycle = request.phase === 'hot' ? { startedAt: timestamp, reason: request.reason } : null;
                 if (stats.coldCompetition) stats.coldCompetition.wait = null;
-                write('UPDATE bot_background_parties SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ? WHERE partyId = ?',
+                write('UPDATE bot_background_parties SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                     [request.phase === 'hot' ? 'hot' : 'active', request.phase === 'hot' ? null : timestamp + 1000,
                         JSON.stringify(stats), timestamp, party.partyId]);
             }
@@ -6317,13 +6337,14 @@ const Database = {
         const members = request.members || [];
         const ids = members.map(m => Number(m.characterId));
         if (ids.length < 2 || ids.length > 9 || new Set(ids).size !== ids.length
-            || !['hot', 'cold'].includes(request.phase) || !['hot', 'cold'].includes(request.expectedPhase)) {
+            || !['hot', 'cold'].includes(request.phase) || !['hot', 'cold'].includes(request.expectedPhase)
+            || !Number.isSafeInteger(request.expectedPartyRevision) || request.expectedPartyRevision < 0) {
             return Promise.resolve({ ok: false, reason: 'invalid_party_transition' });
         }
         return inTransaction(() => {
             const party = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [request.partyId]);
             const declared = party ? JSON.parse(party.memberIdsJson) : [];
-            if (!party || party.status !== request.expectedStatus || Number(party.updatedAt) !== request.expectedUpdatedAt
+            if (!party || party.status !== request.expectedStatus || Number(party.revision) !== request.expectedPartyRevision
                 || declared.length !== ids.length || declared.some(id => !ids.includes(Number(id)))) {
                 return { ok: false, reason: 'party_changed' };
             }
@@ -6358,7 +6379,7 @@ const Database = {
                 [...entries.map(([, value]) => value), LEGACY_SIMULATION_OWNER, m.characterId, m.expectedRevision]);
                 if (changed.affectedRows !== 1) throw Error('party lifecycle CAS failed');
             }
-            write('UPDATE bot_background_parties SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ? WHERE partyId = ?',
+            write('UPDATE bot_background_parties SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                 [request.phase === 'hot' ? 'hot' : 'active', request.nextResolveAt, request.statsJson, timestamp, request.partyId]);
             return { ok: true, rows: ids.map(coldSimulationRow),
                 party: one('SELECT * FROM bot_background_parties WHERE partyId = ?', [request.partyId]) };
@@ -6370,13 +6391,14 @@ const Database = {
         const ids = members.map((member) => Number(member.characterId));
         const playerId = Number(request.playerId || 0);
         if (!request.partyId || !Number.isSafeInteger(playerId) || playerId <= 0
-            || ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length) {
+            || ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length
+            || !Number.isSafeInteger(request.expectedPartyRevision) || request.expectedPartyRevision < 0) {
             return Promise.resolve({ ok: false, reason: 'invalid_party_takeover' });
         }
         return inTransaction(() => {
             const party = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [request.partyId]);
             const declared = party ? JSON.parse(party.memberIdsJson || '[]').map(Number) : [];
-            if (!party || party.status !== 'hot' || Number(party.updatedAt) !== Number(request.expectedUpdatedAt)
+            if (!party || party.status !== 'hot' || Number(party.revision) !== request.expectedPartyRevision
                 || declared.length !== ids.length || declared.some((id) => !ids.includes(id))) {
                 return { ok: false, reason: 'party_changed' };
             }
@@ -6447,9 +6469,9 @@ const Database = {
                 at: timestamp
             };
             const changedParty = write(`UPDATE bot_background_parties
-                SET status = 'player_taken_over', nextResolveAt = NULL, statsJson = ?, updatedAt = ?
-                WHERE partyId = ? AND status = 'hot' AND updatedAt = ?`, [
-                JSON.stringify(partyStats), timestamp, request.partyId, request.expectedUpdatedAt
+                SET status = 'player_taken_over', nextResolveAt = NULL, statsJson = ?, updatedAt = ?, revision = revision + 1
+                WHERE partyId = ? AND status = 'hot' AND revision = ?`, [
+                JSON.stringify(partyStats), timestamp, request.partyId, request.expectedPartyRevision
             ]);
             if (changedParty.affectedRows !== 1) throw Error('party takeover party CAS failed');
             return {
@@ -6563,14 +6585,14 @@ const Database = {
                 ? { startedAt: timestamp, reason: 'player_party_released' }
                 : null;
             const changedParty = write(`UPDATE bot_background_parties
-                SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ?
-                WHERE partyId = ? AND status = 'player_taken_over' AND updatedAt = ?`, [
+                SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ?, revision = revision + 1
+                WHERE partyId = ? AND status = 'player_taken_over' AND revision = ?`, [
                 status,
                 nextResolveAt,
                 JSON.stringify(partyStats),
                 timestamp,
                 partyId,
-                Number(party.updatedAt)
+                Number(party.revision)
             ]);
             if (changedParty.affectedRows !== 1) throw Error('party restore party CAS failed');
             return {

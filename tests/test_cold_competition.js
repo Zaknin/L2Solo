@@ -81,7 +81,7 @@ const party = make(); party.sample(teammates, memory, at);
 assert.strictEqual(party.snapshot().pressuredGroups, 0, 'teammates are a single competitor');
 const mixed = make();
 const mixedEntries = [entries[0], ...teammates.slice(1, 3).map(e => ({ ...e,
-    context: { ...e.context, party: { ...e.context.party, memberIds: [2, 3], leaderId: 2, updatedAt: at } } }))];
+    context: { ...e.context, party: { ...e.context.party, memberIds: [2, 3], leaderId: 2, updatedAt: at, revision: 7 } } }))];
 mixed.sample(mixedEntries, memory, at);
 for (let i = 1; i <= 480; i++) mixed.sample(mixedEntries, memory, at + i * INTERVAL_MS);
 assert(mixed.snapshot().recent.length > 0);
@@ -91,7 +91,7 @@ for (const e of mixed.snapshot().recent) {
     const representative = [e.actor, e.peer].find(p => p.partyId === 'one-party');
     assert(representative, 'party identity must survive worker forecast serialization');
     assert.strictEqual(representative.size, 2);
-    assert.strictEqual(representative.partyUpdatedAt, at);
+    assert.strictEqual(representative.partyRevision, 7);
     selectedMembers.add(representative.id);
     const lastAt = lastEncounter.get(representative.partyId);
     if (lastAt !== undefined) assert(e.at - lastAt >= 2 * 60000, 'rotating participants must not bypass the party-pair cooldown');
@@ -100,7 +100,7 @@ for (const e of mixed.snapshot().recent) {
 assert.strictEqual(selectedMembers.size, 2, 'actual party members can take turns as principal');
 const recoveryEntries = JSON.parse(JSON.stringify(mixedEntries));
 recoveryEntries[2].state.activity = 'resting';
-recoveryEntries[2].context.party.updatedAt = at - 1000;
+recoveryEntries[2].context.party.revision = 6;
 recoveryEntries[2].context.party.memberIds = [2];
 const recovery = make(1);
 for (let i = 0; i <= 60; i++) recovery.sample(recoveryEntries, memory, at + i * INTERVAL_MS);
@@ -110,7 +110,7 @@ for (const event of recovery.snapshot().recent) {
     assert.strictEqual(side.size, 2, 'nearby resting members remain part of the actual party roster');
     assert.strictEqual(side.activeSize, 1);
     assert.strictEqual(side.id, 2, 'the resting member never initiates a resource encounter');
-    assert.strictEqual(side.partyUpdatedAt, at, 'a member\'s older copy cannot replace the leader\'s row');
+    assert.strictEqual(side.partyRevision, 7, 'a member\'s older copy cannot replace the leader\'s row');
 }
 // A pair's four decision rolls come from the pair itself: a second hunter on
 // the party side (who must then be picked) leaves the same pair's rolls as they were.

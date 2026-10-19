@@ -47,7 +47,7 @@ async function run() {
             const result = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
             if (!result.ok) return null;
             Life.acceptPartyAssignments(assigned);
-            return Party.acceptCommit(prepared);
+            return Party.acceptRow(result.partyRow);
         } });
     const event = (a, b, action = 'yield') => ({ key: `episode:${a}:${b}`, at: now, pressure: 2, spotId: 'test', npcId: 10, action, accepted: true,
         actor: { id: a, revision: Life.cachedState(a).simulation.revision, memoryRevision: 0 },
@@ -95,13 +95,13 @@ async function run() {
         const result = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned, event: lifeEvent });
         if (!result.ok) return { party: null, failed: members, reason: result.reason };
         Life.acceptPartyAssignments(assigned);
-        return { party: Party.acceptCommit(prepared), failed: [] };
+        return { party: Party.acceptRow(result.partyRow), failed: [] };
     };
     const recruitOptions = { parties: Party, life: Life, memory, composition: Composition,
         limitsFor: () => ({ maxSize: 5, minSize: 2, levelRange: 4 }), clanReserved: () => false, commit };
     const recruitEvent = (solo, member) => ({ ...event(solo, member, 'offer_party'),
         peer: { ...event(solo, member).peer, partyId: 'competition-party',
-            partyUpdatedAt: Party.find('competition-party').updatedAt, size: Party.find('competition-party').memberIds.length } });
+            partyRevision: Party.find('competition-party').revision, size: Party.find('competition-party').memberIds.length } });
     const join = recruitEvent(7, 3);
     await Database.execute(['UPDATE bot_life_state SET activity=? WHERE characterId=?', ['resting', 4]]);
     Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [4]]))[0]);

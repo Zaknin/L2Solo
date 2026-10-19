@@ -80,7 +80,7 @@ function tick(actions) {
                     const s = life.cachedState(side.principalId), p = side.partyId ? actions.parties.find(side.partyId) : null;
                     return { id: s.characterId, partyId: side.partyId, size: side.memberIds.length,
                         revision: Number(s.simulation?.revision || 0), memoryRevision: actions.memory.revision(s.characterId),
-                        partyUpdatedAt: p?.updatedAt };
+                        partyRevision: p?.revision };
                 };
                 const event = { key: e.key, at, pressure: 3, spotId: e.spotId, npcId: e.npcId,
                     actor: participant(e.sides[0]), peer: participant(e.sides[1]), action: e.reason === 'revenge' ? 'revenge' : 'contest', pvpIntent: true, willing: e.willing };

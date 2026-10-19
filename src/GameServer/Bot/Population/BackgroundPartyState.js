@@ -126,8 +126,8 @@ TableChannel.register('parties', {
 
 function acceptedParty(snapshot) {
     const current = cache.get(snapshot.partyId);
-    // ARCH-NOTE: Snapshots have no revision. One FNV stamp per accept replaces
-    // two cryptographic hashes; the prior accepted stamp is already known.
+    // Each accepted row carries its database revision. One FNV stamp of the
+    // whole snapshot per accept: a re-accepted identical row changes nothing.
     const stamp = fnv1a32(JSON.stringify(snapshot));
     if (current && acceptedStamps.get(snapshot.partyId) === stamp) return current;
     cache.set(snapshot.partyId, snapshot);
@@ -215,19 +215,20 @@ function normalize(row) {
         status: row.status || 'active',
         roleCoverage: parseJson(row.roleCoverageJson, {}),
         stats,
-        updatedAt: Number(row.updatedAt || 0)
+        updatedAt: Number(row.updatedAt || 0),
+        revision: Number(row.revision || 0)
     };
 }
 
 // The bots' downtime (BotLifeState.bootPause, L136) moves the active parties'
 // due times too: the party row is the leader's scheduling authority. Before
-// loadActive, so the cache reads the moved row (party commits fence on its
-// updatedAt, which moves by the same delta for the next boot's measure).
+// loadActive, so the cache reads the moved row (its updatedAt moves by the same
+// delta for the next boot's measure).
 function shiftDueTimesByDowntime() {
     return BotLifeState.bootPause().then(({ startedAt, downtimeMs }) => {
         if (!(downtimeMs > 0)) return 0;
         return Database.execute([
-            `UPDATE ${TABLE} SET nextResolveAt = nextResolveAt + ?, updatedAt = updatedAt + ?
+            `UPDATE ${TABLE} SET nextResolveAt = nextResolveAt + ?, updatedAt = updatedAt + ?, revision = revision + 1
             WHERE status = 'active' AND nextResolveAt > 0 AND updatedAt > 0 AND updatedAt < ?`,
             [downtimeMs, downtimeMs, startedAt]
         ]).then((result) => {
@@ -263,44 +264,6 @@ function rowFromParty(party) {
     };
 }
 
-function save(row) {
-    if (Database.isReady() && typeof Database.saveBackgroundParty === 'function') return Database.saveBackgroundParty(row);
-    return Database.execute([
-        `INSERT INTO ${TABLE} (
-            partyId, leaderId, memberIdsJson, spotId, startedAt, nextResolveAt,
-            cohesion, risk, status, roleCoverageJson, statsJson, updatedAt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(partyId) DO UPDATE SET
-            leaderId = excluded.leaderId,
-            memberIdsJson = excluded.memberIdsJson,
-            spotId = excluded.spotId,
-            nextResolveAt = excluded.nextResolveAt,
-            cohesion = excluded.cohesion,
-            risk = excluded.risk,
-            status = excluded.status,
-            roleCoverageJson = excluded.roleCoverageJson,
-            statsJson = excluded.statsJson,
-            updatedAt = excluded.updatedAt
-        WHERE ${TABLE}.status <> 'hot'
-          AND COALESCE(json_extract(${TABLE}.statsJson, '$.clanGoalInvalidationVersion'), 0)
-              <= COALESCE(json_extract(excluded.statsJson, '$.clanGoalInvalidationVersion'), 0)`,
-        [
-            row.partyId,
-            row.leaderId,
-            row.memberIdsJson,
-            row.spotId,
-            row.startedAt,
-            row.nextResolveAt,
-            row.cohesion,
-            row.risk,
-            row.status,
-            row.roleCoverageJson,
-            row.statsJson,
-            row.updatedAt
-        ]
-    ]);
-}
-
 const BackgroundPartyState = {
     subscribeChanges(listener) {
         if (typeof listener !== 'function') throw new TypeError('invalid_party_publication_listener');
@@ -313,7 +276,7 @@ const BackgroundPartyState = {
         initStarted = true;
 
         initPromise = Database.execute(['SELECT 1', []], 'schema:bot-parties')
-            .then(() => Database.execute([`UPDATE ${TABLE} SET status = 'active', nextResolveAt = ?, updatedAt = ? WHERE status = 'hot'`, [now() + 30000, now()]], 'bot-party:startup-recovery'))
+            .then(() => Database.execute([`UPDATE ${TABLE} SET status = 'active', nextResolveAt = ?, updatedAt = ?, revision = revision + 1 WHERE status = 'hot'`, [now() + 30000, now()]], 'bot-party:startup-recovery'))
             .then(() => shiftDueTimesByDowntime())
             .then(() => this.loadActive()).then(() => {
             initialized = true;
@@ -388,12 +351,12 @@ const BackgroundPartyState = {
 
         return ready.then((isReady) => {
             if (!isReady) return null;
-            return save(prepared.row).then((result) => {
+            return Database.saveBackgroundParty(prepared.row).then((result) => {
                 // Only the whole-party lifecycle can change a hot roster.
                 // A cold maintenance job may have prepared this save before activation.
                 if (!result.affectedRows) return null;
                 (result.lifeRows || []).forEach(row => BotLifeState.acceptNewerLifecycleRow(row));
-                return result.row ? this.acceptRow(result.row) : this.acceptCommit(prepared);
+                return this.acceptRow(result.row);
             });
         }).catch((err) => {
             utils.infoWarn('BotParty', 'failed to save background party %s: %s', prepared.snapshot.partyId, err.message);
@@ -406,7 +369,7 @@ const BackgroundPartyState = {
             updatedAt: Math.max(Date.now(), Number(party.updatedAt || 0) + 1) };
         if (!Database.isReady()) return this.createOrUpdate(next);
         const result = await Database.commitBackgroundPartyGoals({
-            partyId: party.partyId, expectedUpdatedAt: Number(party.updatedAt || 0),
+            partyId: party.partyId, expectedPartyRevision: Number(party.revision || 0),
             leaderId: Number(party.leaderId), memberIds: party.memberIds,
             sources: require('./PartyGoalCalculation').sources(members),
             statsJson: safeJson(next.stats), updatedAt: next.updatedAt });
@@ -421,12 +384,6 @@ const BackgroundPartyState = {
         if (status === 'active' && membership.memberIds.length < Config.partyMinSize) return null;
         const row = rowFromParty(normalizedParty);
         return { row, snapshot: normalize(row) };
-    },
-
-    acceptCommit(prepared) {
-        const snapshot = prepared?.snapshot;
-        if (!snapshot?.partyId) return null;
-        return acceptedParty(snapshot);
     },
 
     acceptRow(row) {

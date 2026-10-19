@@ -164,7 +164,7 @@ Database.init();
     const Calculation = require('../src/GameServer/Bot/Population/PartyGoalCalculation');
     const goalMembers = await LifeState.statesForParty('bgp_atomic_success');
     const [goalParty] = await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', ['bgp_atomic_success']]);
-    const goalInput = { partyId: goalParty.partyId, expectedUpdatedAt: goalParty.updatedAt,
+    const goalInput = { partyId: goalParty.partyId, expectedPartyRevision: goalParty.revision,
         leaderId: goalParty.leaderId, memberIds: JSON.parse(goalParty.memberIdsJson),
         sources: Calculation.sources(goalMembers), updatedAt: goalParty.updatedAt + 1,
         statsJson: JSON.stringify({ objective: { spotId: 'cruma', objectiveKey: 'joint:cruma:0' } }) };
@@ -180,7 +180,7 @@ Database.init();
         await Database.execute([`UPDATE bot_life_state SET ${column}=? WHERE characterId=?`, [original, goalInput.memberIds[0]]]);
     }
     assert.equal((await Database.commitBackgroundPartyGoals({ ...goalInput,
-        expectedUpdatedAt: goalInput.expectedUpdatedAt - 1 })).reason, 'party_goals_changed');
+        expectedPartyRevision: goalInput.expectedPartyRevision + 1 })).reason, 'party_goals_changed');
     assert.equal((await Database.commitBackgroundPartyGoals({ ...goalInput,
         leaderId: goalInput.memberIds[1] })).reason, 'party_goals_changed');
     const lifeBeforeGoal = await Database.execute(['SELECT * FROM bot_life_state WHERE partyId=? ORDER BY characterId', [goalParty.partyId]]);
@@ -188,6 +188,7 @@ Database.init();
     assert.equal(goalCommitted.ok, true);
     assert.equal(goalCommitted.partyRow.statsJson, goalInput.statsJson);
     assert.equal(goalCommitted.partyRow.updatedAt, goalInput.updatedAt);
+    assert.equal(goalCommitted.partyRow.revision, goalInput.expectedPartyRevision + 1, 'the party write moves its revision');
     assert.deepEqual(await Database.execute(['SELECT * FROM bot_life_state WHERE partyId=? ORDER BY characterId', [goalParty.partyId]]),
         lifeBeforeGoal, 'joint goal publication never rewrites members or their leases');
     assert.equal((await Database.commitBackgroundPartyGoals(goalInput)).reason, 'party_goals_changed', 'duplicate result rejected');
@@ -227,18 +228,18 @@ Database.init();
     ]))[0].n, 0, 'conflicted transaction must not assign any member');
 
     const reviewMembers = await LifeState.statesForParty('bgp_atomic_success');
-    const [reviewRow] = await Database.execute(['SELECT updatedAt FROM bot_background_parties WHERE partyId=?', ['bgp_atomic_success']]);
+    const [reviewRow] = await Database.execute(['SELECT revision FROM bot_background_parties WHERE partyId=?', ['bgp_atomic_success']]);
     const Lifecycle = invoke('GameServer/Bot/Population/BackgroundPartyLifecycle');
     const reviewedParty = PartyState.prepareCommit({ partyId: 'bgp_atomic_success', status: 'dissolved', memberIds: [], stats: {} });
     const releases = reviewMembers.map(s => LifeState.preparePartyReview(s, Lifecycle.releaseMember(s, Date.now(), 'party_no_progress')));
     releases[1].expectedUpdatedAt--;
     const failedReview = await Database.commitBackgroundPartyMembership({ party: reviewedParty.row, members: releases,
-        review: true, expectedPartyUpdatedAt: reviewRow.updatedAt });
+        review: true, expectedPartyRevision: reviewRow.revision });
     assert.strictEqual(failedReview.ok, false, 'one stale participant must abort the complete review');
     assert.strictEqual((await Database.execute(['SELECT COUNT(*) AS count FROM bot_life_state WHERE partyId=?', ['bgp_atomic_success']]))[0].count, 2);
     releases[1].expectedUpdatedAt++;
     assert.strictEqual((await Database.commitBackgroundPartyMembership({ party: reviewedParty.row, members: releases,
-        review: true, expectedPartyUpdatedAt: reviewRow.updatedAt })).ok, true);
+        review: true, expectedPartyRevision: reviewRow.revision })).ok, true);
     assert.strictEqual((await Database.execute(['SELECT COUNT(*) AS count FROM bot_life_state WHERE partyId=?', ['bgp_atomic_success']]))[0].count, 0);
     assert.strictEqual((await Database.execute(['PRAGMA integrity_check', []]))[0].integrity_check, 'ok');
     await Database.close();

@@ -272,7 +272,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
         && ['party_travel', 'party_travel_wait', 'party_arrival'].includes(activity)) {
         party = { ...party, updatedAt: Math.max(timestamp, Number(run.party.updatedAt || 0) + 1) };
         atomicGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
-            expectedUpdatedAt: run.party.updatedAt, updatedAt: party.updatedAt,
+            expectedPartyRevision: run.party.revision, updatedAt: party.updatedAt,
             nextResolveAt: party.nextResolveAt, spotId: party.spotId, status: party.status,
             cohesion: party.cohesion, risk: party.risk, statsJson: JSON.stringify(party.stats) }];
     }
@@ -2028,7 +2028,7 @@ class ColdSimulationKernel {
             if (atomicParty) {
                 resolvedParty.updatedAt = Math.max(startedAt, Number(run.party.updatedAt) + 1);
                 memoryGroup.partyChanges = [{ partyId: run.party.partyId, memberIds: run.party.memberIds,
-                    expectedUpdatedAt: run.party.updatedAt, updatedAt: resolvedParty.updatedAt,
+                    expectedPartyRevision: run.party.revision, updatedAt: resolvedParty.updatedAt,
                     nextResolveAt: resolvedParty.nextResolveAt, statsJson: JSON.stringify(resolvedParty.stats),
                     status: resolvedParty.status, cohesion: resolvedParty.cohesion, risk: resolvedParty.risk }];
             }
@@ -2430,7 +2430,7 @@ class ColdSimulationKernel {
                 this.upsert({ state: result.state, context: result.context || this.states.get(id)?.context || {} });
             } else {
                 this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || ''));
-                if (String(result.reason || '').includes('stale')) DiagnosticConfig.developerDiagnostics && (this.stats.stale += 1);
+                if (DiagnosticConfig.developerDiagnostics && Protocol.staleRefusal(result)) this.stats.stale += 1;
                 if (result.state) this.upsert({
                     state: {
                         ...result.state,

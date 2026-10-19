@@ -39,7 +39,7 @@ async function run() {
 
     const request = {
         partyId,
-        expectedUpdatedAt: timestamp,
+        expectedPartyRevision: 0,
         playerId: 9001,
         source: 'test',
         members: [101, 102].map((characterId) => ({
@@ -103,7 +103,7 @@ async function run() {
 
     const retaken = await Database.takeOverBackgroundParty({
         partyId,
-        expectedUpdatedAt: restored.party.updatedAt,
+        expectedPartyRevision: restored.party.revision,
         playerId: 9001,
         source: 'test_again',
         members: restored.rows.map((row) => ({

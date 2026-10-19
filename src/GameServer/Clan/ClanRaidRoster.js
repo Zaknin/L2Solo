@@ -118,7 +118,7 @@ async function cancelUnopened(party, reason) {
     const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
     const current = Parties.find(party?.partyId);
     if (!current || current.status !== 'active' || held(current) || !same(markerFor(current), markerFor(party))
-        || Number(current.updatedAt) !== Number(party.updatedAt)) return false;
+        || Number(current.revision) !== Number(party.revision)) return false;
     const saved = await Parties.createOrUpdate({ ...current, status: 'dissolved', nextResolveAt: null,
         stats: { ...current.stats, partyBreakReason: reason, dissolvedAt: Date.now() } });
     if (!saved) return false;

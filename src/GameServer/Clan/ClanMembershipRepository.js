@@ -28,8 +28,8 @@ module.exports = ({ all, write, inTransaction, now }) => {
             const previous = { stats: JSON.parse(row.statsJson || '{}') };
             const repaired = Policy.reconcileParty(previous, row.actualClanId);
             if (repaired === previous) continue;
-            const next = { ...row, statsJson: JSON.stringify(repaired.stats), updatedAt: now() };
-            write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ? WHERE partyId = ?',
+            const next = { ...row, statsJson: JSON.stringify(repaired.stats), updatedAt: now(), revision: Number(row.revision || 0) + 1 };
+            write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                 [next.statsJson, next.updatedAt, next.partyId]);
             parties.push(next);
         }
@@ -79,8 +79,8 @@ module.exports = ({ all, write, inTransaction, now }) => {
                 if (keys.has(stats.objective.clanGoalKey)) continue;
                 const next = { ...row, statsJson: JSON.stringify({ ...stats, objective: null, acquisitionGoal: null,
                     clanGoalInvalidationVersion: Math.max(now(),
-                        Number(stats.clanGoalInvalidationVersion || 0) + 1) }), updatedAt: now() };
-                write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ? WHERE partyId = ?',
+                        Number(stats.clanGoalInvalidationVersion || 0) + 1) }), updatedAt: now(), revision: Number(row.revision || 0) + 1 };
+                write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                     [next.statsJson, next.updatedAt, next.partyId]);
                 parties.push(next);
             }

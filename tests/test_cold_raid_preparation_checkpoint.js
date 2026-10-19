@@ -132,7 +132,7 @@ async function prepareBatch(deadlineOverride) {
     const nextParty = { ...party, ...resolution.partyPatch, stats: { ...party.stats, ...resolution.partyPatch.stats },
         nextResolveAt: deadlineOverride ?? resolution.nextResolveAt, updatedAt: Math.max(at, party.updatedAt + 1) };
     const atomicGroup = { id: stageId, memberIds: ids,
-        partyChanges: [{ partyId: party.partyId, memberIds: ids, expectedUpdatedAt: party.updatedAt,
+        partyChanges: [{ partyId: party.partyId, memberIds: ids, expectedPartyRevision: party.revision,
             updatedAt: nextParty.updatedAt, nextResolveAt: nextParty.nextResolveAt,
             statsJson: JSON.stringify(nextParty.stats), status: 'active' }],
         raidCommit: { key: 'raid:10372', expectedRevision: 0, revision: 1, snapshot: stage.snapshot } };
@@ -175,9 +175,10 @@ async function main() {
         const state = Life.cachedState(id);
         return Life.preparePartyAssignment(state, prepared.row.partyId, Roles.inferRole(state.stats.classId), ids[0], at + 45000);
     });
-    assert.equal((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok, true);
+    const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+    assert.equal(formed.ok, true);
     Life.acceptPartyAssignments(assigned);
-    party = Parties.acceptCommit(prepared);
+    party = Parties.acceptRow(formed.partyRow);
     const members = ids.map(id => Life.cachedState(id));
     const inputs = copy(members);
     const buffer = members[1];

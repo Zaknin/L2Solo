@@ -494,6 +494,12 @@ function leaseAckIdentity(result, type) {
     return { token, key };
 }
 
+// A refused commit is stale when its reason or, for an aborted atomic group,
+// its detail names a stale fence (e.g. party_revision_stale).
+function staleRefusal(result) {
+    return `${result?.reason || ''} ${result?.detail || ''}`.includes('stale');
+}
+
 module.exports = {
     PROTOCOL_VERSION,
     MAX_BATCH,
@@ -507,6 +513,7 @@ module.exports = {
     validateToken,
     leaseRenewalToken,
     leaseAckIdentity,
+    staleRefusal,
     safetyCheckpoint,
     sameSafetyCheckpoint,
     commandCheckpoint,
