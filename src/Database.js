@@ -2628,8 +2628,10 @@ const COLD_SIMULATION_OWNER = 'cold_simulation_owner';
 // commit); elsewhere a writer that may run next to another mover (the party
 // payment inside commitBackgroundPartyMembership) can move twice. Writers that do not take it on
 // purpose: the BotLifeState startup recovery UPDATEs (they run before the
-// cache and the worker), the hot branch of completeEconomyStepUnsafe, and the
-// karma/PK write inside the commit. BotLifeState `save` takes it in its upsert.
+// cache and the worker), the hot branch of completeEconomyStepUnsafe, the
+// karma/PK write inside the commit, and the PK death drop (inside the commit,
+// or after the resolve's save that already moved the row, before its publish).
+// BotLifeState `save` takes it in its upsert.
 const MOVE_FAR_REVISION = "simulationRevision = simulationRevision + CASE WHEN phase = 'cold' THEN 1 ELSE 0 END";
 const SIMPLE_COLD_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const COLD_SIMULATION_PATCH_COLUMNS = new Set([
@@ -2899,13 +2901,14 @@ function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) 
     // A PvP tally and a PK death drop (tried on the step that ends at 0 HP; it
     // returns its death sequence only when it wrote) rewrite this bot's life
     // state after the commit's UPDATE.
-    const dropped = Number(before?.hp) > 0 && Number(physical.hp) <= 0 ? dropPkDeathItemsUnsafe(characterId, { moveRevision: false }) : null;
+    const dropped = Number(before?.hp) > 0 && Number(physical.hp) <= 0 ? dropPkDeathItemsUnsafe(characterId) : null;
     return { drops: dropped?.drops || [],
         rewrote: dropped?.deathSequence !== undefined || physical.pvpKills?.length > 0 };
 }
 
-// moveRevision: false inside the commit, whose own UPDATE already moved the row.
-function dropPkDeathItemsUnsafe(characterId, { moveRevision }) {
+// The row is already moved when this runs: by the commit's own UPDATE, or by
+// the resolve's save before its inventory sync; nobody read the number between.
+function dropPkDeathItemsUnsafe(characterId) {
     const current = one('SELECT hp,karma,pk FROM characters WHERE id=?', [characterId]);
     if (!current || Number(current.hp) > 0 || !require('./GameServer/PkDropPolicy').enabled(current)) return { drops: [] };
     const life = one('SELECT deathCount,statsJson FROM bot_life_state WHERE characterId=?', [characterId]);
@@ -2920,9 +2923,9 @@ function dropPkDeathItemsUnsafe(characterId, { moveRevision }) {
     const drops = require('./GameServer/PkDropPolicy').rollPlan({ karma: current?.karma, pk: current?.pk, inventory });
     for (const item of drops) write('DELETE FROM items WHERE id=? AND characterId=?', [item.id, characterId]);
     const summary = invoke('GameServer/Bot/Population/BotLifeState').inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId=? ORDER BY id', [characterId]));
-    const moved = one(`UPDATE bot_life_state SET inventorySummary=?, statsJson=json_set(statsJson,'$.pkDropDeathSequence',?)${moveRevision ? `, ${MOVE_FAR_REVISION}` : ''}
+    const written = one(`UPDATE bot_life_state SET inventorySummary=?, statsJson=json_set(statsJson,'$.pkDropDeathSequence',?)
         WHERE characterId=? RETURNING ${NativeWriteCheckpoint.columns.join(', ')}`, [JSON.stringify(summary), death, characterId]);
-    return { drops, inventory: summary, deathSequence: death, revision: Number(moved.simulationRevision), checkpoint: moved };
+    return { drops, inventory: summary, deathSequence: death, revision: Number(written.simulationRevision), checkpoint: written };
 }
 
 // `parsedStats`, when given, are the row's stats as an object (a claim's
@@ -6484,8 +6487,8 @@ const Database = {
                 // A new ordinary cold death consumes its ordered bag once, in
                 // the same transaction that reconciles the physical inventory.
                 if (reason !== 'resolve_death') return result;
-                const dropped = dropPkDeathItemsUnsafe(characterId, { moveRevision: true });
-                // The drop moved the row a worker command is writing; the
+                const dropped = dropPkDeathItemsUnsafe(characterId);
+                // The drop rewrote the row a worker command is writing; the
                 // command's next write (its publish) checks the row against its
                 // proof, so the proof moves with the row, as the save ROW does.
                 if (dropped.checkpoint && admission.nativeProof) NativeWriteCheckpoint.advance(admission.nativeProof, dropped.checkpoint);

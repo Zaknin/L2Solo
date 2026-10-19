@@ -239,11 +239,18 @@ function captureEventProof(state, deps = {}, options = {}) {
 // refuse always returns `out`; a sections refusal stops only outside
 // collect mode: `if (cond && refuse(...) && !collect) return out`.
 function heldBuildVerdict(state, proof, deps = {}, options = {}) {
+    // Diagnostics: verdicts computed (every caller), against the ones a build
+    // served from the card's verdict of its step (forState, handedVerdict).
+    if (Diagnostics.active()) Diagnostics.count('context', 'held_verdict', 'computed');
     const collect = options.collect === true;
     // touchedSections: the pieces to rebuild; movedSections: only the
-    // sections refusals named (a refusal naming none adds nothing to it).
-    const out = { valid: false, reason: '', touchedSections: 0, movedSections: 0 };
+    // sections refusals named (a refusal naming none adds nothing to it);
+    // firstSections: the sections the first refusal named, what a run that
+    // stops there answers (eventProofHolds); leaf: the identity of the leaf
+    // it judged, unset when it stopped before.
+    const out = { valid: false, reason: '', touchedSections: 0, movedSections: 0, firstSections: 0, leaf: undefined };
     const refuse = (reason, names) => {
+        const first = !out.reason;
         out.reason ||= reason;
         if (!names) {
             if (collect) out.touchedSections = Sections.COMPUTED.weighing;
@@ -251,6 +258,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         }
         const bits = typeof names === 'number' ? names : Sections.sectionMask(names);
         out.touchedSections |= bits; out.movedSections |= bits;
+        if (first) out.firstSections = bits;
         return out;
     };
     if (!proof || proof.version !== 2 || proof.owner !== Number(state.characterId)
@@ -273,7 +281,8 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     if (proof.at !== baseline.at) return refuse('baseline_at');
     const generation = RecomputeGeneration.current();
     if ((!generation || proof.generation !== generation) && refuse('generation', ['build', 'sources']) && !collect) return out;
-    if (activityIdentity(options.leaf) !== proof.activity && refuse('activity', ['sources']) && !collect) return out;
+    out.leaf = activityIdentity(options.leaf);
+    if (out.leaf !== proof.activity && refuse('activity', ['sources']) && !collect) return out;
     // A raised event (reconcile bumps the sequence with it) is named by its
     // sections before the echo.
     const dirty = Number(state.stats?.wishDirty) || 0;
@@ -365,13 +374,63 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // The leaf's own check (LEAF_CHECKS): a check:<name> refusal names its sections.
     const failed = leafCheck(state, leaf, deps, { heldUnits, current: null, prepared: { liquidation: liquidation.candidates } });
     if (failed && refuse(failed.reason, failed.sections) && !collect) return out;
-    return out.reason ? out : { valid: true, reason: '', touchedSections: 0, movedSections: 0 };
+    out.valid = !out.reason;
+    return out;
 }
+// options.verdict receives what a run stopping at the first refusal answers,
+// in either mode (touched = moved = the first refusal's sections): the card's
+// verdict that joins the build's mask (forState, deps.eventVerdict). A
+// refusal in collect mode (a card refused right before a build of the same
+// step on the same state) also hands the whole verdict on with what it
+// judged (`collected`, handedVerdict). A held card hands nothing: it is
+// executed, and a build after it follows an await.
 function eventProofHolds(state, proof, deps = {}, options = {}) {
     const verdict = heldBuildVerdict(state, proof, deps, options);
-    if (options.verdict) Object.assign(options.verdict, verdict);
+    if (options.verdict) {
+        const first = verdict.firstSections;
+        Object.assign(options.verdict, { valid: verdict.valid, reason: verdict.reason, touchedSections: first, movedSections: first });
+        // Only what handedVerdict compares, no deps or options.
+        if (options.collect === true && !verdict.valid) options.verdict.collected = { verdict, state, proof,
+            baseline: options.baseline, activity: options.activity, mp: options.mp,
+            units: options.heldUnits ?? options.leaf?.heldAtDecision ?? null,
+            reservations: options.craftReservations ?? options.leaf?.craftReservations,
+            routeRows: deps.routeRows, tripCost: deps.tripCost };
+    }
     if (!verdict.valid) options.why?.push(verdict.reason);
     return verdict.valid;
+}
+// The card's verdict of this step (eventProofHolds `collected`), served as
+// the build's held verdict when it judged the same held entry on the same
+// inputs: the same state object and proof, the proof's own baseline and
+// activity, a leaf of the same identity, the same own units, reserved inputs
+// (a craft leaf), crafter MP and trip rows. The deps it read beside these are
+// the build's own: the caller spreads the card's deps into the build's
+// (ColdSimulationWorker withEventVerdict), and the gear-threat mask
+// is GearThreat's answer for the same state and deps. Else null: computed.
+// The verdict lives with the step's deps, nothing keeps it.
+const reservedRows = rows => rows?.length ? JSON.stringify(rows) : '';
+// The card judged its leaf's compact form (ColdEconomyDecision.CompactActivity),
+// of the same identity as the held leaf; the held leaf reads as it only where
+// the compact form keeps what the verdict reads: the item (the compact one
+// falls back to the wish object's), the sale rows (cut to 8) and the funding
+// mark (made true).
+function readsAsCompact(leaf) {
+    if (!leaf) return true;
+    const object = typeof leaf.object === 'number' ? leaf.object : leaf.object?.itemId;
+    return (leaf.itemId ?? 0) === Number(leaf.itemId || object || 0) && !(leaf.items?.length > 8)
+        && (!leaf.funding || leaf.funding === true);
+}
+function handedVerdict(handed, state, held, deps) {
+    if (!handed || !held || handed.state !== state || handed.proof !== held.plan.eventProof) return null;
+    const leaf = held.plan.network?.activity;
+    if (handed.baseline !== held.plan.statsPacket.wishSections || handed.activity !== held.activity
+        || !Object.is(handed.mp, held.mp) || handed.routeRows !== deps.routeRows || handed.tripCost !== deps.tripCost
+        || handed.units !== (held.heldUnits ?? leaf?.heldAtDecision ?? null)
+        || leaf?.activity === 'crafting' && reservedRows(handed.reservations)
+            !== reservedRows(held.craftReservations ?? leaf.craftReservations)
+        || !readsAsCompact(leaf)) return null;
+    // The held leaf's identity is its proof's (captureEventProof, the same plan).
+    return handed.verdict.leaf !== undefined && handed.verdict.leaf === handed.proof.activity ? handed.verdict : null;
 }
 function restartEventProof(proof, accepted) {
     if (proof?.version !== 2 || proof.restartable !== true || !accepted?.card
@@ -956,7 +1015,13 @@ function forState(state = {}, deps = {}) {
     const current = fieldActivity(state, held?.activity, held?.plan.network?.activity);
     const facts = requestFacts(current, deps);
     const key = inputName(facts, deps.gearThreatMask);
-    const eventVerdict = heldBuildVerdict(state, held?.plan.eventProof, deps, {
+    // The card's verdict of this step serves when it judged this entry on
+    // the same inputs (handedVerdict), else it is computed here.
+    const handed = handedVerdict(deps.eventVerdict?.collected, state, held, deps);
+    // Read once: the hand-off ends here, served or not.
+    if (deps.eventVerdict?.collected) deps.eventVerdict.collected = null;
+    if (diagnostic && handed) Diagnostics.count('context', 'held_verdict', 'reused');
+    const eventVerdict = handed || heldBuildVerdict(state, held?.plan.eventProof, deps, {
         baseline: held?.plan.statsPacket.wishSections, activity: held?.activity,
         leaf: held?.plan.network?.activity, heldUnits: held?.heldUnits, craftReservations: held?.craftReservations,
         mp: held?.mp, facts, collect: true });
@@ -1492,11 +1557,12 @@ function forActor(actor, session, deps = {}) {
     if (!accepted) return forState(state, deps);
     // The same accepted memory owner serves hot and cold validity. Reading
     // the original advisory is not permission to execute its selected act.
-    // lazy: cycle the native memory runtime also calls economic consumers.
+    // lazy: worker main thread only (returned above in the worker); its repository reaches the Database.
     const memory = invoke('GameServer/Social/InteractionMemoryRuntime');
     const input = { ...deps, memory: memory.snapshot(Number(state.characterId)),
         memoryIdentity: memory.contentIdentity(Number(state.characterId)),
         routeRows: deps.routeRows || preparedRouteRows(state) || coordinator.routeRows?.(state) };
+    // Not collected: the worker's card never carries main's held proof.
     const prepared = {};
     const refreshed = ColdEconomyDecision.refreshAdvisory(state, accepted, input, { prepared });
     return refreshed?.economy || forState(state, { ...input, eventVerdict: prepared.eventVerdict });

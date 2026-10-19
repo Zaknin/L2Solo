@@ -341,6 +341,86 @@ async function run() {
             Economy.forget(990027);
         }
     }
+    // A card refused right before the build of the same step on the same
+    // state hands its verdict to that build: the verdict is computed once,
+    // the card answers its first refusal and the build weighs every refusal,
+    // the same mask as with its own verdict. A state that moved between them,
+    // a received card (another proof object) and a held leaf its compact form
+    // reads otherwise (more than 8 sale rows) recompute.
+    {
+        const Card = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+        const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+        const diagnosticsBefore = Config.developerDiagnostics;
+        Config.developerDiagnostics = true;
+        const T = Date.now(), native = { ...base, characterId: 990028, adena: 1000000 };
+        try {
+            const counts = () => invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics().counts || {};
+            const delta = (before, key) => (counts()[key] || 0) - (before[key] || 0);
+            const held = Economy.forState(native, { timestamp: T });
+            const published = { ...native, stats: { ...native.stats, ...held.statsPacket } };
+            const accepted = Card.advisory(held, published, published.activity, { timestamp: T });
+            assert.equal(accepted?.eventProof, held.eventProof(), 'fixture: the card carries the held proof');
+            // Two refusals: a learned skill (its sections) first, the wallet
+            // below the decision's bounds (money) later.
+            const moved = { ...published, adena: 0, stats: { ...published.stats,
+                coldCombat: { classId: 1, skillSource: 'database', skills: [{ selfId: 3, level: 1 }] } } };
+            // The worker's step deps carry its trip rows (main fills them in the build).
+            const deps = { timestamp: T, routeRows: [] };
+            const refused = (state, options, card = accepted) => {
+                const prepared = {};
+                assert.equal(Card.refreshAdvisory(state, card, deps, { prepared, ...options }), null,
+                    'fixture: a learned skill refuses the card');
+                return prepared.eventVerdict;
+            };
+            const build = (state, eventVerdict) => Economy.forState(state, { ...deps, rememberContext: false, eventVerdict });
+            const reused = (state, card) => {
+                const before = counts();
+                build(state, refused(state, { collect: true }, card));
+                return [delta(before, 'context:held_verdict:computed'), delta(before, 'context:held_verdict:reused')];
+            };
+            const plain = refused(moved, {});
+            const own = build(moved, plain);
+            const money = Sections.sectionBit('money');
+            assert(plain.touchedSections && !(plain.touchedSections & money), 'fixture: the first refusal names no money');
+            assert(own.mask & money, 'fixture: the build\'s own verdict names money');
+            let before = counts();
+            const handed = refused(moved, { collect: true });
+            const served = build(moved, handed);
+            assert.equal(delta(before, 'context:held_verdict:computed'), 1, 'one verdict for the card and the build');
+            assert.equal(delta(before, 'context:held_verdict:reused'), 1, 'the build serves the card\'s verdict');
+            assert.deepEqual([handed.valid, handed.reason, handed.touchedSections, handed.movedSections],
+                [plain.valid, plain.reason, plain.touchedSections, plain.movedSections], 'the card answers its first refusal');
+            assert.equal(served.mask, own.mask, 'the build weighs every refusal, as with its own verdict');
+            assert.equal(handed.collected, null, 'the hand-off is read once');
+            // The build reads a state that moved after the card's verdict.
+            before = counts();
+            build({ ...moved, adena: 1 }, refused(moved, { collect: true }));
+            assert.deepEqual([delta(before, 'context:held_verdict:computed'), delta(before, 'context:held_verdict:reused')], [2, 0],
+                'a moved input recomputes');
+            const received = { ...accepted, eventProof: Economy.receiveEventProof(Economy.wireEventProof(accepted.eventProof)) };
+            assert(received.eventProof && received.eventProof !== accepted.eventProof, 'fixture: a received proof');
+            assert.deepEqual(reused(moved, received), [2, 0], 'a received card recomputes');
+            // A held selling leaf with its proof and its card (the leaf's compact
+            // form): up to 8 sale rows the compact form is the leaf, a 9th row
+            // is cut from the card's.
+            const plan = held.plan, kept = { leaf: plan.network.activity, proof: plan.eventProof };
+            const selling = rows => {
+                const leaf = plan.network.activity = { activity: 'selling', kind: 'liquidate', funding: true, town: 'Giran',
+                    items: Array.from({ length: rows }, (_, at) => 1864 + at) };
+                const eventProof = plan.eventProof = Economy.captureEventProof(published, {}, { plan });
+                assert(eventProof, 'fixture: the selling leaf\'s proof');
+                return { ...accepted, eventProof, card: { activity: new Card.CompactActivity(leaf) } };
+            };
+            try {
+                assert.deepEqual(reused(moved, selling(8)), [1, 1], 'a selling leaf of 8 rows serves the card\'s verdict');
+                assert.deepEqual(reused(moved, selling(9)), [2, 0], 'a selling leaf of 9 rows recomputes');
+            } finally { plan.network.activity = kept.leaf; plan.eventProof = kept.proof; }
+        } finally {
+            Config.developerDiagnostics = diagnosticsBefore;
+            Economy.forget(native.characterId);
+        }
+        console.log('PASS card verdict handed to the build of its step');
+    }
     // The cheap check by kind of leaf: an enchant or special-ability decision
     // names its object: it holds while that object is in the bag at the
     // enchant level read; one without an object (an exchange) holds by its

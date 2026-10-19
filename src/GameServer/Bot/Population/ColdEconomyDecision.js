@@ -13,8 +13,8 @@ const { fnv1a32 } = require('../Fnv1a');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
 const RestartDecision = require('./EconomyRestartDecision');
 const CraftInputReservations = require('../Economy/CraftInputReservations');
-// Resolved at the first call (cycles): a require per call was ~1% of the worker (L73).
-let PurchaseFunding = null, DecisionSections = null;
+const Sections = require('../Economy/DecisionSections');
+const PurchaseFunding = require('../Economy/PurchaseFunding');
 const kinds = [undefined, 'improvement', 'book', 'resale', 'shots', 'potions'];
 function kindCode(kind) { const code = kinds.indexOf(kind); return code < 0 ? 255 : code; }
 function kindFor(code) { return kinds[code]; }
@@ -244,8 +244,6 @@ function stateEcho(state = {}) {
     return [Number(stats.decisionSeq || 0), Number(stats.activityLeaf || 0), stats.wishFocus?.[0] ?? null];
 }
 function echoHolds(state, echo) {
-    // lazy: cycle the shared sections also read the economy owner.
-    const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     return Array.isArray(echo) && !(Number(state?.stats?.wishDirty) || 0)
         && !Sections.decisionRefusal(state || {}, echo[0], echo[1], echo[2]);
 }
@@ -323,7 +321,7 @@ function capture(economy, state, seen = state) {
     const own = ownItem(activity);
     if (own !== null) activity.heldAtDecision = heldFor(seen, own);
     if (activity?.activity === 'shopping') {
-        const r = (PurchaseFunding ||= require('../Economy/PurchaseFunding')).rootRatio(wish);
+        const r = PurchaseFunding.rootRatio(wish);
         if (r > 0) activity.r = r;
     }
     let clan = null;
@@ -401,7 +399,7 @@ let basicsKeys = null;
 // the eager build did. Without the money packet, with an urgency or before
 // the first build the view's own fields need them at once.
 function view(state, decision, deps = {}, preparedBase = null) {
-    // lazy: cycle AfkTradeService loads the economy that reads these views
+    // lazy: worker main thread only: the worker passes its board in deps; the service reaches the Database and World.
     const board = deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null);
     const timestamp = Number(deps.timestamp || Date.now());
     const baseDeps = deps.board === board && deps.timestamp === timestamp ? deps : { ...deps, board, timestamp };
@@ -483,8 +481,6 @@ function advisory(economy, state, activity = state.activity, deps = {}) {
         // the goal refusal (refusal); not saved: a restored card refuses once.
         ...(Number.isFinite(deps.goalRevision) ? { goalRevision: deps.goalRevision } : {}) };
     const restartProof = Economy.restartEventProof(eventProof, accepted);
-    // lazy: cycle the shared sections also read the economy owner.
-    const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     accepted.saved = restartProof ? RestartDecision.encode({ ...accepted, eventProof: restartProof },
         Sections.baselineIdentity(accepted.baseline)) : null;
     // A card saved as null is rebuilt at restart: no prefix, or one over the saved field.
@@ -498,8 +494,6 @@ function advisory(economy, state, activity = state.activity, deps = {}) {
 // Decode once at the existing actor publication boundary. No graph or route
 // is rebuilt here; the first consumer must still pass the shared verdict.
 function restoreAdvisory(state, timestamp = Date.now()) {
-    // lazy: cycle the shared sections also read the economy owner.
-    const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     const baseline = state.stats?.wishSections;
     const decoded = RestartDecision.decode(state.stats?.wishAdvisory, timestamp, MAX_BYTES, Number(state.characterId),
         baseline, Sections.baselineIdentity(baseline));
@@ -521,8 +515,6 @@ function restoreAdvisory(state, timestamp = Date.now()) {
 }
 function publishedPacket(state, packet) {
     if (!packet?.wishSections || state.stats?.wishSections !== packet.wishSections) return false;
-    // lazy: cycle the shared sections also read the economy owner.
-    const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     return !Sections.decisionRefusal(state, Number(packet.decisionSeq || 0), Number(packet.activityLeaf || 0),
         packet.wishFocus?.[0] ?? null);
 }
@@ -575,8 +567,6 @@ function receiveAdvisory(value) {
 }
 function advisoryMatches(state, accepted) {
     if (!accepted || accepted.characterId !== Number(state?.characterId)) return false;
-    // lazy: cycle the shared sections also read the economy owner.
-    const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     return !Sections.decisionRefusal(state, accepted.decisionSeq, accepted.activityLeaf, accepted.focus);
 }
 function advisoryPublicationHolds(state, advice, previous = null) {
@@ -602,8 +592,6 @@ function refusal(state, accepted, deps = {}, options = {}) {
     // lazy: cycle EconomyContext constructs and validates these cards.
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     if (state.stats?.wishDirty) return 'wish_dirty';
-    // lazy: cycle keep the section and card modules loadable in either order.
-    const Sections = DecisionSections ||= require('../Economy/DecisionSections');
     const echo = Sections.decisionRefusal(state, accepted.decisionSeq, accepted.activityLeaf, accepted.focus);
     if (echo) return echo;
     // A card without a leaf reuses only as a completed (null) activity its
@@ -623,9 +611,12 @@ function refusal(state, accepted, deps = {}, options = {}) {
     // the next decision point. No revision on the card (restored after a
     // restart) differs too: one rebuild.
     if (Number.isFinite(deps.goalRevision) && deps.goalRevision !== accepted.goalRevision) return 'goal';
+    // options.collect: a build of the same step on this state follows a
+    // refusal; the verdict collects and hands itself to it (forState).
     const why = [], verdict = {};
     const holds = Economy.eventProofHolds(state, accepted.eventProof, deps, { activity: accepted.activity, leaf,
-        baseline: accepted.baseline, mp: accepted.mp, timestamp: Number(deps.timestamp || Date.now()), why, verdict });
+        baseline: accepted.baseline, mp: accepted.mp, timestamp: Number(deps.timestamp || Date.now()), why, verdict,
+        collect: options.collect === true && !!options.prepared });
     if (options.prepared) options.prepared.eventVerdict = verdict;
     return holds ? '' : `events:${why[0] || 'unproved'}`;
 }
@@ -634,7 +625,9 @@ function canReuse(state, accepted, deps = {}, options = {}) {
 }
 // options.why: an array that receives the refusal's name; options.prepared:
 // an object that receives the basics a reuse built (L120), so the caller does
-// not build them or their income route again for the same state and deps.
+// not build them or their income route again for the same state and deps,
+// and the card's verdict; options.collect: the caller builds on this state
+// and deps when the card is refused (its verdict serves the build's).
 function refreshAdvisory(state, accepted, deps = {}, options = {}) {
     const refused = refusal(state, accepted, deps, options);
     if (refused) { options.why?.push(refused); return null; }
@@ -647,7 +640,7 @@ function refreshAdvisory(state, accepted, deps = {}, options = {}) {
         echo: [accepted.decisionSeq, accepted.activityLeaf, accepted.focus], flags: 0 });
     const economy = view(state, decision, deps, base);
     economy.inputKey = String(decision.inputHash);
-    economy.wallet = (PurchaseFunding ||= require('../Economy/PurchaseFunding')).budget(state, deps.buyOrderEscrow);
+    economy.wallet = PurchaseFunding.budget(state, deps.buyOrderEscrow);
     economy.statsPacket = { wishFocus: state.stats.wishFocus, dormantWishes: state.stats.dormantWishes,
         decisionSeq: state.stats.decisionSeq, activityLeaf: state.stats.activityLeaf, money: state.stats.money,
         stockTargets: state.stats.stockTargets, wishSections: accepted.baseline, wishDirty: 0,

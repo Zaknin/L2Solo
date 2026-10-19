@@ -11,6 +11,7 @@ const Progression = require('../AI/PersonalGearProgression');
 const SoulCrystals = require('../../Items/SoulCrystalProgression');
 const DualSwords = require('../../Items/C4DualSwordCombinations');
 const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
+const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 // A module read inside a hot function: require() walks the module path on
 // every call, so each path is resolved once here. The relative require keeps
 // the module's dependency boundary (tests pass their own require).
@@ -43,7 +44,6 @@ function nominationBasis(state) {
 }
 function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisitionAllowed = null, progression = null, exchanges = null) {
     const Data = invoke('GameServer/DataCache');
-    const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const revision = Sources.revision();
     const role = Planner.roleFor(state);
     const classId = Number(state.stats?.classId || state.classId || 0);
@@ -170,7 +170,6 @@ function gearGain(state, item, timestamp = Date.now(), threatMask = 3) {
 function gearGainReader(state, timestamp, options = {}, caster = require('./BotImprovementPolicy').isCaster(state), threatMask = 3) {
     threatMask = threatMask === 1 ? 1 : 3;
     let candidates, ownWeapon;
-    const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const role = Planner.roleFor(state), classId = Number(state.stats?.classId || state.classId || 0);
     const selectedWeapon = item => {
         if (!Planner.equipmentCandidate(item, state, role)) return false;
@@ -247,8 +246,7 @@ function build(state, ctx, deps = {}) {
     const diagnostic = Diagnostics.active();
     if (diagnostic) Diagnostics.count('provider', 'request');
     const started = diagnostic ? performance.now() : 0;
-    // lazy: cycle the gear planner and the wish providers load each other (the shared load cluster).
-    const result = invoke('GameServer/Bot/AI/GearAcquisitionPlanner').withReadiness(() => buildProjection(state, ctx, deps));
+    const result = Planner.withReadiness(() => buildProjection(state, ctx, deps));
     if (diagnostic) {
         Diagnostics.count('provider', 'build', 'context_miss');
         Diagnostics.duration('provider', performance.now() - started);
@@ -280,7 +278,6 @@ function buildProjection(state, ctx, deps) {
         const value = nativeQuantities.incoming(id);
         quantityInputs?.incoming(id, value); return value;
     };
-    const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const timestamp = ctx.timestamp ?? Date.now();
     const magic = need('./BotImprovementPolicy').isCaster(state);
     const Recipes = invoke('GameServer/Items/C4RecipeItems'), Profit = need('./CraftProfitPolicy');
