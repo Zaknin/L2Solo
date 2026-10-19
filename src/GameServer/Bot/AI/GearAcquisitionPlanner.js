@@ -2210,7 +2210,8 @@ function* sourceFacts(state = {}, itemId, units = 1, options = {}) {
         return yield* walk(prepared ? rules.eligible : null, prepared && counts ? rules.staticBuckets : [], counts, false, 0);
     }
     // The row orders each kind's eligible records by target level (the
-    // record's npc level, or Infinity where the band never applies): the
+    // record's npc level, else its spot level, else Infinity, which the band
+    // never takes): the
     // level_band ones (below killerLevel + minGap) are a prefix, the safe ones
     // (up to soloLevelBound) follow, the party_needed ones are the tail. A bot
     // without Spoil refuses every spoil record as spoil_skill. Only the safe
@@ -2405,8 +2406,10 @@ function levelRanksBelowGap(levels, killerLevel, minGap) {
 // level) and ~32 bytes per distinct level. Static refusals use at most four
 // buckets, each retaining its first ordinal, so diagnostic reason keys keep
 // their full-view insertion order. A record with FACT_RULE_NO_CHANCE is never
-// seen or counted by the bot: its chance is 0 at every killer level (a
-// deep-blue penalty floors a group's chance above 0, never to 0).
+// seen or counted by the bot: its chance is 0 at killer level 0, which holds
+// at every killer level only while every reward group has overall * rate > 0
+// (a deep-blue penalty lifts a 0-chance group to its floor; the game data has
+// no such group).
 const FACT_RULE_RAID = 1, FACT_RULE_CANNOT_HUNT = 2, FACT_RULE_NO_CHANCE = 255;
 const FACT_RULE_REASONS = [null, 'raid', 'cannot_hunt'];
 const NO_FACT_ORDINAL = 0xFFFFFFFF;
