@@ -525,28 +525,25 @@ const occupationPlanner = new ColdOccupationPlanner({
             Object.assign(owner.state.stats ||= {}, workshop.statsPacket);
             owner.nearRoute = { key: input.routeKey, rows: workshop.routeRows };
             send('ready', { phase: 'economy_decided', characterId: id, economyDecision: workshop.decision,
-                near: { statsPacket: workshop.statsPacket, nearSeq: Number(input.state.nearSeq || 0),
-                    raiseSeq: Number(input.raiseSeq || 0), ...(workshop.shots ? { shots: workshop.shots } : {}) } });
+                near: { statsPacket: workshop.statsPacket, shotRestock: workshop.shotRestock, personalCraft: workshop.personalCraft,
+                    nearSeq: Number(input.state.nearSeq || 0), raiseSeq: Number(input.raiseSeq || 0),
+                    ...(workshop.shots ? { shots: workshop.shots } : {}) } });
             // Sent once: the slot keeps the workshop.
-            workshop.decision = null; workshop.statsPacket = null; workshop.routeRows = null; workshop.shots = null;
+            workshop.decision = null; workshop.statsPacket = null; workshop.personalCraft = null; workshop.routeRows = null; workshop.shots = null;
         }
     }
 });
 // The planner's work for one request. A near bot's decision (mode near) is the
-// occupation's workshop with the card, the money packet and the route rows of
-// the same build (publish sends them once).
+// occupation's workshop with the card, the fields beside it
+// (DecisionEvents.nearFields) and the route rows of the same build (publish
+// sends them once).
 function occupationWork(input, iterator) {
     return { iterator: input.mode === 'near' ? nearDecision(input, iterator) : iterator, done: false, value: null, stage: 0, units: 0 };
 }
 function* nearDecision(input, iterator) {
     const workshop = yield* iterator;
-    // The auto-shot verdict (ShotStock.enableAutoShot's inputs) from this
-    // build's shot stock, itself ShotStock.usePolicy over the build's tables.
-    const shots = input.stock;
     return { workshop, decision: ColdEconomyDecision.capture({ ...input.economy, workshop }, input.state),
-        statsPacket: input.economy.statsPacket, routeRows: input.routeRows,
-        shots: shots ? { itemId: shots.itemId, ownedUsePerHour: shots.ownedUsePerHour,
-            beginnerUsePerHour: shots.beginnerUsePerHour, paidUsePerHour: shots.paidUsePerHour } : null };
+        ...DecisionEvents.nearFields(input.economy, input.state), routeRows: input.routeRows };
 }
 // options: { economy, stock, routeRows, routeKey } a step already holds, and
 // a party goal query's own (main's) buyOrderEscrow and recipeKnowledge.

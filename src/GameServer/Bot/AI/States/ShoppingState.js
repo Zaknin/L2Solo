@@ -1,5 +1,5 @@
 const refreshPartyMemberships = require('../../../World/PartyMembershipPublication');
-const { raiseDecision } = require('../DecisionEvents');
+const { raiseDecision, held } = require('../DecisionEvents');
 const Speech = invoke('GameServer/Bot/AI/BotSpeechTemplates');
 const SpeckMath      = invoke('GameServer/SpeckMath');
 const ServerResponse = invoke('GameServer/Network/Response');
@@ -390,11 +390,13 @@ module.exports = {
         const closestTown = BotAI.getClosestTown(bot.fetchLocX(), bot.fetchLocY(), bot.fetchLocZ());
 
         const Improvements = invoke('GameServer/Bot/Economy/BotImprovementService');
-        const hotEconomy = invoke('GameServer/Bot/Economy/EconomyContext').forActor(bot, session);
-        const personalCraft = require('../../Economy/WishProviders').personalCraftPlan(hotEconomy.state, hotEconomy);
+        // The decision the body holds (DecisionEvents.held): its craft plan
+        // and its improvement; the station is found here, near the body.
+        const decision = held(session);
+        const personalCraft = decision.personalCraft;
         if (personalCraft && session.coldLifeState) session.coldLifeState = { ...session.coldLifeState,
             stats: { ...session.coldLifeState.stats, equipmentPlan: personalCraft } };
-        const selected = Improvements.chosen(null, hotEconomy);
+        const selected = Improvements.chosen(null, decision);
         if (selected && selected.kind !== 'enchant') {
             const station = Improvements.stationTarget(bot, selected);
             if (station) { session.shoppingTarget = station; session.shoppingServicePhase = 'improvement'; }

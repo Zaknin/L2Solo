@@ -4,6 +4,7 @@
 // seller separately. No saved basket, second wallet, or catalogue scan.
 const Funding = require('./PurchaseFunding');
 const Economy = require('./EconomyContext');
+const DecisionEvents = invoke('GameServer/Bot/AI/DecisionEvents');
 const Diagnostics = require('./EconomyDiagnostics');
 const LIMIT = 12;
 const sellerKey = seller => [seller.town, seller.sourceId, seller.locX, seller.locY, seller.locZ].join(':');
@@ -138,10 +139,10 @@ async function purchase(state, options = {}) {
     return { state: current, receipts };
 }
 async function purchaseForActor(actor, options = {}) {
-    const context = Economy.forActor(actor);
-    let statsPacket = context.statsPacket;
+    // The money packet of the decision the body holds (DecisionEvents.held).
+    let statsPacket = DecisionEvents.held(actor.session)?.statsPacket;
     const state = Economy.stateForActor(actor);
-    state.stats = { ...state.stats, ...context.statsPacket };
+    state.stats = { ...state.stats, ...statsPacket };
     const receipts = [];
     for (const basket of collect(state, options)) {
         const bought = await require('./NpcPurchaseBasket').purchaseForActor(actor, {

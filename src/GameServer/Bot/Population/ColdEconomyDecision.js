@@ -445,10 +445,22 @@ function view(state, decision, deps = {}, preparedBase = null) {
         set: value => { Object.defineProperty(economy, key, { value, writable: true, enumerable: true, configurable: true }); } });
     return Object.assign(economy, own);
 }
+// A bot's economy as main reads it: a far bot's from its card, a near bot's
+// the decision its body holds (DecisionEvents.held), a state without a body
+// a view without a card. The background thread builds it.
 function economyFor(state, deps = {}) {
-    if (isMainThread && state?.phase === 'cold') return view(state,
+    // lazy: cycle EconomyContext requires this module at its top.
+    if (!isMainThread) return invoke('GameServer/Bot/Economy/EconomyContext').forState(state, deps);
+    if (state?.phase === 'cold') return view(state,
         (deps.decisions || invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions).decided(state), deps);
-    return invoke('GameServer/Bot/Economy/EconomyContext').forState(state, deps);
+    // lazy: worker World is main-thread only and this module loads in the worker.
+    const World = invoke('GameServer/World/World');
+    const session = World.registeredActorById(state?.characterId)?.session;
+    // A near bot's view is the held decision "as of its arrival": deps such as
+    // the timestamp or the board are not reapplied; the next near decision
+    // refreshes it (1-4 per minute). A player's session never holds one.
+    // lazy: cycle DecisionEvents requires this module at its top.
+    return session?.actor && World.isBotSession(session) ? invoke('GameServer/Bot/AI/DecisionEvents').held(session) : view(state, null, deps);
 }
 // A compact accepted decision is advisory calculation data, never a lease,
 // quote or permission to spend. Keep it at the existing worker entry owner;

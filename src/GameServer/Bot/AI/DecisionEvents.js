@@ -5,6 +5,7 @@ const TownVisitInterval = require('../Economy/TownVisitInterval');
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 const Decisions = invoke('GameServer/Bot/Population/ColdEconomyDecision');
 const ShotStock = invoke('GameServer/Inventory/ShotStock');
+const WishProviders = invoke('GameServer/Bot/Economy/WishProviders');
 // The reasons code raises by name (raiseDecision). A near bot's moved fact
 // raises on the background thread, which compares its posted row with the
 // one before (ColdSimulationWorker's state writer).
@@ -105,6 +106,22 @@ function rejectSession(session, accepted) {
     raiseDecision(session, 'sources', { impossible: true });
     return true;
 }
+// What a near decision carries beside its card (payload.near), taken in the
+// background thread from the same build: the mind keys (statsPacket), whether
+// the money queue funds a shot restock the stock needs (ShotStock
+// needsActorRestock) and the personal craft plan of the chosen leaf
+// (ShoppingState). The view over the card cannot answer these: it has no
+// queue and no plans.
+function nearFields(economy, state) {
+    const stock = economy.stock('shots');
+    return { statsPacket: economy.statsPacket,
+        shotRestock: !!stock.needed && economy.purchaseBudget(stock.itemId) > 0,
+        personalCraft: WishProviders.personalCraftPlan(state, economy) || null,
+        // The auto-shot verdict (ShotStock.enableAutoShot's inputs): the
+        // build's shot stock, itself ShotStock.usePolicy over its tables.
+        shots: { itemId: stock.itemId, ownedUsePerHour: stock.ownedUsePerHour,
+            beginnerUsePerHour: stock.beginnerUsePerHour, paidUsePerHour: stock.paidUsePerHour } };
+}
 // The near decision the background thread took for this body
 // (economy_decided, the coordinator's admission): its mind keys join the
 // body's stats, the view over its card is what the body's readers take
@@ -160,4 +177,4 @@ function raiseSections(before, after, ...lists) {
     stats.wishDirty = (Number(stats.wishDirty) || 0) | bits;
     return bits;
 }
-module.exports = { statsFor, decisionStatsFor, applyRaise, raiseDecision, takePostedRaise, applyPendingRaise, receive, held, checkWallet, rejectedState, rejectSession, raiseSections };
+module.exports = { statsFor, decisionStatsFor, applyRaise, raiseDecision, takePostedRaise, applyPendingRaise, nearFields, receive, held, checkWallet, rejectedState, rejectSession, raiseSections };

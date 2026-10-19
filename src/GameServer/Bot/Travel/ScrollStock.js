@@ -26,8 +26,9 @@ function keptAmounts(value) {
 function restockPlan(value, options = {}) {
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     const state = value?.backpack ? Economy.stateForActor(value) : value;
-    const coldMain = require('node:worker_threads').isMainThread && state?.phase === 'cold';
-    const context = options.context || (coldMain ? Economy.basics(state) : Economy.forState(state));
+    // Main reads the basics (a near bot's decision is taken in the background).
+    const onMain = require('node:worker_threads').isMainThread;
+    const context = options.context || (onMain ? Economy.basics(state) : Economy.forState(state));
     const currentAmount = heldAmount(value, options.inventory || value?.inventory);
     const adena = Math.max(0, Number(options.adena ?? value?.adena
         ?? value?.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() ?? 0));
