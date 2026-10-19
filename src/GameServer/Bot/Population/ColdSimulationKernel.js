@@ -838,10 +838,13 @@ class ColdSimulationKernel {
         if (scheduled.dueAt !== due) this.schedule(id, leader.version, due);
     }
 
+    // entry.ownCommit: the state is this thread's own proposal echoed back by
+    // main's commit ack (onCommitAck), handed to states.set for its observers.
     upsert(entry = {}) {
         let state = entry.state || entry;
         const characterId = Number(state?.characterId || 0);
         if (!characterId) return false;
+        const ownCommit = entry.ownCommit === true;
         const previousRecord = this.states.locationIndex.getSource(characterId, 'state');
         const current = this.states.get(characterId);
         // Only an active bilateral preparation needs stable object identity.
@@ -887,7 +890,7 @@ class ColdSimulationKernel {
             // A full catalog refresh normally resends the same state. Keep the
             // existing heap version so ten-second refreshes do not accumulate
             // one invalid future node per bot until its next due time.
-            this.states.set(characterId, { ...current, state });
+            this.states.set(characterId, { ...current, state }, ownCommit);
             this.occupancy.update(state);
             this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
             DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
@@ -907,7 +910,7 @@ class ColdSimulationKernel {
         // economy plan sent and its hash, the card it holds, the decision it
         // published and, for a near bot, the last raise applied and the route
         // rows of its last decision (ColdSimulationWorker nearEvents, publish).
-        this.states.set(characterId, { route: null, ...current, state, version });
+        this.states.set(characterId, { route: null, ...current, state, version }, ownCommit);
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
         DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
@@ -2236,7 +2239,9 @@ class ColdSimulationKernel {
             // cache is the proposal's state with them.
             const committed = result.ok ? result.state || Protocol.committedState(active.proposed, result) : null;
             if (committed) {
-                this.upsert({ state: committed });
+                // Without result.state main changed nothing: the held state is
+                // the step's own output, not news for its economy (ownCommit).
+                this.upsert({ state: committed, ownCommit: !result.state });
                 // The commit's slot is free and the kernel holds main's committed
                 // state: the review main named takes the bot before any step does.
                 const review = this.beginReview(id, result.review, active);

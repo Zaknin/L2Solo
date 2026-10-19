@@ -1327,9 +1327,15 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
             committed[id] = state(id, { simulation: { ...base.simulation, revision: 5 }, timing: { lastResolvedAt: at, nextResolveAt: at } });
         }
         reviewKernel.flush(null, true);
+        // A state on the ack is main's (it changed what it committed): not an
+        // own commit, so a pending economy refresh runs on it.
+        const ownCommits = [], nativeSet = reviewKernel.states.set.bind(reviewKernel.states);
+        reviewKernel.states.set = (id, entry, ownCommit) => { ownCommits.push([id, ownCommit]); return nativeSet(id, entry); };
         commitAck(reviewKernel, { results: [
             { ok: true, characterId: 60, revision: 5, state: committed[60], review: ['plan'] },
             { ok: true, characterId: 61, revision: 5, state: committed[61] }] });
+        assert.deepStrictEqual(ownCommits, [[60, false], [61, false]], 'a state ack stores main\'s state');
+        reviewKernel.states.set = nativeSet;
         const request = sentCommands.get(reviewKernel).get(60);
         assert.strictEqual(request?.kind, 'review');
         assert.deepStrictEqual(request.economyPlan, plan, 'the review carries the committed proposal plan');
@@ -1358,7 +1364,13 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         numbersKernel.flush(null, true);
         const ack = { ok: true, characterId: 62, revision: 5, updatedAt: at + 1, inventoryRevision: 3, skillsRevision: 2,
             hennaRevision: 1, review: ['training'] };
+        // The rebuilt state is the step's own output: its store says so, and
+        // the worker runs no economy refresh for it (own outputs are not inputs).
+        const ownCommits = [], nativeSet = numbersKernel.states.set.bind(numbersKernel.states);
+        numbersKernel.states.set = (id, entry, ownCommit) => { ownCommits.push([id, ownCommit]); return nativeSet(id, entry); };
         commitAck(numbersKernel, { results: [ack] });
+        assert.deepStrictEqual(ownCommits, [[62, true]], 'a numbers ack stores the own commit');
+        numbersKernel.states.set = nativeSet;
         const held = numbersKernel.states.get(62).state;
         assert.deepStrictEqual(held, Protocol.committedState(next, ack));
         assert.deepStrictEqual(held.simulation, { revision: 5 });

@@ -622,7 +622,7 @@ function occupationOwnerChanged(id, refresh = false) {
     if (!entry || entry.state.phase !== 'hot' && !refresh) return;
     // One economy refresh per native state object.
     if (refresh && refreshedStates.has(entry.state)) return;
-    if (refresh) refreshedStates.add(entry.state);
+    if (refresh) { refreshedStates.add(entry.state); economyDiagnostics.count('occupation', 'refresh', 'main_state'); }
     const routeKey = EconomicTrip.key(entry.state);
     occupationPlanner.request(id, { state: entry.state, sourceState: entry.state, assetsKey: assetsKey(entry.state),
         timestamp: Date.now(), mode: refresh ? 'refresh' : 'near', pending: entry.economyPending || 0,
@@ -1639,7 +1639,9 @@ function startKernel(config = {}) {
     // scratch is cancelled on a newer canonical owner; it is never LRU-evicted.
     const nativeSet = kernel.states.set.bind(kernel.states), nativeDelete = kernel.states.delete.bind(kernel.states);
     const nativeClear = kernel.states.clear.bind(kernel.states);
-    kernel.states.set = (id, entry) => {
+    // ownCommit (kernel upsert): the state is the step's own proposal echoed
+    // back by main's commit ack; the step already built its economy on it.
+    kernel.states.set = (id, entry, ownCommit = false) => {
         const previousEntry = kernel.states.get(Number(id)), previous = previousEntry?.state;
         // A new life starts from no record (activations fence the bot first),
         // so the raises applied are this life's.
@@ -1660,7 +1662,10 @@ function startKernel(config = {}) {
                 held.input = incoming;
             } else {
                 occupationPlanner.cancel(id);
-                occupationOwnerChanged(id, Boolean(entry.economyPending));
+                // Own outputs are not inputs: no economy refresh for the own
+                // commit; economyPending stays for main's next refresh.
+                if (ownCommit && entry.economyPending) economyDiagnostics.count('occupation', 'refresh', 'own_commit_skipped');
+                occupationOwnerChanged(id, !ownCommit && Boolean(entry.economyPending));
             }
         }
         return result;
