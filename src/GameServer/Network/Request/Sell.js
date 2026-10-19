@@ -9,6 +9,10 @@ const Mutations = require('../../Inventory/InventoryMutationQueue');
 const InventoryLimits = require('../../Inventory/InventoryLimits');
 const Item = invoke('GameServer/Item/Item');
 
+// Invalid or stale client requests are normal refusals; persistence failures
+// still need an error in the server log.
+class NpcSaleRejected extends Error {}
+
 function merchantSellRows(actor, store) {
     TradeService.refreshStorePrices(store, actor);
     const nativeItems = TradeService.nativeStoreItems(store);
@@ -172,7 +176,7 @@ function sellToNpcShop(session, list) {
     return Mutations.run(backpack, async () => {
         try {
             const seen = new Set();
-            if (!Array.isArray(list) || !list.length || list.length > InventoryLimits.MAX_CAPACITY) throw Error('invalid NPC sale');
+            if (!Array.isArray(list) || !list.length || list.length > InventoryLimits.MAX_CAPACITY) throw new NpcSaleRejected('invalid NPC sale');
             const requested = list.map(line => {
                 const item = backpack.fetchItems().find(ob => ob.fetchId() === line.objectId);
                 const offered = shop.items.get(line.objectId);
@@ -180,17 +184,17 @@ function sellToNpcShop(session, list) {
                 if (!NpcSellRules.canSell(item) || !offered || seen.has(line.objectId)
                     || item.fetchSelfId() !== line.selfId || item.fetchSelfId() !== offered.selfId
                     || !Number.isSafeInteger(amount) || amount < 1 || amount > item.fetchAmount()
-                    || !Number.isSafeInteger(offered.price) || offered.price < 0) throw Error('NPC sale item changed');
+                    || !Number.isSafeInteger(offered.price) || offered.price < 0) throw new NpcSaleRejected('NPC sale item changed');
                 seen.add(line.objectId);
                 return { objectId: line.objectId, selfId: line.selfId, amount, price: offered.price,
                     expectedAmount: item.fetchAmount(), item };
             });
             const validate = () => {
-                if (session.actor !== actor || session.activeNpcSellShop !== shop) throw Error('NPC sale window changed');
+                if (session.actor !== actor || session.activeNpcSellShop !== shop) throw new NpcSaleRejected('NPC sale window changed');
                 for (const line of requested) {
                     if (!backpack.fetchItems().includes(line.item) || !NpcSellRules.canSell(line.item)
                         || line.item.fetchAmount() !== line.expectedAmount
-                        || shop.items.get(line.objectId)?.price !== line.price) throw Error('NPC sale item changed');
+                        || shop.items.get(line.objectId)?.price !== line.price) throw new NpcSaleRejected('NPC sale item changed');
                 }
             };
             const result = await Database.sellItemsToNpc(actor.fetchId(), requested.map(({ item, ...line }) => line), validate);
@@ -210,7 +214,7 @@ function sellToNpcShop(session, list) {
             backpack.inventoryRevision = Number(backpack.inventoryRevision || 0) + 1;
             Item.bindInventory(backpack);
         } catch (err) {
-            utils.infoWarn('Sell', 'NPC shop sell error: %s', err.message || err);
+            if (!(err instanceof NpcSaleRejected)) utils.infoWarn('Sell', 'NPC shop sell error: %s', err.message || err);
             if (session.actor === actor) session.dataSendToMe(ServerResponse.actionFailed());
         }
 

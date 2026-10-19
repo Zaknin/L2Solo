@@ -48,7 +48,13 @@ const balance = session => session.actor.backpack.fetchTotalAdena();
     await Database.init();
     Data.init();
     const originalUserInfo = Response.userInfo;
+    const originalWarn = utils.infoWarn;
+    const warnings = [];
     Response.userInfo = () => Buffer.from([4]);
+    utils.infoWarn = (prefix, ...args) => {
+        if (prefix === 'Sell') warnings.push(require('node:util').format(...args));
+        else originalWarn(prefix, ...args);
+    };
     try {
         const bulk = await session(Array.from({ length: 30 }, () => [955, 1]));
         const all = lines(bulk, 955);
@@ -108,6 +114,7 @@ const balance = session => session.actor.backpack.fetchTotalAdena();
         } finally { Database.sellItemsToNpc = originalSale; retired.actor = actor; }
         assert.equal(Native.amount(await rows(retired), 955), 1, 'retired actor cannot complete a pending sale');
         assert.equal(balance(retired), 100);
+        assert.deepEqual(warnings, [], 'replays, duplicate IDs and retired actors are normal sale refusals');
 
         // The live backpack can be stale after another physical transfer. A
         // missing later source must not consume the earlier source or pay out.
@@ -116,6 +123,7 @@ const balance = session => session.actor.backpack.fetchTotalAdena();
         assert.equal(Native.amount(await rows(duplicate), 955), 1);
         assert.equal(duplicate.actor.backpack.fetchItems().filter(item => item.fetchSelfId() === 955).length, 2);
         assert.equal(balance(duplicate), 100);
+        assert.match(warnings.shift(), /npc_sale_item_changed/, 'unexpected durable inventory drift must remain visible');
 
         const rollback = await session([[955, 1], [955, 1]]);
         await Database.execute([`CREATE TEMP TRIGGER fail_npc_payout BEFORE UPDATE ON items
@@ -125,6 +133,7 @@ const balance = session => session.actor.backpack.fetchTotalAdena();
         assert.equal(Native.amount(await rows(rollback), 57), 100);
         assert.equal(rollback.actor.backpack.fetchItems().filter(item => item.fetchSelfId() === 955).length, 2);
         assert.equal(balance(rollback), 100, 'failed transaction never publishes to the live wallet');
+        assert.match(warnings.shift(), /test payout failure/, 'persistence failures must still be logged');
         await Database.execute(['DROP TRIGGER fail_npc_payout']);
 
         const emptyWallet = await session([[955, 1], [955, 1]], 0);
@@ -137,6 +146,7 @@ const balance = session => session.actor.backpack.fetchTotalAdena();
         await Sell(overflow, packet(lines(overflow, 955)));
         assert.equal(Native.amount(await rows(overflow), 955), 1, 'unrepresentable payout retains the item');
         assert.equal(balance(overflow), 0x7fffffff - 1);
+        assert.match(warnings.shift(), /npc_sale_adena_overflow/);
         for (const malformed of [Buffer.alloc(0), Buffer.alloc(8), packet([]), packet(lines(overflow, 955)).subarray(0, 20)]) {
             await Sell(overflow, malformed);
         }
@@ -151,6 +161,7 @@ const balance = session => session.actor.backpack.fetchTotalAdena();
         await assert.rejects(Database.sellItemsToNpc(overflow.actor.fetchId(), tooMany,
             () => { throw Error('oversized transaction must not begin'); }), /invalid_npc_sale/);
         assert.equal(Native.amount(await rows(overflow), 955), 1);
+        assert.deepEqual(warnings, [], 'malformed sale requests must not be logged as server failures');
 
         await Database.close();
         await Database.init();
@@ -159,6 +170,7 @@ const balance = session => session.actor.backpack.fetchTotalAdena();
         console.log('NPC sale transaction: expanded inventories, overlap, replay, duplicates, stale rows, rollback, pickup credit and payout bounds passed');
     } finally {
         Response.userInfo = originalUserInfo;
+        utils.infoWarn = originalWarn;
         await Database.close();
         fs.rmSync(fixture.directory, { recursive: true, force: true });
     }
