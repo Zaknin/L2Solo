@@ -227,8 +227,9 @@ function groupBySpot(states, options = {}) {
 }
 
 // The forming party's spot: its objective's, else the leader's party search,
-// which skips a spot with no room for all its members (members: the search's
-// capacityStates, read by its room filter on main's world index).
+// which skips a spot with no room for all its members (main's world index).
+// Room only: the members' fight profiles are not passed, so the pick keeps
+// the leader-only matchup it had.
 function partySpotForLeader(leader, objectiveSpotId = null, members = [leader]) {
     if (objectiveSpotId) {
         const objectiveSpot = SpotProfiles.findById(objectiveSpotId);
@@ -247,7 +248,11 @@ function partySpotForLeader(leader, objectiveSpotId = null, members = [leader]) 
             ...(leader.stats || {}),
             routeMode: 'party'
         }
-    }, { mode: 'party', role: PartyComposition.roleForState(leader), capacityStates: members })
+    }, {
+        mode: 'party',
+        role: PartyComposition.roleForState(leader),
+        hasRoom: SpotProfiles.defaultRoomFilter(leader, SpotProfiles.ensure(), members)
+    })
         || SpotProfiles.findById(leader.spotId);
 }
 

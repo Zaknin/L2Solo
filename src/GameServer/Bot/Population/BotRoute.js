@@ -147,8 +147,9 @@ function choose(state, currentSpot, party, partyMembers = [], { spots, timestamp
         if (repeatsCurrentGround || !LevelingRoutes.isSpotAllowedForState(selected, state, frame.solo())) selected = null;
     }
     if (!selected && unsafe) selected = evacuationSpot(state, currentId, spots, frame);
-    // A party search with no spot (none with room for the whole party): the
-    // party stays where it is; the next run searches again.
+    // A party search with no spot (no room for the whole party, or none
+    // allowed or matched): the party stays where it is; the next run searches
+    // again.
     if (partyRoute && !selected) EconomyDiagnostics.count('route', 'party', 'none');
     return { spotId: selected ? selected.id : null,
         ...(materialRoute ? { materialRoute: true, materialSources: materialRoute.sources } : {}) };
