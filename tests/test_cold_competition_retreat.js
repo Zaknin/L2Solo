@@ -36,7 +36,7 @@ async function createParty(ids) {
     const assigned = ids.map(id => Life.preparePartyAssignment(state(id), p.row.partyId, 'dps', ids[0], at + 45000));
     const formed = await Database.commitBackgroundPartyMembership({ party: p.row, members: assigned });
     assert(formed.ok);
-    Life.acceptPartyAssignments(assigned); Party.acceptRow(formed.partyRow);
+    Life.acceptPartyAssignments(assigned, formed.lifeRows); Party.acceptRow(formed.partyRow);
 }
 function event(a, b, action = 'avoid') {
     const participant = id => {

@@ -607,6 +607,15 @@ function normalize(row) {
     });
 }
 
+// A main write that moved a far row's revision hands back the written number
+// (`simulationRevision`); a cached copy patched by hand takes it, unless the
+// cache already holds a newer one.
+function movedSimulation(current, written) {
+    const revision = Number(written?.simulationRevision);
+    if (!Number.isSafeInteger(revision) || Number(current.simulation?.revision || 0) >= revision) return current.simulation;
+    return { ...current.simulation, revision };
+}
+
 // A market purchase that failed after its save writes the bot's state from
 // before it back (applyMarketPurchase's own compensation; NPC and configured
 // merchant purchases only, board deals are one transaction).
@@ -952,6 +961,9 @@ function save(row, options = {}) {
         }
         Metrics.recordDbFlush();
         row.statsJson = result.statsJson;
+        // The cache built from this row takes the row's revision, not the
+        // older one the caller's state carried.
+        if (result.simulationRevision !== undefined) row.simulationRevision = Number(result.simulationRevision);
         return enqueueEquipmentGoalAdvance(row.equipmentAdvance).then(() => result);
     });
 }
@@ -1834,14 +1846,24 @@ const BotLifeState = {
         return snapshot;
     },
 
+    // The clan's market demand lives in its leader's row; the write moves that
+    // row, so the cached copy takes it back (else the leader's next claim is
+    // refused once on the old revision).
+    syncClanMarketDemandSignal(signal) {
+        return Database.syncClanMarketDemandSignal(signal).then((result) => {
+            if (result?.row) this.acceptNewerLifecycleRow(result.row);
+            return result;
+        });
+    },
+
     acceptWarehouseWithdrawal(row) {
         const current = cache.get(Number(row?.characterId));
         if (!current) return null;
         if (Number(current.stats?.lastWarehouseWithdrawal?.at || 0) > Number(row.withdrawal.at)) return current;
         const newerTiming = Number(current.simulation?.revision || 0) > Number(row.simulationRevision)
             || Number(current.updatedAt || 0) > Number(row.updatedAt);
-        const snapshot = { ...current, stats: { ...current.stats, lastWarehouseWithdrawal: row.withdrawal,
-            ...(row.market ? { marketSellRetryAfter: null } : {}) },
+        const snapshot = { ...current, simulation: movedSimulation(current, row),
+            stats: { ...current.stats, lastWarehouseWithdrawal: row.withdrawal, ...(row.market ? { marketSellRetryAfter: null } : {}) },
             timing: newerTiming ? current.timing : { ...current.timing, nextResolveAt: row.nextResolveAt ? Number(row.nextResolveAt) : null } };
         cache.set(snapshot.characterId, snapshot);
         notifyColdSnapshot(snapshot, 'cold_warehouse_withdrawal');
@@ -2861,6 +2883,8 @@ const BotLifeState = {
                     .then(() => syncInventorySummary(row.characterId, profiledState.inventory, newDeath ? 'resolve_death' : 'resolve', nativeWriteOptions))
                     .then((deathDrop) => {
                         if (deathDrop?.inventory) {
+                            // The drop moved a far row's revision; the published state carries it.
+                            row.simulationRevision = deathDrop.revision;
                             row.inventorySummary = safeJson(deathDrop.inventory);
                             row.statsJson = safeJson({ ...parseJson(row.statsJson, {}), pkDropDeathSequence: deathDrop.deathSequence });
                             invoke('GameServer/Actor/Generics/PkDeathDrop').spawn(row.characterId, profiledState.loc, deathDrop.drops);
@@ -3841,10 +3865,12 @@ const BotLifeState = {
         const id = Number(characterId);
         if (!cache.has(id)) return Promise.resolve(null);
         const previous = pendingWrites.get(id) || Promise.resolve();
-        const next = previous.then(() => Database.updateGeneratedBotName(id, name, version)).then(() => {
+        const next = previous.then(() => Database.updateGeneratedBotName(id, name, version)).then((written) => {
             const current = cache.get(id);
             if (!current) return null;
-            const snapshot = { ...current, name, stats: { ...current.stats, nameGeneratorVersion: version } };
+            // The write moved a far row's revision; the cache carries the new one.
+            const simulation = movedSimulation(current, written);
+            const snapshot = { ...current, name, simulation, stats: { ...current.stats, nameGeneratorVersion: version } };
             cache.set(id, snapshot);
             const World = invoke('GameServer/World/World');
             for (const session of World.user?.sessions || []) {
@@ -3852,7 +3878,7 @@ const BotLifeState = {
                 session.actor.model.name = name;
                 session.name = name;
                 for (const key of ['coldLifeState', 'coldMarketState', 'coldCraftState']) {
-                    if (session[key]) session[key] = { ...session[key], name,
+                    if (session[key]) session[key] = { ...session[key], name, simulation,
                         stats: { ...session[key].stats, nameGeneratorVersion: version } };
                 }
                 RefreshPartyMemberships([session], invoke);
@@ -3885,6 +3911,7 @@ const BotLifeState = {
                 if (!current) return null;
                 const snapshot = {
                     ...current,
+                    simulation: movedSimulation(current, result),
                     stats: {
                         ...(current.stats || {}),
                         sex: normalizedSex,

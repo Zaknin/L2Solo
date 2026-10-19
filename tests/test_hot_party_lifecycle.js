@@ -47,7 +47,7 @@ async function createParty(ids, extraStats = {}) {
         index ? 'mage' : 'tank', ids[0], at + 1000));
     const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
     assert(formed.ok);
-    Life.acceptPartyAssignments(assigned);
+    Life.acceptPartyAssignments(assigned, formed.lifeRows);
     activeParty = Parties.acceptRow(formed.partyRow);
     return activeParty;
 }

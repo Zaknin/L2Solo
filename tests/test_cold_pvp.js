@@ -48,7 +48,7 @@ async function party(members) {
     const assigned = members.map(id => Life.preparePartyAssignment(state(id), prepared.row.partyId, 'dps', members[0], at + 45000));
     const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
     assert(formed.ok);
-    Life.acceptPartyAssignments(assigned);
+    Life.acceptPartyAssignments(assigned, formed.lifeRows);
     return Parties.acceptRow(formed.partyRow);
 }
 async function main() {

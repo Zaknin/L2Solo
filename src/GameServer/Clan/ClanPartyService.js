@@ -382,7 +382,7 @@ async function resolveActiveOperation(clan, goal, operation, options = {}) {
             goalKey: demandKey,
             status: 'fulfilled'
         });
-        await Database.syncClanMarketDemandSignal({
+        await LifeState.syncClanMarketDemandSignal({
             clanId: clan.id,
             itemId: Config.bloodMarkItemId,
             amount: 1,

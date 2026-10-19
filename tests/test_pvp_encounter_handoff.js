@@ -61,7 +61,7 @@ async function party(ids) {
     const members = ids.map(id => Life.preparePartyAssignment(state(id), p.row.partyId, 'dps', ids[0], clock + 1000));
     const formed = await DB.commitBackgroundPartyMembership({ party: p.row, members });
     assert(formed.ok);
-    Life.acceptPartyAssignments(members); Parties.acceptRow(formed.partyRow);
+    Life.acceptPartyAssignments(members, formed.lifeRows); Parties.acceptRow(formed.partyRow);
 }
 async function main() {
     patch(Date, 'now', () => clock);

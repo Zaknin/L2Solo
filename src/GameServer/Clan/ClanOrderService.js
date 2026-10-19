@@ -371,7 +371,7 @@ async function ensureMarketDemand(clanId, order, goal) {
             status: 'fulfilled'
         });
         if (fulfilled.ok) {
-            await Database.syncClanMarketDemandSignal({
+            await LifeState.syncClanMarketDemandSignal({
                 clanId,
                 itemId: order.itemId,
                 amount: 1,
@@ -391,7 +391,7 @@ async function ensureMarketDemand(clanId, order, goal) {
         status: 'open'
     });
     if (demand.ok) {
-        await Database.syncClanMarketDemandSignal({
+        await LifeState.syncClanMarketDemandSignal({
             clanId,
             itemId: order.itemId,
             amount,

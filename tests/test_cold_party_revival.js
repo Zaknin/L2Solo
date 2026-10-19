@@ -48,7 +48,7 @@ async function run() {
     const assigned = states().map(s => Life.preparePartyAssignment(s, 'revival-party', 'dps', 2, at));
     const formed = await DB.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
     assert(formed.ok);
-    Life.acceptPartyAssignments(assigned); party = Parties.acceptRow(formed.partyRow);
+    Life.acceptPartyAssignments(assigned, formed.lifeRows); party = Parties.acceptRow(formed.partyRow);
     const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
     const messages = [];
     const kernel = new ColdSimulationKernel({ now: () => at, resolveSolo: () => { throw Error('party must remain together'); }, resolveParty: input => Party.resolve(input),

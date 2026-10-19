@@ -2,6 +2,7 @@ const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const { DiagnosticMetricMap } = require('../Bot/Population/DiagnosticMetricMap');
 const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const Database = invoke('Database');
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Config = invoke('GameServer/Clan/ClanSimulationConfig');
 const Contracts = invoke('GameServer/Clan/ClanSimulationContracts');
 const ContributionPolicy = invoke('GameServer/Clan/ClanContributionPolicy');
@@ -283,7 +284,7 @@ async function cancelLegacyBloodMarkDemand(clan, context) {
         goalKey: demand.goalKey,
         status: 'cancelled'
     });
-    await Database.syncClanMarketDemandSignal({
+    await LifeState.syncClanMarketDemandSignal({
         clanId: clan.id,
         itemId: Config.bloodMarkItemId,
         amount: Math.max(1, number(demand.amount, 1)),
@@ -530,7 +531,7 @@ async function resolveClanInternal(clan, options = {}) {
     if (context.marketOffer) {
         demand = await Database.upsertClanMarketDemand({ clanId: clan.id, itemId: Config.bloodMarkItemId,
             amount: 1, maxPrice: context.marketOfferPrice, goalKey: `${clan.id}:level-2:${Config.bloodMarkItemId}`, status: 'open' });
-        await Database.syncClanMarketDemandSignal({ clanId: clan.id, itemId: Config.bloodMarkItemId,
+        await LifeState.syncClanMarketDemandSignal({ clanId: clan.id, itemId: Config.bloodMarkItemId,
             amount: 1, maxPrice: context.marketOfferPrice, goalKey: `${clan.id}:level-2:${Config.bloodMarkItemId}`, status: 'open' });
     }
     if (goal.type === 'item' && demand?.created && !context.marketOffer) {
