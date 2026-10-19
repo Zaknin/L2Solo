@@ -283,7 +283,7 @@ function handoffToMain(state, options = {}) {
 
 function recoverStartupLeases() {
     if (!Database.isReady()) return Promise.resolve({ affectedRows: 0, rows: [] });
-    return Database.recoverColdSimulationLeases({ includeActive: true }).then(reflectRecovery).catch(recordFailure);
+    return Database.recoverColdSimulationLeases().then(reflectRecovery).catch(recordFailure);
 }
 
 module.exports = {

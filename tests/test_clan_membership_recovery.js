@@ -116,16 +116,13 @@ async function main() {
 
         // A membership change invalidates work already running on the old revision.
         await Life.upsertState({ ...Life.cachedState(ids[3]), stats: { generatedCold: true, clanId: 0 } });
-        const timestamp = Date.now();
-        const claimed = await Database.claimColdSimulationLease({ characterId: ids[3], expectedRevision: Number((await lifeRow(ids[3])).simulationRevision),
-            leaseId: 'membership-race', timestamp, leaseUntil: timestamp + 60000 });
-        assert(claimed.ok, JSON.stringify(claimed));
+        const timestamp = Date.now(), stepRevision = Number((await lifeRow(ids[3])).simulationRevision);
         await Database.updateCharacterClan(ids[3], clanId, 0, 0, 0);
         // A proposal is written as is: its columns and the stats object it was built with.
         const propose = (expectedRevision, stats, at) => Database.commitAndReleaseColdSimulationLeases([{ characterId: ids[3], expectedRevision,
             timestamp: timestamp + at, allowLifecycle: true,
             patch: { phase: 'cold', statsJson: JSON.stringify(stats) }, stats }]).then(([result]) => result);
-        const staleCommit = await propose(claimed.revision, { clanId: 0 }, 1);
+        const staleCommit = await propose(stepRevision, { clanId: 0 }, 1);
         assert.equal(staleCommit.reason, 'stale_revision', 'running worker cannot erase a newer membership');
         assert.equal(Life.cachedState(ids[3]).stats.clanId, clanId);
         // The step redone on the joined row carries the membership and its drop plan.

@@ -553,7 +553,6 @@ const tests = [
     'tests/test_cold_owner_batches.js',
     'tests/test_cold_owner_exhausted_inventory.js',
     'tests/test_cold_pvp_kill_commit.js',
-    'tests/test_cold_claim_flags.js',
     'tests/test_bot_errand_flags.js',
     'tests/test_cold_simulation_kernel.js',
     'tests/test_cold_proposal_batch_bytes.js',
