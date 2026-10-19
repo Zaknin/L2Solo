@@ -1745,6 +1745,9 @@ function heldWorkshop(state, deps, eventVerdict) {
     deps.routeRows = own.routeRows;
     eventVerdict.collected = collectedOf(verdict, state, held.plan.eventProof, heldOptionsOf(held), own, reads);
     const kept = heldWorkshopOf(held, verdict.valid ? 0 : verdictMask(state, eventVerdict, verdict), state);
+    // The ask awaits the planner, and memory or recipe rows may land before
+    // the build: its reads (the build key among them) are taken fresh then.
+    if (!kept) eventVerdict.collected.reads = null;
     if (Diagnostics.active()) {
         if (kept) Diagnostics.count('workshop', 'kept', verdict.valid ? 'held_valid' : 'lifecycle');
         // The served held build keeps an unknown or another route's workshop.
