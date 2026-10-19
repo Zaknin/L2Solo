@@ -95,8 +95,7 @@ invoke('GameServer/Bot/AI/GearAcquisitionPlanner').safeFallbackForPlan = (state)
                 timing: { lastResolvedAt: now - 45000, nextResolveAt: now - 1 },
                 stats: { generatedCold: true, classId: 0, role: 'dps', equipment: [],
                     ...(scenario.resting ? { restUntil: now + 60000 } : {}) }
-            },
-            context: { spot: current }
+            }
         }));
         send('snapshot_page', { done: true, rows });
         const proposals = new Map();

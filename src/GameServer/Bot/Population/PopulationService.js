@@ -174,12 +174,11 @@ function beginHuntingTravel(state, spot, timestamp = Date.now(), options = {}) {
     }, timestamp);
 }
 
-// The spot of a commanded bot: the trip the worker's plan started (its
-// request's route, BotRoute), or the ground the worker fought on when the
-// bot needed no trip.
-function commandSpot(workerRequest) {
-    const spotId = workerRequest?.route?.needed ? workerRequest.route.spotId : workerRequest?.context?.spot?.id;
-    return spotId ? SpotProfiles.findById(spotId) : null;
+// The spot of a commanded bot, from its request's route: the trip the
+// worker's plan started (BotRoute), or the ground the worker fought on when
+// the bot needed no trip.
+function commandSpot(route) {
+    return route?.spotId ? SpotProfiles.findById(route.spotId) : null;
 }
 
 function groupBySpot(states, options = {}) {
@@ -3086,7 +3085,7 @@ const PopulationService = {
         const selectedSpot = passiveActivity
             ? null
             : fallbackSpot || (precomputedResult
-                ? commandSpot(workerRequest)
+                ? commandSpot(workerRequest?.route)
                 : SpotProfiles.findForState(travellingState, {
                     excludedSpotIds,
                     timestamp: startedAt

@@ -46,8 +46,6 @@ for (let id = 1; id <= COUNT; id++) {
     coordinator.workerEpoch = 'every-state-test';
     coordinator.ready = true;
     coordinator.started = true;
-    coordinator.contextIndex = () => ({ spots: new Map(), parties: new Map() });
-    coordinator.snapshotEntry = (state) => ({ state: { characterId: state.characterId }, context: {} });
     const result = await coordinator.sendFullSnapshot();
     assert.strictEqual(result.ok, true);
     const sent = messages.filter(message => message.type === 'snapshot_page')

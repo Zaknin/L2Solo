@@ -84,7 +84,7 @@ parentPort.on('message', message => {
         await wait(message => message.type === 'ready' && message.payload.phase === 'running'); send('pause', {}, 'pause');
         send('table_page', { tables: [{ name: 'board', from: null, to: 0, full: true,
             rows: [], removed: [], last: true }] });
-        send('snapshot_page', { rows: [{ state, context: {} }], ack: true }, 'state');
+        send('snapshot_page', { rows: [{ state }], ack: true }, 'state');
         await wait(message => message.type === 'ready' && message.msgId === 'state');
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'probe'), personalShotProbe: id });
         const response = await wait(message => message.probeId === 'probe'); if (response.error) throw Error(response.error);

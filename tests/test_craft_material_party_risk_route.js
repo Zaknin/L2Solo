@@ -71,7 +71,7 @@ async function proposalsFor(currentParty, roster, route, timestamp) {
     const grants = new Map(roster.map(state => [state.characterId, { characterId: state.characterId,
         ownerId: 'cold_simulation_owner', leaseId: `route-${state.characterId}`, revision: 2, leaseUntil: timestamp + 30000 }]));
     for (const state of roster) {
-        kernel.upsert({ state, context: {} });
+        kernel.upsert({ state });
         kernel.inFlight.set(state.characterId, { state, grant: grants.get(state.characterId), partyId: party.partyId, claimRequestId: requestId });
     }
     kernel.partyRuns.set(currentParty.partyId, { party: currentParty, members: roster, spot: byId.get(currentParty.spotId), requestId, grants });

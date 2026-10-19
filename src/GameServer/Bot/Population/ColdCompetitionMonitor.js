@@ -8,6 +8,14 @@ const INTERVAL_MS = 30000;
 const PAIR_COOLDOWN_MS = 2 * 60000;
 const BOT_COOLDOWN_MS = 2 * 60000;
 const unitKeyOf = (partyId, id) => partyId || `solo:${id}`;
+// The spot a cold bot competes at: alive, hunting, not travelling or waiting,
+// and standing at its own spot (spotOf); null when it does not compete.
+function hunterSpot(state, spotOf) {
+    if (state?.phase !== 'cold' || !['hunting', 'grouped'].includes(state.activity)
+        || !(state.vitals?.hp > 0) || state.stats?.travel || state.stats?.coldCompetition?.wait) return null;
+    const spot = spotOf(state);
+    return spot && state.spotId === spot.id ? spot : null;
+}
 const TendencyRoll = require('../AI/TendencyRoll');
 const { ColdRevengeMonitor } = require('./ColdRevengeMonitor');
 class ColdCompetitionMonitor {
@@ -15,9 +23,11 @@ class ColdCompetitionMonitor {
     // exact one (ColdPvpResolver.ownSide); standalone tests see themselves as others do.
     // leaderParty(characterId): the party row a bot leads, or null (the
     // worker's parties table, ColdSimulationKernel.leaderParty).
+    // spotOf(state): the spot a bot stands at (SpotService.standingSpot).
     constructor({ capacityForSpot, personaFor, isTargetAllowed = () => true, ownSide = Visible.stateSide, onCooldown = () => {},
-        knowledgeFor = () => null, leaderParty = () => null }) {
+        knowledgeFor = () => null, leaderParty = () => null, spotOf = () => null }) {
         this.ownSide = ownSide;
+        this.spotOf = spotOf;
         this.leaderParty = leaderParty;
         this.knowledgeFor = knowledgeFor;
         this.onCooldown = onCooldown;
@@ -68,30 +78,28 @@ class ColdCompetitionMonitor {
         const partyTargets = new Map();
         const groups = new Map(), untargeted = new Map();
         let active = 0;
-        for (const { state, context = {} } of entries) {
-            if (state?.phase !== 'cold' || !['hunting', 'grouped'].includes(state.activity)
-                || !(state.vitals?.hp > 0) || state.stats?.travel || !context.spot
-                || state.stats?.coldCompetition?.wait
-                || state.spotId !== context.spot.id) continue;
+        for (const { state } of entries) {
+            const spot = hunterSpot(state, this.spotOf);
+            if (!spot) continue;
             active++;
             const partyId = state.party?.partyId || state.partyId || null;
             if (partyId && !partyTargets.has(partyId)) {
                 const party = parties.get(partyId);
                 partyTargets.set(partyId, targetForParty ? targetForParty(partyId) : party ? PartyHuntingTarget.competitionNpcId(
-                    party, states.get(Number(party.leaderId)), context.spot, id => states.get(Number(id))) : 0);
+                    party, states.get(Number(party.leaderId)), spot, id => states.get(Number(id))) : 0);
             }
             // A solo hunter's target is the one main validates its event with.
             const target = partyId ? partyTargets.get(partyId) || 0
-                : PartyHuntingTarget.competitionNpcId(null, state, context.spot);
+                : PartyHuntingTarget.competitionNpcId(null, state, spot);
             if (!target) { untargeted.set(state.spotId, (untargeted.get(state.spotId) || 0) + 1); continue; }
             if (!this.isTargetAllowed(target)) continue;
-            const spawnRows = context.spot.npcEntries || [];
+            const spawnRows = spot.npcEntries || [];
             const count = spawnRows.filter(r => Number(r.selfId) === target).reduce((n, r) => n + Math.max(1, Number(r.count) || 1), 0);
             const total = spawnRows.reduce((n, r) => n + Math.max(1, Number(r.count) || 1), 0);
             if (!count || !total) continue;
             const key = `${state.spotId}:${target}`;
             if (!groups.has(key)) groups.set(key, { key, spotId: state.spotId, npcId: target, fraction: count / total,
-                capacity: Math.max(1, this.capacityForSpot(context.spot) * count / total), demand: 0, units: new Map() });
+                capacity: Math.max(1, this.capacityForSpot(spot) * count / total), demand: 0, units: new Map() });
             const group = groups.get(key), unitKey = unitKeyOf(partyId, state.characterId);
             group.demand++;
             if (!group.units.has(unitKey)) group.units.set(unitKey, { id: Number(state.characterId), name: state.name,
@@ -245,4 +253,4 @@ class ColdCompetitionMonitor {
     }
     snapshot() { return this.report; }
 }
-module.exports = { ColdCompetitionMonitor, INTERVAL_MS };
+module.exports = { ColdCompetitionMonitor, INTERVAL_MS, hunterSpot };

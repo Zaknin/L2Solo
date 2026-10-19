@@ -20,7 +20,7 @@ const admit = () => { for (const frame of frames) assert(kernel.receiveMeetingPa
 (async () => {
     kernel.upsert({ state }); admit();
     const original = kernel.states.get(1).state;
-    kernel.upsert({ state: structuredClone(state), context: { catalogRefreshed: true } });
+    kernel.upsert({ state: structuredClone(state) });
     assert.equal(kernel.states.get(1).state, original, 'identical native refresh must keep the active computation source');
     assert(kernel.commandStartedAt.has(1), 'refresh must not cancel bilateral preparation');
     finish(request); await new Promise(resolve => setImmediate(resolve));

@@ -192,9 +192,12 @@ class LifecycleSafetySweep {
         }
     }
 
+    // A state edge still holds while main's cached state is the same object
+    // (the cache sets a new one per accepted row).
     edgeCurrent(edge) {
         return !!this.eligible(edge.checkpoint) && this.cold.canRepair(edge.checkpoint)
-            && (edge.kind !== 'state' || this.cold.projection(edge.checkpoint.characterId, edge.checkpoint)?.entry === edge.entry);
+            && (edge.kind !== 'state'
+                || this.cold.projection(edge.checkpoint.characterId, edge.checkpoint)?.entry?.state === edge.entry.state);
     }
 
     edgeIdentity(cycle, kind, checkpoint, receipt) {
@@ -210,7 +213,7 @@ class LifecycleSafetySweep {
 
     appendEdge(cycle, edge) {
         // Count each own full projection once while the review loop can yield.
-        // An oversized entry is deferred intact, never replaced by context{}.
+        // An oversized entry is deferred intact, never cut down to fit.
         const size = Protocol.byteLength([edge]) - 2;
         if (!Number.isFinite(size) || cycle.baseBytes + size > PAGE_BYTES) { DiagnosticConfig.developerDiagnostics && (this.metrics.deferred++); return; }
         cycle.edges.push(edge);

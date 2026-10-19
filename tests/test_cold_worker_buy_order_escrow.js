@@ -16,7 +16,7 @@ const { rowOf, escrowOf, BUY, SELL } = require('../src/GameServer/AfkTrade/Board
 DataCache.init();
 
 // A solo cold bot is planned in the worker, which cannot see AFK shops. Its
-// own buy-order escrow must travel in the resolve context: without it the
+// own buy-order escrow must reach the worker (the board table): without it the
 // worker plan sees only the wallet once the bid is posted, drops the target
 // and the order is withdrawn (T2).
 const catalogRows = npcPlanningCatalogRows();
@@ -132,6 +132,8 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
         // and its order's escrow is part of that budget.
         const spot = { id: 'escrow-field', name: 'Escrow field', center: point, avgLevel: 30, minLevel: 28, maxLevel: 32,
             density: 3, npcSelfIds: [], mob: { hp: 1, damage: 1 }, rewards: { exp: 100, sp: 10, adenaMin: 1, adenaMax: 1 } };
+        // The worker finds the party's spot in its spot catalog.
+        send('catalog_page', { catalog: 'spots', rows: [spot], done: true });
         const robe = 391; // Puma Skin Shirt: D-grade light armour, wrong for this build
         const bridgeWallet = 150000;
         const parties = [];
@@ -146,7 +148,7 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
                 } });
             const members = [member(leaderId, wallet, robe), member(leaderId + 1, bridgeWallet, 58)];
             parties.push(party);
-            return members.map((state, index) => ({ state, context: index ? {} : { spot } }));
+            return members.map(state => ({ state }));
         };
         const bridge = GearAcquisitionPlanner.npcEquipmentBridgePlan(partyRows('p', 20, bridgeWallet)[0].state, plannerOptions);
         parties.length = 0;
@@ -156,8 +158,8 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
         assert(unfundedWallet < bridgePrice + Number(bridge.market.reserve),
             'the fixture bridge must need the escrow once the bid is posted');
         const rows = [
-            { state: { ...soloBase(7, afterPosting), timing }, context: {} },
-            { state: { ...soloBase(8, afterPosting), timing }, context: {} },
+            { state: { ...soloBase(7, afterPosting), timing } },
+            { state: { ...soloBase(8, afterPosting), timing } },
             ...partyRows('escrow-party', 20, unfundedWallet),
             ...partyRows('wallet-party', 30, unfundedWallet)
         ];

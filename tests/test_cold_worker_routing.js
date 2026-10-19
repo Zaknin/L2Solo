@@ -71,15 +71,6 @@ try {
     assert(MarketOpportunity.npcOffers(dGradeNpcPlan.target.selfId, dGradeNpcPlan.market.town)
         .some((offer) => offer.available), 'the selected D-grade destination must expose the persisted NPC offer');
 
-    // Party, leadership, memory, pressure, goal revision and escrow are
-    // worker tables: a bot's context carries none of them.
-    const tableFree = new ColdSimulationCoordinator().contextFor({
-        characterId: 11, phase: 'cold', activity: 'resting', loc: { locX: 1, locY: 2, locZ: 3 }, stats: {}
-    }, { spots: new Map(), profiles: new Map() });
-    for (const key of ['party', 'partyMembers', 'isPartyLeader', 'interactionMemory', 'pressure', 'goalRevision', 'buyOrderEscrow']) {
-        assert(!Object.hasOwn(tableFree, key), `${key} is a worker table, not context`);
-    }
-
     const currentSpot = { id: 'starter-field', name: 'Starter fields' };
     const targetSpot = {
         id: 'mid-level-field',
@@ -245,14 +236,23 @@ try {
         null,
         'a cold raid party already at its virtual raid spot must not repeat the same 25-second travel'
     );
-    const raidContext = coordinator.contextFor(
-        raidMembers[0],
-        {
-            spots: new Map([[currentSpot.id, currentSpot], [raidSpot.id, raidSpot]])
-        }
-    );
-    assert.strictEqual(raidContext.spot.id, raidSpot.id,
-        'the cold resolver must receive the virtual raid profile instead of its surrounding grid sector');
+    // The worker's spot of a bot (SpotService.standingSpot over its catalog):
+    // a declared raid profile, else the spot under its position, else its
+    // declared spot. The position search answers the field around the raid.
+    const fieldSpot = { id: 'raid-field', name: 'Field around the raid' };
+    const standingCatalog = [currentSpot, raidSpot, fieldSpot];
+    const originalFindCurrentSpot = SpotService.findCurrentSpot;
+    SpotService.findCurrentSpot = (loc, spots) => (loc && spots === standingCatalog ? fieldSpot : null);
+    try {
+        assert.strictEqual(SpotService.standingSpot(raidMembers[0], standingCatalog).id, raidSpot.id,
+            'the cold resolver must receive the virtual raid profile instead of its surrounding grid sector');
+        assert.strictEqual(SpotService.standingSpot({ ...raidMembers[0], spotId: currentSpot.id }, standingCatalog).id, fieldSpot.id,
+            'an ordinary declared spot yields to the spot under the bot');
+        assert.strictEqual(SpotService.standingSpot({ ...raidMembers[0], spotId: currentSpot.id, loc: null }, standingCatalog).id,
+            currentSpot.id, 'with no spot under the bot its declared spot stands');
+    } finally {
+        SpotService.findCurrentSpot = originalFindCurrentSpot;
+    }
 
     const retreatAt = Date.now();
     const retreatState = { characterId: 2, phase: 'cold', activity: 'hunting', level: 16,
@@ -284,7 +284,7 @@ try {
         stats: {}
     }, currentSpot, null, [], [currentSpot, targetSpot]);
     // No place is held ahead of arrival (ARCH-08-c): every decision of one
-    // context gets the destination; its room is checked when each bot arrives
+    // spot gets the destination; its room is checked when each bot arrives
     // (test_room_at_arrival.js). The spot's capacity is 2.
     assert(batchRouteFor(20), 'the first cold decision routes to the destination');
     assert(batchRouteFor(21), 'the second cold decision routes to the destination');
@@ -573,7 +573,7 @@ try {
         // b93aef45 keeps one static reward atlas per rewards/npcs table, so the
         // atlas built by an earlier route in this file may already serve both.
         assert(rewardScans <= 1,
-            'repeated cold fallback routes must reuse the reward index across context batches');
+            'repeated cold fallback routes must reuse the reward index across decision batches');
     } finally {
         delete rewards.forEach;
     }

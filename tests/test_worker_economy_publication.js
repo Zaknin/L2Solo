@@ -39,7 +39,7 @@ async function runWorker(state, predicate) {
             ({ name, from: null, to: 0, full: true, rows: [], removed: [] })) });
         send('init', { config: { loopIntervalMs: 20, maxInFlight: 1, maxBatch: 1 } }, 'init');
         await until(message => message.type === 'ready' && message.msgId === 'init');
-        send('snapshot_page', { rows: [{ state, context: {} }], initial: true, done: true });
+        send('snapshot_page', { rows: [{ state }], initial: true, done: true });
         const result = await until(predicate);
         assert(!received.some(message => message.type === 'fault'));
         send('shutdown', {}, 'shutdown');

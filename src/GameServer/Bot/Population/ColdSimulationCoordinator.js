@@ -23,6 +23,8 @@ const BackgroundPartyState = invoke('GameServer/Bot/Population/BackgroundPartySt
 const GlobalChat = invoke('GameServer/Bot/Population/BotGlobalChat');
 const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const RaidEncounterScope = invoke('GameServer/RaidBoss/RaidEncounterScope');
+const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
+const CraftWorkshopService = invoke('GameServer/Bot/Economy/CraftWorkshopService');
 const Protocol = require('./ColdSimulationProtocol');
 const { ColdEconomyDecisions, wireAdvisory, echoHolds } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
@@ -30,7 +32,6 @@ const { occupiedSpotId } = require('./SpotOccupancyIndex');
 const ColdStateDelta = require('./ColdStateDelta');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
 const { ColdSnapshotQueue } = require('./ColdSnapshotQueue');
-const { ColdProjectionRetention } = require('./ColdProjectionRetention');
 const ColdSafetyTransport = require('./ColdSafetyTransport');
 const ColdNpcPlanningCatalog = require('./ColdNpcPlanningCatalog');
 const TableChannel = require('./ColdTableChannel');
@@ -73,10 +74,8 @@ function snapshotRefreshMs() {
 }
 
 function recipeKnowledgeFor(state) {
-    if (!invoke('GameServer/Bot/Economy/CraftShopService').isServiceCrafter(state)) return {};
-    const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
-    return { knownShotRecipes: invoke('GameServer/Bot/Economy/ShotCraftPolicy').packKnown(Workshop.cachedRecipes(state.characterId)),
-        recipeBook: Workshop.bookFor(state.characterId) };
+    return CraftShopService.isServiceCrafter(state)
+        ? CraftWorkshopService.knowledgeFor(state.characterId) : {};
 }
 
 function yieldToLoop() {
@@ -99,13 +98,6 @@ class ColdSimulationCoordinator {
         this.worker = null;
         this.workerEpoch = null;
         this.safetyTransport = null;
-        this.projectionRetention = new ColdProjectionRetention({
-            stateFor: id => LifeState.cachedState(id), epoch: () => this.workerEpoch,
-            dependencies: state => ({
-                catalog: SpotProfiles.cache, physicalCatalog: SpotService.spots,
-                clanId: ClanSocial.view.memberships.get(Number(state.characterId)) || 0
-            })
-        });
         this.population = null;
         this.started = false;
         this.stopping = false;
@@ -396,7 +388,6 @@ class ColdSimulationCoordinator {
         this.workerDiagnosticsSeq = 0;
         this.diagnosticsResyncAt = 0;
         this.competitionFrameAdmission = null;
-        this.projectionRetention.reset();
         this.ready = false;
         this.snapshotsLoaded = false;
         this.lastHeartbeatAt = Date.now();
@@ -469,19 +460,9 @@ class ColdSimulationCoordinator {
         const entries = type === 'snapshot_page' ? payload.rows
             : type === 'claim_ack' ? payload.rejected
                 : ['commit_ack', 'release_ack', 'command_ack'].includes(type) ? payload.results : [];
-        for (const entry of entries || []) {
-            if (!entry?.state?.inventoryInstanceColumns) this.projectionRetention.remember(entry);
-        }
-        if (entries?.length) {
-            // Table changes reach the worker before the states that read them
-            // (parties, memory, goals, pressure, the board's escrow).
-            this.tableChannel.flush();
-            // The facts each commit answer still carries, by name.
-            if (DiagnosticConfig.developerDiagnostics && type === 'commit_ack') for (const entry of entries) {
-                EconomyDiagnostics.count('context_fact', 'commit', 'acks');
-                for (const key in entry?.context || {}) EconomyDiagnostics.count('context_fact', 'commit', key);
-            }
-        }
+        // Table changes reach the worker before the states that read them
+        // (parties, memory, goals, pressure, recipes, the board's escrow).
+        if (entries?.length) this.tableChannel.flush();
         const packed = StateWire.packPayload(type, payload);
         if (packed !== payload) { payload = packed; bytes = null; }
         const message = Protocol.envelope(type, this.workerEpoch, payload, msgId);
@@ -540,7 +521,7 @@ class ColdSimulationCoordinator {
                 throw Error('trade_meeting_source_retired');
             const state = LifeState.cachedState(id);
             if (!state) throw Error('trade_meeting_missing_state');
-            this.postCollections('snapshot_page', { rows: [{ state, context: this.contextFor(state, this.contextIndex()) }] });
+            this.postCollections('snapshot_page', { rows: [{ state }] });
             const codec = invoke('GameServer/AfkTrade/TradeMeetingCodec');
             const msgId = `meeting:${id}:${token}`;
             const envelope = frame => Protocol.envelope('command_request', epoch,
@@ -586,12 +567,11 @@ class ColdSimulationCoordinator {
         if (!authority || !expected || !['phase', 'ownerId', 'leaseId', 'hotAt', 'revision'].every(key => authority[key] === expected[key])) return false;
         const board = invoke('GameServer/AfkTrade/AfkTradeService').boardIndex();
         const Counters = invoke('GameServer/Bot/Economy/MarketCounters');
-        const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
         if (!proof.dependencies?.every(([id, boardToken, marketToken, workshopToken]) => {
             const scope = Counters.counterOf(id), grouped = boardToken.startsWith('g:');
             return (grouped ? `g:${board.groupFingerprint(scope)}` : board.itemFingerprint(id)) === boardToken
                 && Counters.revisionOf(scope).split('.').slice(1).join('.') === marketToken
-                && (grouped ? `g:${Workshop.publicScopeDigest(scope)}` : String(Workshop.publicRecipeDigest(id))) === workshopToken;
+                && (grouped ? `g:${CraftWorkshopService.publicScopeDigest(scope)}` : String(CraftWorkshopService.publicRecipeDigest(id))) === workshopToken;
         })) return false;
         return proof.sources.every(([recordId, revision]) => {
             const rows = board.records.get(recordId);
@@ -649,7 +629,7 @@ class ColdSimulationCoordinator {
             }
             return true;
         }
-        this.postCollections('snapshot_page', { rows: [{ state, context: this.contextFor(state, this.contextIndex()) }] });
+        this.postCollections('snapshot_page', { rows: [{ state }] });
         return !!this.post('snapshot_page', { rows: [], economyOwnerId: id, reconcile: true });
     }
 
@@ -663,14 +643,11 @@ class ColdSimulationCoordinator {
     }
 
     postCollections(type, collections = {}, msgId = null) {
-        for (const entries of Object.values(collections)) for (const entry of entries || []) {
-            if (!entry?.state?.inventoryInstanceColumns) this.projectionRetention.remember(entry);
-        }
         collections = StateWire.packPayload(type, collections);
         const pages = collectionPagesWithBytes(type, this.workerEpoch, collections, msgId, (value) => {
             this.recordInvalid(`out_${type}_single_item_too_large`);
             return value?.state ? {
-                ...value, state: null, context: {},
+                ...value, state: null,
                 retryAfterMs: Math.max(1000, Number(value.retryAfterMs) || 10000),
                 reason: value.reason || 'state_snapshot_too_large'
             } : null;
@@ -1042,51 +1019,13 @@ class ColdSimulationCoordinator {
         });
     }
 
-    contextIndex() {
-        let profiles = [];
-        try { profiles = SpotProfiles.ensure() || []; } catch (_) { profiles = []; }
-        // Every context of one spot catalog reads the same id table.
-        const spots = SpotIndex.tableFor(profiles);
-        return { spots, profiles };
-    }
-
+    // Loads a service crafter's recipes into main's cache; the first load
+    // publishes its 'recipes' row (CraftWorkshopService), which the worker
+    // plans the crafter from.
     async ensureCraftRecipes(state) {
-        if (invoke('GameServer/Bot/Economy/CraftShopService').isServiceCrafter(state)) {
-            await invoke('GameServer/Bot/Economy/CraftWorkshopService').knownFor(state.characterId);
+        if (CraftShopService.isServiceCrafter(state)) {
+            await CraftWorkshopService.knownFor(state.characterId);
         }
-    }
-
-    contextFor(state, index = this.contextIndex()) {
-        let physical = null;
-        try { physical = SpotService.findCurrentSpot(state.loc); } catch (_) { physical = null; }
-        const declared = index.spots.get(String(state.spotId || '')) || null;
-        // A raid profile is virtual and sits inside an ordinary coordinate
-        // sector. The party resolver needs the declared boss profile (HP,
-        // drops, shared encounter key), not the surrounding leveling field.
-        const spot = (declared?.raidBoss === true ? declared : null)
-            || (physical && index.spots.get(String(physical.id)))
-            || declared
-            || null;
-        // Party, leadership, memory, pressure, goal revision, escrow, the
-        // raid boss, the player's meeting wait and the clan hall are worker
-        // tables (BackgroundPartyState, InteractionMemoryRuntime,
-        // PopulationDirector, GoalState, the board's escrow, RaidEncounterScope,
-        // TradeMeetingService, ClanHall/Runtime), not context.
-        const workshop = this.economyDecisions.workshopFor(state);
-        const context = {
-            // The public workshop is capped at 16 entries, not the recipe
-            // book. Hydrated knowledge travels as one catalogue bitset.
-            ...recipeKnowledgeFor(state),
-            ...(state.stats?.workshop?.entries?.length ? { workshop } : {}),
-            spot
-        };
-        this.projectionRetention.prepare(state, context);
-        return context;
-    }
-
-    snapshotEntry(state, index = this.contextIndex()) {
-        if (Config.developerDiagnostics && Config.economyDiagnostics) EconomyDiagnostics.enabled(state.characterId);
-        return { state, context: this.contextFor(state, index) };
     }
 
     attachSafetyTransport() {
@@ -1149,7 +1088,9 @@ class ColdSimulationCoordinator {
         if (this.fencedBots.has(characterId) || this.commandInflight.has(characterId)) {
             return { ok: false, reason: 'projection_owner_busy' };
         }
-        return this.projectionRetention.get(characterId);
+        // The safety repair projects from main's own cached state.
+        const state = LifeState.cachedState(characterId);
+        return state ? { ok: true, entry: { state } } : { ok: false, reason: 'missing_state' };
     }
 
     snapshotPressure() {
@@ -1171,7 +1112,6 @@ class ColdSimulationCoordinator {
         if (current && (Number(current.simulation?.revision || 0) > Number(state?.simulation?.revision || 0)
             || Number(current.simulation?.revision || 0) === Number(state?.simulation?.revision || 0)
                 && Number(current.updatedAt || 0) > Number(state?.updatedAt || 0))) state = current;
-        this.projectionRetention.invalidate(state);
         if (!state?.characterId || !this.worker || !this.ready) {
             return { ok: false, reason: 'worker_not_ready' };
         }
@@ -1199,7 +1139,7 @@ class ColdSimulationCoordinator {
         return true;
     }
 
-    async sendIncrementalEntries(entries, index, pageSize, priority = null, deadlineAt = Infinity) {
+    async sendIncrementalEntries(entries, pageSize, priority = null, deadlineAt = Infinity) {
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany(entries.map(entry => Number((entry.state || entry).characterId)));
         // Count each row once instead of serializing every growing page prefix.
         // post() checks the counted upper bound of the envelope against the limit.
@@ -1227,9 +1167,7 @@ class ColdSimulationCoordinator {
         for (const entry of entries) {
             if (rowsSent + page.length > 0 && Date.now() >= deadlineAt) break;
             await this.ensureCraftRecipes(entry.state || entry);
-            const source = this.snapshotEntry(entry.state || entry, index);
-            this.projectionRetention.remember(source);
-            const row = StateWire.packEntry(source);
+            const row = StateWire.packEntry({ state: entry.state || entry });
             const rowBytes = Protocol.byteLength([row]) - 2;
             const tooLarge = page.length > 0 && pageBytes + rowBytes + 1 > PAGE_BYTES;
             if (tooLarge || page.length >= pageSize) {
@@ -1249,7 +1187,6 @@ class ColdSimulationCoordinator {
         // cached member ownership and membership. Sending the pre-repair
         // array would immediately seed the worker with the stale party again.
         const states = LifeState.everyState();
-        const index = this.contextIndex();
         const pageSize = this.snapshotQueue.pageSize;
         const baseBytes = Protocol.byteLength(Protocol.envelope('snapshot_page', this.workerEpoch, {
             rows: [], done: false, initial: true
@@ -1270,7 +1207,7 @@ class ColdSimulationCoordinator {
             return true;
         };
 
-        // A page of fresh routes can take most of a second on cold caches;
+        // A page of fresh recipe loads can take most of a second on cold caches;
         // hand the loop back inside a page too, not only between pages.
         let sliceStartedAt = Date.now();
         for (let stateIndex = 0; stateIndex < states.length; stateIndex++) {
@@ -1285,9 +1222,7 @@ class ColdSimulationCoordinator {
             }
             const state = states[stateIndex];
             await this.ensureCraftRecipes(state);
-            const source = this.snapshotEntry(state, index);
-            this.projectionRetention.remember(source);
-            const row = StateWire.packEntry(source);
+            const row = StateWire.packEntry({ state });
             const rowBytes = Protocol.byteLength([row]) - 2;
             const tooLarge = page.length > 0 && pageBytes + rowBytes + 1 > PAGE_BYTES;
             if (tooLarge || page.length >= pageSize) {
@@ -1407,8 +1342,7 @@ class ColdSimulationCoordinator {
             while (this.worker && this.ready) {
                 const entries = this.snapshotQueue.takeCritical(this.snapshotQueue.pageSize);
                 if (!entries.length) break;
-                const index = this.contextIndex();
-                const result = await this.sendIncrementalEntries(entries, index, this.snapshotQueue.pageSize, 'P0');
+                const result = await this.sendIncrementalEntries(entries, this.snapshotQueue.pageSize, 'P0');
                 if (!result.ok) {
                     entries.forEach((entry) => this.snapshotQueue.restoreCritical(entry));
                     break;
@@ -1494,8 +1428,7 @@ class ColdSimulationCoordinator {
         return this.startSnapshotJob('dirty', async () => {
             const startedAt = Date.now();
             try {
-                const index = this.contextIndex();
-                const result = await this.sendIncrementalEntries(plan.entries, index, plan.pageSize, null,
+                const result = await this.sendIncrementalEntries(plan.entries, plan.pageSize, null,
                     startedAt + (lease?.budgetMs || Math.max(1, Number(Config.schedulerSliceMs) || 12)));
                 if (result.ok) plan.entries.slice(0, result.rowsSent).forEach(entry => this.snapshotQueue.complete(entry, true));
                 return result;
@@ -1516,10 +1449,11 @@ class ColdSimulationCoordinator {
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([Number(state.characterId)]);
         await this.ensureCraftRecipes(state);
         this.fencedBots.delete(Number(state.characterId));
-        const entry = this.snapshotEntry(state), advice = this.economyDecisions.advisoryFor(state);
+        const entry = { state }, advice = this.economyDecisions.advisoryFor(state);
         if (advice) {
+            // The handoff card rides on the row; the kernel takes it off.
             const transfer = wireAdvisory(advice);
-            if (transfer) entry.context.wishAdvisory = transfer;
+            if (transfer) entry.wishAdvisory = transfer;
             else EconomyDiagnostics.count('card', 'drop', 'handoff_unproved');
         }
         const payload = StateWire.packPayload('snapshot_page', {
@@ -1530,9 +1464,9 @@ class ColdSimulationCoordinator {
         });
         const worker = this.worker, epoch = this.workerEpoch;
         const frame = Protocol.envelope('snapshot_page', epoch, payload);
-        if (entry.context.wishAdvisory && Protocol.validateEnvelope(frame,
+        if (entry.wishAdvisory && Protocol.validateEnvelope(frame,
             'main', { workerEpoch: this.workerEpoch }).reason === 'message_too_large') {
-            delete entry.context.wishAdvisory;
+            delete entry.wishAdvisory;
             EconomyDiagnostics.count('card', 'drop', 'handoff_oversize');
         }
         const msgId = this.post('snapshot_page', payload, frame.msgId);
@@ -1546,7 +1480,7 @@ class ColdSimulationCoordinator {
             // A cold handoff retires the visible owner's unconsumed route.
             this.economyRoutes.forget(Number(state.characterId));
             const current = LifeState.cachedState(state.characterId);
-            if (entry.context.wishAdvisory && this.worker === worker && this.workerEpoch === epoch
+            if (entry.wishAdvisory && this.worker === worker && this.workerEpoch === epoch
                 && current?.phase === 'cold' && current.simulation?.ownerId === state.simulation?.ownerId)
                 this.economyDecisions.releaseAdvisory(state.characterId, advice);
             return { ok: true, reason: 'accepted', ...payload };
@@ -1629,7 +1563,6 @@ class ColdSimulationCoordinator {
         for (const result of claimed.rejected || []) {
             this.refusals.claimRejected[result.reason] = (this.refusals.claimRejected[result.reason] || 0) + 1;
         }
-        const index = this.contextIndex();
         const rebaseIds = [...new Set((claimed.rejected || [])
             .filter((result) => OWNERSHIP_REBASE_REASONS.has(String(result.reason || '')))
             .map((result) => Number(result.characterId))
@@ -1649,8 +1582,7 @@ class ColdSimulationCoordinator {
             return {
                 ...result,
                 ...(needsRetryDelay ? { retryAfterMs: Math.max(1000, Number(result.retryAfterMs) || 1000) } : {}),
-                state,
-                context: this.contextFor(state, index)
+                state
             };
         });
         this.postCollections('claim_ack', {
@@ -2070,16 +2002,6 @@ class ColdSimulationCoordinator {
             this.tableChannel.flush();
             return;
         }
-        const index = this.contextIndex();
-        for (const result of results) {
-            const state = LifeState.cachedState(result.characterId) || result.nextState;
-            if (state) await this.step('economyPlan', result.characterId, () => this.ensureCraftRecipes(state));
-        }
-        if (this.worker !== worker || this.workerEpoch !== epoch) {
-            this.finishCommitAcknowledgements(results, false);
-            this.tableChannel.flush();
-            return;
-        }
         const acknowledgements = results.flatMap((result) => {
             const inputToken = Protocol.leaseRenewalToken(result.proposal?.token);
             const proposalId = result.proposal?.proposalId;
@@ -2096,8 +2018,7 @@ class ColdSimulationCoordinator {
                 ...(result.detail ? { detail: result.detail } : {}),
                 revision: result.revision,
                 raidStepId: result.proposal?.raidStepId,
-                state,
-                context: state ? this.contextFor(state, index) : {}
+                state
             }];
         });
         // Table changes reach the worker before the commits that made them.
@@ -2118,13 +2039,12 @@ class ColdSimulationCoordinator {
         }
         const released = await ColdSimulationOwner.releaseBatch(tokens, { releaseInvalidated: true }).catch(() => []);
         if (this.worker !== worker || this.workerEpoch !== epoch) return;
-        const index = this.contextIndex();
         const results = released.flatMap((result) => {
             const inputToken = original.get(Number(result.characterId));
             if (!inputToken) return [];
             const state = LifeState.cachedState(result.characterId);
             return [{ ...result, inputToken, releaseRequestId: message.msgId,
-                state, context: state ? this.contextFor(state, index) : {} }];
+                state }];
         });
         this.postCollections('release_ack', { results }, message.msgId);
     }
@@ -2161,7 +2081,7 @@ class ColdSimulationCoordinator {
                         this.refusals.staleCommand += 1;
                         state = await this.reloadStaleCommand(id);
                         results.push({ ...identity, ok: false, reason: 'stale_command', retryAfterMs: 1000,
-                            state, context: this.contextFor(state, this.contextIndex()) });
+                            state });
                         continue;
                     }
                     let result;
@@ -2179,8 +2099,7 @@ class ColdSimulationCoordinator {
                         reason: result?.reason || (result?.ok === false ? 'command_rejected' : 'command_applied'),
                         ...(result?.ok === false ? { retryAfterMs: Math.max(1000,
                             Number(result.retryAfterMs) || (result.reason === 'missing_spot' ? 30000 : 5000)) } : {}),
-                        ...(nextState ? { state: nextState } : {}),
-                        context: nextState ? this.contextFor(nextState, this.contextIndex()) : {}
+                        ...(nextState ? { state: nextState } : {})
                     });
                 } catch (error) {
                     if (!sourceCurrent()) return;
@@ -2518,7 +2437,6 @@ class ColdSimulationCoordinator {
         this.cancelLeaseRenewalRound();
         this.cancelSafety();
         Metrics.clearColdSafetyEpoch(epoch);
-        this.projectionRetention.reset();
         this.economyDecisions.clear();
         this.economyRoutes.clear();
         DiagnosticConfig.developerDiagnostics && (this.counters.workerExits += 1);
@@ -2565,7 +2483,6 @@ class ColdSimulationCoordinator {
         this.cancelSafety();
         for (const held of this.commitAcknowledgements.values()) held.resolve(false);
         this.commitAcknowledgements.clear();
-        this.projectionRetention.reset();
         this.economyDecisions.clear();
         this.economyRoutes.clear();
         if (!this.started) return { stopped: true };

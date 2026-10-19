@@ -1,14 +1,11 @@
 const Config = require('./PopulationConfig');
-const { INTERVAL_MS } = require('./ColdCompetitionMonitor');
+const { INTERVAL_MS, hunterSpot } = require('./ColdCompetitionMonitor');
 const PartyTarget = require('./PartyHuntingTarget');
 const { StableOwnerMap } = require('./StableOwnerSet');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
 const metaKey = Symbol('coldCompetitionCandidate');
 const partyOf = state => state?.party?.partyId || state?.partyId || null;
 const unitOf = state => partyOf(state) || `solo:${state?.characterId}`;
-const baseHunter = (state, context) => state?.phase === 'cold' && ['hunting', 'grouped'].includes(state.activity)
-    && state.vitals?.hp > 0 && !state.stats?.travel && !state.stats?.coldCompetition?.wait
-    && !!context?.spot && state.spotId === context.spot.id;
 function add(map, key, value) {
     if (!map.has(key)) map.set(key, new Set());
     map.get(key).add(value);
@@ -30,11 +27,12 @@ function freeze(value) {
 class ColdCompetitionCandidates {
     // leaderParty(id): the party row a bot leads, or null (the worker's
     // parties table, ColdSimulationKernel.leaderParty); partyChanged follows it.
-    constructor({ records, packets, memory, monitor, deadlines, leaderParty = () => null, sequence = null, fitsFrame = () => true, frameSizing = null }) {
-        if ([records, packets, leaderParty].some(read => typeof read !== 'function') || !memory || !monitor || !deadlines) {
+    // spotOf(state): the spot a bot stands at (SpotService.standingSpot).
+    constructor({ records, packets, memory, monitor, deadlines, leaderParty = () => null, spotOf = () => null, sequence = null, fitsFrame = () => true, frameSizing = null }) {
+        if ([records, packets, leaderParty, spotOf].some(read => typeof read !== 'function') || !memory || !monitor || !deadlines) {
             throw new TypeError('invalid_competition_candidates');
         }
-        Object.assign(this, { records, packets, memory, monitor, deadlines, leaderParty, sequence, fitsFrame, frameSizing });
+        Object.assign(this, { records, packets, memory, monitor, deadlines, leaderParty, spotOf, sequence, fitsFrame, frameSizing });
         this.spots = new Map(); this.parties = new Map(); this.partyHunters = new Map();
         this.memberParties = new Map(); this.relationOwners = new StableOwnerMap(); this.clans = new Map(); this.units = new Map();
         this.pendingSpots = new Map(); this.pendingActors = new Map(); this.policyDeadlines = new Map();
@@ -113,14 +111,14 @@ class ColdCompetitionCandidates {
         if (!record || !packet || record.source !== packet.state) return;
         const old = previousRecord?.[metaKey] || record[metaKey];
         if (previousRecord && previousRecord !== record && !previousRecord[metaKey] && record[metaKey]) return;
-        // Kernel captures old packet BEFORE publication, including same-source
-        // context replacement; old grouping tags are stored only as metadata.
+        // Kernel captures old packet BEFORE publication, including a same-source
+        // record replacement; old grouping tags are stored only as metadata.
         if (previousRecord && previousPacket && previousRecord.source !== previousPacket.state) return;
         const affected = new Set([old?.ledParty, old?.party]);
         const sequence = this.sequence?.(id) ?? old?.sequence ?? ++this.nextSequence;
         this.detach(previousRecord || record, old);
-        const state = packet.state, context = packet.context || {};
-        const meta = { id, sequence, hunter: baseHunter(state, context), spot: state.spotId,
+        const state = packet.state;
+        const meta = { id, sequence, hunter: !!hunterSpot(state, this.spotOf), spot: state.spotId,
             party: partyOf(state), ledParty: this.leaderParty(id)?.partyId ?? null, unit: unitOf(state),
             clan: this.memory.clanSocial?.identity({ id, clanId: Number(state.stats?.clanId || 0) }).clanId
                 ?? Number(state.stats?.clanId || 0), targets: [], deadlineKey: {}, deadlineToken: null };
@@ -217,7 +215,7 @@ class ColdCompetitionCandidates {
             if (!first || record[metaKey].sequence < first[metaKey].sequence) first = record;
         }
         return first ? PartyTarget.competitionNpcId(party, this.packets(Number(party.leaderId))?.state,
-            this.packets(first.id)?.context.spot, id => this.packets(Number(id))?.state) : 0;
+            this.spotOf(this.packets(first.id)?.state), id => this.packets(Number(id))?.state) : 0;
     }
     // One encounter roll per spot and 30 s window, its decision point. The
     // monitor seeds a group's rolls by the window, so every review of the spot

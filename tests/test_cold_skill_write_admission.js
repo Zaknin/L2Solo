@@ -186,7 +186,7 @@ async function producerCapture(kind) {
 async function workerQueue(mode) {
     const id=await seed(),state=Life.snapshot(id),time=Date.now();
     const request={kind:'lifecycle',characterId:id,commandId:`skill:${serial}`,commandCheckpoint:Protocol.commandCheckpoint(state),
-        state,context:{},precomputedResult:{patch:{activity:'resting',vitals:{...state.vitals,hp:90},stats:{restUntil:time+60000}},
+        state,precomputedResult:{patch:{activity:'resting',vitals:{...state.vitals,hp:90},stats:{restUntil:time+60000}},
             events:[],materialize:{exp:0,sp:0,adena:0,items:[]},nextResolveAt:time+60000}};
     const c=new ColdSimulationCoordinator(),sent=[],entered=deferred(),gate=deferred(),queued=deferred(),stopEntered=deferred(),stopGate=deferred();
     c.ready=true;c.workerEpoch=`skill:${serial}`;
@@ -202,7 +202,6 @@ async function workerQueue(mode) {
     // native writer gets an artificial admission/result from this observer.
     c.population={executeWorkerLifecycleCommand(...args){admission=args[2]?.workerAdmission;
         return Population.executeWorkerLifecycleCommand(...args);}};
-    c.contextIndex=()=>({});c.contextFor=()=>({});
     const fetchSkill=Database.fetchSkill,learnBotSkill=Database.learnBotSkill;
     Database.learnBotSkill=function(...args){if(args[0]===id)queued.resolve();return learnBotSkill.apply(this,args);};
     Database.fetchSkill=async function(...args){

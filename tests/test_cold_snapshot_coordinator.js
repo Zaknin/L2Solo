@@ -27,8 +27,6 @@ function setup() {
     coordinator.workerEpoch = 'snapshot-test';
     coordinator.ready = true;
     coordinator.started = true;
-    coordinator.contextIndex = () => ({ spots: new Map(), parties: new Map() });
-    coordinator.snapshotEntry = (state) => ({ state, context: {} });
     coordinator.post = (type, payload) => {
         messages.push({ type, payload });
         return `${type}:${messages.length}`;
@@ -99,7 +97,7 @@ function setup() {
         coordinator.reconcileOrphanedBackgroundParties = async () => {};
         LifeState.everyState = () => [largeState];
         if (mode === 'full') assert.strictEqual((await coordinator.sendFullSnapshot()).ok, true);
-        else if (mode === 'incremental') assert.strictEqual((await coordinator.sendIncrementalEntries([largeState], {}, 32)).ok, true);
+        else if (mode === 'incremental') assert.strictEqual((await coordinator.sendIncrementalEntries([largeState], 32)).ok, true);
         else {
             const field = mode === 'snapshot_page' ? 'rows' : mode === 'claim_ack' ? 'rejected' : 'results';
             const row = { characterId: 1, ok: false, state: largeState,
@@ -175,7 +173,7 @@ function setup() {
         }));
         LifeState.everyState = () => states;
         const send = () => mode === 'full' ? coordinator.sendFullSnapshot()
-            : coordinator.sendIncrementalEntries(states, {}, 32, 'P0');
+            : coordinator.sendIncrementalEntries(states, 32, 'P0');
         const result = await send();
         assert.strictEqual(result.ok, true);
         assert.strictEqual(result.rowsSent, states.length);
@@ -233,7 +231,8 @@ function setup() {
     try {
         Date.now = () => clock;
         for (let id = 201; id <= 203; id++) sliced.coordinator.markDirty({ characterId: id, phase: 'cold' });
-        sliced.coordinator.snapshotEntry = state => { clock += 20; return { state, context: {} }; };
+        // Each row's preparation costs 20 ms of the slice.
+        sliced.coordinator.ensureCraftRecipes = async () => { clock += 20; };
         governor.admit = () => ({ ok: true, lease: { budgetMs: 1 } });
         governor.complete = () => { completed++; };
         const first = await sliced.coordinator.sendSnapshots(false, true);

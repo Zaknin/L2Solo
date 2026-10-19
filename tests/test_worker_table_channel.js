@@ -49,6 +49,35 @@ function wired() {
 }
 
 async function unitChecks() {
+    // A crafter's 'recipes' row (CraftWorkshopService): each load publishes it,
+    // a learning (recipesChanged) keeps it until the next load replaces it, and
+    // a bot that leaves takes it away.
+    {
+        const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
+        const Codec = invoke('GameServer/Bot/Economy/RecipeBookCodec');
+        const Database = invoke('Database');
+        const shared = require('../src/GameServer/Bot/Population/ColdTableChannel').shared;
+        const mirror = new TableMirror(), target = {}, id = 990001;
+        const originalFetch = Database.fetchCharacterRecipes;
+        let learned = [1];
+        Database.fetchCharacterRecipes = async () => learned.map(recipeId => ({ recipeId, type: 'dwarven' }));
+        const book = () => { shared.flush(); return mirror.rows('recipes').get(id)?.recipeBook; };
+        try {
+            shared.attach(target, 'recipes', payload => { mirror.apply(structuredClone(payload.tables)); return true; });
+            await Workshop.knownFor(id);
+            assert.strictEqual(book(), Codec.pack([1]), 'the first load publishes the row');
+            learned = [1, 2];
+            Workshop.recipesChanged(id);
+            assert.strictEqual(book(), Codec.pack([1]), 'a learning keeps the last book until the next load');
+            await Workshop.knownFor(id);
+            assert.strictEqual(book(), Codec.pack([1, 2]), 'the next load republishes the row');
+            Workshop.remove(id);
+            assert.strictEqual(book(), undefined, 'a bot that leaves takes its row away');
+        } finally {
+            shared.detach(target);
+            Database.fetchCharacterRecipes = originalFetch;
+        }
+    }
     // Source readiness precedes transport readiness. Other tables still stream
     // while native warehouse/clan owners finish their startup projections.
     {

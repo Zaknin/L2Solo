@@ -92,7 +92,7 @@ async function main() {
     const held = new Map(scattered.map(s => [s.characterId, { characterId: s.characterId,
         ownerId: 'cold_simulation_owner', leaseId: `assembly-${s.characterId}`, revision: 1, leaseUntil: at + 30000 }]));
     for (const state of scattered) {
-        kernel.upsert({ state, context: {} });
+        kernel.upsert({ state });
         kernel.inFlight.set(state.characterId, { state, grant: held.get(state.characterId),
             partyId: party.partyId, claimRequestId: requestId });
     }
@@ -137,6 +137,8 @@ async function main() {
     };
     try {
         await until(m => m.type === 'ready' && m.payload.phase === 'loaded');
+        // The worker finds the party's spot in its spot catalog.
+        send('catalog_page', { catalog: 'spots', rows: [spot], done: true });
         send('init', { config: { loopIntervalMs: 10 } });
         await until(m => m.type === 'ready' && m.payload.phase === 'running');
         const now = Date.now();
@@ -148,8 +150,7 @@ async function main() {
         // The party row comes from main's parties table, the members from their snapshot rows.
         send('table_page', { tables: [{ name: 'parties', from: null, to: 0, full: true,
             rows: [[workerParty.partyId, workerParty]], removed: [], last: true }] });
-        send('snapshot_page', { done: true, rows: workerMembers.map(state => ({ state,
-            context: state.characterId === 1 ? { spot } : {} })) });
+        send('snapshot_page', { done: true, rows: workerMembers.map(state => ({ state })) });
         const claim = await until(m => m.type === 'claim_request');
         send('claim_ack', { grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,
             ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,

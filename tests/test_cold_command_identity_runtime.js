@@ -16,7 +16,7 @@ const row = id => ({ characterId: id, phase: 'cold', activity: 'shopping', updat
 const checkpoint = state => { const cp = Protocol.safetyCheckpoint(state); delete cp.simulationLeaseUntil; return cp; };
 const command = (state, kind = 'lifecycle') => ({ characterId: state.characterId, kind,
     commandId: `command:${state.characterId}:1`, commandCheckpoint: checkpoint(state), state: clone(state),
-    context: { original: true }, precomputedResult: { patch: {}, events: [], materialize: {}, nextResolveAt: 1000 },
+    precomputedResult: { patch: {}, events: [], materialize: {}, nextResolveAt: 1000 },
     ...(kind === 'market_review' ? { market: { updates: [], reprices: [], withdrawals: [] } } : {}) });
 let currentRows;
 const oldCached = LifeState.cachedState;
@@ -26,12 +26,10 @@ const failures = [];
 async function check(name, work) { try { await work(); console.log(`PASS ${name}`); } catch (error) { failures.push(name); console.error(`FAIL ${name}: ${error.stack}`); } }
 function fixture({ held = false, error = null, kind = 'lifecycle', advance = false } = {}) {
     const coordinator = new ColdSimulationCoordinator(), gate = deferred(), entered = deferred();
-    const sent = [], calls = [], contexts = [];
+    const sent = [], calls = [];
     currentRows = new Map([[1, row(1)], [2, row(2)]]);
     const worker = label => ({ postMessage: message => sent.push({ label, message: clone(message) }) });
     coordinator.worker = worker('A'); coordinator.workerEpoch = 'command:A';
-    coordinator.contextIndex = () => { contexts.push('index'); return {}; };
-    coordinator.contextFor = state => { contexts.push(state.characterId); return { current: state.updatedAt }; };
     let first = true;
     const operation = async (state, request) => {
         calls.push({ state, request });
@@ -47,7 +45,7 @@ function fixture({ held = false, error = null, kind = 'lifecycle', advance = fal
         const worker = coordinator.worker, epoch = coordinator.workerEpoch;
         await coordinator.onMessage(Protocol.envelope('command_request', epoch, { requests }, `message:${++messages}`), worker, epoch);
     };
-    return { coordinator, gate, entered, sent, calls, contexts, submit, kind,
+    return { coordinator, gate, entered, sent, calls, submit, kind,
         replace() { coordinator.worker = worker('B'); coordinator.workerEpoch = 'command:B'; } };
 }
 const acknowledgements = h => h.sent.filter(value => value.message.type === 'command_ack');
@@ -66,7 +64,6 @@ async function run() {
             await h.submit([command(currentRows.get(2), kind)]); h.replace();
             h.gate.resolve({ ok: true, state: currentRows.get(1) }); await h.coordinator.commandTail;
             assert.equal(h.calls.length, 1, 'old queued request cannot execute against replacement source');
-            assert.equal(h.contexts.length, 0, 'retired reply does not project context');
             assert.equal(acknowledgements(h).length, 0); assert.equal(h.coordinator.commandInflight.size, 0);
         });
     }
@@ -104,10 +101,10 @@ async function run() {
         assert.equal(result.commandId, input.commandId); assert.deepEqual(result.commandCheckpoint, input.commandCheckpoint);
         assert.equal(h.coordinator.counters.commandErrors, 1); assert.equal(h.coordinator.commandInflight.size, 0);
     });
-    await check('retired command error has no replacement reply or error/context effects', async () => {
+    await check('retired command error has no replacement reply or error effects', async () => {
         const h = fixture({ held: true }); await h.submit([command(currentRows.get(1))]); await h.entered.promise;
         h.replace(); h.gate.reject(Error('old_operation_error')); await h.coordinator.commandTail;
-        assert.equal(acknowledgements(h).length, 0); assert.equal(h.contexts.length, 0);
+        assert.equal(acknowledgements(h).length, 0);
         assert.equal(h.coordinator.counters.commandErrors, 0); assert.equal(h.coordinator.commandInflight.size, 0);
     });
     await check('malformed sibling is omitted before work while valid original identity proceeds', async () => {

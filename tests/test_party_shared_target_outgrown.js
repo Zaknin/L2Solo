@@ -52,7 +52,7 @@ assert.deepStrictEqual(review(partyFor(sharedTarget), membersFor(12), null).stat
     const held = new Map(members.map(s => [s.characterId, { characterId: s.characterId,
         ownerId: 'cold_simulation_owner', leaseId: `review-${s.characterId}`, revision: 1, leaseUntil: at + 30000 }]));
     for (const state of members) {
-        kernel.upsert({ state, context: {} });
+        kernel.upsert({ state });
         kernel.inFlight.set(state.characterId, { state, grant: held.get(state.characterId),
             partyId: party.partyId, claimRequestId: requestId });
     }

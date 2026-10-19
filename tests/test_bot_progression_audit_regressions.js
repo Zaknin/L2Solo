@@ -149,8 +149,8 @@ async function checkWorkerSafety() {
     const kernel = new ColdSimulationKernel({ now: () => at,
         resolveSolo: () => { throw new Error('party review must not run a solo fight'); },
         resolveParty: () => { throw new Error('an unsafe clan party must be released before combat'); },
-        emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
-    states.forEach((state, i) => kernel.upsert({ state, context: i === 0 ? { spot: { id: 'tower' } } : {} }));
+        spotOf: () => ({ id: 'tower' }), emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
+    states.forEach(state => kernel.upsert({ state }));
     kernel.partyPut(party.partyId, party);
     kernel.tick();
     const claim = messages.shift();

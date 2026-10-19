@@ -2,6 +2,9 @@
 const Profit = require('./CraftProfitPolicy');
 const Commit = require('./EconomyCommit');
 const Diagnostics = require('./EconomyDiagnostics');
+const ShotCraftPolicy = require('./ShotCraftPolicy');
+const { isMainThread } = require('node:worker_threads');
+const TableChannel = require('../Population/ColdTableChannel').shared;
 const recipes = () => invoke('GameServer/Items/C4RecipeItems');
 const life = () => invoke('GameServer/Bot/Population/BotLifeState');
 const byRecipe = new Map();
@@ -59,12 +62,16 @@ const registeredStates = new Map();
 
 function remove(id, { recipes: dropRecipes = true, publish = true } = {}) {
     registeredStates.delete(Number(id));
+    // A bot with a 'recipes' row: a cold crafter, or one whose recipes are loaded.
+    const recipeRowShown = dropRecipes && (crafters.has(Number(id)) || knownRecipes.has(Number(id)));
     const removedRecipes = owners.get(Number(id)) || [];
     for (const row of publicRecipeRows(id)) { togglePublicDigest(row, -1); publicCandidates.remove(`w:${Number(id)}:${row[1]}`); }
     if (publish) for (const recipeId of removedRecipes) invoke('GameServer/Bot/Population/ColdTableChannel').shared
         .changed('board', { key: `w:${Number(id)}:${recipeId}`, removed: true });
     invoke('GameServer/Bot/Economy/ShotMarketIndex').native().remove(id);
     if (dropRecipes) recipesChanged(id);
+    // Not under publish: the board rows publishRows rewrites do not include it.
+    if (recipeRowShown) TableChannel.changed('recipes', { key: Number(id), removed: true });
     for (const recipeId of owners.get(Number(id)) || []) {
         const records = byRecipe.get(recipeId);
         records?.delete(Number(id));
@@ -248,6 +255,7 @@ async function knownFor(id) {
     if (!known) {
         known = (await invoke('Database').fetchCharacterRecipes(id)).map(row => Number(row.recipeId));
         knownRecipes.set(id, known);
+        TableChannel.changed('recipes', () => recipeRow(id));
     }
     return known;
 }
@@ -258,6 +266,21 @@ function bookFor(id) {
     if (!encodedRecipes.has(id)) encodedRecipes.set(id, invoke('GameServer/Bot/Economy/RecipeBookCodec').pack(knownRecipes.get(id)));
     return encodedRecipes.get(id);
 }
+// A bot's recipe knowledge for planning: the packed book and its packed shot
+// recipes; empty until knownFor has loaded the bot's recipes.
+function knowledgeFor(id) {
+    return { knownShotRecipes: ShotCraftPolicy.packKnown(cachedRecipes(id)), recipeBook: bookFor(id) };
+}
+const recipeRow = id => ({ characterId: Number(id), ...knowledgeFor(id) });
+// The 'recipes' table: one row per bot whose recipes main has loaded; the cold
+// worker plans a far service crafter from it. A cache drop (recipesChanged)
+// keeps the row until the next load replaces it, so the worker plans on the
+// last known book meanwhile, not on none. Every learning reaches that load:
+// a cold one sends the bot's snapshot (ColdSimulationCoordinator.ensureCraftRecipes),
+// a hot one its return to cold (acceptColdState); a bot that leaves (remove)
+// takes its row away.
+if (isMainThread) TableChannel.register('recipes', { key: row => row.characterId,
+    allRows: () => [...knownRecipes.keys()].map(recipeRow) });
 async function review(state) {
     init();
     const rules = invoke('GameServer/Bot/Economy/CraftShopService');
@@ -388,4 +411,4 @@ async function publishDemand(state, recipe, productPrice, context) {
     }
     return state;
 }
-module.exports = { init, register, remove, recipesChanged, knownFor, cachedRecipes, bookFor, review, find, publicForRecipe, publicRecipeRows, publicRows, publicRecipeDigest, publicScopeDigest, itemFingerprint: publicRecipeDigest, quote, discount, boardRecords, lookup, craft, inputSources, inputStateFor, crafterCandidates, publishDemand };
+module.exports = { init, register, remove, recipesChanged, knownFor, cachedRecipes, bookFor, knowledgeFor, review, find, publicForRecipe, publicRecipeRows, publicRows, publicRecipeDigest, publicScopeDigest, itemFingerprint: publicRecipeDigest, quote, discount, boardRecords, lookup, craft, inputSources, inputStateFor, crafterCandidates, publishDemand };

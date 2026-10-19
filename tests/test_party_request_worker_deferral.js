@@ -26,7 +26,7 @@ async function seed(age = 0, extra = {}) {
                 itemId: 4108, targetId: 148, requiredTotal: 12, amount: 12, spotId: 'old-source',
                 objectiveKey: 'craft-material:old-source', npcId: 620, attempts: 2, requestedAt: at - age, ...extra } } }, 'deferral_fixture');
     await flush();
-    kernel.upsert({ state, context: {} });
+    kernel.upsert({ state });
     return state;
 }
 async function rowFor(id) { return (await DB.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [id]]))[0]; }
@@ -62,7 +62,7 @@ async function checkDeferred(old, reason) {
 }
 async function main() {
     DB.init(); invoke('GameServer/DataCache').init(); await Life.init();
-    Coordinator.markDirty = (state, options) => { snapshots.push({ state, options }); kernel.upsert({ state, context: {} }); };
+    Coordinator.markDirty = (state, options) => { snapshots.push({ state, options }); kernel.upsert({ state }); };
     const incompatible = await seed(), claimed = await seed();
     const grant = await DB.claimColdSimulationLease({ characterId: claimed.characterId, expectedRevision: claimed.simulation.revision,
         allowLifecycle: true, ownerId: 'cold_simulation_owner', leaseId: 'active-request', timestamp: at, leaseUntil: at + 30000 });

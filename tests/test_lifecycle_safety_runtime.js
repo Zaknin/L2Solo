@@ -159,7 +159,7 @@ async function sendLostStatePage(coordinator, worker, entry) {
         coordinator.watchdogTimer = null;
         assert(coordinator.worker instanceof Worker);
         assert.equal(Metrics.coldSafetySource.epoch, coordinator.workerEpoch, 'epoch begins at actual unique Worker creation');
-        assert.equal(coordinator.projectedEntryFor(characterId).ok, true, 'actual initial producer retained valid healthy context');
+        assert.equal(coordinator.projectedEntryFor(characterId).ok, true, 'the repair projects the healthy owner from the cached state');
         const healthy = Protocol.safetyCheckpoint(Life.cachedState(characterId));
         const healthyReceipt = await coordinator.requestSafety('presence', [healthy], coordinator.safetyCurrent());
         assert.equal(healthyReceipt.ok, true);
@@ -177,9 +177,8 @@ async function sendLostStatePage(coordinator, worker, entry) {
         const lostNative = (await execute.call(Database, ['SELECT * FROM bot_life_state WHERE characterId = ?', [lostId]]))[0];
         const lostState = Life.acceptLifecycleRow(lostNative);
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([lostId]);
-        const prepared = coordinator.snapshotEntry(lostState);
-        assert.equal(await sendLostStatePage(coordinator, coordinator.worker, prepared), true);
-        assert.equal(coordinator.projectedEntryFor(lostId).entry, prepared);
+        assert.equal(await sendLostStatePage(coordinator, coordinator.worker, { state: lostState }), true);
+        assert.equal(coordinator.projectedEntryFor(lostId).entry.state, lostState, 'the repair projects the cached state');
         const lostCheckpoint = Protocol.safetyCheckpoint(lostState);
         assert.equal(coordinator.canRepairSafety(lostCheckpoint), true);
         for (const name of ['fencedBots', 'commandInflight']) {
@@ -202,7 +201,7 @@ async function sendLostStatePage(coordinator, worker, entry) {
         const missing = await coordinator.requestSafety('presence', [lostCheckpoint], coordinator.safetyCurrent());
         assert.equal(missing.ok, true);
         assert.equal(missing.results[0].normal.status, 'uncovered');
-        assert.equal(missing.results[0].normal.reason, 'missing_state', 'actual lost delivery, not a context stub');
+        assert.equal(missing.results[0].normal.reason, 'missing_state', 'actual lost delivery, not a stub');
 
         Population.lifecycleSafetySweep = createLifecycleSafetyRuntime(Population, coordinator);
         assert.equal(await Population.startLifecycleSafetySweep(), true);
@@ -265,12 +264,12 @@ async function sendLostStatePage(coordinator, worker, entry) {
         assert.equal(coordinator.worker, replacement, 'late completion of a repeated stop cannot retire replacement');
         assert.equal(Metrics.coldSafetySource.epoch, replacementEpoch);
         assert.notEqual(replacementEpoch, oldEpoch);
-        const beforeLate = coordinator.projectedEntryFor(characterId).entry;
+        const beforeLate = coordinator.projectedEntryFor(characterId).entry.state;
         oldWorker.emit('message', Protocol.envelope('heartbeat', replacementEpoch,
             { safety: { stateRepairs: 999, coverageRepairs: 999, orphanRepairs: 999 } }));
         oldWorker.emit('exit', 0);
         assert.equal(coordinator.worker, replacement, 'late old exit cannot retire replacement');
-        assert.equal(coordinator.projectedEntryFor(characterId).entry, beforeLate, 'late old exit cannot clear new projection');
+        assert.equal(coordinator.projectedEntryFor(characterId).entry.state, beforeLate, 'late old exit cannot clear new projection');
         assert.equal(Metrics.coldSafetySource.epoch, replacementEpoch);
         assert.equal(Metrics.counters.missedEventsRecovered, recovered, 'wrong old Worker cannot report replacement totals');
         Population.stopLifecycleSafetySweep();
@@ -310,8 +309,7 @@ async function sendLostStatePage(coordinator, worker, entry) {
         const awaitNative = (await execute.call(Database, ['SELECT * FROM bot_life_state WHERE characterId = ?', [awaitId]]))[0];
         const awaitState = Life.acceptLifecycleRow(awaitNative);
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([awaitId]);
-        const awaitEntry = coordinator.snapshotEntry(awaitState);
-        await sendLostStatePage(coordinator, replacement, awaitEntry);
+        await sendLostStatePage(coordinator, replacement, { state: awaitState });
         let readEntered = false, releaseRead;
         const readGate = new Promise(resolve => { releaseRead = resolve; });
         let heldReads = 0;

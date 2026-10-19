@@ -162,7 +162,7 @@ function bot(characterId, extra = {}) {
         const onTheWay = bot(103, { activity: 'traveling', stats: { ...bot(103).stats,
             travel: { spotId: room.id, reason: 'level_replan', to: { ...room.center }, arrivalAt: Date.now() + 600000 } } });
         const rows = [standing(101), standing(102), onTheWay, bot(104), bot(110), bot(111)];
-        send('snapshot_page', { rows: rows.map(state => ({ state, context: { buyOrderEscrow: 0 } })), ack: true }, 'state');
+        send('snapshot_page', { rows: rows.map(state => ({ state })), ack: true }, 'state');
         await wait(message => message.type === 'ready' && message.msgId === 'state');
 
         // Two bots stand on a spot of two places: the arriving bot finds it full.
@@ -229,9 +229,7 @@ function bot(characterId, extra = {}) {
             worker: { postMessage: message => {
                 if (message.type === 'snapshot_page') pages.push(message.payload);
                 worker.postMessage(message);
-            } },
-            contextIndex: () => ({ spots: new Map(), parties: new Map() }),
-            snapshotEntry: state => ({ state, context: { buyOrderEscrow: 0 } }) });
+            } } });
         const near = (characterId, spot) => LifeState.acceptClanCraftState({ characterId, characterName: `Near${characterId}`,
             phase: 'hot', activity: 'hunting', level: 20, spotId: spot.id, currentRegion: spot.name,
             locX: spot.center.locX, locY: spot.center.locY, locZ: spot.center.locZ, statsJson: '{}', updatedAt: Date.now() });

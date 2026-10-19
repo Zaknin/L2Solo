@@ -820,5 +820,5 @@ class ColdEconomyDecisions {
     }
 }
 
-module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateEcho, echoHolds, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, rememberPublished, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, cardWithShot, kindCode, kindFor, compact, workshopValues,
+module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateEcho, echoHolds, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, rememberPublished, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, current, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, cardWithShot, kindCode, kindFor, compact, workshopValues,
     unknownWorkshop, MAX_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };

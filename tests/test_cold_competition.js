@@ -7,18 +7,22 @@ const at = 1800000000000;
 const memory = new Memory();
 const spot = { id: 'test', npcEntries: [{ selfId: 10, count: 1 }] };
 const entries = Array.from({ length: 20 }, (_, i) => ({ state: { characterId: i + 1, name: `Bot${i + 1}`, phase: 'cold',
-    activity: 'hunting', level: 40, spotId: 'test', vitals: { hp: 100 }, stats: {} }, context: { spot } }));
+    activity: 'hunting', level: 40, spotId: 'test', vitals: { hp: 100 }, stats: {} }, tables: { spot } }));
 entries.forEach(e => memory.accept(P.empty(e.state.characterId)));
-// The worker's parties table as a fixture states it: the row a bot leads is
-// the party its own entry carries when it is that party's leader.
-const leaderParties = input => new Map(input.filter(e => e.context?.party
-    && Number(e.context.party.leaderId) === Number(e.state.characterId)).map(e => [Number(e.state.characterId), e.context.party]));
+// The worker's tables as a fixture states them on each entry: the spot a bot
+// stands at, and the parties row a bot leads is the party its own entry
+// carries when it is that party's leader.
+const leaderParties = input => new Map(input.filter(e => e.tables?.party
+    && Number(e.tables.party.leaderId) === Number(e.state.characterId)).map(e => [Number(e.state.characterId), e.tables.party]));
 const make = (capacity = 2, options = {}) => {
-    let led = new Map();
+    let led = new Map(), spots = new Map();
     const monitor = new ColdCompetitionMonitor({ capacityForSpot: () => capacity, personaFor: () => ({ traits: {} }), ...options,
-        leaderParty: id => led.get(Number(id)) || null });
+        leaderParty: id => led.get(Number(id)) || null, spotOf: state => spots.get(state.characterId) || null });
     const sample = monitor.sample.bind(monitor);
-    monitor.sample = (input, ...rest) => { led = leaderParties(input); return sample(input, ...rest); };
+    monitor.sample = (input, ...rest) => {
+        led = leaderParties(input); spots = new Map(input.map(e => [e.state.characterId, e.tables?.spot]));
+        return sample(input, ...rest);
+    };
     return monitor;
 };
 const monitor = make(), pristine = JSON.stringify(entries);
@@ -36,7 +40,7 @@ const crowdedEntries = Array.from({ length: 8 }, (_, ground) => entries.map((e, 
     const id = 100 + ground * 20 + index;
     memory.accept(P.empty(id));
     const crowdedSpot = { ...spot, id: `crowded-${ground}` };
-    return { state: { ...e.state, characterId: id, spotId: crowdedSpot.id }, context: { spot: crowdedSpot } };
+    return { state: { ...e.state, characterId: id, spotId: crowdedSpot.id }, tables: { spot: crowdedSpot } };
 })).flat();
 const crowded = make();
 let preservedLargeBatch = false;
@@ -75,13 +79,13 @@ const inactive = make();
 inactive.sample(entries.map(e => ({ ...e, state: { ...e.state, activity: 'resting' } })), memory, at);
 assert.strictEqual(inactive.snapshot().activeHunters, 0);
 const teammates = entries.slice(0, 5).map(e => ({ ...e, state: { ...e.state, party: { partyId: 'one-party' }, activity: 'grouped' },
-    context: { ...e.context, party: { partyId: 'one-party', status: 'active', spotId: 'test', leaderId: 1,
+    tables: { ...e.tables, party: { partyId: 'one-party', status: 'active', spotId: 'test', leaderId: 1,
         memberIds: entries.slice(0, 5).map(e => e.state.characterId), stats: { objective: { npcId: 10 } } } } }));
 const party = make(); party.sample(teammates, memory, at);
 assert.strictEqual(party.snapshot().pressuredGroups, 0, 'teammates are a single competitor');
 const mixed = make();
 const mixedEntries = [entries[0], ...teammates.slice(1, 3).map(e => ({ ...e,
-    context: { ...e.context, party: { ...e.context.party, memberIds: [2, 3], leaderId: 2, updatedAt: at, revision: 7 } } }))];
+    tables: { ...e.tables, party: { ...e.tables.party, memberIds: [2, 3], leaderId: 2, updatedAt: at, revision: 7 } } }))];
 mixed.sample(mixedEntries, memory, at);
 for (let i = 1; i <= 480; i++) mixed.sample(mixedEntries, memory, at + i * INTERVAL_MS);
 assert(mixed.snapshot().recent.length > 0);
@@ -100,8 +104,8 @@ for (const e of mixed.snapshot().recent) {
 assert.strictEqual(selectedMembers.size, 2, 'actual party members can take turns as principal');
 const recoveryEntries = JSON.parse(JSON.stringify(mixedEntries));
 recoveryEntries[2].state.activity = 'resting';
-recoveryEntries[2].context.party.revision = 6;
-recoveryEntries[2].context.party.memberIds = [2];
+recoveryEntries[2].tables.party.revision = 6;
+recoveryEntries[2].tables.party.memberIds = [2];
 const recovery = make(1);
 for (let i = 0; i <= 60; i++) recovery.sample(recoveryEntries, memory, at + i * INTERVAL_MS);
 assert(recovery.snapshot().evaluated > 0);
@@ -148,8 +152,8 @@ assert(recurring.snapshot().evaluated > 1 && recurring.snapshot().evaluated <= 5
 for (const kind of ['solo', 'party', 'member']) {
     const until = at + 30 * 60000;
     const cooling = JSON.parse(JSON.stringify(kind === 'solo' ? entries.slice(0, 2) : mixedEntries));
-    if (kind === 'party') cooling.filter(e => e.context.party).forEach(e => {
-        e.context.party.stats.coldCompetition = { conflictUntil: until };
+    if (kind === 'party') cooling.filter(e => e.tables.party).forEach(e => {
+        e.tables.party.stats.coldCompetition = { conflictUntil: until };
     });
     else cooling.at(-1).state.stats.coldCompetition = { conflictUntil: until };
     const guarded = make(0.5,
@@ -187,7 +191,7 @@ console.log('Cold competition pressure, cooldowns, independent parties, cadence 
 // A regular party without an explicit objective hunts its leader's active target.
 const ordinaryEntries = mixedEntries.map(e => ({ ...e,
     state: { ...e.state, stats: { equipmentPlan: { status: 'active', next: { npcId: e.state.characterId === 3 ? 11 : 10 } } } },
-    context: e.context.party ? { ...e.context, party: { ...e.context.party, stats: {} } } : e.context
+    tables: e.tables.party ? { ...e.tables, party: { ...e.tables.party, stats: {} } } : e.tables
 }));
 const ordinary = make();
 for (let i = 0; i < 60; i++) ordinary.sample(ordinaryEntries.slice().reverse(), memory, at + i * INTERVAL_MS);

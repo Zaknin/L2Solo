@@ -37,7 +37,7 @@ function stub(object, key, value) { const previous = object[key]; restores.push(
         stub(invoke('GameServer/Bot/Population/PopulationConfig'), 'developerDiagnostics', true);
         const coordinator = new ColdSimulationCoordinator();
         coordinator.worker = { postMessage: message => messages.push(message) }; coordinator.workerEpoch = 'plan:test';
-        coordinator.tableChannel.flush = () => {}; coordinator.contextIndex = () => ({}); coordinator.contextFor = () => ({});
+        coordinator.tableChannel.flush = () => {};
         coordinator.reviewCommittedEconomy = async value => value;
         stub(invoke('GameServer/Bot/Goals/GoalService'), 'review', async () => null);
         stub(Life, 'enqueueEquipmentGoalAdvanceForState', () => {});

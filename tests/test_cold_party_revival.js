@@ -52,9 +52,9 @@ async function run() {
     const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
     const messages = [];
     const kernel = new ColdSimulationKernel({ now: () => at, resolveSolo: () => { throw Error('party must remain together'); }, resolveParty: input => Party.resolve(input),
-        emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
+        spotOf: () => ({ id: 'test' }), emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
     const roster = states(), expired = { ...party, stats: { ...party.stats, sessionExpiresAt: at - 1 } };
-    roster.forEach(s => kernel.upsert({ state: s, context: s.characterId === 2 ? { spot: { id: 'test' } } : {} }));
+    roster.forEach(s => kernel.upsert({ state: s }));
     kernel.partyPut(expired.partyId, expired);
     kernel.tick();
     const claim = messages.find(m => m.type === 'claim_request'); assert(claim);

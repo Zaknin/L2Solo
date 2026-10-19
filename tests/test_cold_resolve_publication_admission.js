@@ -51,7 +51,7 @@ async function run(mode) {
     const id = await seed(), state = Life.snapshot(id), originalCache = Life.cachedState(id), time = Date.now();
     const itemId = facts(id).items.find(row => row.characterId === id && row.selfId === 1869).id;
     const request = { kind: 'lifecycle', characterId: id, commandId: `publication:${serial}`,
-        commandCheckpoint: Protocol.commandCheckpoint(state), state, context: {},
+        commandCheckpoint: Protocol.commandCheckpoint(state), state,
         precomputedResult: {
             patch: { activity: 'resting', vitals: { ...state.vitals, hp: 90 }, stats: { restUntil: time + 60000 } },
             events: [], materialize: { exp: 13, sp: 0, adena: 0,
@@ -67,7 +67,6 @@ async function run(mode) {
         admission = args[2]?.workerAdmission;
         return Population.executeWorkerLifecycleCommand(...args);
     } };
-    c.contextIndex = () => ({}); c.contextFor = () => ({});
     const unsubscribe = Life.subscribeChanges((snapshot, reason) => {
         if (snapshot.characterId === id && reason === 'resolve') publications.push(snapshot);
     });

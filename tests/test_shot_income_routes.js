@@ -35,7 +35,7 @@ const Demand = require('../src/GameServer/Bot/Economy/ShotTradeDemand');
         ];
         for (const row of records) board.put(row);
         Afk.boardIndex = () => board;
-        const result = await probe(state, { recipeEarning: true, context: { recipeBook: Codec.pack([]) },
+        const result = await probe(state, { recipeEarning: true, recipes: { recipeBook: Codec.pack([]) },
             boardRows: records.map(row => [row.id, rowOf(row)]) });
         const selected = Policy.unpackStep(Policy.packStep(result.selected));
         assert.equal(selected?.recipeTarget, recipeId, `worker selects the offered grade recipe ${recipeId}`);
@@ -50,7 +50,7 @@ const Demand = require('../src/GameServer/Bot/Economy/ShotTradeDemand');
                     selfId: Recipes.resolveByRecipeId(id).productId, count: 100000, price: 10000, enchant: 0 }] }));
             const investing = { ...state, level: 52, stats: { ...state.stats,
                 shotRecipeDemand: { itemId: recipe.recipeItemId, at: Date.now(), amount: 1, maxSpend: 1000 } } };
-            const wishes = await probe(investing, { nativeRoutes: true, context: { recipeBook: Codec.pack([]) },
+            const wishes = await probe(investing, { nativeRoutes: true, recipes: { recipeBook: Codec.pack([]) },
                 boardRows: [...records, ...competitors].map(row => [row.id, rowOf(row)]) });
             assert(wishes.queue.some(row => row.key === `resale:${recipe.productId}`), 'recipe investment has a native earning root');
             assert(wishes.tradeIntents.some(row => row.itemId === recipe.recipeItemId && row.worth >= 1), 'a meeting can certify the recipe purchase through the shared wish graph');
@@ -94,7 +94,7 @@ const Demand = require('../src/GameServer/Bot/Economy/ShotTradeDemand');
             assert.equal(town.reason, 'supported_item_forecast');
         }
         const result = await probe(state, { recipeEarning: true, timestamp: now,
-            context: { recipeBook: Codec.pack([]) }, tablePages: [{ tables: [
+            recipes: { recipeBook: Codec.pack([]) }, tablePages: [{ tables: [
                 { name: 'board', from: null, to: 0, full: true, rows: [[scroll.id, rowOf(scroll)]], removed: [], last: true },
                 { name: 'market', from: null, to: 0, full: true, rows: rows.map(row => [row[0], row]), removed: [], last: true }
             ] }] });
@@ -117,7 +117,7 @@ const Demand = require('../src/GameServer/Bot/Economy/ShotTradeDemand');
                     { selfId: row.selfId, amount: row.amount * 64, stackable: true }])),
                 168: { selfId: 168, amount: 1, equipped: true, slot: 7, stackable: false } } };
             const refreshed = await probe(producer, { recipeEarning: true, refreshEconomy: true, timestamp: now,
-                context: { recipeBook: Codec.pack([20]), knownShotRecipes: [20] }, tablePages: [{ tables: [
+                recipes: { recipeBook: Codec.pack([20]), knownShotRecipes: [20] }, tablePages: [{ tables: [
                     { name: 'board', from: null, to: 0, full: true, rows: [[scroll.id, rowOf(scroll)]], removed: [], last: true },
                     { name: 'market', from: null, to: 0, full: true, rows: rows.map(row => [row[0], row]), removed: [], last: true }
                 ] }] });

@@ -171,7 +171,7 @@ function deterministicRandom(state = {}) {
     };
 }
 
-// The facts the kernel reads from its worker tables, not from a context: the
+// The facts the kernel reads from its worker tables: the
 // party a bot leads ('parties'), that party's member states (the kernel's
 // own records), the adena its buy orders hold (the board), whether its clan
 // hall needs a visit ('clan_halls') and whether the player waits for it at a
@@ -486,7 +486,8 @@ class RetainedStateMap extends Map {
         for (const [id, packet] of this.entries()) Reflect.apply(callback, thisArg, [packet, id, this]);
     }
 
-    set(id, entry) {
+    // incomingCard: the card a snapshot row carried (undefined: none came).
+    set(id, entry, incomingCard = undefined) {
         const current = this.get(id);
         this.shotIndex?.update(entry.state);
         try { this.sources.publish(id, entry); }
@@ -503,24 +504,21 @@ class RetainedStateMap extends Map {
             }
             throw error;
         }
-        // Worker calculation advice belongs to this existing native owner.
-        // Publication replaces transport context, but is not a new decision.
-        // Decoded advice stays off enumerable context DTOs; only its bounded
-        // restart prefix lives in stats. Readers prove every dependency before
-        // reuse, and retirement releases the owner.
-        const published = this.get(id), publishedContext = published?.context;
-        const supplied = Object.hasOwn(entry.context || {}, 'wishAdvisory');
-        const previousAdvice = current?.context?.wishAdvisory;
-        const incomingAdvice = supplied ? ColdEconomyDecision.receiveAdvisory(entry.context.wishAdvisory)
-            : !current && this.#skillDtos ? ColdEconomyDecision.restoreAdvisory(published.state, this.now()) : null;
-        const wishAdvisory = ColdEconomyDecision.advisoryPublicationHolds(published.state, incomingAdvice, previousAdvice)
-            ? incomingAdvice : ColdEconomyDecision.advisoryPublicationHolds(published.state, previousAdvice) ? previousAdvice : null;
-        if (this.#skillDtos && (supplied || wishAdvisory) && publishedContext
-            && Object.isExtensible(publishedContext)) {
-            Reflect.defineProperty(publishedContext, 'wishAdvisory', {
-                value: published.state?.phase === 'cold' ? wishAdvisory : null,
-                writable: true, configurable: true, enumerable: false
-            });
+        // Worker calculation advice belongs to this existing native owner, as
+        // a field of its record (the record never leaves this thread). A new
+        // record is not a new decision: the card it carried over is checked
+        // against the new state. Only its bounded restart prefix lives in
+        // stats. Readers prove every dependency before reuse, and retirement
+        // releases the owner.
+        const record = this.get(id);
+        const supplied = incomingCard !== undefined;
+        const previousAdvice = current?.wishAdvisory;
+        const incomingAdvice = supplied ? ColdEconomyDecision.receiveAdvisory(incomingCard)
+            : !current && this.#skillDtos ? ColdEconomyDecision.restoreAdvisory(record.state, this.now()) : null;
+        const wishAdvisory = ColdEconomyDecision.advisoryPublicationHolds(record.state, incomingAdvice, previousAdvice)
+            ? incomingAdvice : ColdEconomyDecision.advisoryPublicationHolds(record.state, previousAdvice) ? previousAdvice : null;
+        if (this.#skillDtos && record && (supplied || wishAdvisory || record.wishAdvisory)) {
+            record.wishAdvisory = record.state?.phase === 'cold' ? wishAdvisory : null;
         }
         if (this.#skillDtos) {
             let staged;
@@ -625,6 +623,9 @@ class ColdSimulationKernel {
         this.hallNeedOf = typeof options.hallNeeded === 'function' ? options.hallNeeded : () => false;
         this.waitingOf = typeof options.playerWaiting === 'function' ? options.playerWaiting : () => false;
         this.raidRowOf = typeof options.raidRow === 'function' ? options.raidRow : () => null;
+        // The spot a bot stands at (SpotService.standingSpot over the worker's
+        // spot catalog), computed when a step reads it.
+        this.spotOf = typeof options.spotOf === 'function' ? options.spotOf : () => null;
         this.interactionMemory.playingHours = id => this.states.get(id)?.state?.stats?.playedHours;
         this.interactionMemory.clanSocial = new (require('../../Clan/ClanSocialView'))();
         this.versions = new Map();
@@ -841,14 +842,16 @@ class ColdSimulationKernel {
         // not new consent. Changed bags/timing/ownership still invalidate it.
         if (this.commandStartedAt.get(characterId)?.kind === 'meeting'
             && current && isDeepStrictEqual(current.state, state)) state = current.state;
+        // The card a hot-to-far handoff carried: off the row before the store,
+        // handed to the record's write (RetainedStateMap.set).
+        const card = entry !== state && Object.hasOwn(entry, 'wishAdvisory') ? entry.wishAdvisory : undefined;
+        if (card !== undefined) delete entry.wishAdvisory;
         const incomingRevision = Math.max(0, Number(state.simulation?.revision || 0));
         const currentRevision = Math.max(0, Number(current?.state?.simulation?.revision || 0));
         if (current && incomingRevision < currentRevision) {
             // Periodic catalog pages are prepared on main while the worker can
             // still resolve and receive newer commit ACKs. Preserve monotonic
-            // ownership state when an older page arrives out of order, while
-            // still accepting refreshed routing/party context.
-            if (entry.context) this.states.set(characterId, { ...current, context: entry.context });
+            // ownership state when an older page arrives out of order.
             this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
             this.refreshCommandSource(characterId);
             this.buyerStateChanged(characterId);
@@ -856,7 +859,6 @@ class ColdSimulationKernel {
             this.refreshPartyMeetingLeader(characterId, current);
             return false;
         }
-        const nextContext = entry.context || {};
         // The incoming state's due time and kind, read once by the same-revision
         // compare and handed to ensureScheduled below for this state only (the
         // kind also reads the clock, so it is never kept past this call).
@@ -873,14 +875,10 @@ class ColdSimulationKernel {
             }
         }
         if (unchanged) {
-            // A full catalog refresh normally changes only context. Keep the
+            // A full catalog refresh normally resends the same state. Keep the
             // existing heap version so ten-second refreshes do not accumulate
             // one invalid future node per bot until its next due time.
-            this.states.set(characterId, {
-                ...current,
-                state,
-                context: nextContext
-            });
+            this.states.set(characterId, { ...current, state }, card);
             this.occupancy.update(state);
             this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
             DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
@@ -892,11 +890,13 @@ class ColdSimulationKernel {
         }
         const version = Number(this.versions.get(characterId) || 0) + 1;
         this.versions.set(characterId, version);
-        // The bot's one record; its kept route (BotRoute.trip) survives a new
-        // state: only its step's drops clear it. The material memo is the
-        // background thread's own (partyRequestForPlan).
-        this.states.set(characterId, { state, context: nextContext, version, route: current?.route || null,
-            ...(current?.materialMemo ? { materialMemo: current.materialMemo } : {}) });
+        // The bot's one record: { state, version, route, materialMemo,
+        // economyPending, economyPlanHash, wishAdvisory, published }. Every
+        // field but the state and version is this thread's own and survives a
+        // new state: the kept route (BotRoute.trip) until its step's drops,
+        // the material memo (partyRequestForPlan), the economy plan sent and
+        // its hash, the card it holds and the decision it published.
+        this.states.set(characterId, { route: null, ...current, state, version }, card);
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
         DiagnosticConfig.developerDiagnostics && (this.stats.snapshots += 1);
@@ -972,7 +972,7 @@ class ColdSimulationKernel {
         return {
             skillDtoOwners: skillDtos.owners, skillDtoRows: skillDtos.unique,
             skillDtoAcquisitions: skillDtos.acquiredSlots, skillDtoSharingFailures: skillDtos.sharingFailures,
-            states: this.states.size, contexts: this.states.size,
+            states: this.states.size,
             locationStates: this.states.locationIndex.sourceSize('state'),
             occupancy: this.occupancy.size().owners,
             scheduleTokens: this.scheduleTokens.size, ownerHeapNodes: this.heap.size - this.alarms.size,
@@ -1228,8 +1228,7 @@ class ColdSimulationKernel {
                     characterId: id,
                     expectedRevision: Math.max(0, Number(current.state.simulation?.revision || 0)),
                     purpose: { kind: 'resolver' },
-                    state: current.state,
-                    context: current.context
+                    state: current.state
                 });
             } else if (kind === 'party') {
                 // The party row (the 'parties' table) without its two
@@ -1314,7 +1313,7 @@ class ColdSimulationKernel {
                     raidOwner,
                     party,
                     members: partyMembers,
-                    spot: this.raidSpot(current.context.spot),
+                    spot: this.raidSpot(this.spotOf(current.state)),
                     pressure: pressureFor(current.state, this.pressureRow),
                     targetNpcId: Number(PartyHuntingTarget.npcId(party, current.state,
                         memberId => this.states.get(Number(memberId))?.state) || 0),
@@ -1422,7 +1421,7 @@ class ColdSimulationKernel {
         const checkpoint = Protocol.commandCheckpoint(current.state);
         if (!checkpoint) return null;
         const attempt = { startedAt: this.now(), commandId: `${kind}:${id}:${this.nextCommandRequest++}`,
-            kind, checkpoint, context: current.context, version: current.version, sent: false };
+            kind, checkpoint, version: current.version, sent: false };
         if (kind === 'lifecycle' && this.buyerWakeups.delete(id)) attempt.marketWakeup = true;
         this.commandStartedAt.set(id, attempt);
         this.commanding.add(id);
@@ -1480,21 +1479,18 @@ class ColdSimulationKernel {
                 : 60000;
             const hallVisit = !!current.state.stats?.clanHallVisit || this.hallNeeded(current.state);
             const lifecyclePlan = !hallVisit && this.planLifecycle
-                ? await this.planLifecycle({
-                    state: current.state,
-                    context: current.context,
-                    timestamp
-                })
+                ? await this.planLifecycle({ state: current.state, timestamp })
                 : null;
             if (!this.currentCommand(id, attempt)) return;
             const resolveState = lifecyclePlan?.plannedState || current.state;
+            const spot = this.spotOf(current.state);
             const result = hallVisit
                 ? { patch: {}, events: [], materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: timestamp + 30000 }
                 : await this.resolveSolo({
                 assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
                 state: resolveState,
-                spot: current.context.spot || null,
-                spotHunters: this.spotHunters(current.context.spot),
+                spot,
+                spotHunters: this.spotHunters(spot),
                 pressure: pressureFor(current.state, this.pressureRow),
                 targetNpcId: Number(lifecyclePlan?.targetNpcId ||
                     (lifecyclePlan?.activityPick?.activity === 'hunting' ? lifecyclePlan.activityPick.npcId : 0) || 0),
@@ -1512,11 +1508,13 @@ class ColdSimulationKernel {
                     commandId: attempt.commandId,
                     commandCheckpoint: attempt.checkpoint,
                     state: current.state,
-                    context: current.context,
                     precomputedPlan: postedPlan(lifecyclePlan),
                     precomputedResult: result,
-                    // The trip the plan started (commandSpot on main reads it).
-                    route: lifecyclePlan?.route?.needed ? { needed: true, spotId: lifecyclePlan.route.spotId } : null,
+                    // The trip the plan started, else the ground this step
+                    // fought on (commandSpot on main reads the spot id).
+                    route: lifecyclePlan?.route?.needed
+                        ? { needed: true, spotId: lifecyclePlan.route.spotId }
+                        : { needed: false, spotId: spot?.id ?? null },
                     computedAt: timestamp,
                     ...(attempt.marketWakeup ? { marketWakeup: true } : {}),
                     ...(hallVisit ? { hallVisit: true } : {})
@@ -1630,7 +1628,7 @@ class ColdSimulationKernel {
                 if (run) run.requestId = requestId;
             }
         }
-        this.emit('claim_request', { candidates: candidates.map(({ state, context, ...candidate }) => candidate) }, requestId);
+        this.emit('claim_request', { candidates: candidates.map(({ state, ...candidate }) => candidate) }, requestId);
     }
 
     onClaimAck(payload = {}, requestId) {
@@ -1672,7 +1670,7 @@ class ColdSimulationKernel {
             }
             const entry = this.states.get(id);
             if (!entry) return;
-            this.inFlight.set(id, { grant, state: entry.state, context: entry.context, startedAt: this.now(), claimRequestId: requestId });
+            this.inFlight.set(id, { grant, state: entry.state, startedAt: this.now(), claimRequestId: requestId });
             DiagnosticConfig.developerDiagnostics && (this.stats.claimed += 1);
             const source = this.captureResolverSource(id);
             this.resolveChain = this.resolveChain.then(() => this.resolveGrant(id, source));
@@ -1699,7 +1697,7 @@ class ColdSimulationKernel {
             run.purpose.memberIds.forEach((id) => {
                 const state = run.members.find((member) => Number(member.characterId) === Number(id));
                 this.inFlight.set(Number(id), {
-                    grant: run.grants.get(Number(id)), state, context: {}, startedAt: this.now(), partyId, claimRequestId: requestId
+                    grant: run.grants.get(Number(id)), state, startedAt: this.now(), partyId, claimRequestId: requestId
                 });
             });
             DiagnosticConfig.developerDiagnostics && (this.stats.claimed += run.purpose.memberIds.length);
@@ -2232,11 +2230,11 @@ class ColdSimulationKernel {
                 ? Math.max(1000, timestamp - Number(active.state.timing.lastResolvedAt))
                 : 60000;
             const lifecyclePlan = this.planLifecycle
-                ? await this.planLifecycle({ state: active.state, context: active.context, timestamp })
+                ? await this.planLifecycle({ state: active.state, timestamp })
                 : null;
             if (!this.resolverSourceCurrent(source)) return;
             const resolveState = lifecyclePlan?.plannedState || active.state;
-            const spot = resolveState.activity === 'traveling' ? null : lifecyclePlan?.spot || active.context.spot || null;
+            const spot = resolveState.activity === 'traveling' ? null : lifecyclePlan?.spot || this.spotOf(active.state);
             const result = await this.resolveSolo({
                 assessRelationship: this.interactionMemory.assess.bind(this.interactionMemory),
                 state: resolveState,
@@ -2481,7 +2479,7 @@ class ColdSimulationKernel {
             if (active.pendingRaidStepId) require('./ColdRaidEncounter').acknowledge(active.pendingRaidStepId, id, result.ok);
             this.inFlight.delete(id);
             if (result.ok && result.state) {
-                this.upsert({ state: result.state, context: result.context || this.states.get(id)?.context || {} });
+                this.upsert({ state: result.state });
             } else {
                 this.partyRequirementProgress.delete(String(active?.state?.party?.partyId || ''));
                 if (DiagnosticConfig.developerDiagnostics && Protocol.staleRefusal(result)) this.stats.stale += 1;
@@ -2493,8 +2491,7 @@ class ColdSimulationKernel {
                             ...(result.state.timing || {}),
                             nextResolveAt: Math.max(this.now() + 1000, Number(result.state.timing?.nextResolveAt || 0))
                         }
-                    },
-                    context: result.context || {}
+                    }
                 });
                 refused.push(id);
             }
@@ -2557,10 +2554,7 @@ class ColdSimulationKernel {
                 && Number(output.simulation?.leaseUntil || 0) < Number(current.state.simulation?.leaseUntil || 0)) {
                 output = { ...output, simulation: { ...output.simulation, leaseUntil: current.state.simulation.leaseUntil } };
             }
-            const context = current.context === attempt.context
-                && Protocol.sameCommandCheckpoint(current.state, attempt.checkpoint)
-                ? payload.context || current.context : current.context;
-            this.upsert({ state: output, context });
+            this.upsert({ state: output });
             // Rejected commands often return the unchanged overdue state. Do
             // not let that timestamp immediately re-enter the head of the queue.
             if ((payload.ok === false || Number(payload.retryAfterMs) > 0) && this.scheduleTokens.has(id)) {
@@ -2589,7 +2583,7 @@ class ColdSimulationKernel {
         const id = Number(characterId);
         const proposal = this.dirty.get(id) || null;
         const active = this.inFlight.get(id) || null;
-        const accepted = this.states.get(id)?.context?.wishAdvisory;
+        const accepted = this.states.get(id)?.wishAdvisory;
         const wishAdvisory = accepted ? ColdEconomyDecision.wireAdvisory(accepted) : null;
         if (accepted && !wishAdvisory && EconomyDiagnostics.active()) EconomyDiagnostics.count('card', 'drop', 'handoff_unproved');
         this.remove(id);

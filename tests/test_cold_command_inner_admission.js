@@ -46,7 +46,7 @@ async function seed() {
 async function inner(mode) {
     const id = await seed(), state = clone(Life.snapshot(id)), time = Date.now();
     const request = { kind: 'lifecycle', characterId: id, commandId: `inner:${serial}`,
-        commandCheckpoint: Protocol.commandCheckpoint(state), state, context: {},
+        commandCheckpoint: Protocol.commandCheckpoint(state), state,
         precomputedResult: { patch: { activity: 'resting', vitals: { ...state.vitals, hp: 90 },
             stats: { restUntil: time + 60000 } }, events: [],
             materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: time + 60000 } };
@@ -68,7 +68,6 @@ async function inner(mode) {
     } });
     c.worker = worker('A');
     const originalWorker = c.worker, originalEpoch = c.workerEpoch;
-    c.contextIndex = () => ({}); c.contextFor = () => ({});
     c.population = { executeWorkerLifecycleCommand(...args) {
         calls.push(args[0]); admissions.push(args[2]?.workerAdmission);
         const work = Population.executeWorkerLifecycleCommand(...args);
@@ -164,7 +163,7 @@ async function inner(mode) {
 }
 function command(state) {
     return { characterId: state.characterId, kind: 'lifecycle', commandId: `manual:${++serial}`,
-        commandCheckpoint: Protocol.commandCheckpoint(state), state, context: {},
+        commandCheckpoint: Protocol.commandCheckpoint(state), state,
         precomputedResult: { patch: { activity: 'resting', vitals: { ...state.vitals, hp: 90 },
             stats: { restUntil: Date.now() + 60000 } }, events: [],
             materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: Date.now() + 60000 } };
@@ -284,7 +283,7 @@ async function versionedTraining(key, mode, worker = false) {
         const c = new ColdSimulationCoordinator(), sent = [];
         c.ready = true; c.workerEpoch = `versioned-training:${id}`;
         c.worker = { postMessage(message) { sent.push(clone(message)); }, terminate: async () => {} };
-        c.contextIndex = () => ({}); c.contextFor = () => ({}); c.population = Population;
+        c.population = Population;
         await c.onMessage(Protocol.envelope('command_request', c.workerEpoch, { requests: [request] }, `versioned-message:${id}`),
             c.worker, c.workerEpoch);
         await c.commandTail;
@@ -396,7 +395,7 @@ async function hiddenVersionTraining(kind, worker) {
         const c = new ColdSimulationCoordinator(), sent = [];
         c.ready = true; c.workerEpoch = `hidden-training:${id}`;
         c.worker = { postMessage(message) { sent.push(clone(message)); }, terminate: async () => {} };
-        c.contextIndex = () => ({}); c.contextFor = () => ({}); c.population = Population;
+        c.population = Population;
         await c.onMessage(Protocol.envelope('command_request', c.workerEpoch, { requests: [request] }, `hidden-message:${id}`),
             c.worker, c.workerEpoch);
         await c.commandTail;

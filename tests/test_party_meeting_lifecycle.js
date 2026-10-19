@@ -72,7 +72,7 @@ async function main() {
     const grants = new Map(members.map(state => [state.characterId, { characterId: state.characterId,
         ownerId: 'cold_simulation_owner', leaseId: `group-${state.characterId}`, revision: 1, leaseUntil: at + 30000 }]));
     for (const state of members) {
-        kernel.upsert({ state, context: {} });
+        kernel.upsert({ state });
         kernel.inFlight.set(state.characterId, { state, grant: grants.get(state.characterId), partyId: party.partyId, claimRequestId: requestId });
     }
     kernel.partyPut(party.partyId, { ...party, nextResolveAt: at + 10000 });
@@ -101,7 +101,7 @@ async function main() {
         emit: (type, payload, msgId) => selected.push({ type, payload, msgId }) });
     const future = members.map(state => state.characterId === 1 ? state : { ...state,
         stats: { ...state.stats, travel: { ...state.stats.travel, arrivalAt: at + 10000 } } });
-    for (const state of future) selector.upsert({ state, context: {} });
+    for (const state of future) selector.upsert({ state });
     selector.partyPut(party.partyId, party);
     selector.tick();
     assert(!selected.some(message => message.type === 'claim_request'),
@@ -166,7 +166,7 @@ async function main() {
             partyRoute: () => ({ needed: true, travelMs: 60000, spotId: 'wrong-spot' }),
             emit: (type, payload) => raidMessages.push({ type, payload }) });
         for (const state of raidMembers) {
-            terminalKernel.upsert({ state, context: {} });
+            terminalKernel.upsert({ state });
             terminalKernel.inFlight.set(state.characterId, { state, grant: grants.get(state.characterId),
                 partyId: party.partyId, claimRequestId: requestId });
         }
