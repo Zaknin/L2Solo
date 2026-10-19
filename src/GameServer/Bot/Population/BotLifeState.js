@@ -1295,7 +1295,7 @@ function mergeSessionIntoLifeState(session, state, phase, reason = '', options =
     const physicalSpot = physicalLoc ? SpotService.findCurrentSpot(physicalLoc) : null;
     const physicalActivity = physicalLoc && ['hunting', 'resting', 'shopping', 'pk_hunting'].includes(observed.activity)
         ? observed.activity : null;
-    return {
+    const merged = {
         ...state,
         accountName: observed.accountName,
         name: observed.characterName,
@@ -1327,6 +1327,10 @@ function mergeSessionIntoLifeState(session, state, phase, reason = '', options =
         },
         inventory: preserveStarterLootProvenance(state.inventory, observedInventory)
     };
+    // The cold row of every cooling writer (writeColdRow, partySessionSnapshot
+    // for the party and PvP cooldowns) takes the near raise still unanswered.
+    if (phase === 'cold') DecisionEvents.applyPendingRaise(session, merged.stats);
+    return merged;
 }
 
 // A stale cold snapshot can retain the previous hunting region while its
@@ -2058,7 +2062,8 @@ const BotLifeState = {
                 stats: { ...(craftState.stats || {}), ...membershipStats, pvpEnemies: BotEnemyMemory.snapshot(session), lastReason: reason },
                 inventory: parseJson(row.inventorySummary, {})
             };
-            DecisionEvents.settleNearRaise(session, nextState.stats);
+            // Built without mergeSessionIntoLifeState: the near raise joins here.
+            DecisionEvents.applyPendingRaise(session, nextState.stats);
             return this.upsertState(nextState, reason, { releaseHot: true });
         }
 
@@ -2070,7 +2075,6 @@ const BotLifeState = {
                 loc: preserved.loc,
                 nextResolveAt: now() + 30000 + Math.round(Math.random() * 90000)
             });
-            DecisionEvents.settleNearRaise(session, nextState.stats);
             session.coldLifeState = nextState;
             RefreshPartyMemberships([session], invoke);
             return this.upsertState(nextState, reason, { releaseHot: true });

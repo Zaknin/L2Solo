@@ -86,14 +86,14 @@ function takePostedRaise(stats, raise, applied) {
         raise.impossible === true && Number(raise.impossibleSeq || 0) > applied);
     return Math.max(applied, Number(raise?.seq || 0));
 }
-// A near bot's pending raise when its body cools (BotLifeState.writeColdRow):
-// no decision will answer it, so it lands on the cold row's stats, the step
-// dropped only while its impossible raise is still unanswered.
-function settleNearRaise(session, stats) {
+// A near bot's pending raise on the cold row its body cools to
+// (BotLifeState.mergeSessionIntoLifeState): no decision will answer it, so the
+// row's stats take it, the step dropped only while its impossible raise is
+// unanswered. The session keeps it: the body ends with the cooling, and a
+// cooling that rolls back leaves the raise waiting for its decision.
+function applyPendingRaise(session, stats) {
     const raise = session?.nearRaise;
-    if (!raise) return;
-    session.nearRaise = null;
-    applyRaise(stats, Number(raise.bits) || 0, raise.impossible === true);
+    if (raise) applyRaise(stats, Number(raise.bits) || 0, raise.impossible === true);
 }
 // A hot body's rejection: one impossible raise while it waits for its
 // decision, a second rejection in that window adds nothing.
@@ -160,4 +160,4 @@ function raiseSections(before, after, ...lists) {
     stats.wishDirty = (Number(stats.wishDirty) || 0) | bits;
     return bits;
 }
-module.exports = { statsFor, decisionStatsFor, applyRaise, raiseDecision, takePostedRaise, settleNearRaise, receive, held, checkWallet, rejectedState, rejectSession, raiseSections };
+module.exports = { statsFor, decisionStatsFor, applyRaise, raiseDecision, takePostedRaise, applyPendingRaise, receive, held, checkWallet, rejectedState, rejectSession, raiseSections };

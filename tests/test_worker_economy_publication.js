@@ -73,13 +73,15 @@ async function runWorker(state, predicate, followUp = null) {
 
     // The worker owns the near mind: a post carries the body's older mind keys, which are
     // discarded; a raise is taken once and a later post naming it adds nothing.
-    const decidedAt = (until, seq) => until(message => message.type === 'ready'
-        && message.payload.phase === 'economy_decided' && message.payload.near?.nearSeq === seq);
+    const decidedAt = (until, seq, characterId = 765413) => until(message => message.type === 'ready'
+        && message.payload.phase === 'economy_decided' && message.payload.characterId === characterId
+        && message.payload.near?.nearSeq === seq);
     await runWorker({ ...state, characterId: 765413 }, message => message.type === 'ready'
         && message.payload.phase === 'economy_decided', async ({ result: first, until, received, post }) => {
         const own = first.payload.near.statsPacket.decisionSeq;
         const raised = { ...state, characterId: 765413, nearSeq: 4, updatedAt: now + 1,
             raise: { seq: 1, bits: 1, impossible: true, impossibleSeq: 1 } };
+        post({ ...state, characterId: 765414, updatedAt: now + 1 });
         post(raised);
         const answer = (await decidedAt(until, 4)).payload.near, one = answer.statsPacket;
         assert.equal(one.decisionSeq, own + 1, 'a raise main posted is taken once, on the worker\'s mind');
@@ -89,11 +91,12 @@ async function runWorker(state, predicate, followUp = null) {
         const cached = { ...state };
         delete cached.nearSeq;
         post({ ...cached, characterId: 765413, updatedAt: now + 3 });
-        // Nothing answers it; a build on it would land within this wait.
-        const unposted = message => message.payload?.phase === 'economy_decided' && message.payload.near?.nearSeq === 0;
-        for (const deadline = Date.now() + 3000; Date.now() < deadline && !received.some(unposted);)
-            await new Promise(resolve => setTimeout(resolve, 20));
-        assert(!received.some(unposted), 'a hot row without a newer post number is not decided on');
+        // A second near bot's post queued after it: the planner takes builds in
+        // order, so a build on the copy would be answered before this one.
+        post({ ...state, characterId: 765414, nearSeq: 4, updatedAt: now + 3 });
+        await decidedAt(until, 4, 765414);
+        assert(!received.some(message => message.payload?.phase === 'economy_decided' && message.payload.characterId === 765413
+            && message.payload.near?.nearSeq === 0), 'a hot row without a newer post number is not decided on');
         post({ ...raised, nearSeq: 5, updatedAt: now + 2 });
         const two = (await decidedAt(until, 5)).payload.near.statsPacket;
         assert.equal(two.decisionSeq, one.decisionSeq, 'a later post naming the same raise neither raises again nor rolls the mind back');
@@ -102,29 +105,6 @@ async function runWorker(state, predicate, followUp = null) {
         post({ ...raised, nearSeq: 6, updatedAt: now + 4, raise: { seq: 2, bits: 1, impossible: true, impossibleSeq: 1 } });
         const three = (await decidedAt(until, 6)).payload.near.statsPacket;
         assert.equal(three.decisionSeq, two.decisionSeq + 1, 'the new raise is taken');
-        // A clan expulsion's row (a writer's copy, newer membership) joins the
-        // record's body and is decided on as the record's post.
-        const sent = received.length;
-        post({ ...cached, characterId: 765413, updatedAt: now + 5, simulation: { revision: 2 },
-            stats: { ...state.stats, clanId: 0, clanMembershipVersion: now + 5 } });
-        const expelled = await until(message => received.indexOf(message) >= sent
-            && message.type === 'ready' && message.payload.phase === 'economy_decided');
-        assert.equal(expelled.payload.near.nearSeq, 6, 'the record keeps its post number');
-        assert(!(Decisions.compact(expelled.payload.economyDecision).clan?.huntPerHour > 0), 'the expelled bot has no clan valuation');
-        // A newer revision without a newer membership is a new life: its row
-        // replaces the record and its first post is decided on.
-        post({ ...cached, characterId: 765413, updatedAt: now + 6, simulation: { revision: 3 },
-            stats: { ...state.stats, clanId: 0, clanMembershipVersion: now + 5 } });
-        await decidedAt(until, 0);
-        const life = { ...cached, characterId: 765413, simulation: { revision: 3 },
-            stats: { ...state.stats, clanId: 0, clanMembershipVersion: now + 5 } };
-        post({ ...life, nearSeq: 1, updatedAt: now + 7 });
-        const lifeFirst = (await decidedAt(until, 1)).payload.near.statsPacket;
-        // The new session's first raise (seq 1, below the old life's 2) is taken.
-        post({ ...life, nearSeq: 2, updatedAt: now + 8, raise: { seq: 1, bits: 1, impossible: false } });
-        const raisedAgain = await decidedAt(until, 2);
-        assert.equal(raisedAgain.payload.near.statsPacket.decisionSeq, lifeFirst.decisionSeq + 1, 'a new life\'s raises count from 1');
-        assert.equal(raisedAgain.payload.near.raiseSeq, 1);
     });
 
     const instances = Array.from({ length: 2075 }, (_, index) => ({ id: 900000 + index,

@@ -26,7 +26,6 @@ const { eligible: eligibleBuyer } = require('../Economy/MarketBuyerWaiters');
 const { SpotOccupancyIndex, stateKey } = require('./SpotOccupancyIndex');
 const C4Unseal = require('../../Items/C4Unseal');
 const ClanEquipment = require('./ClanEquipmentPartyPolicy');
-const ClanMembershipPolicy = require('../../Clan/ClanMembershipPolicy');
 
 class DueHeap {
     constructor() {
@@ -324,26 +323,12 @@ let PartyMarketBreak, ClanPartyDuty, BotCrystallization;
 // without a newer post number: a writer's copy of the cached row
 // (notifyState from the party, PvP and clan writers, the competition's
 // onState, a catalog page), whose body is the activation's and older than the
-// posts. The record keeps its body and mind. Of those writers only the clan
-// expulsion (Database.expelDisciplinedClanMember) changes something the body's
-// posts do not carry yet: the membership (clanId, clanMembershipVersion,
-// clanDiscipline) and the goals tied to the clan, so a newer membership joins
-// the record through the membership owner (ClanMembershipPolicy) at the row's
-// revision. The party and PvP writers send it from failure paths, their rows
-// rolled back to cold (no gate) or the same cached row; the competition acts
-// on cold bots. A newer revision without a newer membership is a new life
-// (a cooling and re-activation whose cold row coalesced away in the snapshot
-// queue): its posts count from 1 again, so it replaces the record. Anything
-// else returns the record's own state (unchanged). The activity stays the
-// body's: the membership owner may move it, the body's next post decides.
+// posts. The record keeps its body and mind. Every activation fences the bot
+// first (HotActivation, HotPartyLifecycle, PvpEncounterLifecycle), and so does
+// the clan expulsion (ClanSocialRuntime), which removes its record: a new life
+// starts from no record, never against an older life's.
 function nearHeld(record, row) {
-    if (row.phase !== 'hot' || record.phase !== 'hot' || Number(row.nearSeq || 0) >= Number(record.nearSeq || 0)) return row;
-    const incoming = row.stats || {}, newer = Number(row.simulation?.revision || 0) > Number(record.simulation?.revision || 0);
-    if (Number(incoming.clanMembershipVersion || 0) <= Number(record.stats?.clanMembershipVersion || 0)) return newer ? row : record;
-    const merged = ClanMembershipPolicy.reconcileState({ ...record, simulation: newer ? row.simulation : record.simulation,
-        stats: { ...record.stats, clanMembershipVersion: incoming.clanMembershipVersion, clanDiscipline: incoming.clanDiscipline ?? null } },
-    Number(incoming.clanId || 0));
-    return merged.activity === record.activity ? merged : { ...merged, activity: record.activity };
+    return row.phase === 'hot' && record.phase === 'hot' && Number(row.nearSeq || 0) < Number(record.nearSeq || 0);
 }
 
 function lifecycleKind(state = {}, facts = NO_FACTS) {
@@ -683,6 +668,8 @@ class ColdSimulationKernel {
         this.resolveChain = Promise.resolve();
         this.stats = {
             snapshots: 0,
+            // Hot rows older than their near record, kept out (nearHeld).
+            nearHeld: 0,
             selected: 0,
             resolved: 0,
             proposals: 0,
@@ -866,12 +853,11 @@ class ColdSimulationKernel {
         // handed to the record's write (RetainedStateMap.set).
         const card = entry !== state && Object.hasOwn(entry, 'wishAdvisory') ? entry.wishAdvisory : undefined;
         if (card !== undefined) delete entry.wishAdvisory;
+        const incomingRevision = Math.max(0, Number(state.simulation?.revision || 0));
         const currentRevision = Math.max(0, Number(current?.state?.simulation?.revision || 0));
         // A hot row older than the near record (nearHeld) leaves it as it is.
-        const held = current ? nearHeld(current.state, state) : state;
-        const nearStale = held !== state && held === current.state;
-        state = held;
-        const incomingRevision = Math.max(0, Number(state.simulation?.revision || 0));
+        const nearStale = !!current && nearHeld(current.state, state);
+        if (nearStale) DiagnosticConfig.developerDiagnostics && (this.stats.nearHeld += 1);
         // A hot row at the cold row's revision is a stale near post that crossed
         // the cooldown: cold -> hot moves the revision (the handoff), hot -> cold does not.
         if (current && (nearStale || incomingRevision < currentRevision || incomingRevision === currentRevision

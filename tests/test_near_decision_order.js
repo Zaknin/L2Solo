@@ -90,8 +90,11 @@ const spot = () => Events.held(session)?.network.activity?.spotId;
         fetchName: () => 'NearOrder', fetchExp: () => 0, fetchSp: () => 0 });
     // The row is read here, not saved (this test has no database).
     Life.upsertState = async row => row;
+    // The party and PvP cooldowns build their cold rows here too.
+    const party = Life.partySessionSnapshot(session, { ...session.coldLifeState, party: { partyId: 'p', role: 'dps', leaderId: id } },
+        'cold', 'party_cooldown');
+    assert.equal(party.stats.decisionSeq, seq + 1, 'a party cooling\'s cold row takes the raise');
     await Life.writeColdRow(session, 'cooldown');
-    assert.equal(session.nearRaise, null, 'no decision answers it any more');
     assert.equal(session.coldLifeState.phase, 'cold');
     assert.equal(session.coldLifeState.stats.decisionSeq, seq + 1, 'the cold row is raised once');
     assert.equal(session.coldLifeState.stats.wishDirty & pending.bits, pending.bits);
