@@ -75,5 +75,13 @@ try {
     assert.equal(allowed(marked), false, 'a spot exclusion marked after the build refuses the spot');
     assert.equal(allowed({ ...marked, stats: { ...marked.stats, stepCount: 12 } }), true,
         'the expired mark leaves the spot allowed, with no section moved');
+    // Party-only ground: refused to the bot alone, admitted once it joins a
+    // party (a relations move, which no longer drops the kept verdict).
+    const partyGround = { ...low, id: '8_43', tags: ['party_required'], tagsAuthoritative: true };
+    const kept = Planner.sourceGround([partyGround]);
+    const onParty = bot => Planner.sourceRouteReader(bot, { timestamp, ground: Planner.sourceGround([partyGround], kept) })(partyGround);
+    assert.equal(onParty(economic), false, 'party-only ground is refused to the bot alone');
+    assert.equal(onParty({ ...economic, party: { partyId: 77 } }), true, 'the same ground is admitted in a party');
+    assert.equal(onParty(economic), false, 'and refused again after the party');
 }
 console.log('test_source_route_admission: ok');

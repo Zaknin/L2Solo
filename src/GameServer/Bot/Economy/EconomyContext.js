@@ -997,9 +997,9 @@ function forState(state = {}, deps = {}) {
     // the equipment plan and the crafter's MP.
     const keptBase = held && !(mask & Sections.COMPUTED.foundation) ? held.plan : null;
     const keptSources = held?.sourceSections && !(mask & Sections.COMPUTED.sources) ? held : null;
-    // The source walk's per-spot ground verdict: the same section rule,
-    // without the memo's size cap (GearAcquisitionPlanner.sourceGround).
-    const keptGround = !(mask & Sections.COMPUTED.sources) ? held?.sourceGround || null : null;
+    // The source walk's per-spot ground verdict, outside the memo's size cap:
+    // its own section rule (GearAcquisitionPlanner.sourceGround).
+    const keptGround = !(mask & Sections.COMPUTED.sourceGround) ? held?.sourceGround || null : null;
     const started = diagnostic ? performance.now() : 0;
     // The build's cause, one of a few names (its duration layer). An
     // input-name mismatch is named as a dependency change; it does not claim
@@ -1141,8 +1141,9 @@ function forState(state = {}, deps = {}) {
     const extra = [...extensions.values()].flatMap(provider => provider(state, context) || []);
     const sourceSections = keptSources ? held.sourceSections : null;
     if (diagnostic) {
+        // The mask first: no_memo is a build whose sections kept the walk.
         Diagnostics.count('source_memo', sourceSections ? 'hit' : 'miss', sourceSections ? 'held'
-            : !held ? 'no_held' : !held.sourceSections ? 'no_memo' : 'sections');
+            : !held ? 'no_held' : mask & Sections.COMPUTED.sources ? 'sections' : 'no_memo');
         Diagnostics.count('context', 'caller', deps.caller || 'economy_context');
         Diagnostics.count('context', 'foundation', keptBase ? 'kept' : 'built');
     }

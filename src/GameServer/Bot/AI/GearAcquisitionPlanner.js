@@ -46,6 +46,7 @@ const BotTargetScorer = invoke('GameServer/Bot/AI/BotTargetScorer');
 const BotTargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
 const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
+const BotHuntingGroundPolicy = invoke('GameServer/Bot/AI/BotHuntingGroundPolicy');
 
 const RANKS = ['none', 'd', 'c', 'b', 'a', 's'];
 const { equipmentSlotKey, equipmentReplacementConflict } = BotEquipmentCompatibility;
@@ -2076,19 +2077,20 @@ function writeReadySourceFact(fact, kind, spotId, npcId, itemId, units, expected
     return fact;
 }
 // A source is executable only on ground the solo route executor admits.
-// The bot's ground verdict per planning spot: the clauses only its build and
-// its sources move (the spot's raid flag, the level fit with the economic
-// hunt, the kit matchup), 2 bits per spot at its ordinal in `spots`
-// (SpotIndex.ordinalFor): 0 unknown, 1 allowed, 2 refused, filled as the
-// walk asks. The wish build keeps the record with the bot's held build
-// (EconomyContext, dropped when a step's sections hit COMPUTED.sources);
-// kept = that record, or null. Its own scalars are checked by each reader:
-// the list's length, the economic hunt (the bot's wish focus) and the
-// recovery level penalty (SpotRiskPolicy, its clean wins move no section).
+// The bot's ground verdict per planning spot: the clauses only its build
+// moves (the spot's raid flag, the level fit, the kit matchup of the bot
+// alone), 2 bits per spot at its ordinal in `spots` (SpotIndex.ordinalFor):
+// 0 unknown, 1 allowed, 2 refused, filled as the walk asks. The wish build
+// keeps the record with the bot's held build (EconomyContext, dropped when a
+// step's sections hit COMPUTED.sourceGround); kept = that record, or null.
+// The reads no section of that mask names are checked by each reader against
+// the copies beside the bits: the list's length, the economic hunt (the
+// bot's wish focus), the recovery level penalty (SpotRiskPolicy, its clean
+// wins move no section) and the party ground flag (BotHuntingGroundPolicy).
 // The spot exclusions (step-counted marks, no section) are never kept.
 const GROUND_ALLOWED = 1, GROUND_REFUSED = 2;
 function sourceGround(spots = [], kept = null) {
-    return kept?.spots === spots ? kept : { spots, length: -1, economicHunt: null, penalty: -1, cells: null };
+    return kept?.spots === spots ? kept : { spots, length: -1, economicHunt: null, penalty: -1, grouped: null, cells: null };
 }
 // Diagnostics only: one reused reader in 64 also checks its kept cells
 // against a fresh verdict (source_route:ground:checked|disagree).
@@ -2103,12 +2105,14 @@ function sourceRouteReader(state, options = {}) {
     const Spots = invoke('GameServer/Bot/AI/SpotService');
     const economicHunt = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state);
     const penalty = Number(SpotRiskPolicy.recoveryFor(state)?.levelPenalty) || 0;
+    // The hunting-ground clause admits party-only ground to a grouped bot.
+    const grouped = BotHuntingGroundPolicy.isParty(state, { mode: 'solo' });
     const level = Number(state.level || 1);
     const ground = options.ground || sourceGround(options.spots || []);
     const spots = ground.spots;
     const reused = ground.cells !== null && ground.length === spots.length
-        && ground.economicHunt === economicHunt && ground.penalty === penalty;
-    if (!reused) Object.assign(ground, { length: spots.length, economicHunt, penalty,
+        && ground.economicHunt === economicHunt && ground.penalty === penalty && ground.grouped === grouped;
+    if (!reused) Object.assign(ground, { length: spots.length, economicHunt, penalty, grouped,
         cells: new Uint8Array((spots.length + 3) >> 2) });
     const cells = ground.cells, diagnostic = Diagnostics.active();
     if (diagnostic && options.ground) Diagnostics.count('source_route', 'ground', reused ? 'reuse' : 'build');
