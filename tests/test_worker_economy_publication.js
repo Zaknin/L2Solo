@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
+require('../src/Global');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const Decisions = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
 const StateWire = require('../src/GameServer/Bot/Population/ColdStateWire');
@@ -52,17 +53,21 @@ async function runWorker(state, predicate) {
 (async () => {
     const now = Date.now();
     const state = { characterId: 765411, name: 'PublicationOwner', accountName: 'bot_publication',
-        phase: 'hot', activity: 'hunting', level: 40, adena: 100000, exp: 0, sp: 1000,
+        phase: 'hot', nearSeq: 3, activity: 'hunting', level: 40, adena: 100000, exp: 0, sp: 1000,
         loc: { locX: 83000, locY: 148000, locZ: -3400 }, currentRegion: 'Giran',
         inventory: {}, stats: { classId: 0, clanId: 9, generatedCold: true },
         timing: { nextResolveAt: now + 60000, lastResolvedAt: now - 60000 }, updatedAt: now,
         simulation: { ownerId: 'legacy_main', revision: 1, leaseId: null, leaseUntil: 0 },
         vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } };
     const hot = await runWorker(state, message => message.type === 'ready' && message.payload.phase === 'economy_decided');
-    const decision = Decisions.compact(hot.payload.economyDecision);
-    assert.equal(decision.clan, null);
+    // A near bot's decision is the whole one a far bot gets (its clan plan
+    // included), with the mind it moved and the row's post number beside it.
+    const decision = Decisions.compact(hot.payload.economyDecision), near = hot.payload.near;
+    assert(decision.clan?.huntPerHour > 0, 'a clan member near the player gets its clan valuation');
     assert.equal(decision.workshop.known, true);
-    assert.deepEqual(decision.echo, Decisions.stateEcho(state));
+    assert.equal(near.nearSeq, state.nearSeq, 'the decision names the post it answers');
+    assert.deepEqual(decision.echo, [near.statsPacket.decisionSeq, near.statsPacket.activityLeaf, near.statsPacket.wishFocus[0]],
+        'the card and the moved mind are one decision');
 
     const instances = Array.from({ length: 2075 }, (_, index) => ({ id: 900000 + index,
         selfId: 952, amount: 1, equipped: false, slot: 0, enchant: 0 }));
@@ -93,7 +98,7 @@ async function runWorker(state, predicate) {
     assert.equal(Protocol.omitPlannedStates(stillTooLarge), false);
     assert.equal(Protocol.validateEnvelope(stillTooLarge, 'worker').reason, 'message_too_large',
         'required source data never bypasses the fixed transport cap');
-    console.log('PASS native hot clan publication and oversized lifecycle command', JSON.stringify({
+    console.log('PASS near decision from the worker and oversized lifecycle command', JSON.stringify({
         expandedBytes: Protocol.byteLength({ ...command, payload: { requests: [{ ...request,
             precomputedPlan: { ...request.precomputedPlan, plannedState: large } }] } }),
         commandBytes: Protocol.byteLength(command), instances: instances.length }));

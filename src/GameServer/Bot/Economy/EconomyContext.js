@@ -91,7 +91,7 @@ function stateForActor(actor, session = actor?.session) {
     return routeState(state, session);
 }
 // The live items of a backpack as a state's inventory rows, one per item id
-// (stateForActor; the near fact reader's worn rows, DecisionEvents.actorView).
+// (stateForActor).
 function itemRows(items) {
     const inventory = {};
     for (const item of items) {
@@ -1712,6 +1712,6 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, itemRows, routeState, preparedRouteRows, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forActor, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, routeState, preparedRouteRows, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome, summary: () => ({ mainColdForState: Diagnostics.active() ? Object.fromEntries(mainColdForState || []) : null }),
     resetCounters: () => { mainColdForState = null; } };

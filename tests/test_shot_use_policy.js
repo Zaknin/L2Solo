@@ -107,9 +107,9 @@ try {
         benefit = .01;
         const Events = invoke('GameServer/Bot/AI/DecisionEvents');
         actor.autoSoulshots.add(1835);
-        const denied = Economy.basics(state, deps).stock('shots');
-        Events.hold(actor.session, actor, { routePending: true, stock: () => denied });
-        assert.equal(actor.autoSoulshots.size, 0, 'waiting for a route must not defer an already prepared stock choice');
+        actor.session.actor = actor;
+        Events.receive(actor.session, null, { statsPacket: {}, nearSeq: 1 });
+        assert.equal(actor.autoSoulshots.size, 0, 'a received decision applies the current shot use choice');
     } finally { Economy.stateForActor = actorState; }
     benefit = .01;
     stock = Economy.basics(state, deps).stock('shots');

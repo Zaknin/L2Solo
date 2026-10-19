@@ -48,8 +48,10 @@ function build({ potions = 0, mobHp = 10, mobPAtk = 1, economy = true } = {}) {
         accountId: 'bot_resting_moment', actor: bot, plan: 'resting', recoveryLocked: true,
         incomingThreatId: mob.fetchId(), incomingThreatAt: Date.now(), dataSendToOthers() {}
     };
-    if (economy) Object.assign(session, { coldLifeState: { stats: { decisionSeq: 3 } }, economySeq: 3,
-        heldEconomy: { deathHours: 0.5, riskWeight: 1.5, moneyPrice: 1 / 10000, network: { activity: null } } });
+    // The decision the body holds (DecisionEvents.held); without one the
+    // price of death is unknown.
+    session.heldEconomy = economy ? { deathHours: 0.5, riskWeight: 1.5, moneyPrice: 1 / 10000, network: { activity: null } }
+        : { deathHours: NaN, network: { activity: null } };
     World.user = { sessions: [session] };
     World.npc = { spawns: [mob] };
     World.fetchNpcsInRadius = () => [];
@@ -78,6 +80,6 @@ assert.deepStrictEqual(run.fights, []);
 
 // No held economy: the author rule (flee while recovery is locked) stays.
 run = build({ economy: false });
-assert.strictEqual(run.session.plan, 'fleeing', 'without a held economy the author rule decides');
+assert.strictEqual(run.session.plan, 'fleeing', 'without a price of death the author rule decides');
 
 console.log('Bot resting danger moment tests passed');

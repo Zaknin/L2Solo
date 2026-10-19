@@ -1,13 +1,14 @@
 const assert = require('assert');
 require('../src/Global');
 invoke('GameServer/DataCache').init();
-// Navigation fixtures have no economy datapack; town wishes do not own these route checks.
-invoke('GameServer/Bot/Economy/EconomyContext').forActor = (_actor, session) => ({
+// The near body holds a decision without wishes (DecisionEvents.held): these
+// fixtures have no economy datapack.
+invoke('GameServer/Bot/AI/DecisionEvents').held = session => session.heldEconomy ||= {
     // A real context always carries its stock reader; these bots use no shots.
     stock: () => ({ itemId: 0, usePerHour: 0 }),
     network: { activity: null }, statsPacket: { decisionSeq: session.coldLifeState?.stats?.decisionSeq || 0,
         activityLeaf: 0, money: [1, 1, 0, 0] }
-});
+};
 const Hunting = invoke('GameServer/Bot/AI/States/HuntingState');
 const Spots = invoke('GameServer/Bot/AI/SpotService');
 const Decision = invoke('GameServer/Bot/AI/BotDecisionService');

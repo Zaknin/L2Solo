@@ -1112,9 +1112,8 @@ function npcForSpot(spot = {}, rng = Math.random, options = {}) {
     };
 }
 
-// The kit parts' text forms, one owner for the far reader (combatView over a
-// saved state) and the near one (DecisionEvents.actorView over the live
-// character). wornPart: the worn rows of a state-format inventory (null: none).
+// The kit parts' text forms (combatView over a state; a near bot's state is
+// the row it posts). wornPart: the worn rows of a state-format inventory (null: none).
 function wornPart(inventory) {
     return inventory && typeof inventory === 'object'
         ? Object.values(inventory).filter((row) => row?.equipped).map((row) => [row.selfId, row.amount, row.slot,
@@ -1125,10 +1124,6 @@ function wornPart(inventory) {
 // The skills of a capture (stats.coldCombat).
 function skillsPart(saved) {
     return Array.isArray(saved.skills) ? `${saved.skillSource}:${saved.skills.map((skill) => `${skill.selfId}:${skill.level}`).join(',')}` : '';
-}
-// The live skill list as a hot capture records it (capture).
-function liveSkillsPart(skills) {
-    return skillsPart({ skillSource: 'hot', skills: (skills || []).map(skillSnapshot) });
 }
 // The capture's numbers (stats.coldCombat); setEffects: its armour set
 // effects when the state has no inventory to derive them (savedSetEffects).
@@ -1167,7 +1162,7 @@ function kitStoreSize() { return kitProfiles.size; }
 
 module.exports = {
     PROFILE_VERSION, capture, legacySnapshot, treeSnapshot, needsDatabaseBackfill, profileFor, buildCount, buildMs, withBuildSite,
-    fightProfile, currentCp, seedSnapshot, oldSeedRepair, candidateProfiles, fightSources, combatView, kitHash, wornPart, liveSkillsPart, capturePart, skillsFor, forgetBuild, kitStoreSize,
+    fightProfile, currentCp, seedSnapshot, oldSeedRepair, candidateProfiles, fightSources, combatView, kitHash, skillsFor, forgetBuild, kitStoreSize,
     isAttackSkill, offensiveSkills, summonDetails, summonSkills, corpseSummonSkills, activeMusicEffects, partyMusicSkills, partyMusicMpCost, partyMusicEffect,
     spotSpawns, npcForSpot, npcCombatStats, skillSnapshotsFromRecords, skillRecordsFromTree, treeSkillLevel,
     statMultiplier: multiplier, statAdd: add

@@ -14,7 +14,7 @@ const Needs = invoke('GameServer/Bot/Goals/NeedsEvaluator');
 const Events = invoke('GameServer/Bot/AI/DecisionEvents');
 const Commit = require('../src/GameServer/Bot/Economy/EconomyCommit');
 const { WishNetwork } = invoke('GameServer/Bot/Economy/WishNetwork');
-const { capture } = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
+const { capture, view: decisionView } = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
 const Native = require('./helpers/nativeMarketFixture');
 invoke('GameServer/DataCache').init();
 fixture.assertConfigured(options.default);
@@ -50,14 +50,13 @@ async function run() {
         inventory: { 57: { selfId: 57, amount: 10000 }, [itemId]: { selfId: itemId, amount: 4 } },
         simulation: { ownerId: 'legacy_main', revision: 0 }, timing: {}, updatedAt: Date.now() }, 'native_fixture');
 
-    // One decision, read cold (the card) and hot (the held economy of DecisionEvents.hold).
-    const coldGoal = goalOf(cold, { network: { activity: capture({ network, inputKey: 'one' }, cold).activity },
-        inputHash: 1, state: cold });
-    invoke('GameServer/Inventory/ShotStock').enableAutoShot = () => null;
-    const session = { decisionStats: { decisionSeq: 1 } };
-    const held = Events.hold(session, { backpack: { fetchItems: () => [], fetchTotalLoad: () => 0 }, fetchLevel: () => 30 },
-        { stock: () => null, network, statsPacket: { decisionSeq: 1, activityLeaf: 0 }, inputKey: 'one' });
+    // One decision, read cold (the card) and hot (the near body's held view of the same card,
+    // DecisionEvents.receive).
+    const card = capture({ network, inputKey: 'one' }, cold);
+    const coldGoal = goalOf(cold, { network: { activity: card.activity }, inputHash: 1, state: cold });
     const hotState = { ...cold, phase: 'hot' };
+    const session = { decisionStats: { decisionSeq: 1 }, heldEconomy: decisionView(hotState, card) };
+    const held = Events.held(session);
     const hotGoal = goalOf(hotState, { ...held, state: hotState });
     const view = goal => ({ type: goal.type, itemId: goal.target.itemId, amount: goal.target.amount,
         adena: goal.target.adena, rootKey: goal.plan.wishKey, kind: goal.plan.kind, activity: goal.plan.economyActivity });

@@ -518,15 +518,6 @@ function publishedPacket(state, packet) {
     return !Sections.decisionRefusal(state, Number(packet.decisionSeq || 0), Number(packet.activityLeaf || 0),
         packet.wishFocus?.[0] ?? null);
 }
-function rememberPublished(economy, state, deps = {}) {
-    if (!publishedPacket(state, economy?.statsPacket)) return null;
-    const accepted = advisory(economy, state, economy.state?.activity ?? state.activity, deps);
-    if (accepted && isMainThread) {
-        // lazy: worker the main native owner receives hot advice only after publication.
-        invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.retainAdvisory(state, accepted);
-    }
-    return accepted;
-}
 function readAdvisoryCard(record) {
     try {
         if (!validEcho(record?.echo)) return null;
@@ -813,5 +804,5 @@ class ColdEconomyDecisions {
     }
 }
 
-module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateEcho, echoHolds, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, rememberPublished, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, current, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, cardWithShot, kindCode, kindFor, compact, workshopValues,
+module.exports = { personalUsefulness, preparedCardWorth, capture, heldFor, remainingToOrder, materialHunt, ownItem, stateEcho, echoHolds, CompactActivity, ColdEconomyDecisions, economyFor, view, advisory, restoreAdvisory, wireAdvisory, receiveAdvisory, advisoryPublicationHolds, sameEconomicOutput, current, canReuse, refusal, refreshAdvisory, refreshPreparedCraft, cardWithShot, kindCode, kindFor, compact, workshopValues,
     unknownWorkshop, MAX_BYTES, MAX_SHOT_BYTES, COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES };

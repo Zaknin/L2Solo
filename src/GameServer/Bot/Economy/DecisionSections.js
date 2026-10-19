@@ -340,9 +340,9 @@ function relationTargetIds(state, memory = null) {
 }
 // The one fact function, for near and far bots alike: what about the bot's
 // world changed is the fact that differs from the copy kept with the
-// decision (factEvents). Only the reading of the raw values differs: the far
-// reader stateView (the saved state), the near one DecisionEvents.actorView
-// (the live character). view: the kit fields (kitView), recipes (the sorted
+// decision (factEvents). The raw values are read from a state (stateView):
+// the saved one of a far bot, the posted row of a near one. view: the kit
+// fields (kitView), recipes (the sorted
 // known recipe ids, null: none read), party (null: none), clanId,
 // relationTargets ([friend, enemy] ids; null: read here from memory), activity,
 // spotId, stats.travel (occupationPlanned's shape) and stats.relations (the
@@ -490,5 +490,5 @@ function factEvents(previousFact, current, funding = false, facts = null, planne
 function kitMoved(before, after) {
     return (before?.stats?.wishSections?.build ?? null) !== (after?.stats?.wishSections?.build ?? null);
 }
-module.exports = { SECTIONS, COMPUTED, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, kitMoved, fundingMark, moneyChanged, meaningfulMoney, observationChanged, incomeError,
-    MARKET_WATCH, softEvents, carrySectionBaseline, baselineIdentity, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, factsOf, stateView, stockIds, storesOf, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };
+module.exports = { SECTIONS, COMPUTED, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, kitMoved, moneyChanged, observationChanged, incomeError,
+    MARKET_WATCH, softEvents, carrySectionBaseline, baselineIdentity, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, factsOf, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };

@@ -1,13 +1,14 @@
 const assert = require('assert');
 
 require('../src/Global');
-// Combat fixtures have no economy datapack; keep unrelated town wishes out of this encounter test.
-invoke('GameServer/Bot/Economy/EconomyContext').forActor = (_actor, session) => ({
+// The near body holds a decision without wishes (DecisionEvents.held): these
+// fixtures have no economy datapack.
+invoke('GameServer/Bot/AI/DecisionEvents').held = session => session.heldEconomy ||= {
     // A real context always carries its stock reader; these bots use no shots.
     stock: () => ({ itemId: 0, usePerHour: 0 }),
     network: { activity: null }, statsPacket: { decisionSeq: session.coldLifeState?.stats?.decisionSeq || 0,
         activityLeaf: 0, money: [1, 1, 0, 0] }
-});
+};
 
 const World = invoke('GameServer/World/World');
 const HuntingState = invoke('GameServer/Bot/AI/States/HuntingState');
