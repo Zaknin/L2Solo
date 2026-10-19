@@ -59,8 +59,9 @@ const fresh = capture({ network: after, inputKey: 'owned:14' }, looted).activity
 assert.equal(goalOf(looted, { network: { activity: fresh }, inputHash: 2, state: looted }).target.amount, 14,
     'fresh card and stale card agree');
 
-// A near bot reads the same card through its held view (DecisionEvents.receive), so the cold
-// result above is its result too (test_task4_b5_hot_cold_same.js).
+// A near bot's card is taken in the worker on its post by the same capture and read through
+// its held view (DecisionEvents.receive), so the cold result above is its result too
+// (test_worker_economy_publication.js, test_near_decision_order.js).
 assert.equal(invoke('Database').isReady(), false);
 console.log('Task 4 B5 need drops: cold 24 -> 14 on loot under one root');
 fs.rmSync(dir, { recursive: true, force: true });
