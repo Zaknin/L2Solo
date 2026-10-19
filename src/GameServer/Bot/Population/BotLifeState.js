@@ -785,11 +785,10 @@ function rowFromState(state) {
         partyId: persistedState.party?.partyId || null,
         inventorySummary: safeJson(persistedState.inventory || {}),
         statsJson: statsJson(persistedState.stats || {}),
-        // Legacy lifecycle writes are fenced in SQLite by simulationOwner, but
-        // `save()` intentionally does not rewrite the ownership columns. Keep
-        // the authoritative ownership snapshot on the transient row as well,
-        // otherwise normalize(row) resets the in-memory revision to zero and
-        // the cold worker rejects the resulting lifecycle ACK as stale.
+        // `save()` does not bind the ownership columns: a far row's revision
+        // moves in SQL and save() writes the moved number back here. Until then
+        // the row carries the state's own, so normalize(row) never resets the
+        // cached revision to zero.
         simulationOwner: persistedState.simulation?.ownerId || 'legacy_main',
         simulationRevision: Math.max(0, Number(persistedState.simulation?.revision || 0)),
         simulationLeaseId: persistedState.simulation?.leaseId || null,
@@ -895,7 +894,10 @@ function save(row, options = {}) {
                     (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 1),
                     (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 2),
                     (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 3))),
-            updatedAt = excluded.updatedAt
+            updatedAt = excluded.updatedAt,
+            -- A main write to a far row moves its revision: a worker step
+            -- begun before it is refused stale_revision and rebases.
+            ${Database.MOVE_FAR_REVISION}
         WHERE ${TABLE}.simulationOwner = 'legacy_main'
           AND COALESCE(json_extract(${TABLE}.statsJson, '$.clanInventoryRevision'), 0)
               <= COALESCE(json_extract(excluded.statsJson, '$.clanInventoryRevision'), 0)
@@ -947,8 +949,8 @@ function save(row, options = {}) {
         }
         Metrics.recordDbFlush();
         row.statsJson = result.statsJson;
-        // The cache built from this row takes the row's revision, not the
-        // older one the caller's state carried.
+        // The cache built from this row takes the row's revision (moved by
+        // this write on a far row), not the older one the caller's state carried.
         if (result.simulationRevision !== undefined) row.simulationRevision = Number(result.simulationRevision);
         return enqueueEquipmentGoalAdvance(row.equipmentAdvance).then(() => result);
     });

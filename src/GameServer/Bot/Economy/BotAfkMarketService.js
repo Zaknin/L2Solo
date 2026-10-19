@@ -15,6 +15,7 @@ const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const LotPolicy = require('./MarketLotPolicy');
 const { isNativeSource } = require('./TradeIntent');
 const Diagnostics = require('./EconomyDiagnostics');
+const EconomyCommit = require('./EconomyCommit');
 const { marketStoreTitle, marketBuyStoreTitle } = invoke('GameServer/Bot/Economy/MarketStoreTitle');
 
 const BoardRules = require('../../AfkTrade/BoardRules');
@@ -411,7 +412,7 @@ async function reduceStandingBids(state, ads, { beforeWrite } = {}) {
     if (!reprices.length && !withdrawals.length) return false;
     beforeWrite?.();
     const result = await AfkTrade.repriceBotLines(state.characterId, reprices, { withdrawals,
-        coldAuthority: require('./EconomyCommit').authority(state),
+        coldAuthority: EconomyCommit.authority(state),
         canCommitReview: beforeWrite ? () => { beforeWrite(); return true; } : null });
     if (result.skipped) throw Error('afk_trade_shop_changed');
     return true;
@@ -746,11 +747,8 @@ async function listSellAds(ownerId, state, listings, shop, inventory, options = 
 async function executePlan(state, plan, { step = work => work(), beforeWrite = () => {}, preparedState = state, reviewGoal = true } = {}) {
     if (state.stats?.tradeMeeting || invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(state.characterId)) return { state, pending: true };
     const ownerId = Number(state.characterId);
-    const authority = invoke('GameServer/Bot/Economy/EconomyCommit').authority(preparedState);
-    const stillPrepared = () => {
-        const current = invoke('GameServer/Bot/Economy/EconomyCommit').authority(LifeState.cachedState(ownerId) || state);
-        return Object.keys(authority).every(key => current[key] === authority[key]);
-    };
+    const authority = EconomyCommit.authority(preparedState);
+    const stillPrepared = () => EconomyCommit.sameAuthority(EconomyCommit.authority(LifeState.cachedState(ownerId) || state), authority);
     const run = async (work) => {
         const result = await step(() => Database.withMutationAdmission(beforeWrite, work));
         state = LifeState.cachedState(ownerId) || result?.state || state;

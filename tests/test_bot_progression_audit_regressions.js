@@ -153,11 +153,7 @@ async function checkWorkerSafety() {
     states.forEach(state => kernel.upsert({ state }));
     kernel.partyPut(party.partyId, party);
     kernel.tick();
-    const claim = messages.shift();
-    assert.strictEqual(claim.type, 'claim_request');
-    kernel.onClaimAck({ grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,
-        ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,
-        leaseId: `safety-${c.characterId}`, leaseUntil: at + 30000, purpose: c.purpose })) }, claim.msgId);
+    assert.strictEqual(kernel.inFlight.size, 3, 'the party steps at once from the worker\'s copy');
     await kernel.resolveChain;
     const proposals = messages.find(m => m.type === 'proposal_batch').payload.proposals;
     assert.strictEqual(proposals.length, 3);

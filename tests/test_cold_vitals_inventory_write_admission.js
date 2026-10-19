@@ -117,7 +117,7 @@ async function workerBoundary(writer, stage, mode) {
     c.ready = true; c.workerEpoch = `vi:${serial}`;
     const worker = label => ({ postMessage(message) { sent.push({ label, message: clone(message) });
         if (message.type === 'fence') realImmediate(() => c.onMessage(Protocol.envelope('fence_ack', message.workerEpoch,
-            { characterId: id, proposal: null, token: null }, message.msgId), c.worker, c.workerEpoch));
+            { characterId: id, proposal: null }, message.msgId), c.worker, c.workerEpoch));
         if (message.type === 'shutdown') realImmediate(() => c.onMessage(Protocol.envelope('drained', message.workerEpoch,
             { ok: true }, message.msgId), c.worker, c.workerEpoch));
     }, terminate: async () => {} });

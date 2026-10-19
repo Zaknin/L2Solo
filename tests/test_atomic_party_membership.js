@@ -84,7 +84,7 @@ Database.init();
         seqA: 1, seqB: 1, town: 'Giran', point: { locX: 0, locY: 0, locZ: 0 },
         lines: [{ payer: 0, itemId: 1, selfId: 1867, count: 1, price: 100 }],
         parties: [0, 1].map(() => ({ revision: 0, sequence: 1, needRevision: 0,
-            phase: 'cold', ownerId: 'legacy_main', leaseId: null, hotAt: 0,
+            phase: 'cold', hotAt: 0,
             route: { fee: 0, scroll: false, method: 'walk', durationMs: 0 } })) };
     Meetings.stage(preparation);
     assert.equal((await Database.commitBackgroundPartyMembership({ party: preparedParty.row, members: preparedMembers })).reason,
@@ -100,8 +100,7 @@ Database.init();
         'party_trade_busy', 'accepted native trade fences both hot and cold party admission');
     await Database.execute(["DELETE FROM board_trade_meetings WHERE token='party-admission-native'"]);
 
-    const staleAssignment = preparedMembers.map(entry => ({ ...entry, expectedSimulationRevision: 999,
-        expectedSimulationLeaseId: '' }));
+    const staleAssignment = preparedMembers.map(entry => ({ ...entry, expectedSimulationRevision: 999 }));
     assert.equal((await Database.commitBackgroundPartyMembership({ party: preparedParty.row,
         members: staleAssignment })).reason, 'membership_conflict', 'first goal cannot create a party after a version change');
     const committed = await Database.commitBackgroundPartyMembership({
@@ -168,7 +167,7 @@ Database.init();
         leaderId: goalParty.leaderId, memberIds: JSON.parse(goalParty.memberIdsJson),
         sources: Calculation.sources(goalMembers), updatedAt: goalParty.updatedAt + 1,
         statsJson: JSON.stringify({ objective: { spotId: 'cruma', objectiveKey: 'joint:cruma:0' } }) };
-    for (const field of ['updatedAt', 'revision', 'ownerId', 'leaseId']) {
+    for (const field of ['updatedAt', 'revision']) {
         const changed = structuredClone(goalInput);
         changed.sources[0][field] = typeof changed.sources[0][field] === 'number'
             ? changed.sources[0][field] + 1 : changed.sources[0][field] + ':changed';
@@ -192,7 +191,7 @@ Database.init();
     assert.deepEqual(await Database.execute(['SELECT * FROM bot_life_state WHERE partyId=? ORDER BY characterId', [goalParty.partyId]]),
         lifeBeforeGoal, 'joint goal publication never rewrites members or their leases');
     assert.equal((await Database.commitBackgroundPartyGoals(goalInput)).reason, 'party_goals_changed', 'duplicate result rejected');
-    console.log('PASS conditional joint goals: member/party/lease fences, duplicate rejection, no member writes');
+    console.log('PASS conditional joint goals: member/party/revision fences, duplicate rejection, no member writes');
 
     const conflictMembers = await LifeState.statesByIds([3200003, 3200004], {
         ownerId: 'legacy_main',

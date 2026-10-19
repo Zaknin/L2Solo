@@ -45,11 +45,10 @@ async function fund(states, suffix) {
     if (result.ok) { result.lifeRows.forEach(row => Life.acceptNewerLifecycleRow(row)); Parties.acceptRow(result.partyRow); }
     return { result, prepared: party, members, party: result.partyRow && Parties.acceptRow(result.partyRow) };
 }
+let loots = 0;
 async function loot(party, units, { stale = false } = {}) {
     const members = party.memberIds.map(id => Life.cachedState(id));
-    const { grants } = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
-    assert.equal(grants.length, members.length);
-    const atomicGroup = { id: `help:${grants[0].leaseId}`, memberIds: party.memberIds,
+    const atomicGroup = { id: `help:${party.partyId}:${++loots}`, memberIds: party.memberIds,
         partyChanges: [{ partyId: party.partyId, memberIds: party.memberIds, expectedPartyRevision: party.revision,
             updatedAt: Math.max(Date.now(), party.updatedAt + 1), nextResolveAt: Date.now() + 60000,
             statsJson: JSON.stringify({ ...party.stats, agreement: { ...party.stats.agreement,
@@ -61,14 +60,13 @@ async function loot(party, units, { stale = false } = {}) {
     const entries = rewards.memberResults.map(({ state, result }) => {
         const inventory = { ...state.inventory };
         for (const item of result.materialize.items) inventory[item.selfId] = { ...item, amount: Number(inventory[item.selfId]?.amount || 0) + item.amount };
-        return { revision: grants.find(grant => grant.characterId === state.characterId).revision, atomicGroup,
+        return { revision: state.simulation.revision, atomicGroup,
             options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: state }, nextState: { ...state, inventory } };
     });
     if (stale) entries[1].revision -= 1;
     const before = await images(party.memberIds);
     const results = await Owner.commitBatch(entries);
-    if (stale) { assert(results.every(result => !result.ok)); assert.deepEqual(await images(party.memberIds), before);
-        await Owner.releaseBatch(grants); }
+    if (stale) { assert(results.every(result => !result.ok)); assert.deepEqual(await images(party.memberIds), before); }
     else { assert(results.every(result => result.ok)); assert(results.every(result => result.row.simulationRevision === result.revision));
         Parties.acceptRow(results[0].partyRow); }
     return { results, entries };
@@ -197,13 +195,6 @@ async function run() {
     await Parties.setStatus(closed.partyId, 'dissolved');
     assert.equal(held(await DB.fetchItems(d.characterId), 57), 10000);
     console.log('PASS existing party ending refunds held money exactly once');
-    const g = await seed(), h = await seed(), i = await seed();
-    const token = await Owner.claim(g); assert(token.ok);
-    const before = await images([g.characterId, h.characterId, i.characterId]);
-    const refused = await fund([g, h, i], 'busy'); assert(!refused.result.ok);
-    assert.deepEqual(await images([g.characterId, h.characterId, i.characterId]), before);
-    await Owner.release(token);
-    console.log('PASS native active owner blocks help funding without partial membership/payment');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
     await DB.close(); fs.rmSync(directory, { recursive: true, force: true });

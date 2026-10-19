@@ -72,7 +72,7 @@ async function run() {
     stub(Response, 'speak', (actor, data) => ({ ...data, id: actor.fetchId() }));
     stub(Clan, 'findById', id => ({ id, members: clanIds.map(id => ({ id })) }));
     stub(Life, 'statesByIds', async (ids, options) => {
-        reads++; assert(options.excludeReserved); assert.strictEqual(options.ownerId, 'legacy_main');
+        reads++; assert(options.excludeReserved);
         return rows.filter(row => ids.includes(row.characterId));
     });
     stub(Life, 'statesForParty', async id => rows.filter(row => row.party?.partyId === id));

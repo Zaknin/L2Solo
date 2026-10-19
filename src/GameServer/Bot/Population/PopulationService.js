@@ -817,8 +817,7 @@ function commitPartyMembership(party, members = [], event = null, options = {}) 
             preparedParty.snapshot.leaderId,
             preparedParty.snapshot.nextResolveAt
         );
-        return prepared && { ...prepared, expectedSimulationRevision: Number(member.simulation?.revision || 0),
-            expectedSimulationLeaseId: String(member.simulation?.leaseId || '') };
+        return prepared && { ...prepared, expectedSimulationRevision: Number(member.simulation?.revision || 0) };
     }).filter(Boolean);
     if (preparedMembers.length !== selected.length) {
         return Promise.resolve({ party: null, assigned: [], failed: selected });

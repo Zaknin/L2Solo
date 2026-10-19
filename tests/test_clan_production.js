@@ -89,8 +89,8 @@ async function main() {
         assert.equal(pooled[1869].amount, 17);
 
         // Level zero keeps personal stock; an active craft at level four collects
-        // only its inputs. Party membership and
-        // worker ownership must survive an atomic, revision-fenced deposit.
+        // only its inputs. Party membership must survive an atomic,
+        // revision-fenced deposit.
         await add(ids[2], 1864, 20);
         await add(ids[2], 2005, 5);
         let clan = await projection();
@@ -111,20 +111,9 @@ async function main() {
         assert(partyState.simulationRevision > 0);
         const coal = (await Database.fetchClanWarehouseItems(clanId)).find(row => row.selfId === 1870);
         assert.equal(coal.amount, 30);
-
-        // Worker-owned virtual inventory is materialized before collection;
-        // stale revisions cannot replay a deposit or lose unmaterialized units.
-        await query(`UPDATE bot_life_state SET partyId = NULL, simulationOwner = 'cold_simulation_owner',
-            inventorySummary = ? WHERE characterId = ?`, [JSON.stringify({ 1864: { selfId: 1864, name: 'Stem', amount: 37, stackable: true } }), ids[2]]);
-        clan = await projection();
+        // The same stale projection deposits nothing twice: the revision moved.
         await Warehouse.resolveClan(clan, { batchSize: 8 });
-        assert.equal((await Database.fetchClanWarehouseItems(clanId)).find(row => row.selfId === 1864).amount, 57);
-        const [workerState] = await query('SELECT simulationOwner,inventorySummary FROM bot_life_state WHERE characterId = ?', [ids[2]]);
-        assert.equal(workerState.simulationOwner, 'cold_simulation_owner');
-        assert.equal(JSON.parse(workerState.inventorySummary)[1864].amount, 0);
-        await Warehouse.resolveClan(clan, { batchSize: 8 });
-        assert.equal((await Database.fetchClanWarehouseItems(clanId)).find(row => row.selfId === 1864).amount, 57);
-        await query("UPDATE bot_life_state SET simulationOwner = 'legacy_main' WHERE characterId = ?", [ids[2]]);
+        assert.equal((await Database.fetchClanWarehouseItems(clanId)).find(row => row.selfId === 1870).amount, 30);
 
         // The visible bot uses its real backpack and the native warehouse transaction.
         await add(ids[2], 1865, 11);
@@ -145,7 +134,7 @@ async function main() {
 
         // A real clan crafter unlocks a recipe outside the public catalogue.
         await query("UPDATE bot_life_state SET partyId = NULL WHERE characterId = ?", [ids[2]]);
-        await query("UPDATE bot_life_state SET simulationOwner = 'cold_simulation_owner', inventorySummary = ? WHERE characterId = ?",
+        await query("UPDATE bot_life_state SET inventorySummary = ? WHERE characterId = ?",
             [JSON.stringify({ 1870: { selfId: 1870, amount: 19, name: 'Coal', stackable: true } }), ids[1]]);
         Life.acceptClanCraftState((await query('SELECT * FROM bot_life_state WHERE characterId = ?', [ids[1]]))[0]);
         clan = await projection();

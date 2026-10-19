@@ -87,33 +87,29 @@ async function main() {
         Life.acceptPartyAssignments(assigned, membership.lifeRows); Parties.acceptRow(membership.partyRow);
         for (const id of partyIds) { await verify(id, { effects: oldKit.effects }); assert.equal(rank(Life.cachedState(id)), 10); }
         console.log('PASS party membership commits and cache publication use native skill ranks');
-        const claims = await Owner.claimBatch(partyIds.map(id => Life.cachedState(id)), { allowParty: true, allowLifecycle: true });
-        assert.equal(claims.grants.length, 2);
         const dynamic = { effects: [{ id: 1040, level: 2, expiresAt: Date.now() + 300000 }], cooldowns: { 1097: Date.now() + 12000 },
             charges: 2, chargeExpiresAt: Date.now() + 5000, summon: { active: true, skillId: 1225, expiresAt: Date.now() + 20000 } };
-        const results = await Owner.commitBatch(claims.grants.map(token => {
-            const state = Life.cachedState(token.characterId);
-            // The kit of the row it claimed, with the step's combat state: a
+        const results = await Owner.commitBatch(partyIds.map(id => {
+            const state = Life.cachedState(id);
+            // The kit of the row it stepped from, with the step's combat state: a
             // skills writer moves the revision, so an older kit is refused, not rebuilt.
             const kit = { ...clone(state.stats.coldCombat), ...dynamic };
-            return { revision: token.revision, nextState: { ...state, updatedAt: Date.now() + 1, stats: { ...state.stats, coldCombat: kit } },
+            return { revision: state.simulation.revision, nextState: { ...state, updatedAt: Date.now() + 1, stats: { ...state.stats, coldCombat: kit } },
                 options: { allowParty: true, allowLifecycle: true }, atomicGroup: { id: 'skill-authority-commit', memberIds: partyIds } };
         }));
         assert(results.every(result => result.ok));
         for (const id of partyIds) { await verify(id, dynamic); assert.equal(rank(Life.cachedState(id)), 10); }
         assert.deepEqual(await resources(), before, 'repairing a profile cannot grant skills or spend SP/items');
-        console.log('PASS actual atomic party batch writes the claimed kit with its combat state');
+        console.log('PASS actual atomic party batch writes the stepped kit with its combat state');
 
         const id = ids[2];
-        const token = await Owner.claim(Life.cachedState(id), { allowParty: true, allowLifecycle: true });
-        assert(token.ok);
         const state = Life.cachedState(id);
         const cleared = { effects: [], cooldowns: {}, charges: 0, chargeExpiresAt: null, summon: null };
-        const [committed] = await Owner.commitBatch([{ revision: token.revision, nextState: { ...state, stats: { ...state.stats,
+        const [committed] = await Owner.commitBatch([{ revision: state.simulation.revision, nextState: { ...state, stats: { ...state.stats,
             coldCombat: { ...clone(state.stats.coldCombat), ...cleared } } }, options: { allowParty: true, allowLifecycle: true } }]);
         assert(committed.ok);
         await verify(id, cleared); assert.equal(rank(Life.cachedState(id)), 10);
-        console.log('PASS ordinary lease commit keeps ranks and genuine effect/cooldown/summon removals');
+        console.log('PASS ordinary commit keeps ranks and genuine effect/cooldown/summon removals');
 
         const current = Life.cachedState(id);
         assert(await Life.upsertState({ ...current, stats: { ...current.stats, coldCombat: { ...stale.get(id), ...dynamic } } }, 'stale_actor_profile'));

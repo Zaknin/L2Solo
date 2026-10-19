@@ -13,8 +13,7 @@ function roleRank(role) {
 
 function operationAvailable(member) {
     return member?.phase === 'cold'
-        && !member?.partyId
-        && String(member?.simulationOwner || 'legacy_main') === 'legacy_main';
+        && !member?.partyId;
 }
 
 function operationMembers(members = [], limit = Config.operationMaxMembers) {

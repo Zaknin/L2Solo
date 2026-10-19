@@ -47,8 +47,7 @@ function stub(object, key, value) { const previous = object[key]; restores.push(
         stub(Life, 'enqueueEquipmentGoalAdvanceForState', () => {});
         stub(invoke('GameServer/Bot/Population/BotLifeEvents'), 'recordMany', async () => {});
         stub(invoke('GameServer/Bot/Population/BotGlobalChat'), 'maybeAnnounce', () => {});
-        const proposal = { proposalId: 'plan:1', token: { characterId: id, ownerId: 'cold_simulation_owner',
-            revision: 0, leaseId: 'plan:lease', leaseUntil: Date.now() + 60000 },
+        const proposal = { revision: 0,
             nextState: state, result: { events: [] }, economyEdges: 1,
             economyPlan: { sell: [], withdraw: [line.lineId], buyAds: [], travel: null } };
         const result = { ok: true, characterId: id, nextState: state, proposal };
@@ -58,10 +57,14 @@ function stub(object, key, value) { const previous = object[key]; restores.push(
         const kernel = new ColdSimulationKernel({ resolveSolo: () => null,
             emit: (type, payload) => { sent.push({ type, payload }); return true; } });
         const fromMain = (type, from) => StateWire.unpackPayload(type, messages.slice(from).find(message => message.type === type).payload);
+        let steps = 0;
         const commit = async (fields = {}) => {
-            const flushed = { ...proposal, ...fields, characterId: id, priority: 'P1', enqueuedAt: Date.now() };
+            // Each commit is its own step: a distinct start, so a distinct proposal id.
+            const startedAt = Date.now() + steps++;
+            const flushed = { ...proposal, ...fields, proposalId: `${id}:${startedAt}`, characterId: id, priority: 'P1',
+                enqueuedAt: Date.now() };
             kernel.upsert({ state: Life.cachedState(id) });
-            kernel.inFlight.set(id, { state: Life.cachedState(id), grant: flushed.token });
+            kernel.inFlight.set(id, { state: Life.cachedState(id), startedAt });
             kernel.dirty.set(id, flushed);
             kernel.flush(null, true);
             const committed = { ...result, nextState: Life.cachedState(id),

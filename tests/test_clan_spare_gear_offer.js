@@ -29,7 +29,7 @@ function seed(clans) {
     const db = new DatabaseSync(databasePath);
     db.exec(fs.readFileSync(path.join(rootDir, 'database', 'sql', 'sqlite.sql'), 'utf8'));
     db.prepare('INSERT INTO accounts(username, password) VALUES (?, ?)').run('bot_pop_gear', 'test-only');
-    for (const { clanId, giver, mate, traits, worker } of clans) {
+    for (const { clanId, giver, mate, traits } of clans) {
         db.prepare('INSERT INTO clans(id, name, level, leaderId) VALUES (?, ?, 2, ?)').run(clanId, `Gear${clanId}`, mate);
         db.prepare(`INSERT INTO clan_simulation_clans(clanId, mode, stateJson, createdAt, updatedAt)
             VALUES (?, 'autonomous', '{"mode":"autonomous","warehouseRevision":0}', 0, 0)`).run(clanId);
@@ -42,7 +42,7 @@ function seed(clans) {
             const inventory = giving ? { [EARRING]: { selfId: EARRING, amount: 1, equippedCount: 1, name: 'Red Crescent Earring' } } : {};
             db.prepare(`INSERT INTO bot_life_state(characterId, accountName, characterName, level, adena, activity, phase,
                 simulationOwner, inventorySummary, statsJson, updatedAt) VALUES (?, 'bot_pop_gear', ?, 30, 0, 'hunting', 'cold', ?, ?, '{"classId":0}', 1)`)
-                .run(id, `Gear${id}`, giving && worker ? 'cold_simulation_owner' : 'legacy_main', JSON.stringify(inventory));
+                .run(id, `Gear${id}`, 'legacy_main', JSON.stringify(inventory));
             db.prepare(`INSERT INTO bot_personas(characterId, version, seed, primaryDrive, archetype, traitsJson, textCard, createdAt, updatedAt)
                 VALUES (?, 2, 1, 'social', 'party_regular', ?, '', 0, 0)`).run(id, JSON.stringify(giving ? traits : generous));
             if (giving) {
@@ -58,8 +58,7 @@ async function main() {
     const clans = [
         { clanId: 81, giver: 4800001, mate: 4800002, traits: generous },
         { clanId: 82, giver: 4800011, mate: 4800012, traits: stingy },
-        { clanId: 83, giver: 4800021, mate: 4800022, traits: generous },
-        { clanId: 84, giver: 4800031, mate: 4800032, traits: stingy, worker: true }
+        { clanId: 83, giver: 4800021, mate: 4800022, traits: generous }
     ];
     seed(clans);
     options.default.Database.path = path.relative(rootDir, databasePath);
@@ -105,10 +104,6 @@ async function main() {
 
         assert.strictEqual(await stored(83), 0, 'nothing goes to an enemy');
         assert.strictEqual(await spare(4800021), 2);
-
-        assert.strictEqual(await stored(84), 1, 'a member owned by the cold worker gives its earring');
-        const [worker] = await Database.execute(['SELECT adena FROM bot_life_state WHERE characterId = 4800031']);
-        assert(Number(worker.adena) > 0, 'and is paid through its worker snapshot');
 
         // An item seen at the previous pass is not offered again.
         await Database.execute(["DELETE FROM clan_warehouse_items WHERE clanId = 83 AND selfId = ?", [EARRING]]);

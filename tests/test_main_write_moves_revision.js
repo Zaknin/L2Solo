@@ -72,25 +72,26 @@ function coordinatorProbe() {
             'the cached copy matches the row after a main write');
 
         // A proposal built before a main write is refused and rebases on the row.
-        const token = await Owner.claim(Life.cachedState(far), { allowLifecycle: true });
-        assert(token.ok);
+        const stepRevision = Life.cachedState(far).simulation.revision;
         const proposed = { ...Life.cachedState(far), stats: { ...Life.cachedState(far).stats, proposalProbe: true } };
         await Database.updateGeneratedBotName(far, 'RenamedUnderStep', 4);
         const moved = Number((await row(far)).simulationRevision);
-        const [refused] = await Owner.commitBatch([{ revision: token.revision, nextState: proposed, proposal: { token } }]);
+        const [refused] = await Owner.commitBatch([{ revision: stepRevision, nextState: proposed,
+            proposal: { revision: stepRevision } }]);
         assert.equal(refused.ok, false);
         assert.equal(refused.reason, 'stale_revision', 'the older proposal is refused');
         assert.equal(refused.row.characterName, 'RenamedUnderStep', 'the refusal hands back the row it read');
         assert.equal(Number(refused.row.simulationRevision), moved);
 
         const commits = coordinatorProbe();
-        await commits.coordinator.handleCommitResults([{ ...refused, proposal: { token, proposalId: 'proposal:1' }, nextState: proposed }]);
+        await commits.coordinator.handleCommitResults([{ ...refused, proposal: { revision: stepRevision,
+            proposalId: `${far}:1` }, nextState: proposed }]);
         const [ack] = commits.sent.find(message => message.type === 'commit_ack').results;
-        const released = await row(far);
+        const read = await row(far);
         assert.equal(ack.ok, false);
         assert.equal(ack.state.name, 'RenamedUnderStep', 'the ack state carries the main write');
-        assert.equal(ack.state.simulation.revision, Number(released.simulationRevision), 'the ack state is the row after the release');
-        assert.equal(ack.state.simulation.ownerId, released.simulationOwner);
+        assert.equal(ack.state.simulation.revision, Number(read.simulationRevision), 'the ack state is the row the commit read');
+        assert.equal(ack.state.simulation.ownerId, read.simulationOwner);
         assert.equal(commits.coordinator.snapshot().refusals.commitRefused.stale_revision, 1);
 
         // A stale_command answers with the row read back, not the cached copy.
@@ -135,7 +136,7 @@ function coordinatorProbe() {
         assert.equal(Life.cachedState(pk).simulation.revision, pkRevision + 1, 'the cache carries the moved revision');
 
         // A clan demand written into its leader's row moves the cached copy too,
-        // so the leader's next claim is not refused on the old revision.
+        // so the leader's next commit is not refused on the old revision.
         const leader = await create('cold');
         await Database.execute(['INSERT INTO clans(id,name,leaderId) VALUES(?,?,?)', [820900, 'RevisionClan', leader]]);
         const leaderRevision = Life.cachedState(leader).simulation.revision;
@@ -145,23 +146,42 @@ function coordinatorProbe() {
         assert.equal(Number((await row(leader)).simulationRevision), leaderRevision + 1);
         assert.equal(Life.cachedState(leader).simulation.revision, leaderRevision + 1, 'the leader cache takes the moved row');
         assert.equal(Life.cachedState(leader).stats.clanMarketDemand.goalKey, 'revision-demand');
-        assert((await Owner.claim(Life.cachedState(leader), {})).ok, 'the leader claims on the cached copy');
+        const leaderState = Life.cachedState(leader);
+        const [leaderCommit] = await Owner.commitBatch([{ revision: leaderState.simulation.revision, nextState: leaderState,
+            proposal: { revision: leaderState.simulation.revision } }]);
+        assert.equal(leaderCommit.ok, true, `the leader commits on the cached copy: ${leaderCommit.reason}`);
 
         // A commit writes the proposal's stats as is, except the economy leaf:
         // the row keeps it even when the proposal carries none.
         const leaf = [1, 1, '0f0e0d0c-0b0a-4908-8706-050403020100', 2, 1, 0, 0, 0, 0, null];
         const trader = await create('cold', { economyCommit: leaf });
         assert.deepEqual(JSON.parse((await row(trader)).statsJson).economyCommit, leaf);
-        const leafToken = await Owner.claim(Life.cachedState(trader), { allowLifecycle: true });
-        assert(leafToken.ok);
+        const leafRevision = Life.cachedState(trader).simulation.revision;
         const leafless = { ...Life.cachedState(trader), stats: { ...Life.cachedState(trader).stats, proposalProbe: true } };
         delete leafless.stats.economyCommit;
-        const [kept] = await Owner.commitBatch([{ revision: leafToken.revision, nextState: leafless, proposal: { token: leafToken } }]);
+        const [kept] = await Owner.commitBatch([{ revision: leafRevision, nextState: leafless,
+            proposal: { revision: leafRevision } }]);
         assert.equal(kept.ok, true, `the leafless proposal commits: ${kept.reason}`);
         const keptRow = JSON.parse((await row(trader)).statsJson);
         assert.equal(keptRow.proposalProbe, true, 'the proposal\'s stats are written');
         assert.deepEqual(keptRow.economyCommit, leaf, 'the row keeps its economy leaf');
         assert.deepEqual(Life.cachedState(trader).stats.economyCommit, leaf, 'the cache takes the leaf the commit kept');
+
+        // Main taking a far bot hot is a main write: the handoff moves the
+        // revision even without a patch, so a step begun before it is refused.
+        const handed = await create('cold');
+        const handedBefore = await row(handed);
+        const handedStep = { ...Life.cachedState(handed), stats: { ...Life.cachedState(handed).stats, proposalProbe: true } };
+        const handoff = await Owner.handoffToMain(Life.cachedState(handed));
+        assert.equal(handoff.ok, true, `the handoff takes the row: ${handoff.reason}`);
+        assert.equal(handoff.reason, 'hot_handoff');
+        const handedAfter = await row(handed);
+        assert.equal(Number(handedAfter.simulationRevision), Number(handedBefore.simulationRevision) + 1, 'the handoff moves the revision once');
+        assert.equal(Number(handedAfter.updatedAt), Number(handedBefore.updatedAt), 'a handoff without a patch writes only the revision');
+        const [late] = await Owner.commitBatch([{ revision: Number(handedBefore.simulationRevision), nextState: handedStep,
+            proposal: { revision: Number(handedBefore.simulationRevision) } }]);
+        assert.equal(late.ok, false);
+        assert.equal(late.reason, 'stale_revision', 'a step begun before the handoff is refused');
         console.log('PASS main writes move the revision; refusals rebase on the row');
     } finally {
         fs.rmSync(directory, { recursive: true, force: true });

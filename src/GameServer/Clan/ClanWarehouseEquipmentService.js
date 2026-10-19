@@ -82,7 +82,7 @@ async function resolve(clanId, options) {
         || Number(a.id <= cursor) - Number(b.id <= cursor) || a.id - b.id).slice(0, 32);
     if (!stock.length) return { exchanged: 0 };
     const members = await Database.execute([`SELECT c.id, c.classId, c.level, c.name,
-        l.phase, l.activity, l.partyId, l.simulationOwner, l.statsJson
+        l.phase, l.activity, l.partyId, l.statsJson
         FROM characters c JOIN bot_life_state l ON l.characterId = c.id
         WHERE c.clanId = ? ORDER BY c.id`, [clanId]], 'clan-gear:members');
     const manager = invoke('GameServer/Bot/BotManager');

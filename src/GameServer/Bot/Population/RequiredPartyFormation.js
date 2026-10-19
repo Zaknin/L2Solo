@@ -129,7 +129,7 @@ function proposalFromStates(states = [], options = {}) {
                 return { requiredCount, spotId: selectedGroup.spotId, oldestAt: selectedGroup.oldestAt,
                     minSize, maxSize, levelRange, materialParty: true,
                     candidates: members.map(state => ({ characterId: Number(state.characterId), updatedAt: Number(state.updatedAt || 0),
-                        simulation: { ownerId: state.simulation?.ownerId || 'legacy_main', revision: Math.max(0, Number(state.simulation?.revision || 0)) } })) };
+                        simulation: { revision: Math.max(0, Number(state.simulation?.revision || 0)) } })) };
             }
             if (require('../../Clan/ClanRaidRoster').selectMembers(compatible, anchor.objective, { minSize, maxSize, levelRange }).length < minSize) continue;
             return {
@@ -143,10 +143,7 @@ function proposalFromStates(states = [], options = {}) {
                 candidates: compatible.map((state) => ({
                     characterId: Number(state.characterId),
                     updatedAt: Number(state.updatedAt || 0),
-                    simulation: {
-                        ownerId: state.simulation?.ownerId || 'legacy_main',
-                        revision: Math.max(0, Number(state.simulation?.revision || 0))
-                    }
+                    simulation: { revision: Math.max(0, Number(state.simulation?.revision || 0)) }
                 }))
             };
         }

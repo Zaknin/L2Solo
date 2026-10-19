@@ -12,7 +12,6 @@ function eligible(state, objective) {
     const planDuty = state?.stats?.equipmentPlan?.clanGoal;
     const party = state?.party?.partyId && Parties.find(state.party.partyId);
     return state?.phase === 'cold' && !BotErrands.busyWith(state, BUSY_FLAGS) && !Identity.isStaticService(state)
-        && String(state.simulation?.ownerId || 'legacy_main') === 'legacy_main'
         && Number(state.vitals?.hp) > 0
         && ['hunting', 'resting', 'party_wait', 'grouped', 'shopping', 'traveling'].includes(state.activity)
         && (!state.stats?.travel || ['hunting', 'grouped'].includes(state.stats.travel.arrivalActivity))

@@ -12,7 +12,6 @@ isolated.assertConfigured(options.default);
 const Database = invoke('Database');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
 const Data = invoke('GameServer/DataCache');
 const Skillset = invoke('GameServer/Actor/Skillset');
 const Progression = invoke('GameServer/Progression/ProgressionCap');
@@ -59,7 +58,7 @@ async function nativeAncestorPrefix(id) {
     assert.deepStrictEqual(training.consumedBooks, []);
     const row = await Database.publishColdTraining(id, { ...training, transitions: [] }, { beforeWrite });
     const prepared = LifeState.acceptNewerLifecycleRow(row);
-    assert(prepared, 'the actual free-grant publisher row rebases the cached lease input');
+    assert(prepared, 'the actual free-grant publisher row rebases the cached step input');
     assert.strictEqual(prepared.sp, 100);
     assert.strictEqual(prepared.stats.classId, 0, 'ancestor-only preparation preserves the class CAS boundary');
     assert.strictEqual(prepared.simulation.revision, input.simulation.revision + 1);
@@ -143,39 +142,20 @@ async function createProbe(index) {
     states = await Promise.all(states.map(state => nativeAncestorPrefix(state.characterId)));
     await Database.execute(['UPDATE characters SET karma = 45, pk = 1 WHERE id IN (?, ?)', [states[0].characterId, states[1].characterId]]);
     await Database.execute(['UPDATE characters SET karma = 1 WHERE id = ?', [states[2].characterId]]);
-    const claimed = await Owner.claimBatch(states.map((state, index) => ({
-        state,
-        leaseId: `batch-lease-${index + 1}`
-    })), { timestamp: 2000, leaseMs: 10000 });
-    assert.strictEqual(claimed.grants.length, 3, 'one transaction must claim every eligible row');
-    assert.strictEqual(claimed.rejected.length, 0);
+    // Each worker step begins from the row's revision.
+    const stepRevisions = states.map((state) => state.simulation.revision);
 
-    const staleClaims = await Owner.claimBatch([{
-        state: states[0],
-        leaseId: 'stale-batch-lease'
-    }], { timestamp: 2100, leaseMs: 10000 });
-    assert.strictEqual(staleClaims.grants.length, 0);
-    assert.strictEqual(staleClaims.rejected[0].reason, 'stale_revision');
-    assert.strictEqual(staleClaims.rejected[0].expectedRevision, states[0].simulation.revision);
-    assert.strictEqual(staleClaims.rejected[0].actualRevision, states[0].simulation.revision + 1);
-    assert.strictEqual(staleClaims.rejected[0].actualOwner, Owner.OWNER_ID);
-    const staleTelemetry = Metrics.snapshot().coldOwner;
-    assert.strictEqual(staleTelemetry.staleRevisionGaps['+1'], 1, 'stale claims must expose revision distance');
-    assert.strictEqual(staleTelemetry.staleOwners[Owner.OWNER_ID], 1, 'stale claims must expose the current owner');
-
-    const fenced = claimed.grants[1];
-    const handoffState = LifeState.cachedState(fenced.characterId);
-    const handoff = await Owner.handoffToMain(handoffState);
-    assert.strictEqual(handoff.ok, true, 'activation handoff should invalidate one grant');
+    const handoff = await Owner.handoffToMain(LifeState.cachedState(states[1].characterId));
+    assert.strictEqual(handoff.ok, true, 'activation handoff should invalidate one step');
     const staleBefore = await wholeImage(states[1].characterId);
 
-    const nextStates = claimed.grants.map((grant, index) => ({
-        ...LifeState.cachedState(grant.characterId),
+    const nextStates = states.map((state, index) => ({
+        ...LifeState.cachedState(state.characterId),
         level: 21 + index,
         exp: authoredProfiles[index].committedExp,
-        sp: LifeState.cachedState(grant.characterId).sp + authoredProfiles[index].earnedSp,
+        sp: LifeState.cachedState(state.characterId).sp + authoredProfiles[index].earnedSp,
         adena: 550 + index,
-        timing: { ...LifeState.cachedState(grant.characterId).timing, lastResolvedAt: 3000, nextResolveAt: 6000 },
+        timing: { ...LifeState.cachedState(state.characterId).timing, lastResolvedAt: 3000, nextResolveAt: 6000 },
         updatedAt: 3000
     }));
     nextStates.forEach((state, index) => {
@@ -187,8 +167,8 @@ async function createProbe(index) {
     nextStates[1].inventory = {
         57: { selfId: 57, name: 'Adena', amount: 999999, stackable: true }
     };
-    const entries = claimed.grants.map((grant, index) => ({
-        revision: grant.revision,
+    const entries = states.map((state, index) => ({
+        revision: stepRevisions[index],
         nextState: nextStates[index],
         proposal: {
             baseState: states[index],
@@ -239,7 +219,7 @@ async function createProbe(index) {
         'the rejected member retains its exact prepared physical/cache image');
     for (const state of states) {
         assert.deepStrictEqual(clone(await Database.fetchSkills(state.characterId)).sort((a, b) => a.selfId - b.selfId), preparedSkills.get(state.characterId),
-            'leased CAS ignores synthetic skills and preserves every actual granted/historical rank');
+            'the commit ignores synthetic skills and preserves every actual granted/historical rank');
         assert.deepStrictEqual(await Database.fetchSkill(state.characterId, 1000), []);
         assert.deepStrictEqual(await Database.fetchSkill(state.characterId, 1001), []);
     }
@@ -273,7 +253,7 @@ async function createProbe(index) {
         'accepted CAS must atomically persist class and physical progression'
     );
     assert.strictEqual(Number(physical[0].adenaItem), 550, 'accepted CAS must atomically persist materialized inventory');
-    assert.strictEqual(physical[0].skillLevel, null, 'leased CAS must not grant an unowned synthetic worker skill');
+    assert.strictEqual(physical[0].skillLevel, null, 'the commit must not grant an unowned synthetic worker skill');
     assert.strictEqual(Number((await Database.fetchSkill(states[0].characterId, 239))[0].level), 2,
         'a lower-level worker tree after delevel must not downgrade persisted Expertise');
     assert.deepStrictEqual(
@@ -320,19 +300,13 @@ async function createProbe(index) {
         'UPDATE bot_life_state SET partyId = ?, statsJson = ? WHERE characterId = ?',
         ['batch-party', JSON.stringify(member.stats), member.characterId]
     ])));
-    const partyClaim = await Owner.claimBatch(partyMembers.map((member, index) => ({
-        state: member,
-        leaseId: `party-batch-${index}`,
-        options: { allowParty: true, allowLifecycle: true }
-    })), { timestamp: 4000, leaseMs: 10000 });
-    assert.strictEqual(partyClaim.grants.length, 2, 'trusted party lifecycle must claim plan and warehouse members together');
     const partyExpectedExp = partyMembers.map((member, index) => member.exp + 100 + index);
-    const partyCommit = await Owner.commitBatch(partyClaim.grants.map((token, index) => ({
-        revision: token.revision,
+    const partyCommit = await Owner.commitBatch(partyMembers.map((member, index) => ({
+        revision: member.simulation.revision,
         nextState: { ...partyMembers[index], exp: partyExpectedExp[index], updatedAt: 4100 },
         options: { allowParty: true, allowLifecycle: true }
     })), { timestamp: 4100 });
-    assert(partyCommit.every((result) => result.ok), 'party proposals must retain CAS and release semantics');
+    assert(partyCommit.every((result) => result.ok), 'trusted party lifecycle commits plan and warehouse members together');
     const partyRows = await Database.execute([
         `SELECT exp, simulationOwner, simulationLeaseId FROM bot_life_state
          WHERE partyId = 'batch-party' ORDER BY characterId`, []
@@ -341,13 +315,8 @@ async function createProbe(index) {
     assert(partyRows.every((row) => row.simulationOwner === Owner.LEGACY_OWNER_ID && row.simulationLeaseId === null));
 
     const releaseBase = partyMembers.map((member) => LifeState.cachedState(member.characterId));
-    const releaseClaim = await Owner.claimBatch(releaseBase.map((member, index) => ({
-        state: member,
-        leaseId: `party-release-${index}`,
-        options: { allowParty: true, allowLifecycle: true }
-    })), { timestamp: 4200, leaseMs: 10000 });
-    const releaseCommit = await Owner.commitBatch(releaseClaim.grants.map((token, index) => ({
-        revision: token.revision,
+    const releaseCommit = await Owner.commitBatch(releaseBase.map((member, index) => ({
+        revision: member.simulation.revision,
         nextState: {
             ...releaseBase[index],
             party: { ...(releaseBase[index].party || {}), partyId: null, leaderId: null },
@@ -364,18 +333,11 @@ async function createProbe(index) {
     assert(releasedPartyRows.every((row) => row.partyId === null), 'party release must clear the durable party column');
 
     const atomicBase = [states[0], states[2]].map((base) => LifeState.cachedState(base.characterId));
-    const atomicClaim = await Owner.claimBatch(atomicBase.map((member, index) => ({
-        state: member,
-        leaseId: `atomic-party-${index}`,
-        options: { allowParty: true, allowLifecycle: true }
-    })), { timestamp: 5000, leaseMs: 10000 });
-    assert.strictEqual(atomicClaim.grants.length, 2, 'atomic party probe must claim every member');
-    const invalidatedMember = atomicClaim.grants[1];
-    const invalidation = await Owner.handoffToMain(LifeState.cachedState(invalidatedMember.characterId));
+    const invalidation = await Owner.handoffToMain(LifeState.cachedState(atomicBase[1].characterId));
     assert.strictEqual(invalidation.ok, true, `atomic party invalidation must succeed: ${JSON.stringify(invalidation)}`);
     const atomicGroup = { id: 'atomic-party-route', memberIds: atomicBase.map((member) => member.characterId) };
-    const atomicCommit = await Owner.commitBatch(atomicClaim.grants.map((token, index) => ({
-        revision: token.revision,
+    const atomicCommit = await Owner.commitBatch(atomicBase.map((member, index) => ({
+        revision: member.simulation.revision,
         nextState: { ...atomicBase[index], exp: atomicBase[index].exp + 100 + index, updatedAt: 5100 },
         options: { allowParty: true, allowLifecycle: true },
         atomicGroup

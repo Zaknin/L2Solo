@@ -61,8 +61,7 @@ function acceptResult(state, result, previousGoal, observation = null) {
         const row = result.coldLifeRow;
         if (row) current = { ...current, phase: row.phase, adena: Number(row.adena),
             inventory: JSON.parse(row.inventorySummary || '{}'), stats: JSON.parse(row.statsJson || '{}'),
-            simulation: { ...current.simulation, revision: Number(row.simulationRevision),
-                ownerId: row.simulationOwner, leaseId: row.simulationLeaseId || null }, updatedAt: Number(row.updatedAt) };
+            simulation: { ...current.simulation, revision: Number(row.simulationRevision) }, updatedAt: Number(row.updatedAt) };
         if (observation && Diagnostics.active()) diagnostic(current, observation.command, 'npc_delivery', 'state_deferred', resultFields(result, observation.seller));
         utils.infoWarn('BotMarket', 'committed NPC state delivery deferred: %s', error.message);
     }

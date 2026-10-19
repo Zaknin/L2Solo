@@ -127,11 +127,10 @@ async function run() {
         await runtime.recordBatch([event('ack:memory')]);
         TableChannel.flush();
         assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'a committed episode reaches the worker as a memory row');
-        const token = { characterId: 1, ownerId: 'cold_simulation_owner', revision: 5,
-            leaseId: 'memory-ack', leaseUntil: Date.now() + 30000 };
-        const proposal = { characterId: 1, proposalId: 'memory-ack:5', token,
-            baseState: coldState, priority: 'P2', enqueuedAt: Date.now(), result: { events: [] } };
-        kernel.inFlight.set(1, { state: coldState, grant: token });
+        const startedAt = Date.now();
+        const proposal = { characterId: 1, proposalId: `1:${startedAt}`, revision: 5,
+            baseState: coldState, priority: 'P2', enqueuedAt: startedAt, result: { events: [] } };
+        kernel.inFlight.set(1, { state: coldState, startedAt });
         kernel.dirty.set(1, proposal); kernel.flush(null, true);
         coordinator.postCollections = (type, payload) => {
             assert.strictEqual(type, 'commit_ack');

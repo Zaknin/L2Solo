@@ -38,10 +38,14 @@ function result(tuple) {
     return { committed: true, replayed: true, success: tuple[4] === 1, units: tuple[5], amount: tuple[5],
         spent: tuple[6], received: tuple[7], nativeId: tuple[8], mp: tuple[9], economyCommit: tuple };
 }
+// A bot's authority: its phase, simulation revision and hot time. Any main
+// or worker write moves the revision, so no owner or loan is compared.
 function authority(state) {
-    return { phase: state?.phase, ownerId: state?.simulation?.ownerId || 'legacy_main',
-        leaseId: state?.simulation?.leaseId || null, revision: Number(state?.simulation?.revision || 0),
+    return { phase: state?.phase, revision: Number(state?.simulation?.revision || 0),
         hotAt: Number(state?.timing?.lastHotAt || 0) };
+}
+function sameAuthority(left, right) {
+    return !!left && !!right && left.phase === right.phase && left.revision === right.revision && left.hotAt === right.hotAt;
 }
 function acceptRow(row) {
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
@@ -94,5 +98,5 @@ function finish(characterId, command) {
 }
 function forget(characterId) { active.delete(Number(characterId)); }
 
-module.exports = { KINDS, MAX_BYTES, MAX_ACTIVE, create, header, valid, pending, completed, result, authority, admit,
+module.exports = { KINDS, MAX_BYTES, MAX_ACTIVE, create, header, valid, pending, completed, result, authority, sameAuthority, admit,
     acceptRow, preserveLeafSql, finish, forget, clear: () => active.clear(), size: () => active.size };

@@ -90,7 +90,7 @@ function setup() {
     assert(Protocol.byteLength(commandMessage) < PAGE_BYTES, 'native reconstruction removes only the redundant planned state');
     assert.throws(() => StateWire.unpackState({ ...packed,
         inventoryInstanceColumns: { 952: ['id'] } }), /invalid_inventory_wire/);
-    for (const mode of ['full', 'incremental', 'snapshot_page', 'claim_ack', 'commit_ack', 'release_ack', 'command_ack']) {
+    for (const mode of ['full', 'incremental', 'snapshot_page', 'commit_ack', 'command_ack']) {
         const { coordinator, messages } = setup();
         delete coordinator.post;
         coordinator.worker.postMessage = message => messages.push(message);
@@ -99,20 +99,16 @@ function setup() {
         if (mode === 'full') assert.strictEqual((await coordinator.sendFullSnapshot()).ok, true);
         else if (mode === 'incremental') assert.strictEqual((await coordinator.sendIncrementalEntries([largeState], 32)).ok, true);
         else {
-            const field = mode === 'snapshot_page' ? 'rows' : mode === 'claim_ack' ? 'rejected' : 'results';
+            const field = mode === 'snapshot_page' ? 'rows' : 'results';
             const row = { characterId: 1, ok: false, state: largeState,
-                ...(mode === 'commit_ack' ? { proposalId: 'p', inputToken: { characterId: 1,
-                    ownerId: 'cold_simulation_owner', revision: 1, leaseId: 'l', leaseUntil: 9999999999999 } } : {}),
-                ...(mode === 'release_ack' ? { releaseRequestId: 'r', inputToken: { characterId: 1,
-                    ownerId: 'cold_simulation_owner', revision: 1, leaseId: 'l', leaseUntil: 9999999999999 } } : {}) };
-            assert.strictEqual(coordinator.postCollections(mode, { [field]: [row],
-                ...(mode === 'claim_ack' ? { grants: [] } : {}) }), 1, mode);
+                ...(mode === 'commit_ack' ? { proposalId: '1:1' } : {}) };
+            assert.strictEqual(coordinator.postCollections(mode, { [field]: [row] }), 1, mode);
         }
         assert(messages.length > 0, mode);
         const message = messages.at(-1);
         assert(Protocol.byteLength(message) < Protocol.MAX_MESSAGE_BYTES);
         const payload = StateWire.unpackPayload(message.type, message.payload);
-        const rows = payload.rows || payload.rejected || payload.results;
+        const rows = payload.rows || payload.results;
         assert.deepStrictEqual(rows[0].state, largeState, mode);
         if (mode === 'full') assert.strictEqual(message.payload.done, true, 'a large bag must not suppress bootstrap readiness');
     }

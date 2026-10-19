@@ -81,12 +81,9 @@ async function noContribution(clanId) {
 }
 
 async function coldSp(leaderId, sp, replay = false) {
-    const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
     const { ColdSimulationCoordinator } = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
     const old = Life.cachedState(leaderId);
-    const token = await Owner.claim(old, { allowLifecycle: true });
-    assert(token.ok, JSON.stringify(token));
-    const proposal = { characterId: leaderId, token, baseState: old,
+    const proposal = { characterId: leaderId, revision: old.simulation.revision, baseState: old,
         nextState: { ...Life.cachedState(leaderId), sp }, options: { allowLifecycle: true }, result: {}, priority: 'P1' };
     const coordinator = new ColdSimulationCoordinator();
     let emitted = 0, results = [];

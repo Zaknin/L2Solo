@@ -56,7 +56,6 @@ function availableMember(member, profile, retained = new Set()) {
         // controlled, or already active raid groups here.
         if (!reclaimableEquipmentParty) return false;
     }
-    if (String(member?.simulationOwner || 'legacy_main') !== 'legacy_main') return false;
     if (bossLevel && (level < bossLevel - MAX_LEVEL_BELOW_BOSS || level > bossLevel + MAX_LEVEL_ABOVE_BOSS)) return false;
     if ((member?.stats?.clanHuntBackoffs || []).some((entry) => (
         String(entry?.spotId || '') === String(profile?.id || '')

@@ -171,10 +171,6 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
             { name: 'parties', from: null, to: 0, full: true, removed: [], last: true,
                 rows: parties.map(party => [party.partyId, party]) }] });
         send('snapshot_page', { done: true, rows });
-        const claim = await until((m) => m.type === 'claim_request');
-        send('claim_ack', { grants: claim.payload.candidates.map((c) => ({ ok: true, characterId: c.characterId,
-            ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,
-            leaseId: `worker-escrow-${c.characterId}`, leaseUntil: Date.now() + 30000, purpose: c.purpose })) }, claim.msgId);
         const proposals = new Map();
         const deadline = Date.now() + 15000;
         while ([7, 8, 20, 30].some((id) => !proposals.has(id))) {
