@@ -35,6 +35,15 @@ const id = 730093;
     assert.equal(rich.state.stats.travel?.townName, 'Talking Island');
     assert(!(Number(rich.state.stats.marketSellRetryAfter || 0) > now),
         'the trip to the shop town keeps no retry: the visit there opens the shop');
+
+    // The sale visit saves its retry before answering buy ads in the reached
+    // town; a sale there must still lead on to the shop town.
+    const answered = visitor(1000000);
+    answered.stats.marketSellRetryAfter = now + Listing.SELL_RETRY_DELAY_MS;
+    const onward = await Listing.travelToShopTown(answered, board, now);
+    assert.equal(onward.reason, 'shop_town_trip', 'the saved sale retry does not stop the trip to the shop town');
+    assert.equal(onward.state.stats.travel?.townName, 'Talking Island');
+    assert(!(Number(onward.state.stats.marketSellRetryAfter || 0) > now), 'the trip carries no retry');
     console.log('test_shop_town_unreached_retry: ok');
     process.exit(0);
 })().catch((error) => { console.error(error); process.exit(1); });
