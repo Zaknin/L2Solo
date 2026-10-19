@@ -1008,6 +1008,11 @@ function forState(state = {}, deps = {}) {
         : held.key !== key ? 'input_dependency_changed'
         : !eventVerdict.valid ? 'held_refused' : 'nodes_needed';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
+    // A held refusal split by the verdict's first reason and by whether the
+    // caller keeps the build: it picks which refusal to make cheaper.
+    if (diagnosticReason === 'held_refused') {
+        Diagnostics.count('context', deps.rememberContext === false ? 'held_refusal_unkept' : 'held_refusal', eventVerdict.reason || 'none');
+    }
     let elapsed = 0;
     // The items the review read, each reported once (deps.onSourceRead, the
     // occupation planner's dependencies) and kept with the held entry
