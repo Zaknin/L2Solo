@@ -149,12 +149,7 @@ const HotActivation = {
                 if (!handoff.ok) throw new Error(`simulation_owner_handoff_failed:${handoff.reason}`);
                 state = {
                     ...state,
-                    simulation: {
-                        ownerId: handoff.ownerId,
-                        revision: handoff.revision,
-                        leaseId: handoff.leaseId,
-                        leaseUntil: handoff.leaseUntil
-                    }
+                    simulation: { ...state.simulation, revision: handoff.revision }
                 };
                 if (leavesTrip && ['traveling', 'pk_hunting'].includes(state.activity)) {
                     state = {

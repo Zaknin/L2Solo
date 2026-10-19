@@ -10855,7 +10855,7 @@ const ClanLevelSp = require('./GameServer/Clan/ClanLevelSpRepository')({ one, wr
 Object.assign(Database, require('./GameServer/Clan/ClanAllianceRepository')({ one, all, write, inTransaction, withCharacterFlushes, ClanLevelSp, recordClanGoalEventUnsafe }));
 
 Object.assign(Database, require('./GameServer/ClanHall/Repository')({
-    one, all, write, inTransaction, inPreparedTransaction, inPreparedTransactionBatch, withCharacterFlush, updateColdInventorySnapshotUnsafe, syncInventorySummaryUnsafe,
+    one, all, write, inTransaction, inPreparedTransaction, inPreparedTransactionBatch, withCharacterFlush, updateColdInventorySnapshotUnsafe,
     rememberClanContributionUnsafe
 }));
 

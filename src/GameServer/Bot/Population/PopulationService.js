@@ -695,7 +695,6 @@ function hydratePartyCandidates(candidates = []) {
     }
     const projectionById = new Map(selected.map((state) => [Number(state.characterId), state]));
     return LifeState.statesByIds(Array.from(projectionById.keys()), {
-        ownerId: 'legacy_main',
         unassigned: true, excludeReserved: true
     }).then((states) => {
         const hydratedById = new Map((states || []).map((state) => [Number(state.characterId), state]));
@@ -1627,7 +1626,7 @@ const PopulationService = {
         const state = LifeState.cachedState(id);
         if (!state) return null;
         if (!this.started || this.partyFormationRunning || this.resolving
-            || state.phase !== 'cold' || state.simulation?.ownerId !== 'legacy_main' || state.simulation?.leaseId) return { deferred: true };
+            || state.phase !== 'cold') return { deferred: true };
         const expired = expirePartyRequestForState(state, timestamp);
         if (expired !== state) return LifeState.upsertState(expired, 'party_request_expired');
         // A deferred request whose time has passed: the next ordinary cold
@@ -1648,7 +1647,6 @@ const PopulationService = {
         }
         if (this.partyFormationRunning || this.resolving) return { deferred: true };
         const eligible = candidates.filter(state => LifeState.cachedState(state.characterId) === state
-            && state.simulation?.ownerId === 'legacy_main' && !state.simulation?.leaseId
             && !invoke('GameServer/Bot/Population/PartyAssemblyRecovery').coolingDown(state, timestamp)
             && !(state.stats?.partyRequest?.status === 'deferred' && Number(state.stats.partyRequest.deferredUntil || 0) > timestamp));
         if (!eligible.length) return { deferred: candidates.length > 0 };
@@ -3550,13 +3548,11 @@ const PopulationService = {
         const summary = Config.developerDiagnostics ? this.summary() : { enabled: false, coldQueue: LifeState.coldDueSummary() };
         if (summary.line) console.info('BotPopulation :: %s %s', reason, summary.line);
         // A bot due for over a minute is not normal (user 2026-10-17): name it
-        // and say why it waits, one line per summary. A claimed bot counts
-        // from its lease end: its lease expired and the claim still stands.
+        // and say why it waits, one line per summary.
         const queue = summary.coldQueue || {};
         if (queue.oldest && queue.oldestAgeMs >= 60000) {
             const bot = queue.oldest, at = Date.now();
-            const reason = bot.owner !== 'legacy_main' ? `claimed_by:${bot.owner}:lease_expired`
-                : ColdSimulationCoordinator.overdueReason(bot.characterId);
+            const reason = ColdSimulationCoordinator.overdueReason(bot.characterId);
             console.info('BotPopulation :: overdue %s(%d) %s due %ds ago, last step %ds ago, reason %s, due total %d',
                 bot.name, bot.characterId, bot.activity, Math.round(queue.oldestAgeMs / 1000),
                 bot.lastResolvedAt > 0 ? Math.round((at - bot.lastResolvedAt) / 1000) : -1, reason, queue.due);

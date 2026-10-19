@@ -27,7 +27,7 @@ const states = rows.map(row => ({ characterId: row.characterId, name: row.charac
     spotId: row.spotId, updatedAt: row.updatedAt, loc: { locX: row.locX, locY: row.locY, locZ: row.locZ },
     vitals: { hp: row.hp, maxHp: row.maxHp, mp: row.mp, maxMp: row.maxMp },
     timing: { lastResolvedAt: row.lastResolvedAt, nextResolveAt: row.nextResolveAt },
-    simulation: { ownerId: 'legacy_main', revision: row.simulationRevision || 0 },
+    simulation: { revision: row.simulationRevision || 0 },
     party: row.partyId ? { partyId: row.partyId } : null, stats: { ...json(row.statsJson), clanId: membership.get(row.characterId).clanId },
     classId: membership.get(row.characterId).classId, inventory: json(row.inventorySummary), persona: personas.get(row.characterId) }));
 assert.ok(states.length, 'native saved clan members are required');

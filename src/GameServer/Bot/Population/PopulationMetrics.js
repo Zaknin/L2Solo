@@ -45,9 +45,7 @@ function emptyCounters() {
         activationFloorGeoChecks: 0,
         activationFloorCacheHits: 0,
         activationFloorBudgetDeferred: 0,
-        coldOwnerResolved: 0,
         coldOwnerCommitted: 0,
-        coldOwnerCasStale: 0,
         coldOwnerRejected: 0,
         coldOwnerErrors: 0,
         coldOwnerLegacyDeferred: 0,
@@ -95,19 +93,6 @@ function stats(values) {
     };
 }
 
-function revisionGapBucket(result = {}) {
-    const expected = Number(result.expectedRevision);
-    const actual = Number(result.actualRevision);
-    if (!Number.isFinite(expected) || !Number.isFinite(actual)) return 'unknown';
-    const gap = actual - expected;
-    if (gap < 0) return 'ahead';
-    if (gap === 0) return 'same';
-    if (gap === 1) return '+1';
-    if (gap <= 4) return '+2-4';
-    if (gap <= 16) return '+5-16';
-    return '+17';
-}
-
 // The cold worker limit reads the median of the last three 1 s readings (L118): two of three late, not one.
 const LAG_WINDOW = 3;
 
@@ -144,8 +129,6 @@ const PopulationMetrics = {
         coldOwnerCommitDurationsMs: [],
         coldOwnerLegacyReasons: new DiagnosticMetricMap(),
         coldOwnerRejectReasons: new DiagnosticMetricMap(),
-        coldOwnerStaleRevisionGaps: new DiagnosticMetricMap(),
-        coldOwnerStaleOwners: new DiagnosticMetricMap(),
         warehouseCleanupDurationsMs: [],
         warehouseCleanupDeferralReasons: new DiagnosticMetricMap(),
         stateRetentionDurationsMs: [],
@@ -363,36 +346,18 @@ const PopulationMetrics = {
         this.counters.backgroundDeferrals += 1;
     },
 
-    recordColdOwnerResolved() {
-        if (!Config.developerDiagnostics) return;
-        this.counters.coldOwnerResolved += 1;
-    },
-
     recordColdOwnerCommit(result = {}, durationMs = 0) {
         if (!Config.developerDiagnostics) return;
         this.interval.coldOwnerCommitDurationsMs.push(Math.max(0, Number(durationMs) || 0));
         if (this.interval.coldOwnerCommitDurationsMs.length > Config.resolveSampleLimit) this.interval.coldOwnerCommitDurationsMs.shift();
         if (result.ok) this.counters.coldOwnerCommitted += 1;
-        else this.recordColdOwnerRejected(result.reason, result);
+        else this.recordColdOwnerRejected(result.reason);
     },
 
-    recordColdOwnerRejected(reason = 'unknown', result = {}) {
+    recordColdOwnerRejected(reason = 'unknown') {
         if (!Config.developerDiagnostics) return;
         const key = String(reason || 'unknown');
         this.counters.coldOwnerRejected += 1;
-        if (['stale_revision', 'cas_failed', 'owner_changed'].includes(key)) {
-            this.counters.coldOwnerCasStale += 1;
-            const gap = revisionGapBucket(result);
-            const owner = String(result.actualOwner || 'unknown');
-            this.interval.coldOwnerStaleRevisionGaps.set(
-                gap,
-                Number(this.interval.coldOwnerStaleRevisionGaps.get(gap) || 0) + 1
-            );
-            this.interval.coldOwnerStaleOwners.set(
-                owner,
-                Number(this.interval.coldOwnerStaleOwners.get(owner) || 0) + 1
-            );
-        }
         this.interval.coldOwnerRejectReasons.set(key, Number(this.interval.coldOwnerRejectReasons.get(key) || 0) + 1);
     },
 
@@ -622,8 +587,6 @@ const PopulationMetrics = {
         const activationFloorReasons = Object.fromEntries(this.interval.activationFloorReasons.entries());
         const coldOwnerLegacyReasons = Object.fromEntries(this.interval.coldOwnerLegacyReasons.entries());
         const coldOwnerRejectReasons = Object.fromEntries(this.interval.coldOwnerRejectReasons.entries());
-        const coldOwnerStaleRevisionGaps = Object.fromEntries(this.interval.coldOwnerStaleRevisionGaps.entries());
-        const coldOwnerStaleOwners = Object.fromEntries(this.interval.coldOwnerStaleOwners.entries());
         const warehouseCleanupStats = stats(this.interval.warehouseCleanupDurationsMs);
         const warehouseCleanupDeferralReasons = Object.fromEntries(this.interval.warehouseCleanupDeferralReasons.entries());
         const stateRetentionStats = stats(this.interval.stateRetentionDurationsMs);
@@ -639,8 +602,6 @@ const PopulationMetrics = {
         this.interval.activationFloorReasons = new DiagnosticMetricMap();
         this.interval.coldOwnerLegacyReasons = new DiagnosticMetricMap();
         this.interval.coldOwnerRejectReasons = new DiagnosticMetricMap();
-        this.interval.coldOwnerStaleRevisionGaps = new DiagnosticMetricMap();
-        this.interval.coldOwnerStaleOwners = new DiagnosticMetricMap();
         this.interval.warehouseCleanupDurationsMs = [];
         this.interval.warehouseCleanupDeferralReasons = new DiagnosticMetricMap();
         this.interval.stateRetentionDurationsMs = [];
@@ -668,9 +629,7 @@ const PopulationMetrics = {
             coldOwner: {
                 commit: coldOwnerCommitStats,
                 legacyReasons: coldOwnerLegacyReasons,
-                rejectReasons: coldOwnerRejectReasons,
-                staleRevisionGaps: coldOwnerStaleRevisionGaps,
-                staleOwners: coldOwnerStaleOwners
+                rejectReasons: coldOwnerRejectReasons
             },
             warehouseCleanup: {
                 ...warehouseCleanupStats,
