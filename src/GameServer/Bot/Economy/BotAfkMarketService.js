@@ -1,6 +1,7 @@
 const ClassProgression = invoke('GameServer/ClassProgression');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
+const TradeMeetingService = invoke('GameServer/AfkTrade/TradeMeetingService');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
@@ -387,9 +388,12 @@ async function withdrawSourceInvalidBuyAds(ownerId) {
 async function reduceStandingBids(state, ads, { beforeWrite } = {}) {
     const hour = Number(state.stats?.money?.[0]);
     if (state.phase !== 'cold' || !ads.length || !Number.isFinite(hour) || hour < 0
-        || state.stats?.tradeMeeting) return false;
-    // A preparation is still a quote, checked by record revision at native
-    // acceptance. It cannot lock an overpriced remaining ad indefinitely.
+        || state.stats?.tradeMeeting || TradeMeetingService.hasPreparation(state.characterId)) return false;
+    // A bot in a trade meeting or with a staged meeting preparation keeps its
+    // standing bids: the meeting was quoted on that money. Both are bounded (the
+    // preparation times out, trade_meeting_preparation_timeout, and is discarded
+    // on any life/board/user change), and the review reruns at the next commit's
+    // boardLimits step.
     // Native lifecycle transitions can have no worker plan. Compare only the
     // owner's five bids against reserved stock/NPCs and known routes, using the
     // existing money packet; this does not build or value a wish graph.
