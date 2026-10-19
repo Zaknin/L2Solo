@@ -2320,12 +2320,15 @@ class ColdSimulationKernel {
         let itemBytes = 0;
         const oversized = [];
         const visited = new Set();
+        // Each sent proposal's own next state (a transport copy may carry a delta
+        // instead): the in-flight record keeps it for a numbers-only commit ack.
+        const proposed = new Map();
         for (const proposal of eligible) {
             if (visited.has(proposal.characterId)) continue;
             const group = proposal.atomicGroup?.id
                 ? eligible.filter(entry => entry.atomicGroup?.id === proposal.atomicGroup.id) : [proposal];
             if (proposals.length + group.length > limit) break;
-            group.forEach(entry => visited.add(entry.characterId));
+            group.forEach(entry => { visited.add(entry.characterId); proposed.set(Number(entry.characterId), entry.nextState); });
             let transportGroup = group;
             let transportSizes = proposalSizes(group);
             if (DiagnosticConfig.developerDiagnostics === true && groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
@@ -2414,6 +2417,9 @@ class ColdSimulationKernel {
                 // The inputs of the review the commit ack may name (onCommitAck).
                 active.economyPlan = proposal.economyPlan;
                 active.buffOffer = proposal.buffOffer;
+                // What main commits unless it changes it: an ok ack with numbers
+                // only rebuilds main's cached state from it (Protocol.committedState).
+                active.proposed = proposed.get(Number(proposal.characterId));
             }
         }
         this.emit('proposal_batch', { proposals, ...tail }, null, payloadBytes);
@@ -2484,8 +2490,11 @@ class ColdSimulationKernel {
             if (active.pendingCommitId !== identity.key || this.states.get(id)?.state.phase !== 'cold') return;
             if (active.pendingRaidStepId) require('./ColdRaidEncounter').acknowledge(active.pendingRaidStepId, id, result.ok);
             this.inFlight.delete(id);
-            if (result.ok && result.state) {
-                this.upsert({ state: result.state });
+            // An ok ack without the state carries the commit's numbers: main's
+            // cache is the proposal's state with them.
+            const committed = result.ok ? result.state || Protocol.committedState(active.proposed, result) : null;
+            if (committed) {
+                this.upsert({ state: committed });
                 // The commit's slot is free and the kernel holds main's committed
                 // state: the review main named takes the bot before any step does.
                 const review = this.beginReview(id, result.review, active);

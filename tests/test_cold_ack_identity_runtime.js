@@ -11,6 +11,7 @@ const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const World = invoke('GameServer/World/World');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
+const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 const previous = { path: options.default.Database.path, history: options.default.Database.historyPath,
     knowledge: Config.knowledgeErrorsEnabled, world: World.user };
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l2solo-ack-runtime-'));
@@ -117,6 +118,67 @@ async function release(token) {
         assert.notEqual(activeRelease.results[0].revision, releaseToken.revision);
         assert.equal((await row(id)).simulationLeaseId, null);
         console.log('Successful native release keeps original input/request and newer output authority: PASS');
+
+        // A commit whose afterCommit writes nothing: main's cache stays the
+        // commit's own entry, the ack carries the numbers and no state, and the
+        // worker's copy built from its proposal matches main's cache on the
+        // command checkpoint and the bag, kit and henna revisions.
+        const numbersId = await create(), numbersToken = await claim(numbersId), claimed = Life.cachedState(numbersId);
+        const at = Date.now();
+        const proposedState = { ...claimed, activity: 'hunting', updatedAt: at,
+            timing: { ...claimed.timing, lastResolvedAt: at, nextResolveAt: at + 60000 } };
+        const numbersKernel = new ColdSimulationKernel({ resolveSolo: () => null, emit: () => true });
+        numbersKernel.upsert({ state: claimed });
+        numbersKernel.inFlight.set(numbersId, { state: claimed, grant: numbersToken });
+        numbersKernel.dirty.set(numbersId, { proposalId: 'numbers-proposal', characterId: numbersId, token: numbersToken,
+            priority: 'P1', enqueuedAt: at, nextState: proposedState, result: { events: [] } });
+        numbersKernel.flush(null, true);
+        const numbersProposal = { proposalId: 'numbers-proposal', token: numbersToken, nextState: proposedState,
+            result: { events: [] }, enqueuedAt: at };
+        const [numbersCommit] = await Owner.commitAndReleaseBatch([{ token: numbersToken, nextState: proposedState,
+            proposal: numbersProposal, options: { allowLifecycle: true } }]);
+        assert(numbersCommit.ok);
+        assert.equal(Life.cachedState(numbersId), numbersCommit.cached, 'the commit names the cache entry it built');
+        await coordinator.afterCommit({ proposal: numbersProposal, token: numbersToken, nextState: proposedState }, numbersCommit);
+        assert.equal(Life.cachedState(numbersId), numbersCommit.cached, 'an afterCommit that writes nothing keeps the entry');
+        const committedResult = { ...numbersCommit, proposal: numbersProposal, nextState: proposedState };
+        const ackState = { ...coordinator.ackState };
+        await coordinator.handleCommitResults([committedResult]);
+        const [numbersAck] = take('commit_ack');
+        assert.equal(Object.hasOwn(numbersAck, 'state'), false, 'the ack carries no state');
+        assert.deepEqual(coordinator.ackState, { with: ackState.with, without: ackState.without + 1 });
+        numbersKernel.onCommitAck({ results: [numbersAck] });
+        const workerCopy = numbersKernel.states.get(numbersId).state, mainCopy = Life.cachedState(numbersId);
+        assert(Protocol.sameCommandCheckpoint(workerCopy, mainCopy), 'the worker copy passes main\'s command checkpoint');
+        for (const key of ['updatedAt', 'activity', 'bagRevision', 'skillsRevision', 'hennaRevision'])
+            assert.deepEqual(workerCopy[key], mainCopy[key], key);
+        assert.deepEqual(workerCopy.timing, mainCopy.timing);
+        assert.deepEqual(workerCopy.simulation, mainCopy.simulation);
+        console.log('A commit main did not change acks with numbers only and the worker rebuilds main\'s state: PASS');
+
+        // Each condition failing carries the state: main committed another
+        // state, a write replaced the cache entry, the commit read the bag or
+        // the stats back from the row, or the row kept an economy leaf.
+        const fails = {
+            cleanup: { proposal: { ...numbersProposal, inventoryCleanupForced: true } },
+            resolvedOnMain: { proposal: { ...numbersProposal, nextState: undefined } },
+            cacheReplaced: { cached: { ...numbersCommit.cached } },
+            settled: { settled: true },
+            pkDrops: { pkDrops: [{ itemId: 1 }] },
+            partyPayment: { partyPayment: true },
+            rowReread: { row: { ...numbersCommit.row, statsJson: '{}' } },
+            economyLeaf: { row: { ...numbersCommit.row, economyCommit: '{"id":"x"}' } },
+            proposalLeaf: { proposal: { ...numbersProposal, nextState: { ...proposedState,
+                stats: { ...proposedState.stats, economyCommit: { id: 'x' } } } } }
+        };
+        for (const [name, change] of Object.entries(fails)) {
+            await coordinator.handleCommitResults([{ ...committedResult, ...change }]);
+            const [ack] = take('commit_ack');
+            assert(ack.state, `${name}: the ack carries the state`);
+            assert.equal(Object.hasOwn(ack, 'inventoryRevision'), false, `${name}: no numbers`);
+        }
+        assert.equal(coordinator.ackState.with, ackState.with + Object.keys(fails).length);
+        console.log('Each failed numbers condition still carries the state: PASS');
 
         // Hold delivery of real native release outcomes, then replace the
         // actual Worker before either main handler resumes. Native recovery

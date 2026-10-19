@@ -5,6 +5,7 @@ const Database = invoke('Database');
 const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const C4Unseal = invoke('GameServer/Items/C4Unseal');
 const BotErrands = require('./BotErrands');
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 
 const OWNER_ID = 'cold_simulation_owner';
 const LEGACY_OWNER_ID = 'legacy_main';
@@ -389,7 +390,13 @@ function commitAndReleaseBatch(entries = [], options = {}) {
             if (result.ok) {
                 DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerRelease({ ok: true });
                 const state = states.get(Number(result.characterId));
+                const kept = LifeState.cachedState(result.characterId);
                 reflect(result, withPersistedStats(state, result));
+                // The cache entry this commit's own state built (a newer clan SP
+                // grant keeps the old one): the commit ack's identity test
+                // (ColdSimulationCoordinator ackNumbers).
+                const cached = LifeState.cachedState(result.characterId);
+                if (cached && cached !== kept) result.cached = cached;
             }
         });
         return [...results, ...rejected];

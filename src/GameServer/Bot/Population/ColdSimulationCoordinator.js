@@ -263,6 +263,9 @@ class ColdSimulationCoordinator {
         // Review commands answered (always counted, like the refusals): how many
         // came, how they ended (refused by reason) and which steps they carried.
         this.reviews = { sent: 0, ok: 0, refused: {}, plan: 0, buff: 0, training: 0 };
+        // Ok commit acks with the state and with the commit's numbers only
+        // (ackNumbers), always counted.
+        this.ackState = { with: 0, without: 0 };
         this.queue = new ColdCommitQueue({
             targetMs: Config.coldWorkerOrdinaryFlushMs || 2000,
             hardMs: Config.coldWorkerOrdinaryHardMaxMs || 5000,
@@ -1983,6 +1986,8 @@ class ColdSimulationCoordinator {
             if (!inputToken || inputToken.characterId !== Number(result.characterId)
                 || typeof proposalId !== 'string' || !proposalId || proposalId.length > 240) return [];
             const state = LifeState.cachedState(result.characterId) || result.nextState || result.proposal?.baseState || null;
+            const numbers = result.ok ? this.ackNumbers(result, state) : null;
+            if (result.ok) this.ackState[numbers ? 'without' : 'with'] += 1;
             return [{
                 ok: !!result.ok,
                 characterId: Number(result.characterId),
@@ -1993,7 +1998,7 @@ class ColdSimulationCoordinator {
                 ...(result.detail ? { detail: result.detail } : {}),
                 revision: result.revision,
                 raidStepId: result.proposal?.raidStepId,
-                state,
+                ...(numbers || { state }),
                 ...(result.ok ? this.reviewSteps(result.proposal, state) : {})
             }];
         });
@@ -2001,6 +2006,25 @@ class ColdSimulationCoordinator {
         this.tableChannel.flush();
         const sent = this.postCollections('commit_ack', { results: acknowledgements });
         this.finishCommitAcknowledgements(results, sent > 0);
+    }
+
+    // An ok ack carries the commit's numbers, not the state, when main's cache
+    // is the commit's own entry built from the worker's proposal: the worker
+    // rebuilds it (Protocol.committedState). Otherwise main changed what it
+    // committed and the state goes: a forced cleanup trip or a state main
+    // resolved itself (prepareProposal), a later write over the entry (an
+    // afterCommit step, the party work), a row the commit re-read (a board
+    // settlement, a PvP tally, a PK drop, a party payment: SQL wrote its bag or
+    // stats), or the economy leaf the row kept over the proposal's.
+    ackNumbers(result, cached) {
+        const proposal = result.proposal, row = result.row, stats = proposal?.nextState?.stats;
+        if (!proposal?.nextState || proposal.inventoryCleanupForced
+            || !result.cached || cached !== result.cached
+            || result.settled || result.pkDrops?.length || result.partyPayment
+            || !row || typeof row.statsJson === 'string'
+            || row.economyCommit != null || stats && Object.hasOwn(stats, 'economyCommit')) return null;
+        return { revision: cached.simulation.revision, updatedAt: cached.updatedAt, inventoryRevision: cached.bagRevision,
+            skillsRevision: cached.skillsRevision, hennaRevision: cached.hennaRevision };
     }
 
     // The steps of the review command the worker sends on this ok ack, decided
@@ -2632,6 +2656,7 @@ class ColdSimulationCoordinator {
                 staleCommand: this.refusals.staleCommand },
             reviews: { ...this.reviews, refused: { ...this.reviews.refused } },
             heldAcks: this.heldAcks.size,
+            ackState: { ...this.ackState },
             soloHolds: invoke('GameServer/Bot/Population/PartyIncomeComparison').soloHoldStats(),
             competitionActions: Config.developerDiagnostics ? this.competitionActions.snapshot() : null,
             economyDecisions: Config.developerDiagnostics ? { hits: this.economyDecisions.hits, misses: this.economyDecisions.misses, held: this.economyDecisions.byId.size } : null,

@@ -1533,6 +1533,33 @@ function claimAck(kernel, payload) {
     }
 
     {
+        // An ok ack with the commit's numbers and no state: the bot holds its
+        // own proposed state released to main with the row's clock and
+        // revisions, the same state main cached, and the review main named runs.
+        const at = 55000;
+        const numbersKernel = recordingKernel({ resolveSolo: () => null, now: () => at });
+        const base = state(62, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
+        const next = state(62, { activity: 'resting', timing: { lastResolvedAt: at, nextResolveAt: at + 9000 } });
+        const token = { characterId: 62, ownerId: 'cold_simulation_owner', revision: 4, leaseId: 'numbers-62', leaseUntil: at + 30000 };
+        numbersKernel.upsert({ state: base });
+        numbersKernel.inFlight.set(62, { state: base, grant: token });
+        numbersKernel.dirty.set(62, { proposalId: 'numbers:62', characterId: 62, token, priority: 'P1', enqueuedAt: at,
+            nextState: next, result: { events: [] } });
+        numbersKernel.flush(null, true);
+        const ack = { ok: true, characterId: 62, revision: 5, updatedAt: at + 1, inventoryRevision: 3, skillsRevision: 2,
+            hennaRevision: 1, review: ['training'] };
+        commitAck(numbersKernel, { results: [ack] });
+        const held = numbersKernel.states.get(62).state;
+        assert.deepStrictEqual(held, Protocol.committedState(next, ack));
+        assert.deepStrictEqual(held.simulation, { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 });
+        assert.deepStrictEqual([held.activity, held.timing, held.updatedAt, held.bagRevision, held.skillsRevision, held.hennaRevision],
+            ['resting', next.timing, at + 1, 3, 2, 1], 'the proposal and the ack numbers make the held state');
+        assert.strictEqual(numbersKernel.inFlight.has(62), false, 'the proposed state goes with the in-flight record');
+        assert.strictEqual(sentCommands.get(numbersKernel).get(62)?.kind, 'review', 'a numbers ack still sends the named review');
+        assert.strictEqual(Protocol.committedState(next, { ...ack, updatedAt: undefined }), null, 'a missing number builds nothing');
+    }
+
+    {
         // A plan the step stamped as sent that no review runs (refused, skipped
         // on a full window, its send failed, or not named after a forced
         // cleanup) is forgotten as sent, so the refresh reproducing it sends it
