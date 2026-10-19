@@ -582,6 +582,7 @@ function askWorkshop(state, timestamp, routeRows, caller, options = {}) {
 async function lifecycleWorkshop(state, timestamp, deps) {
     const kept = EconomyContext.heldWorkshop(state, deps);
     if (!kept) return askWorkshop(state, timestamp, deps.routeRows, 'lifecycle');
+    economyDiagnostics.count('workshop', 'kept', 'lifecycle');
     if (economyDiagnostics.enabled(state.characterId)) {
         const fresh = await occupationFor(state, timestamp, { routeRows: deps.routeRows, routeKey: EconomicTrip.key(state) });
         economyDiagnostics.count('workshop', 'skip', fresh?.recipeId === kept.recipeId && fresh?.productId === kept.productId ? 'same' : 'new');

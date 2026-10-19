@@ -467,9 +467,28 @@ async function run() {
         const watched = built.statsPacket.wishSections.marketWatch || [];
         const watches = (id, storeType) => watched.some(row => row[0] === id && row[1] === storeType);
         assert(watches(recipe.productId, 3), 'the product\'s buyers are watched');
-        assert(recipe.materials.every(row => watches(row.selfId, 1) || watched.length >= Sections.MARKET_WATCH),
-            'the materials\' sellers are watched');
+        assert(watched.length < Sections.MARKET_WATCH, 'fixture: a short queue, every row fits under the cap');
+        assert(recipe.materials.every(row => watches(row.selfId, 1)), 'the materials\' sellers are watched');
         Economy.forget(state.characterId);
+        // The keep: a crafter's card refused only by its MP (sources), its
+        // collected verdict handed to the step's build on the same deps.
+        const Card = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+        const T = Date.now(), crafter = { ...base, characterId: 990032, craftLevel: 1 };
+        const deps = { timestamp: T, routeRows: Trip.prepared(crafter) };
+        const held = Economy.forState(crafter, { ...deps, workshop });
+        const published = { ...crafter, stats: { ...crafter.stats, ...held.statsPacket } };
+        const accepted = Card.advisory(held, published, published.activity, deps);
+        const tired = { ...published, vitals: { ...published.vitals, mp: published.vitals.mp - 1 } };
+        const prepared = {};
+        assert.equal(Card.refreshAdvisory(tired, accepted, deps, { prepared, collect: true }), null, 'fixture: the MP refuses the card');
+        const handed = { ...deps, eventVerdict: prepared.eventVerdict };
+        assert(prepared.eventVerdict.collected, 'fixture: the refusal is collected');
+        assert(!(prepared.eventVerdict.collected.verdict.touchedSections & Sections.COMPUTED.workshop),
+            'fixture: the refusal names no workshop section');
+        assert.equal(Economy.heldWorkshop(tired, handed), held.plan.workshop, 'the held workshop is kept for the build');
+        assert.equal(Economy.heldWorkshop(tired, { ...handed, routeRows: Trip.prepared(crafter).slice() }), null,
+            'other route rows than the verdict judged ask');
+        Economy.forget(crafter.characterId);
     }
     console.log('PASS workshop kept with the held build / asked when it moved');
     // The cheap check by kind of leaf: an enchant or special-ability decision

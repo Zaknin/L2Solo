@@ -667,8 +667,8 @@ function watchedBoard(board, watch) {
 // rebuild and would cross at every step; the decision already weighed it.
 // Only a newer, clearly better line crosses. recipe: the build's productive
 // workshop recipe (a crafter's); its product's buy lines and its materials'
-// sell lines are watched too, so a crossing raises money and the kept
-// workshop is asked again (Sections.COMPUTED.workshop).
+// sell lines are watched too, after the wishes and sales, so a crossing
+// raises money and the kept workshop is asked again (Sections.COMPUTED.workshop).
 function marketWatchRows(queue, sales, board, ownerId, buyValue, sellValue, errorOf, recipe = null) {
     const rows = [], exclude = { excludeOwner: ownerId };
     const add = (id, storeType, value) => {
@@ -680,11 +680,12 @@ function marketWatchRows(queue, sales, board, ownerId, buyValue, sellValue, erro
         rows.push([id, storeType, Math.round(reference), Math.round(errorOf(id) * 1000) / 1000]);
     };
     for (const wish of queue) { const id = Number(wish.object?.itemId); if (id > 0) add(id, SELL, buyValue(id)); }
+    for (const [id] of sales) add(Number(id), BUY, sellValue(id));
+    // Last: the workshop's rows never push a wish or a sale out of the cap.
     if (recipe) {
         add(Number(recipe.productId), BUY, sellValue(Number(recipe.productId)));
         for (const row of recipe.materials || []) add(Number(row.selfId), SELL, buyValue(Number(row.selfId)));
     }
-    for (const [id] of sales) add(Number(id), BUY, sellValue(id));
     return rows;
 }
 function defaultProducerSource(state, board) {
@@ -1249,8 +1250,9 @@ function forState(state = {}, deps = {}) {
     context.choiceBagValue = mask === 0 && choiceBagValueHolds(state, choiceBands, acceptedSections, context.hourAdena, bagValue)
         ? acceptedSections.bagValue : bagValue;
     // An event re-weighs the held focus and step (WishNetwork reconsider): a
-    // section that moved (raised, or named by a refusal), not verdictMask by intent. A first build or an
+    // section that moved (raised, or named by a refusal). A first build or an
     // unproved held build (no section named, mask = every piece) keeps them.
+    // By intent not verdictMask: an unproved verdict's sections rebuild, never re-weigh.
     const moved = (Number(state.stats?.wishDirty) || 0) | (Number(deps.eventVerdict?.touchedSections) || 0)
         | (held ? eventVerdict.movedSections : 0);
     const reconsider = moved !== 0;
@@ -1301,7 +1303,7 @@ function forState(state = {}, deps = {}) {
         // || (TradeIntent.project above keeps ??): a zero-usefulness item's
         // worth is 0, yet its sale is watched at its price.
         Number(state.characterId), price, id => context.worth(id) || price(id), priceError,
-        workshop?.known !== false && workshop?.productId > 0 ? Recipes.resolveByRecipeId(workshop.recipeId) : null);
+        productive ? Recipes.resolveByRecipeId(workshop.recipeId) : null);
     // The build's facts for its baseline: the request's when they were read
     // over this state itself (no held leaf's field activity in between).
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
