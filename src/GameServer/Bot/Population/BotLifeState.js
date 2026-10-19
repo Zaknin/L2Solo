@@ -139,7 +139,7 @@ function notifyNearFacts(session, reason) {
             if (session.nearRaise) row.raise = { ...session.nearRaise };
             // lazy: cycle the coordinator requires this module at its top.
             invoke('GameServer/Bot/Population/ColdSimulationCoordinator').markDirty(row,
-                { reason, critical: isCriticalSnapshotReason(reason, row), near: true });
+                { reason, critical: isCriticalSnapshotReason(reason, row) || !!row.raise, near: true });
         } catch (error) {
             utils.infoWarn('BotLife', 'near fact %s post failed: %s', reason, error.message);
         }

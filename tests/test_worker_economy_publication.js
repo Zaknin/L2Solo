@@ -7,7 +7,7 @@ const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtoco
 const Decisions = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
 const StateWire = require('../src/GameServer/Bot/Population/ColdStateWire');
 
-async function runWorker(state, predicate) {
+async function runWorker(state, predicate, followUp = null) {
     const epoch = `economy-publication-${state.characterId}`, received = [];
     const worker = new Worker(path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js'),
         { workerData: { workerEpoch: epoch }, resourceLimits: { maxOldGenerationSizeMb: 256 } });
@@ -42,6 +42,7 @@ async function runWorker(state, predicate) {
         await until(message => message.type === 'ready' && message.msgId === 'init');
         send('snapshot_page', { rows: [{ state }], initial: true, done: true });
         const result = await until(predicate);
+        if (followUp) await followUp({ result, until, post: row => send('snapshot_page', { rows: [{ state: row }], initial: false, done: true }) });
         assert(!received.some(message => message.type === 'fault'));
         send('shutdown', {}, 'shutdown');
         await until(message => message.type === 'drained' && message.msgId === 'shutdown');
@@ -68,6 +69,22 @@ async function runWorker(state, predicate) {
     assert.equal(near.nearSeq, state.nearSeq, 'the decision names the post it answers');
     assert.deepEqual(decision.echo, [near.statsPacket.decisionSeq, near.statsPacket.activityLeaf, near.statsPacket.wishFocus[0]],
         'the card and the moved mind are one decision');
+
+    // The worker owns the near mind: a post carries the body's older mind keys, which are
+    // discarded; a raise is taken once and a later post naming it adds nothing.
+    const decidedAt = (until, seq) => until(message => message.type === 'ready'
+        && message.payload.phase === 'economy_decided' && message.payload.near?.nearSeq === seq);
+    await runWorker({ ...state, characterId: 765413 }, message => message.type === 'ready'
+        && message.payload.phase === 'economy_decided', async ({ result: first, until, post }) => {
+        const own = first.payload.near.statsPacket.decisionSeq;
+        const raised = { ...state, characterId: 765413, nearSeq: 4, updatedAt: now + 1, raise: { seq: 1, bits: 1, impossible: false } };
+        post(raised);
+        const one = (await decidedAt(until, 4)).payload.near.statsPacket;
+        assert.equal(one.decisionSeq, own + 1, 'a raise main posted is taken once, on the worker\'s mind');
+        post({ ...raised, nearSeq: 5, updatedAt: now + 2 });
+        const two = (await decidedAt(until, 5)).payload.near.statsPacket;
+        assert.equal(two.decisionSeq, one.decisionSeq, 'a later post naming the same raise neither raises again nor rolls the mind back');
+    });
 
     const instances = Array.from({ length: 2075 }, (_, index) => ({ id: 900000 + index,
         selfId: 952, amount: 1, equipped: false, slot: 0, enchant: 0 }));
