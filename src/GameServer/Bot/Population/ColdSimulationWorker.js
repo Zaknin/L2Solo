@@ -108,6 +108,7 @@ const ColdEconomyPlan = require('./ColdEconomyPlan');
 const RecomputeGeneration = require('./RecomputeGeneration');
 const PersonalWarehouseIndex = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
 const ClanSupplyPolicy = invoke('GameServer/Clan/ClanSupplyPolicy');
+const ClanMembershipPolicy = require('../../Clan/ClanMembershipPolicy');
 const { ColdOccupationPlanner } = require('./ColdOccupationPlanner');
 const OccupationSources = require('./ColdOccupationSources');
 const EconomicTrip = require('../Economy/EconomicTrip');
@@ -1388,7 +1389,10 @@ function startKernel(config = {}) {
                         rememberWishAdvisory(owner, advice, refreshed ? null : seen, observedDeps);
                     }
                 });
-            const projected = resolved;
+            // Membership is the row's: a plan, request or objective of another
+            // clan leaves the proposal here (the same object when none, one
+            // compare). The commit writes the proposal as it is, no merge.
+            const projected = ClanMembershipPolicy.reconcileState(resolved);
             if (stepEconomy) {
                 seenEcho = ColdEconomyDecision.stateEcho(projected);
                 economyEdges = ColdEconomyPlan.edges(state, projected,

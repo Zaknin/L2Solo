@@ -80,6 +80,12 @@ async function admit(state, kind, original = null) {
     catch (error) { finish(id, admitted.command); throw error; }
     return { command: admitted.command, state: current, recovered: admitted.recovered || null };
 }
+// The one SQL rule for the leaf on a bot_life_state write of a whole stats
+// JSON (`incoming`, an SQL expression): the row's leaf stays, a leaf the row
+// does not hold is dropped. json_patch with a NULL member removes the key.
+function preserveLeafSql(incoming) {
+    return `json_patch(${incoming}, json_object('economyCommit', json_extract(bot_life_state.statsJson, '$.economyCommit')))`;
+}
 function finish(characterId, command) {
     const value = active.get(Number(characterId));
     // A retry may rebind the same UUID to a newer native owner. Its older
@@ -89,4 +95,4 @@ function finish(characterId, command) {
 function forget(characterId) { active.delete(Number(characterId)); }
 
 module.exports = { KINDS, MAX_BYTES, MAX_ACTIVE, create, header, valid, pending, completed, result, authority, admit,
-    acceptRow, finish, forget, clear: () => active.clear(), size: () => active.size };
+    acceptRow, preserveLeafSql, finish, forget, clear: () => active.clear(), size: () => active.size };

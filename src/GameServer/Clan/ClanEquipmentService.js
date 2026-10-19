@@ -362,9 +362,11 @@ async function suspendWaitingAssignments(clan, goal, previousGoal) {
         const repaired = Policy.reconcileGoals(current, keys);
         if (repaired === current) continue;
         repaired.stats.clanGoalInvalidationVersion = Math.max(Date.now(), number(stats.clanGoalInvalidationVersion) + 1);
-        // This committed goal owner is allowed to replace a locked clan plan;
-        // a generic lifecycle save would preserve the superseded plan.
-        if (await LifeState.upsertState(repaired, 'clan_equipment_goal')) cleared++;
+        repaired.stats.lastReason = 'clan_equipment_goal';
+        // The write moves the row's revision: a far proposal built on the
+        // superseded goal is refused instead of restoring it.
+        cleared += (await Database.writeClanGoalMember(current.characterId, repaired.activity,
+            JSON.stringify(repaired.stats))).repairedMembers;
     }
     return { ...reformed, cleared };
 }

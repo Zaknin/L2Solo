@@ -197,7 +197,7 @@ async function main() {
         assert.deepEqual((await query('SELECT payloadJson,ordinaryEligible FROM bot_party_candidate_projection WHERE characterId=?', [coldId]))[0],
             unchangedProjection, 'native lease claim preserves payload and ordinary identity');
         const request = { characterId: coldId, expectedRevision: grant.revision, ownerId: Owner.OWNER_ID, leaseId: grant.leaseId,
-            timestamp: timestamp + 1, patch: { level: 51 }, physical: { classId: 17, level: 51, maxHp: 500, maxMp: 300 } };
+            timestamp: timestamp + 1, allowLifecycle: true, patch: { phase: 'cold', level: 51 }, physical: { classId: 17, level: 51, maxHp: 500, maxMp: 300 } };
         await assert.rejects(Database.commitAndReleaseColdSimulationLeases([{ ...request,
             physical: { ...request.physical, pvpKills: Array(19).fill({ victimId: 1 }) } }]), /too many kills/);
         assert.deepEqual(await events(), [], 'rolled back native cold row/class changes publish no pending capability event');

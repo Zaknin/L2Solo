@@ -95,23 +95,39 @@ function persistencePatch(state = {}, timestamp = Date.now(),
     };
 }
 
+// The proposal's stats with the economy leaf the row kept (the commit's
+// RETURNING: JSON text, null when none). A new object only when they differ.
+function withEconomyLeaf(stats = {}, leaf) {
+    if (leaf == null) {
+        if (!Object.hasOwn(stats, 'economyCommit')) return stats;
+        const rest = { ...stats };
+        delete rest.economyCommit;
+        return rest;
+    }
+    return JSON.stringify(stats.economyCommit) === leaf ? stats : { ...stats, economyCommit: JSON.parse(leaf) };
+}
+
+// The committed state is the proposal's own object with the commit's numbers.
+// A commit that rewrote the row after its UPDATE (a settlement, a PvP tally,
+// a PK drop, a party payment) hands the whole row back: its stats hold what
+// SQL wrote into them, so they are parsed (the one parse, rare).
 function withPersistedStats(state, result) {
-    if (!state || typeof result?.row?.statsJson !== 'string') return state;
+    const row = result?.row;
+    if (!state || !row) return state;
     try {
-        // The commit hands over its own parse of the stats it wrote when nothing rewrote them.
-        const stats = result.committedStats || JSON.parse(result.row.statsJson);
+        const stats = typeof row.statsJson === 'string' ? JSON.parse(row.statsJson) : withEconomyLeaf(state.stats, row.economyCommit);
         if (!stats || typeof stats !== 'object') return state;
         // The row's revisions (Database.stateRevisions) ride on the state, so
         // readers of the cached state ask whether the bag or the kit moved.
         // Its updatedAt too: a settlement merged inside the commit moves it past
         // the worker's clock, and a command checkpoint built from the cache
         // must match the row (L127: stale_command loop).
-        const persisted = { ...state, ...Database.stateRevisions(result.row), name: result.row.characterName || state.name, stats,
-            updatedAt: Number(result.row.updatedAt) || Number(state.updatedAt || 0) };
+        const persisted = { ...state, ...Database.stateRevisions(row), name: row.characterName || state.name, stats,
+            updatedAt: Number(row.updatedAt) || Number(state.updatedAt || 0) };
         // Board settlements, drops and native party payments can all change
         // the bag after the proposed state: continue with the committed bag.
         if (!result.settled && !result.pkDrops?.length && !result.partyPayment) return persisted;
-        return { ...persisted, adena: Number(result.row.adena || 0), inventory: JSON.parse(result.row.inventorySummary || '{}') };
+        return { ...persisted, adena: Number(row.adena || 0), inventory: JSON.parse(row.inventorySummary || '{}') };
     } catch (_) {
         return state;
     }
@@ -239,6 +255,8 @@ function commit(claimToken, nextState, options = {}) {
         timestamp,
         leaseUntil: timestamp + leaseMs,
         patch: persistencePatch(canonicalState, timestamp),
+        // The partition reads these instead of parsing the patch's statsJson.
+        stats: canonicalState.stats || {},
         ...(options.memoryEvents ? { memoryEvents: options.memoryEvents } : {})
     }).then((result) => {
         DiagnosticConfig.developerDiagnostics && Metrics().recordColdOwnerCommit(result, Date.now() - startedAt);
@@ -338,6 +356,8 @@ function commitAndReleaseBatch(entries = [], options = {}) {
             leaseId: token.leaseId,
             timestamp,
             patch: persistencePatch(canonicalState, timestamp, inventorySummary),
+            // The partition and the death record read these instead of parsing the patch's statsJson.
+            stats: canonicalState.stats || {},
             physical: {
                 level: Number(nextState.level || 1),
                 exp: Number(nextState.exp || 0),

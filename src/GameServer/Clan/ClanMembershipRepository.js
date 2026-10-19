@@ -1,13 +1,26 @@
 const Policy = require('./ClanMembershipPolicy');
+const EconomyCommit = require('../Bot/Economy/EconomyCommit');
+
+// The row's revision moves in SQL, so no writer between the read and this
+// write can be handed the same number; the cache gets the written one. The
+// economy leaf stays the row's.
+const MEMBER_WRITE = `UPDATE bot_life_state SET activity = ?, statsJson = ${EconomyCommit.preserveLeafSql('?')},
+    simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ? RETURNING `;
 
 module.exports = ({ all, write, inTransaction, now }) => {
-    // The row's revision moves in SQL, so no writer between the read and this
-    // write can be handed the same number; the cache gets the written one.
     function writeMemberUnsafe(row, activity, statsJson) {
-        const [written] = all(`UPDATE bot_life_state SET activity = ?, statsJson = ?,
-            simulationRevision = simulationRevision + 1, updatedAt = ?
-            WHERE characterId = ? RETURNING simulationRevision, updatedAt`, [activity, statsJson, now(), row.characterId]);
+        const [written] = all(`${MEMBER_WRITE}simulationRevision, updatedAt`, [activity, statsJson, now(), row.characterId]);
         return { ...row, activity, statsJson, ...written };
+    }
+
+    // One member's goal repair built from main's cache (ClanEquipmentService):
+    // the same write, so a proposal built before it is refused on its
+    // revision. Published like the repairs below.
+    function writeGoalMember(characterId, activity, statsJson) {
+        return inTransaction(() => {
+            const members = all(`${MEMBER_WRITE}*`, [activity, statsJson, now(), Number(characterId)]);
+            return { repairedMembers: members.length, repairedParties: 0, membershipRepair: { members, parties: [] } };
+        }, 'clan-goal:member').then(publish);
     }
 
     function repairUnsafe(characterIds = null) {
@@ -113,5 +126,5 @@ module.exports = ({ all, write, inTransaction, now }) => {
             return { repairedMembers: membershipRepair.members.length, repairedParties: membershipRepair.parties.length, membershipRepair };
         }, 'clan-membership:reconcile').then(publish);
     }
-    return { repairUnsafe, repairGoalsUnsafe, publish, reconcile, reconcileGoals };
+    return { repairUnsafe, repairGoalsUnsafe, publish, reconcile, reconcileGoals, writeGoalMember };
 };

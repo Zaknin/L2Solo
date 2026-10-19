@@ -121,24 +121,25 @@ async function main() {
             leaseId: 'membership-race', timestamp, leaseUntil: timestamp + 60000 });
         assert(claimed.ok, JSON.stringify(claimed));
         await Database.updateCharacterClan(ids[3], clanId, 0, 0, 0);
-        const staleCommit = await Database.commitColdSimulationLease({ characterId: ids[3], expectedRevision: claimed.revision,
-            leaseId: 'membership-race', timestamp: timestamp + 1, leaseUntil: timestamp + 60000,
-            patch: { statsJson: JSON.stringify({ clanId: 0 }) } });
-        assert(!staleCommit.ok, 'running worker cannot erase a newer membership');
+        // A proposal is written as is: its columns and the stats object it was built with.
+        const propose = (expectedRevision, stats, at) => Database.commitColdSimulationLease({ characterId: ids[3], expectedRevision,
+            leaseId: 'membership-race', timestamp: timestamp + at, leaseUntil: timestamp + 60000, allowLifecycle: true,
+            patch: { phase: 'cold', statsJson: JSON.stringify(stats) }, stats });
+        const staleCommit = await propose(claimed.revision, { clanId: 0 }, 1);
+        assert.equal(staleCommit.reason, 'stale_revision', 'running worker cannot erase a newer membership');
         assert.equal(Life.cachedState(ids[3]).stats.clanId, clanId);
+        // The step redone on the joined row carries the membership and its drop plan.
+        const joinedRow = await lifeRow(ids[3]);
         const directPlan = { ...personalPlan, strategy: 'direct_drop' };
-        const merged = await Database.commitColdSimulationLease({ characterId: ids[3],
-            expectedRevision: Number((await lifeRow(ids[3])).simulationRevision),
-            leaseId: 'membership-race', timestamp: timestamp + 2, leaseUntil: timestamp + 60000,
-            patch: { statsJson: JSON.stringify({ clanId: 0, equipmentPlan: directPlan }) } });
-        assert(merged.ok, JSON.stringify(merged));
-        assert.equal(JSON.parse(merged.row.statsJson).clanId, clanId);
-        assert.deepEqual(JSON.parse(merged.row.statsJson).equipmentPlan, directPlan, 'membership metadata merge preserves ordinary drop plans');
-        const sanitized = await Database.commitColdSimulationLease({ characterId: ids[3], expectedRevision: merged.revision,
-            leaseId: 'membership-race', timestamp: timestamp + 3, leaseUntil: timestamp + 60000,
-            patch: { statsJson: JSON.stringify({ ...JSON.parse(merged.row.statsJson), equipmentPlan: personalPlan }) } });
+        const redone = await propose(Number(joinedRow.simulationRevision),
+            { ...JSON.parse(joinedRow.statsJson), equipmentPlan: directPlan }, 2);
+        assert(redone.ok, JSON.stringify(redone));
+        assert.equal(JSON.parse((await lifeRow(ids[3])).statsJson).clanId, clanId);
+        assert.deepEqual(JSON.parse((await lifeRow(ids[3])).statsJson).equipmentPlan, directPlan, 'a membership keeps ordinary drop plans');
+        const sanitized = await propose(redone.revision,
+            { ...JSON.parse((await lifeRow(ids[3])).statsJson), equipmentPlan: personalPlan }, 3);
         assert(sanitized.ok, JSON.stringify(sanitized));
-        assert.deepEqual(JSON.parse(sanitized.row.statsJson).equipmentPlan, personalPlan, 'worker writes keep personal clan crafting');
+        assert.deepEqual(JSON.parse((await lifeRow(ids[3])).statsJson).equipmentPlan, personalPlan, 'worker writes keep personal clan crafting');
         await Database.removeCharacterFromClan(ids[3], 0);
         assert.equal(Life.cachedState(ids[3]).stats.clanId, 0);
         const dissolved = await Database.dissolveClan({ clanId: created.clanId, leaderId: founders[0] });

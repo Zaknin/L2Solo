@@ -2638,25 +2638,7 @@ function parsedObject(raw) {
     }
 }
 
-// Both views of one stats string from a single JSON.parse: `loose` as
-// parsedObject returns it (null for bad JSON) and `plain` as jsonObject does.
-function statsViews(raw) {
-    if (typeof raw !== 'string' || !raw) return { loose: parsedObject(raw), plain: jsonObject(raw) };
-    let value;
-    try {
-        value = JSON.parse(raw);
-    } catch (_) {
-        return { loose: null, plain: {} };
-    }
-    const loose = value && typeof value === 'object' ? value : {};
-    return { loose, plain: Array.isArray(loose) ? {} : loose };
-}
-
-function preserveColdVersionedStats(row, patch = {}) {
-    return preserveColdVersionedStatsParsed(row, patch).patch;
-}
-
-// The rebuild below keeps a held rank's fields over the fresh ones and puts
+// The kit rebuild below keeps a held rank's fields over the fresh ones and puts
 // the fresh keys first; a held skill whose keys already start with them and
 // whose identity fields match rebuilds into the same JSON.
 function heldSkillCurrent(held, fresh) {
@@ -2667,32 +2649,17 @@ function heldSkillCurrent(held, fresh) {
     return true;
 }
 
-// Returns `combat` itself when the learned rows rebuild it unchanged, so the
-// caller re-serializes stats only after a skill move (a level-up, a grant).
+// The kit from the learned rows. Returns `combat` itself when the rows rebuild
+// it unchanged, so the caller re-serializes stats only after a skill move (a
+// level-up, a grant).
 function nativeColdCombatSkillsUnsafe(characterId, combat) {
-    return coldCombatSkillsUnsafe(characterId, combat).kit;
-}
-
-// The kit and how it was reached, from the learned rows read on every
-// commit: 'same' (the rows rebuilt it unchanged), 'stamped' (unchanged, the
-// stamp moved) or 'rebuilt'. With the row's skillsRevision the kit carries it
-// as its stamp; without it (a save or party write) a kit keeps the stamp it
-// has: it was built from the rows at or after that stamp, so an equal stamp
-// still proves the rows.
-function coldCombatSkillsUnsafe(characterId, combat, skillsRevision) {
-    if (!combat || typeof combat !== 'object' || Array.isArray(combat)) return { kit: combat, outcome: 'same' };
-    const native = combat.version === ColdCombatProfile.PROFILE_VERSION && combat.skillSource === 'database';
-    const known = skillsRevision !== undefined;
+    if (!combat || typeof combat !== 'object' || Array.isArray(combat)) return combat;
     const learned = ColdCombatProfile.skillSnapshotsFromRecords(all('SELECT selfId, level FROM skills WHERE characterId = ? ORDER BY selfId', [characterId]));
     const held = Array.isArray(combat.skills) ? combat.skills : null;
-    const same = held && native && held.length === learned.length && learned.every((skill, index) => heldSkillCurrent(held[index], skill));
-    if (same) {
-        return !known || combat.skillsRevision === skillsRevision ? { kit: combat, outcome: 'same' }
-            : { kit: { ...combat, skillsRevision }, outcome: 'stamped' };
-    }
+    if (held && combat.version === ColdCombatProfile.PROFILE_VERSION && combat.skillSource === 'database'
+        && held.length === learned.length && learned.every((skill, index) => heldSkillCurrent(held[index], skill))) return combat;
     const proposed = new Map((held || []).map(skill => [Number(skill.selfId), skill]));
-    return { outcome: 'rebuilt', kit: { ...combat, version: ColdCombatProfile.PROFILE_VERSION, skillSource: 'database',
-        ...(known ? { skillsRevision } : {}),
+    return { ...combat, version: ColdCombatProfile.PROFILE_VERSION, skillSource: 'database',
         skills: learned.map(skill => {
             const sameRank = proposed.get(skill.selfId);
             // Hot Skill models resolve C4 semantics (for example buff power)
@@ -2700,98 +2667,7 @@ function coldCombatSkillsUnsafe(characterId, combat, skillsRevision) {
             // learned rank; changed/missing ranks need a fresh native DTO.
             return Number(sameRank?.level) === skill.level
                 ? { ...skill, ...sameRank, selfId: skill.selfId, level: skill.level, passive: skill.passive } : skill;
-        }) } };
-}
-
-// Resolved on first use; require() re-resolved the path on every cold commit.
-let ClanMembershipPolicyModule;
-const clanMembershipPolicy = () => ClanMembershipPolicyModule
-    || (ClanMembershipPolicyModule = require('./GameServer/Clan/ClanMembershipPolicy'));
-
-// Parses the current and proposed stats once each. Besides the patch it
-// returns what later cold commit steps would otherwise parse again: the final
-// stats as parsedObject(patch.statsJson) would see them (undefined when the
-// patch carries no stats), whether they are exactly JSON.parse(patch.statsJson)
-// (no repair re-serialized them), how the combat kit was checked against the
-// learned rows (coldCombatSkillsUnsafe's outcome, undefined without a kit) and
-// the proposed death-experience record.
-function preserveColdVersionedStatsParsed(row, patch = {}, parts = null) {
-    const next = { ...patch };
-    if (!Object.prototype.hasOwnProperty.call(next, 'statsJson')) return { patch: next, stats: undefined, statsParsed: false, skills: undefined, deathExperience: undefined };
-    const proposedViews = statsViews(next.statsJson);
-    const deathExperience = proposedViews.loose?.deathExperience;
-    let stats = proposedViews.loose;
-    const current = statsViews(row?.statsJson).plain;
-    const incoming = proposedViews.plain;
-    parts?.lap('stats_parse');
-    // Each repair below edits `incoming`; it is serialized once after the last.
-    let dirty = false;
-    let stamped = false;
-    let skills;
-    // A resolve owns effects, cooldowns and other transient combat state.
-    // Only the native learned rows own the skill set and its ranks.
-    const combat = incoming.coldCombat || current.coldCombat;
-    if (combat && Number(row?.characterId) > 0) {
-        // Only a whole row read in this transaction proves the revision; a
-        // partial row leaves the kit unproved (checked, stamp kept).
-        const checked = coldCombatSkillsUnsafe(row.characterId, combat,
-            Number.isSafeInteger(row.skillsRevision) ? row.skillsRevision : undefined);
-        const rebuilt = checked.kit;
-        skills = checked.outcome;
-        // A non-string proposal leaves this step serialized, as it always did.
-        if (rebuilt !== incoming.coldCombat || typeof next.statsJson !== 'string') {
-            // A stamp on the proposed kit (a number on a parsed object) keeps
-            // the stats an exact parse of what is written: still handed back.
-            if (skills === 'stamped' && combat === incoming.coldCombat && typeof next.statsJson === 'string') stamped = true;
-            else dirty = true;
-            incoming.coldCombat = rebuilt;
-        }
-    }
-    parts?.lap('stats_skills');
-    // Physical symbols own these slots, including removals. A worker can
-    // still carry the kit from before a native improvement or hot handoff.
-    const hennas = nativeHennaSlotsUnsafe(row?.characterId);
-    if (JSON.stringify(incoming.hennas) !== JSON.stringify(hennas)) {
-        incoming.hennas = hennas;
-        dirty = true;
-    }
-    // The native transaction owns this leaf. A stale worker/handoff snapshot
-    // cannot remove, fabricate or rewind an intent or its saved completion.
-    // A bot keeps its last receipt, so an equal leaf (the usual case) leaves the proposal string as it is.
-    const heldCommit = Object.hasOwn(current, 'economyCommit');
-    if ((heldCommit || Object.hasOwn(incoming, 'economyCommit'))
-        && (heldCommit !== Object.hasOwn(incoming, 'economyCommit') || JSON.stringify(incoming.economyCommit) !== JSON.stringify(current.economyCommit))) {
-        if (heldCommit) incoming.economyCommit = current.economyCommit;
-        else delete incoming.economyCommit;
-        dirty = true;
-    }
-    // ARCH-NOTE: old workers can still carry the retired counters; the row table owns them now.
-    if (incoming.marketTrades || incoming.priceBeliefs) {
-        delete incoming.marketTrades;
-        delete incoming.priceBeliefs;
-        dirty = true;
-    }
-    if (Number(current.clanMembershipVersion || 0) > Number(incoming.clanMembershipVersion || 0)) {
-        for (const key of ['clanId', 'clanMembershipVersion', 'clanDiscipline', 'clanPartyObjective']) incoming[key] = current[key];
-        if (Number(current.clanDiscipline?.clanId) > 0
-            && incoming.equipmentPlan?.clanGoal?.clanId === current.clanDiscipline.clanId) incoming.equipmentPlan = null;
-        dirty = true;
-    }
-    if (dirty || stamped) {
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
-    }
-    const proposed = {
-        activity: next.activity || row?.activity, stats: incoming
-    };
-    const policy = clanMembershipPolicy();
-    const repaired = policy.reconcileState(policy.preserveGoalInvalidation(proposed, current));
-    if (repaired !== proposed) {
-        next.statsJson = JSON.stringify(repaired.stats);
-        stats = repaired.stats;
-        if (repaired.activity !== proposed.activity) next.activity = repaired.activity;
-    }
-    return { patch: next, stats, statsParsed: !dirty && repaired === proposed, skills, deathExperience };
+        }) };
 }
 
 function syncInventorySummaryUnsafe(characterId, inventory = {}) {
@@ -2967,16 +2843,6 @@ function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) 
         values.level, values.exp, values.sp, values.hp, values.maxHp, values.mp, values.maxMp,
         ...(classId !== null ? [classId] : []), characterId
     ]);
-    (physical.skills || []).forEach((skill) => {
-        const selfId = Number(skill.selfId || 0);
-        const level = Number(skill.level || 0);
-        if (!selfId || !level) return;
-        write(`INSERT INTO skills (selfId, name, passive, level, characterId) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(characterId, selfId) DO UPDATE SET name = excluded.name, passive = excluded.passive,
-                level = MAX(skills.level, excluded.level)`, [
-            selfId, String(skill.name || `Skill ${selfId}`), skill.passive ? 1 : 0, level, characterId
-        ]);
-    });
     if (physical.soulCrystals?.length) applySoulCrystalStepsUnsafe(characterId, physical.soulCrystals);
     parts?.lap('physical');
     if (physical.inventory) syncInventorySummaryUnsafe(characterId, physical.inventory);
@@ -3004,8 +2870,7 @@ function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) 
     }
     // A PvP tally and a PK death drop (tried on the step that ends at 0 HP; it
     // returns its death sequence only when it wrote) rewrite this bot's life
-    // state after the commit's UPDATE. A learned skill moves only its
-    // skillsRevision (the trigger).
+    // state after the commit's UPDATE.
     const dropped = Number(before?.hp) > 0 && Number(physical.hp) <= 0 ? dropPkDeathItemsUnsafe(characterId, { moveRevision: false }) : null;
     return { drops: dropped?.drops || [],
         rewrote: dropped?.deathSequence !== undefined || physical.pvpKills?.length > 0 };
@@ -3032,7 +2897,8 @@ function dropPkDeathItemsUnsafe(characterId, { moveRevision }) {
     return { drops, inventory: summary, deathSequence: death, revision: Number(moved.simulationRevision), checkpoint: moved };
 }
 
-// `parsedStats`, when given, is parsedObject(row.statsJson) computed earlier.
+// `parsedStats`, when given, are the row's stats as an object (a claim's
+// flags, a commit's proposal stats): no parse here.
 function coldSimulationPartition(row, options = {}, parsedStats) {
     if (!row) return { ok: false, reason: 'missing_state' };
     if (row.phase !== 'cold') return { ok: false, reason: 'not_cold' };
@@ -3106,6 +2972,43 @@ function coldSimulationConflict(row, request, timestamp) {
     if (String(row.simulationLeaseId || '') !== String(request.leaseId || '')) return 'lease_changed';
     if (Number(row.simulationLeaseUntil || 0) <= timestamp) return 'lease_expired';
     return 'cas_failed';
+}
+
+// The assignments of a cold patch written whole. The economy leaf stays the
+// row's (EconomyCommit.preserveLeafSql): a proposal never drops or rewinds it.
+function coldPatchAssignments(entries) {
+    return entries.map(([column]) => `${escapeIdentifier(column)} = ${column === 'statsJson' ? EconomyCommit.preserveLeafSql('?') : '?'}`);
+}
+
+// An atomic group member's guard columns (coldSimulationConflict) and party.
+const COLD_GROUP_MEMBER_SQL = `SELECT characterId, partyId, phase, simulationOwner, simulationRevision,
+    simulationLeaseId, simulationLeaseUntil FROM bot_life_state WHERE characterId = ?`;
+
+// What a cold commit hands back on its write: the row's revisions, its time
+// and the economy leaf it kept (JSON text, NULL when none).
+const COLD_COMMIT_RETURNING = `characterId, simulationRevision, inventoryRevision, skillsRevision, hennaRevision, updatedAt,
+    json_extract(statsJson, '$.economyCommit') AS economyCommit`;
+
+// A cold commit's one write: the guarded UPDATE of the proposal's columns,
+// with no row read before it. The bag revision moves in this statement:
+// RETURNING does not see what an AFTER trigger writes, and a statement that
+// moved it leaves the trigger nothing to do. `lease` holds the owner and
+// lease assignments the commit leaves behind. Null when the guard refused.
+function writeColdCommitUnsafe(fields, patch, lease) {
+    const { characterId, ownerId, expectedRevision, leaseId, timestamp } = fields;
+    const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
+    const assignments = coldPatchAssignments(entries);
+    const params = entries.map(([, value]) => value);
+    if (patch.inventorySummary !== undefined) {
+        assignments.push('inventoryRevision = CASE WHEN inventorySummary IS ? THEN inventoryRevision ELSE inventoryRevision + 1 END');
+        params.push(patch.inventorySummary);
+    }
+    assignments.push('simulationRevision = ?', ...lease.assignments);
+    params.push(expectedRevision + 1, ...lease.params);
+    return one(`UPDATE bot_life_state SET ${assignments.join(', ')}
+        WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ?
+          AND simulationLeaseId = ? AND simulationLeaseUntil > ?
+        RETURNING ${COLD_COMMIT_RETURNING}`, [...params, characterId, ownerId, expectedRevision, leaseId, timestamp]) || null;
 }
 
 function ensureSocialEntityUnsafe(entity, timestamp) {
@@ -4289,6 +4192,7 @@ const Database = {
     },
     reconcileBotClanMembership: ClanMembership.reconcile,
     reconcileBotClanGoals: ClanMembership.reconcileGoals,
+    writeClanGoalMember: ClanMembership.writeGoalMember,
     init(callback = () => {}) {
         try {
             boardDealCountsReady = false;
@@ -5813,37 +5717,22 @@ const Database = {
         if (invalidColumn) return Promise.resolve({ ok: false, reason: 'invalid_patch', column: invalidColumn });
 
         return inTransaction(() => {
-            const row = coldSimulationRow(characterId);
-            const conflict = coldSimulationConflict(row, { expectedRevision, ownerId, leaseId }, timestamp);
-            if (conflict !== 'cas_failed') return { ok: false, reason: conflict };
-            const patch = preserveColdVersionedStats(row, requestedPatch);
-            const proposed = { ...row, ...patch, phase: patch.phase || row.phase, activity: patch.activity || row.activity };
-            const partition = coldSimulationPartition(proposed, request);
+            const fields = { characterId, expectedRevision, ownerId, leaseId, timestamp };
+            // The proposal's columns and the stats object its owner passes.
+            const partition = coldSimulationPartition(requestedPatch, request, request.stats || {});
             if (!partition.ok) return { ok: false, reason: 'partition_rejected', detail: partition.reason };
-            const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
-            const revision = expectedRevision + 1;
-            const assignments = entries.map(([column]) => `${escapeIdentifier(column)} = ?`);
-            assignments.push('simulationRevision = ?', 'simulationLeaseUntil = ?');
-            const params = [
-                ...entries.map(([, value]) => value), revision, leaseUntil,
-                characterId, ownerId, expectedRevision, leaseId, timestamp
-            ];
-            const result = write(`UPDATE bot_life_state SET ${assignments.join(', ')}
-                WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ?
-                  AND simulationLeaseId = ? AND simulationLeaseUntil > ?`, params);
-            if (result.affectedRows !== 1) {
-                return { ok: false, reason: coldSimulationConflict(coldSimulationRow(characterId), { expectedRevision, ownerId, leaseId }, timestamp) };
-            }
+            const written = writeColdCommitUnsafe(fields, requestedPatch, { assignments: ['simulationLeaseUntil = ?'], params: [leaseUntil] });
+            if (!written) return { ok: false, reason: coldSimulationConflict(coldSimulationRow(characterId), fields, timestamp) };
             return {
                 ok: true,
                 characterId,
                 ownerId,
                 leaseId,
-                revision,
+                revision: expectedRevision + 1,
                 leaseUntil,
                 reason: 'committed',
                 ...(request.memoryEvents !== undefined ? { memorySnapshots: commitColdInteractionMemoryUnsafe(request) || [] } : {}),
-                row: coldSimulationRow(characterId)
+                row: written
             };
         }, 'bot-life:cold-owner-commit');
     },
@@ -5863,6 +5752,8 @@ const Database = {
             group.push(request);
             atomicGroups.set(groupId, group);
         });
+        const RELEASE_LEASE = { assignments: ['simulationOwner = ?', 'simulationLeaseId = NULL', 'simulationLeaseUntil = 0'],
+            params: [LEGACY_SIMULATION_OWNER] };
         const commitFields = (request) => {
             const requestedPatch = { ...(request.patch || {}) };
             return {
@@ -5875,22 +5766,9 @@ const Database = {
                 invalidColumn: Object.keys(requestedPatch).find((column) => !COLD_SIMULATION_PATCH_COLUMNS.has(column))
             };
         };
-        // A group member's row read and stats merge run once, in the group
-        // check before any commit of the batch, and its commit takes them: a
-        // commit writes only its own bot's rows and the party payment runs
-        // after the batch, so no earlier commit moves a member's inputs.
-        const groupInputs = new Map();
-        const commitInput = (request, fields, parts = null) => {
-            const row = coldSimulationRow(fields.characterId);
-            const conflict = coldSimulationConflict(row, fields, fields.timestamp);
-            parts?.lap('row_read');
-            if (conflict !== 'cas_failed') return { fields, row, conflict };
-            const { patch, stats, statsParsed, skills, deathExperience } = preserveColdVersionedStatsParsed(row, fields.requestedPatch, parts);
-            const proposed = { ...row, ...patch, phase: patch.phase || row.phase, activity: patch.activity || row.activity };
-            const partition = coldSimulationPartition(proposed, request, stats);
-            parts?.lap('stats_merge');
-            return { fields, row, conflict, patch, stats, statsParsed, skills, deathExperience, partition };
-        };
+        // The proposal's columns and the stats object its owner passes: no
+        // row read and no parse.
+        const proposalPartition = (request, fields) => coldSimulationPartition(fields.requestedPatch, request, request.stats || {});
         const validatedRaidKeys = new Set();
         const validateAtomicGroups = () => atomicGroups.forEach((group, groupId) => {
             const expectedIds = new Set((group[0]?.atomicGroup?.memberIds || []).map(Number).filter(Boolean));
@@ -5924,15 +5802,17 @@ const Database = {
             if (!failure) {
                 for (const request of group) {
                     const fields = commitFields(request);
-                    const input = commitInput(request, fields);
-                    groupInputs.set(request, input);
-                    memberRows.set(fields.characterId, input.row);
+                    // Only the guard columns and the party: a member's commit
+                    // writes under the same guard.
+                    const row = one(COLD_GROUP_MEMBER_SQL, [fields.characterId]);
+                    const conflict = coldSimulationConflict(row, fields, fields.timestamp);
+                    memberRows.set(fields.characterId, row);
                     if (!Number.isSafeInteger(fields.characterId) || fields.characterId <= 0
                         || !Number.isSafeInteger(fields.expectedRevision) || fields.expectedRevision < 0
                         || fields.ownerId !== COLD_SIMULATION_OWNER || !fields.leaseId
-                        || fields.invalidColumn || input.conflict !== 'cas_failed' || !input.partition.ok) {
+                        || fields.invalidColumn || conflict !== 'cas_failed' || !proposalPartition(request, fields).ok) {
                         failure = true;
-                        reason = input.conflict !== 'cas_failed' ? input.conflict : 'party_group_invalid';
+                        reason = conflict !== 'cas_failed' ? conflict : 'party_group_invalid';
                         break;
                     }
                 }
@@ -5986,51 +5866,27 @@ const Database = {
                     detail: atomicGroupFailures.get(groupId)
                 };
             }
-            const checked = groupInputs.get(request);
-            groupInputs.delete(request);
-            const fields = checked?.fields || commitFields(request);
-            const { characterId, expectedRevision, ownerId, leaseId, timestamp, invalidColumn } = fields;
+            const fields = commitFields(request);
+            const { characterId, expectedRevision, ownerId, leaseId, timestamp, invalidColumn, requestedPatch } = fields;
             if (!Number.isSafeInteger(characterId) || characterId <= 0) return { ok: false, characterId, reason: 'invalid_character' };
             if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return { ok: false, characterId, reason: 'invalid_revision' };
             if (ownerId !== COLD_SIMULATION_OWNER || !leaseId) return { ok: false, characterId, reason: 'invalid_lease' };
             if (invalidColumn) return { ok: false, characterId, reason: 'invalid_patch', column: invalidColumn };
             const parts = Diagnostics.laps('commit_');
-            parts && Diagnostics.count('commit_input', checked ? 'group_check' : 'read');
-            const { row, conflict, patch, stats, statsParsed, skills, deathExperience, partition } = checked || commitInput(request, fields, parts);
-            // A refusal hands back the row it read: the worker rebases on it.
-            if (conflict !== 'cas_failed') return { ok: false, characterId, reason: conflict, ...(row ? { row } : {}) };
+            const partition = proposalPartition(request, fields);
             if (!partition.ok) return { ok: false, characterId, reason: 'partition_rejected', detail: partition.reason };
-            const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
-            // The commit moves the bag revision with its own write, so the
-            // revision trigger adds no second row write and the built row holds it.
-            const bagMoved = patch.inventorySummary !== undefined && patch.inventorySummary !== row.inventorySummary
-                && Number.isSafeInteger(row.inventoryRevision);
-            if (bagMoved) entries.push(['inventoryRevision', row.inventoryRevision + 1]);
-            parts && Diagnostics.count('commit_bag', bagMoved ? 'moved' : 'same');
-            const revision = expectedRevision + 1;
-            const assignments = entries.map(([column]) => `${escapeIdentifier(column)} = ?`);
-            assignments.push(
-                'simulationOwner = ?',
-                'simulationRevision = ?',
-                'simulationLeaseId = NULL',
-                'simulationLeaseUntil = 0'
-            );
-            const params = [
-                ...entries.map(([, value]) => value), LEGACY_SIMULATION_OWNER, revision,
-                characterId, ownerId, expectedRevision, leaseId, timestamp
-            ];
-            const result = write(`UPDATE bot_life_state SET ${assignments.join(', ')}
-                WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ?
-                  AND simulationLeaseId = ? AND simulationLeaseUntil > ?`, params);
-            if (result.affectedRows !== 1) {
+            const written = writeColdCommitUnsafe(fields, requestedPatch, RELEASE_LEASE);
+            if (!written) {
+                // A refusal hands back the row: the worker rebases on it.
                 const current = coldSimulationRow(characterId);
                 return {
                     ok: false,
                     characterId,
-                    reason: coldSimulationConflict(current, { expectedRevision, ownerId, leaseId }, timestamp),
+                    reason: coldSimulationConflict(current, fields, timestamp),
                     ...(current ? { row: current } : {})
                 };
             }
+            const revision = expectedRevision + 1;
             parts?.lap('row_write');
             const physical = request.physical || null;
             EconomyJournal.detail(request.journalReason || 'resolve');
@@ -6044,7 +5900,7 @@ const Database = {
             EconomyJournal.detail(null);
             // Persist the entitlement under the same lease fence and transaction
             // as EXP. Cold-to-hot resurrection reads this durable record.
-            syncColdDeathExperienceUnsafe(characterId, deathExperience, timestamp);
+            syncColdDeathExperienceUnsafe(characterId, request.stats?.deathExperience, timestamp);
             const memorySnapshots = request.memoryEvents !== undefined ? commitColdInteractionMemoryUnsafe(request) || [] : undefined;
             // The resolve's life events (BotLifeEvents.resolvePayload) leave
             // with its save: the outbox row commits or rolls back with it.
@@ -6052,15 +5908,9 @@ const Database = {
             parts?.lap('settle');
             // After the UPDATE only a settlement (it returns its read) and the
             // physical step's PvP tally or PK death drop write this bot's life
-            // state. Otherwise the row is what was written.
-            const rewritten = settled || rewrote;
-            const committedRow = settled?.row || (rewritten ? coldSimulationRow(characterId) : {
-                ...row, ...Object.fromEntries(entries), simulationOwner: LEGACY_SIMULATION_OWNER,
-                simulationRevision: revision, simulationLeaseId: null, simulationLeaseUntil: 0
-            });
-            parts && Diagnostics.count('commit_reread', settled?.row ? 'settled' : rewritten ? 'read' : 'built');
-            parts && Diagnostics.count('commit_stats', statsParsed && !rewritten ? 'handed' : 'reparsed');
-            parts && skills !== undefined && Diagnostics.count('commit_skills', skills);
+            // state: then the whole row goes back (its stats hold what SQL
+            // wrote into them). Otherwise the UPDATE's own numbers.
+            const committedRow = settled?.row || (settled || rewrote ? coldSimulationRow(characterId) : written);
             parts?.lap('reread');
             parts?.done();
             return {
@@ -6074,7 +5924,6 @@ const Database = {
                 ...(pkDrops.length ? { pkDrops } : {}),
                 ...(memorySnapshots !== undefined ? { memorySnapshots } : {}),
                 ...(settled ? { settled: true } : {}),
-                ...(statsParsed && !rewritten ? { committedStats: stats } : {}),
                 row: committedRow
             };
         });
@@ -6106,10 +5955,7 @@ const Database = {
                     let partyRow, partyRowRead = false;
                     for (const request of group) {
                         const result = results.find(result => result.characterId === Number(request.characterId));
-                        const row = coldSimulationRow(result.characterId);
-                        // The payment moves adena, not stats; committedStats stays the parse of row.statsJson.
-                        if (row.statsJson !== result.row.statsJson) delete result.committedStats;
-                        result.row = row;
+                        result.row = coldSimulationRow(result.characterId);
                         result.revision = Number(result.row.simulationRevision);
                         if (payment.touched.has(result.characterId)) result.partyPayment = true;
                         // A two-party group: each member gets its own party's row
@@ -6317,11 +6163,10 @@ const Database = {
                 }
             }
             const timestamp = Math.max(now(), ...rows.map(r => Number(r.updatedAt) + 1));
-            for (let i = 0; i < rows.length; i++) {
-                const row = rows[i], m = members[i];
-                const patch = preserveColdVersionedStats(row, { ...m.patch, updatedAt: timestamp });
+            for (const m of members) {
+                const patch = { ...m.patch, updatedAt: timestamp };
                 const entries = Object.entries(patch);
-                const changed = write(`UPDATE bot_life_state SET ${entries.map(([k]) => `${escapeIdentifier(k)} = ?`).join(', ')},
+                const changed = write(`UPDATE bot_life_state SET ${coldPatchAssignments(entries).join(', ')},
                     simulationOwner = ?, simulationRevision = simulationRevision + 1, simulationLeaseId = NULL, simulationLeaseUntil = 0
                     WHERE characterId = ? AND simulationRevision = ?`,
                 [...entries.map(([, v]) => v), LEGACY_SIMULATION_OWNER, m.characterId, m.expectedRevision]);
@@ -6385,10 +6230,9 @@ const Database = {
                 const reason = raidRosterCommitReason(party, jsonObject(request.statsJson), null, snapshots);
                 if (reason) return { ok: false, reason };
             }
-            for (let i = 0; i < members.length; i++) {
-                const m = members[i], row = rows[i];
-                const entries = Object.entries(preserveColdVersionedStats(row, { ...m.patch, updatedAt: timestamp }));
-                const changed = write(`UPDATE bot_life_state SET ${entries.map(([key]) => `${escapeIdentifier(key)} = ?`).join(', ')},
+            for (const m of members) {
+                const entries = Object.entries({ ...m.patch, updatedAt: timestamp });
+                const changed = write(`UPDATE bot_life_state SET ${coldPatchAssignments(entries).join(', ')},
                     simulationOwner = ?, simulationRevision = simulationRevision + 1, simulationLeaseId = NULL, simulationLeaseUntil = 0
                     WHERE characterId = ? AND simulationRevision = ?`,
                 [...entries.map(([, value]) => value), LEGACY_SIMULATION_OWNER, m.characterId, m.expectedRevision]);

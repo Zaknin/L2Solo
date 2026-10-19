@@ -145,8 +145,11 @@ function state(characterId, revision, activity = 'hunting') {
     assert.strictEqual(BotLifeState.cachedState(characterId).appearanceVersion, 2,
         'appearance migration must patch the active lifecycle cache without replacing other state');
 
+    // The worker proposes on the state it claimed: its name and look ride along.
     const resting = {
         ...state(characterId, first.revision, 'resting'),
+        name: BotLifeState.cachedState(characterId).name,
+        appearanceVersion: BotLifeState.cachedState(characterId).appearanceVersion,
         stats: { restUntil: 9000 },
         inventory: {
             57: { selfId: 57, name: 'Adena', amount: 500 },
@@ -165,7 +168,7 @@ function state(characterId, revision, activity = 'hunting') {
     const committed = await Owner.commit(redo, resting, { timestamp: 2000, leaseMs: 5000 });
     assert.strictEqual(committed.ok, true, 'owner proposal must commit through the main database gateway');
     assert.strictEqual(committed.revision, redo.revision + 1, 'conditional commit must advance the revision');
-    assert.strictEqual(committed.row.activity, 'resting');
+    assert.strictEqual(Number(committed.row.simulationRevision), committed.revision, 'the commit hands back the revision it wrote');
     assert.strictEqual(BotLifeState.cachedState(characterId).activity, 'resting', 'commit must reflect the accepted state in cache');
     assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, committed.revision, 'commit must reflect its revision in cache');
     assert.strictEqual(BotLifeState.cachedState(characterId).inventory['9999'], undefined,

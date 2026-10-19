@@ -45,15 +45,15 @@ async function run() {
             VALUES (1, 'bot_memory_1', 'Memory1', 'cold', 'hunting', ?, 'cold_simulation_owner', 0, 'memory-lease', ?, '{}')`,
         [timestamp, timestamp + 60000]]);
         const request = { characterId: 1, expectedRevision: 0, ownerId: 'cold_simulation_owner', leaseId: 'memory-lease',
-            timestamp, leaseUntil: timestamp + 60000, patch: { hp: 73 }, memoryEvents: [event('cold:accepted')] };
+            timestamp, leaseUntil: timestamp + 60000, patch: { phase: 'cold', activity: 'hunting', hp: 73 }, memoryEvents: [event('cold:accepted')] };
         const committed = await Database.commitColdSimulationLease(request);
         assert.strictEqual(committed.ok, true);
-        assert.strictEqual(committed.row.hp, 73);
+        assert.strictEqual((await Database.execute(['SELECT hp FROM bot_life_state WHERE characterId = 1', []]))[0].hp, 73);
         assert.strictEqual(committed.memorySnapshots[0].revision, 4);
         const stale = await Database.commitColdSimulationLease({ ...request, memoryEvents: [event('cold:stale')] });
         assert.strictEqual(stale.ok, false);
         assert.strictEqual((await Repository.load(1)).revision, 4, 'rejected lifecycle proposal creates no social event');
-        await assert.rejects(Database.commitColdSimulationLease({ ...request, expectedRevision: 1, patch: { hp: 1 },
+        await assert.rejects(Database.commitColdSimulationLease({ ...request, expectedRevision: 1, patch: { ...request.patch, hp: 1 },
             memoryEvents: [event('cold:expired', 1, 2, timestamp - Policy.ACCEPT_WINDOW_MS - 1000)] }), /expired_event/);
         assert.strictEqual((await Database.execute(['SELECT hp FROM bot_life_state WHERE characterId = 1', []]))[0].hp, 73,
             'social admission failure rolls back the physical outcome');

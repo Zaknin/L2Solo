@@ -1,6 +1,5 @@
 'use strict';
 
-const { createHash } = require('node:crypto');
 const BuffPolicy = invoke('GameServer/Bot/Economy/BuffServicePolicy');
 const HOUR_MS = 3600000;
 const REVIEW_MS = 5 * 60000;
@@ -113,11 +112,10 @@ function soloRoute(state, spots, timestamp, peers = []) {
     return best;
 }
 
-// Cold rows only. Their revision misses out-of-band writes (adena sync, PK drops,
-// warehouse liquidation keep it), so the key is the whole row content, not the revision.
+// Cold rows only: every write to a far row moves its revision.
 function rowInput(state) {
     if (state.phase !== 'cold' || !(Number(state.simulation?.revision) > 0) || !(Number(state.characterId) > 0)) return null;
-    try { return createHash('sha1').update(JSON.stringify(state)).digest('base64'); } catch { return null; }
+    return Number(state.simulation.revision);
 }
 let soloHoldSpots = null;
 function holdById(characterId, entry, timestamp) {

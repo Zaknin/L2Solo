@@ -202,8 +202,8 @@ async function createProbe(index) {
         ...(index < 2 ? { lifeEvents: invoke('GameServer/Bot/Population/BotLifeEvents').resolvePayload(
             states[index].characterId, [{ type: 'batch_probe', summary: `probe ${index}` }]) } : {})
     }));
-    // The committed row handed back to the owner is the row as stored:
-    // compare it with a fresh read of every column.
+    // The committed row handed back to the owner is the row as stored: a
+    // rewritten row whole, otherwise the UPDATE's own numbers and economy leaf.
     const commitLeases = Database.commitAndReleaseColdSimulationLeases;
     const rawResults = [];
     Database.commitAndReleaseColdSimulationLeases = async (...args) => {
@@ -214,16 +214,20 @@ async function createProbe(index) {
     assert(committedRows.length >= 1, 'the batch must commit at least one row');
     for (const result of committedRows) {
         const [stored] = await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [result.characterId]]);
+        if (result.row.statsJson === undefined) {
+            const { economyCommit, ...numbers } = result.row;
+            assert.deepStrictEqual(numbers, Object.fromEntries(Object.keys(numbers).map((key) => [key, stored[key]])),
+                `the numbers handed back for ${result.characterId} are the stored ones`);
+            assert.strictEqual(economyCommit, JSON.stringify(JSON.parse(stored.statsJson).economyCommit) ?? null);
+            continue;
+        }
         // acceptedIncoming/incomingPending are a projection of accepted trade
         // custody (1fa28c5b, 81eae8c8), not bot_life_state columns.
         const { acceptedIncoming, incomingPending, ...columns } = result.row;
         assert.deepStrictEqual(acceptedIncoming, {}, `row ${result.characterId} has no accepted trade custody`);
         assert.strictEqual(incomingPending, undefined);
         assert.deepStrictEqual(columns, { ...stored }, `committed row ${result.characterId} equals the stored row`);
-        if (result.committedStats) assert.deepStrictEqual(result.committedStats, JSON.parse(stored.statsJson),
-            `the stats handed back for ${result.characterId} are the stored stats`);
     }
-    assert(committedRows.some((result) => result.committedStats), 'a commit hands its stats parse back');
     const byId = new Map(results.map((result) => [Number(result.characterId), result]));
     assert.strictEqual(byId.get(states[0].characterId).ok, true);
     assert.strictEqual(byId.get(states[1].characterId).reason, 'stale_revision', 'one stale row must not roll back valid peers');
@@ -390,7 +394,7 @@ async function createProbe(index) {
     // batch counts its bots.
     const metrics = invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics();
     assert(metrics.counts['commit_batch:bots:all'] >= 2, 'the commit batch counts its bots');
-    for (const part of ['row_read', 'stats_parse', 'stats_skills', 'stats_merge', 'row_write', 'physical', 'settle', 'reread']) {
+    for (const part of ['row_write', 'physical', 'settle', 'reread']) {
         assert(metrics.durations[`commit_${part}`]?.count >= 1, `commit part ${part} is timed`);
     }
     console.log('Cold owner batch partial-stale and ACK-loss checks passed');

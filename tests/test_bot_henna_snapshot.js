@@ -39,8 +39,10 @@ async function run() {
         const claim = await Owner.claim(state, { allowLifecycle: true });
         assert(claim.ok);
         const leased = Life.cachedState(id);
+        // The worker writes the kit of the row it claimed: a henna writer moves
+        // the revision, so a proposal with older symbols is refused, not merged.
         const committed = await Owner.commitAndReleaseBatch([{ token: claim,
-            nextState: { ...leased, stats: { ...leased.stats, hennas: [] } },
+            nextState: { ...leased, stats: { ...leased.stats } },
             proposal: { baseState: leased }, options: { allowLifecycle: true } }]);
         assert(committed[0].ok);
         state = Life.cachedState(id);

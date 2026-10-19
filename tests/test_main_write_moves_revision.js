@@ -146,6 +146,22 @@ function coordinatorProbe() {
         assert.equal(Life.cachedState(leader).simulation.revision, leaderRevision + 1, 'the leader cache takes the moved row');
         assert.equal(Life.cachedState(leader).stats.clanMarketDemand.goalKey, 'revision-demand');
         assert((await Owner.claim(Life.cachedState(leader), {})).ok, 'the leader claims on the cached copy');
+
+        // A commit writes the proposal's stats as is, except the economy leaf:
+        // the row keeps it even when the proposal carries none.
+        const leaf = [1, 1, '0f0e0d0c-0b0a-4908-8706-050403020100', 2, 1, 0, 0, 0, 0, null];
+        const trader = await create('cold', { economyCommit: leaf });
+        assert.deepEqual(JSON.parse((await row(trader)).statsJson).economyCommit, leaf);
+        const leafToken = await Owner.claim(Life.cachedState(trader), { allowLifecycle: true });
+        assert(leafToken.ok);
+        const leafless = { ...Life.cachedState(trader), stats: { ...Life.cachedState(trader).stats, proposalProbe: true } };
+        delete leafless.stats.economyCommit;
+        const [kept] = await Owner.commitAndReleaseBatch([{ token: leafToken, nextState: leafless, proposal: { token: leafToken } }]);
+        assert.equal(kept.ok, true, `the leafless proposal commits: ${kept.reason}`);
+        const keptRow = JSON.parse((await row(trader)).statsJson);
+        assert.equal(keptRow.proposalProbe, true, 'the proposal\'s stats are written');
+        assert.deepEqual(keptRow.economyCommit, leaf, 'the row keeps its economy leaf');
+        assert.deepEqual(Life.cachedState(trader).stats.economyCommit, leaf, 'the cache takes the leaf the commit kept');
         console.log('PASS main writes move the revision; refusals rebase on the row');
     } finally {
         fs.rmSync(directory, { recursive: true, force: true });

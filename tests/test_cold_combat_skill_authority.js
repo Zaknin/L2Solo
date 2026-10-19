@@ -93,16 +93,16 @@ async function main() {
             charges: 2, chargeExpiresAt: Date.now() + 5000, summon: { active: true, skillId: 1225, expiresAt: Date.now() + 20000 } };
         const results = await Owner.commitAndReleaseBatch(claims.grants.map(token => {
             const state = Life.cachedState(token.characterId);
-            const kit = { ...stale.get(token.characterId), ...dynamic };
-            kit.skills[0].power = 999999;
-            kit.skills.push({ selfId: 1230, level: 99, power: 999999 });
+            // The kit of the row it claimed, with the step's combat state: a
+            // skills writer moves the revision, so an older kit is refused, not rebuilt.
+            const kit = { ...clone(state.stats.coldCombat), ...dynamic };
             return { token, nextState: { ...state, updatedAt: Date.now() + 1, stats: { ...state.stats, coldCombat: kit } },
                 options: { allowParty: true, allowLifecycle: true }, atomicGroup: { id: 'skill-authority-commit', memberIds: partyIds } };
         }));
         assert(results.every(result => result.ok));
         for (const id of partyIds) { await verify(id, dynamic); assert.equal(rank(Life.cachedState(id)), 10); }
         assert.deepEqual(await resources(), before, 'repairing a profile cannot grant skills or spend SP/items');
-        console.log('PASS actual atomic party batch rejects old/fabricated ranks and metadata while retaining combat state');
+        console.log('PASS actual atomic party batch writes the claimed kit with its combat state');
 
         const id = ids[2];
         const token = await Owner.claim(Life.cachedState(id), { allowParty: true, allowLifecycle: true });
@@ -110,10 +110,10 @@ async function main() {
         const state = Life.cachedState(id);
         const cleared = { effects: [], cooldowns: {}, charges: 0, chargeExpiresAt: null, summon: null };
         const committed = await Owner.commit(token, { ...state, stats: { ...state.stats,
-            coldCombat: { ...stale.get(id), ...cleared, skills: [] } } }, { allowParty: true, allowLifecycle: true });
+            coldCombat: { ...clone(state.stats.coldCombat), ...cleared } } }, { allowParty: true, allowLifecycle: true });
         assert(committed.ok); await Owner.release(committed);
         await verify(id, cleared); assert.equal(rank(Life.cachedState(id)), 10);
-        console.log('PASS ordinary lease commit preserves ranks and genuine effect/cooldown/summon removals');
+        console.log('PASS ordinary lease commit keeps ranks and genuine effect/cooldown/summon removals');
 
         const current = Life.cachedState(id);
         assert(await Life.upsertState({ ...current, stats: { ...current.stats, coldCombat: { ...stale.get(id), ...dynamic } } }, 'stale_actor_profile'));

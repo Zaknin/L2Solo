@@ -22,6 +22,7 @@ const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
 const { WorkerCommandAdmissionRefusal, checkWorkerCommandAdmission } = require('./WorkerCommandAdmission');
 const NativeWriteCheckpoint = require('./NativeWriteCheckpoint');
 const Uptime = require('./Uptime');
+const EconomyCommit = require('../Economy/EconomyCommit');
 
 const TABLE = 'bot_life_state';
 const GearSkillHints = invoke('GameServer/Bot/AI/GearSkillHints');
@@ -887,10 +888,8 @@ function save(row, options = {}) {
             inventorySummary = excluded.inventorySummary,
             -- Native takeover/release/restore owns player membership. A late
             -- actor snapshot cannot revive or remove that ownership marker.
-            statsJson = json_set(json_patch(json_remove(CASE WHEN json_type(bot_life_state.statsJson, '$.economyCommit') IS NULL
-                THEN json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs', '$.economyCommit')
-                ELSE json_set(json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs'),
-                    '$.economyCommit', json_extract(bot_life_state.statsJson, '$.economyCommit')) END, '$.playerPartyTakeover'),
+            statsJson = json_set(json_patch(json_remove(${EconomyCommit.preserveLeafSql(
+                "json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs')")}, '$.playerPartyTakeover'),
                 json_object('playerPartyTakeover', json_extract(bot_life_state.statsJson, '$.playerPartyTakeover'))),
                 '$.hennas', json_array(
                     (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 1),
@@ -3625,16 +3624,15 @@ const BotLifeState = {
                     ? [{ ...decision.recipe, name: item.name }] : [];
             });
             if (!recipes.length) return state;
-            const Commit = invoke('GameServer/Bot/Economy/EconomyCommit');
             let saved = state, changed = false;
             for (const recipe of recipes) {
-                const admitted = await Commit.admit(saved, Commit.KINDS.learn);
+                const admitted = await EconomyCommit.admit(saved, EconomyCommit.KINDS.learn);
                 let learned;
                 try { learned = await Database.learnColdRecipes(state.characterId, [recipe], admitted.state,
                     { economyCommand: admitted.command }); }
-                finally { Commit.finish(state.characterId, admitted.command); }
+                finally { EconomyCommit.finish(state.characterId, admitted.command); }
                 if (learned.learned?.length) changed = true;
-                if (learned.coldLifeRow) saved = Commit.acceptRow(learned.coldLifeRow);
+                if (learned.coldLifeRow) saved = EconomyCommit.acceptRow(learned.coldLifeRow);
                 if (saved.phase !== 'cold' || this.hotRow(saved.characterId)) break;
             }
             if (changed) invoke('GameServer/Bot/Economy/CraftWorkshopService').recipesChanged(state.characterId);
