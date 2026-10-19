@@ -21,7 +21,6 @@ const fixtureDatabaseMethods = { ...fixtureDatabase };
         const originalReconcileClanGoals = Database.reconcileBotClanGoals;
         const Life = invoke('GameServer/Bot/Population/BotLifeState');
         const Memory = invoke('GameServer/Bot/AI/BotEnemyMemory');
-        const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
         const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 
         async function run() {
@@ -34,7 +33,7 @@ const fixtureDatabaseMethods = { ...fixtureDatabase };
                 VALUES (1, 'bot_memory_test', 'MemoryBot', 0, 0, 100, 100, 0, 0, 0, 0, 0, 0, 0)`);
             const saved = { execute: Database.execute, location: Database.updateCharacterLocation,
                 experience: Database.updateCharacterExperience, vitals: Database.updateCharacterVitals,
-                recover: Owner.recoverStartupLeases, dirty: Coordinator.markDirty,
+                dirty: Coordinator.markDirty,
                 membership: Database.reconcileBotClanMembership };
             let writes = 0;
             try {
@@ -48,7 +47,6 @@ const fixtureDatabaseMethods = { ...fixtureDatabase };
                     return { affectedRows: Number(result.changes) };
                 };
                 Database.updateCharacterLocation = Database.updateCharacterExperience = Database.updateCharacterVitals = async () => {};
-                Owner.recoverStartupLeases = async () => ({ affectedRows: 0 });
                 Database.reconcileBotClanMembership = async () => ({ repairedMembers: 0, repairedParties: 0 });
                 Database.reconcileBotClanGoals = async () => ({ repairedMembers: 0, repairedParties: 0 });
                 Coordinator.markDirty = () => {};
@@ -89,7 +87,7 @@ const fixtureDatabaseMethods = { ...fixtureDatabase };
             } finally {
                 Database.execute = saved.execute; Database.updateCharacterLocation = saved.location;
                 Database.updateCharacterExperience = saved.experience; Database.updateCharacterVitals = saved.vitals;
-                Owner.recoverStartupLeases = saved.recover; Coordinator.markDirty = saved.dirty;
+                Coordinator.markDirty = saved.dirty;
                 Database.reconcileBotClanMembership = saved.membership;
                 Database.reconcileBotClanGoals = originalReconcileClanGoals;
                 await fixtureDatabase.close();

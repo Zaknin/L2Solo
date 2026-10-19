@@ -48,7 +48,7 @@ async function run() {
         loc: { x: 83000, y: 148000, z: -3400 }, vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
         stats: { generatedCold: true, classId: 0, shopTown: { town: 'Giran', at: 1 }, money: [10000, .0001, 0, 0, .001, 10000, itemId] },
         inventory: { 57: { selfId: 57, amount: 10000 }, [itemId]: { selfId: itemId, amount: 4 } },
-        simulation: { ownerId: 'legacy_main', revision: 0 }, timing: {}, updatedAt: Date.now() }, 'native_fixture');
+        simulation: { revision: 0 }, timing: {}, updatedAt: Date.now() }, 'native_fixture');
 
     // One decision, read cold (the card) and hot (the near body's held view of the same card,
     // DecisionEvents.receive).

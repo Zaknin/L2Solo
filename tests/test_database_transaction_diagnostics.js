@@ -67,11 +67,13 @@ console.warn = (format, serialized, ...rest) => {
 };
 const deadline = setTimeout(() => { console.error('Native transaction diagnostic fixture exceeded 45 seconds'); process.exit(1); }, 45000);
 deadline.unref();
-// One native transaction moving both rows: the startup return of the loans
-// an older server left in them.
-const recover = () => Database.recoverColdSimulationLeases();
+// One native transaction moving both rows: the end of the PvP encounter both
+// bots are in.
+const seeded = [];
+const ENCOUNTER = 'diagnostic:pvp';
+const recover = () => Database.endPvpEncounter(ENCOUNTER, seeded);
 const rowFacts = () => Database.execute([
-    'SELECT characterId,simulationOwner,simulationRevision,simulationLeaseId,simulationLeaseUntil FROM bot_life_state ORDER BY characterId'
+    'SELECT characterId,simulationRevision,statsJson FROM bot_life_state ORDER BY characterId'
 ]);
 const tableCount = table => Database.execute([`SELECT COUNT(*) AS n FROM ${table}`]).then(rows => rows[0].n);
 async function rejectedNative(work, sqliteCode) {
@@ -94,10 +96,11 @@ async function seed(index) {
         sex: 0, face: 0, hair: 0, hairColor: 0, locX: 0, locY: 0, locZ: 0
     })).insertId);
     await Database.execute([
-        `INSERT INTO bot_life_state(characterId,accountName,characterName,phase,activity,statsJson,simulationOwner,simulationLeaseId,simulationLeaseUntil)
-            VALUES(?,?,?,'cold','hunting','{}','cold_simulation_owner','diagnostic:${index}',10000)`,
-        [id, username, `TransactionDiag${index}`]
+        `INSERT INTO bot_life_state(characterId,accountName,characterName,phase,activity,statsJson)
+            VALUES(?,?,?,'cold','hunting',?)`,
+        [id, username, `TransactionDiag${index}`, JSON.stringify({ pvpEncounter: { key: ENCOUNTER } })]
     ]);
+    seeded.push(id);
     return id;
 }
 async function installWorkFault(id) {
@@ -137,7 +140,7 @@ async function installWorkFault(id) {
     await rejectedNative(() => recover(), 5);
     assert.equal(logs.length, 1, 'a native BEGIN failure must emit diagnostics');
     assert.equal(logs[0].phase, 'begin');
-    assert.equal(logs[0].operation, 'bot-life:cold-owner-startup-recovery');
+    assert.equal(logs[0].operation, 'bot-life:pvp-encounter-end');
     assert.equal(logs[0].sqliteCode, 5);
     await released; await writerExited; writer = null;
     assert.deepEqual(await rowFacts(), before);
@@ -183,9 +186,9 @@ async function installWorkFault(id) {
     assert.equal(Database.stats().failures, failuresBefore + 5);
     await Database.execute(['DROP TRIGGER diagnostic_work_fault']);
 
-    assert.equal((await recover()).affectedRows, 2);
+    assert.equal((await recover()).rows.length, 2);
     assert((await rowFacts()).every(row => row.simulationRevision === 1));
-    assert.equal((await recover()).affectedRows, 0, 'nothing is left to recover');
+    assert.equal((await recover()).rows.length, 0, 'nothing is left to end');
     assert.equal(Database.stats().failures, failuresBefore + 5);
     assert.equal(logs.length, 3, 'successful and empty transactions do not log');
     for (const log of logs) {
@@ -195,7 +198,7 @@ async function installWorkFault(id) {
         assert(log.frames.every(frame => /^\s+at /.test(frame)));
     }
     assert(!JSON.stringify(logs).includes('SECRET_DIAGNOSTIC_SQL_VALUE'));
-    console.log(JSON.stringify({ pass: true, nativeInit: true, fullSchema: true, actualRecoveryBatch: true,
+    console.log(JSON.stringify({ pass: true, nativeInit: true, fullSchema: true, actualPvpEndBatch: true,
         phases: logs.map(log => log.phase), sqliteCodes: logs.map(log => log.sqliteCode),
         ordinaryFailureDelta: 4, nonordinaryGetterFailureDelta: 1, sameNativeError: true,
         rollback: true, successfulAndEmptyTransactionsLog: false, noSqlOrParameters: true }));

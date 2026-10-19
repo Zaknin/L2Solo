@@ -670,9 +670,11 @@ function sameEconomicOutput(before, after) {
 }
 
 // A published card made on exactly this state: the one check of decided(),
-// workshopFor() and feasibilityFor().
+// workshopFor() and feasibilityFor(). A hot bot's card is current by its post
+// number (nearSeq, checked on arrival), not by updatedAt: the body's row moves
+// on between posts.
 function current(state, entry) {
-    return !!entry && !entry.stale && entry.updatedAt === Number(state?.updatedAt || 0) && echoHolds(state, entry.echo);
+    return !!entry && !entry.stale && (state?.phase === 'hot' || entry.updatedAt === Number(state?.updatedAt || 0) && echoHolds(state, entry.echo));
 }
 class ColdEconomyDecisions {
     constructor() {

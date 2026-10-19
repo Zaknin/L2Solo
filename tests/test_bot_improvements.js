@@ -157,7 +157,6 @@ async function main() {
             proposal:{baseState:stepped,durable:{soulCrystals:[step]}},options:{allowLifecycle:true}}]);
         assert.equal(committed[0].ok,true);state=Life.cachedState(state.characterId);
         assert.equal((await DB.fetchItems(state.characterId)).find(row=>row.id===step.objectId).selfId,4630);
-        assert.equal(state.simulation.ownerId,'legacy_main');
         console.log('PASS actual quest, MP/time/HP Drain Soul and fenced accepted Worker physical commit');
 
         const Resolver=invoke('GameServer/Bot/Population/BackgroundPartyResolver');

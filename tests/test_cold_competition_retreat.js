@@ -153,7 +153,7 @@ async function run() {
         return Owner.commitBatch(entries, opts);
     } } });
     assert.strictEqual((await race.apply(fresh)).reason, 'commit_rejected');
-    assert([23, 24, 25].every(id => !state(id).stats.travel && !state(id).simulation.leaseId), 'membership race aborts every departure and releases leases');
+    assert([23, 24, 25].every(id => !state(id).stats.travel), 'membership race aborts every departure');
     // The scheduler report is developer diagnostics (off by default since c656911d):
     // the departure itself must happen with it off, and is counted when it is on.
     const Diagnostics = invoke('GameServer/Bot/Population/PopulationConfig');

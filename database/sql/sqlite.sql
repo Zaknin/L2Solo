@@ -447,10 +447,7 @@ CREATE TABLE IF NOT EXISTS bot_life_state (
     inventorySummary TEXT,
     statsJson TEXT,
     updatedAt INTEGER NOT NULL DEFAULT 0,
-    simulationOwner TEXT NOT NULL DEFAULT 'legacy_main',
     simulationRevision INTEGER NOT NULL DEFAULT 0,
-    simulationLeaseId TEXT,
-    simulationLeaseUntil INTEGER NOT NULL DEFAULT 0,
     partyRequestStatus TEXT GENERATED ALWAYS AS (
         json_extract(statsJson, '$.partyRequest.status')
     ) VIRTUAL,

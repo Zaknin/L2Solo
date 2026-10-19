@@ -19,7 +19,7 @@ const stock = Object.fromEntries(recipe.materials.map(row => [row.selfId, { self
 stock[recipe.recipeItemId] = { selfId: recipe.recipeItemId, amount: 1 };
 function member(characterId, classId, skills = [], inventory = {}) {
     return { characterId, classId, level: 50, clanId: 0, phase: 'cold', activity: 'hunting', spotId: 'ordinary:economic-fixture', partyId: null,
-        simulationOwner: 'legacy_main', simulationRevision: 0, accountName: 'bot_pop_economic', inventory,
+        simulationRevision: 0, accountName: 'bot_pop_economic', inventory,
         loc: { locX: 83400, locY: 148600, locZ: -3400 }, stats: { generatedCold: true, classId,
             coldCombat: { version: Combat.PROFILE_VERSION, classId, skillSource: 'database', skills: Combat.skillSnapshotsFromRecords(skills) } } };
 }

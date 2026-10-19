@@ -41,8 +41,8 @@ function seed(clans) {
                 locX, locY, locZ, clanId) VALUES (?, 'bot_pop_gear', ?, 0, 0, 30, 500, 250, 0, 0, 0, 0, 0, 0, 0, ?)`).run(id, `Gear${id}`, clanId);
             const inventory = giving ? { [EARRING]: { selfId: EARRING, amount: 1, equippedCount: 1, name: 'Red Crescent Earring' } } : {};
             db.prepare(`INSERT INTO bot_life_state(characterId, accountName, characterName, level, adena, activity, phase,
-                simulationOwner, inventorySummary, statsJson, updatedAt) VALUES (?, 'bot_pop_gear', ?, 30, 0, 'hunting', 'cold', ?, ?, '{"classId":0}', 1)`)
-                .run(id, `Gear${id}`, 'legacy_main', JSON.stringify(inventory));
+                inventorySummary, statsJson, updatedAt) VALUES (?, 'bot_pop_gear', ?, 30, 0, 'hunting', 'cold', ?, '{"classId":0}', 1)`)
+                .run(id, `Gear${id}`, JSON.stringify(inventory));
             db.prepare(`INSERT INTO bot_personas(characterId, version, seed, primaryDrive, archetype, traitsJson, textCard, createdAt, updatedAt)
                 VALUES (?, 2, 1, 'social', 'party_regular', ?, '', 0, 0)`).run(id, JSON.stringify(giving ? traits : generous));
             if (giving) {

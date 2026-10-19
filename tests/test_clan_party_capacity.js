@@ -4,7 +4,7 @@ const objective = { status: 'open', priority: 'required', clanId: 77, clanGoalKe
 const now = 1000000;
 const ordinary = { partyId: 'ordinary', status: 'active', leaderId: 1, memberIds: [1, 2], updatedAt: 123, revision: 4, stats: {} };
 const members = [1, 2].map(characterId => ({ characterId, phase: 'cold', activity: 'grouped',
-    party: { partyId: 'ordinary' }, simulation: { ownerId: 'legacy_main' }, stats: {} }));
+    party: { partyId: 'ordinary' }, simulation: {}, stats: {} }));
 (async () => {
     let writes = 0, accepted = 0, commits = [];
     const deps = {

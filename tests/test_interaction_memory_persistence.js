@@ -41,11 +41,10 @@ async function run() {
 
         const timestamp = Date.now();
         await Database.execute([`INSERT INTO bot_life_state(characterId, accountName, characterName, phase, activity, updatedAt,
-            simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil, statsJson)
-            VALUES (1, 'bot_memory_1', 'Memory1', 'cold', 'hunting', ?, 'cold_simulation_owner', 0, 'memory-lease', ?, '{}')`,
-        [timestamp, timestamp + 60000]]);
-        const request = { characterId: 1, expectedRevision: 0, ownerId: 'cold_simulation_owner', leaseId: 'memory-lease',
-            timestamp, leaseUntil: timestamp + 60000, patch: { phase: 'cold', activity: 'hunting', hp: 73 }, memoryEvents: [event('cold:accepted')] };
+            simulationRevision, statsJson)
+            VALUES (1, 'bot_memory_1', 'Memory1', 'cold', 'hunting', ?, 0, '{}')`,
+        [timestamp]]);
+        const request = { characterId: 1, expectedRevision: 0, timestamp, patch: { phase: 'cold', activity: 'hunting', hp: 73 }, memoryEvents: [event('cold:accepted')] };
         const commitOne = (one) => Database.commitAndReleaseColdSimulationLeases([one]).then(([result]) => result);
         const committed = await commitOne(request);
         assert.strictEqual(committed.ok, true);
@@ -60,13 +59,13 @@ async function run() {
             'social admission failure rolls back the physical outcome');
         await assert.rejects(commitOne({ ...request, expectedRevision: 1, memoryEvents: {} }), /invalid cold batch/);
         await Database.execute([`INSERT INTO bot_life_state(characterId, accountName, characterName, phase, activity, updatedAt,
-            simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil, statsJson)
-            VALUES (2, 'bot_memory_2', 'Memory2', 'cold', 'hunting', ?, 'cold_simulation_owner', 0, 'memory-lease-2', ?, '{}')`,
-        [timestamp, timestamp + 60000]]);
+            simulationRevision, statsJson)
+            VALUES (2, 'bot_memory_2', 'Memory2', 'cold', 'hunting', ?, 0, '{}')`,
+        [timestamp]]);
         const atomicGroup = { id: 'encounter:1', memberIds: [1, 2] };
         const group = [
             { ...request, expectedRevision: 1, atomicGroup, memoryEvents: [{ ...event('group:1'), type: 'hunted_together' }] },
-            { ...request, characterId: 2, leaseId: 'memory-lease-2', atomicGroup, memoryEvents: [{ ...event('group:2', 2, 1), type: 'hunted_together' }] }
+            { ...request, characterId: 2, atomicGroup, memoryEvents: [{ ...event('group:2', 2, 1), type: 'hunted_together' }] }
         ];
         const queuedChange = Database.execute(['UPDATE bot_life_state SET simulationRevision = 1 WHERE characterId = 2', []]);
         const raced = Database.commitAndReleaseColdSimulationLeases(group);

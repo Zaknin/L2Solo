@@ -98,14 +98,6 @@ async function inner(mode) {
             Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [id]]))[0]);
             assert.equal(Protocol.sameCommandCheckpoint(request.commandCheckpoint, Life.cachedState(id)), false);
         }
-        if (mode === 'deadline_metadata') {
-            // Same native tuple, deadline-only metadata: this proves admission
-            // parity, not a worker-owned legacy apply or native grant renewal.
-            await Database.execute(['UPDATE bot_life_state SET simulationLeaseUntil = ? WHERE characterId = ?', [Date.now() + 120000, id]]);
-            Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [id]]))[0]);
-            assert(Protocol.sameCommandCheckpoint(request.commandCheckpoint, Life.cachedState(id)));
-            assert.equal(admissions[0].check(), null, 'same11 cached deadline-only metadata admits synchronously before prepareResolve');
-        }
         if (mode === 'owned_replaced') c.commandInflight.set(id, Promise.resolve());
         if (mode === 'request_changed') {
             request.commandCheckpoint.updatedAt += 1000;
@@ -138,7 +130,7 @@ async function inner(mode) {
             receipts: receipts.map(row => [row.label, row.message.payload.results[0]?.reason]) }));
         if (mode === 'owned_replaced') c.commandInflight.delete(id);
         assert.equal(c.commandInflight.size, 0);
-        if (mode === 'current' || mode === 'deadline_metadata' || mode === 'request_changed') {
+        if (mode === 'current' || mode === 'request_changed') {
             assert.equal(after.characters.find(row => row.id === id).hp, 90, 'current genuine native transition persists');
             assert(after.cache.timing.lastResolvedAt > state.timing.lastResolvedAt);
             assert.equal(receipts.length, 1); assert.equal(receipts[0].message.payload.results[0].ok, true);
@@ -451,7 +443,7 @@ async function check(name, work) {
     options.default.Database.path = path.join(directory, 'world.sqlite');
     options.default.Database.historyPath = path.join(directory, 'history.sqlite');
     Database.init(); assert(Database.isReady()); Data.init(); await Life.init();
-    for (const mode of ['current', 'replace', 'stop', 'changed', 'fence', 'moved', 'deadline_metadata', 'owned_replaced', 'request_changed']) {
+    for (const mode of ['current', 'replace', 'stop', 'changed', 'fence', 'moved', 'owned_replaced', 'request_changed']) {
         await check(`native inner ${mode}`, () => inner(mode));
     }
     for (const key of ['clanInventoryRevision', 'clanLevelSpVersion', 'clanMembershipVersion']) {

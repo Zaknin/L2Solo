@@ -30,7 +30,7 @@ function candidate(characterId, options = {}) {
             }
         },
         timing: { activityStartedAt: requestedAt },
-        simulation: { ownerId: 'legacy_main', revision: Number(options.revision || 3) },
+        simulation: { revision: Number(options.revision || 3) },
         updatedAt: Number(options.updatedAt || 5000)
     };
 }

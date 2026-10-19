@@ -1,4 +1,5 @@
 process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
+require('../src/Global');
 const assert = require('node:assert/strict');
 const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
 const { MarketBuyerWaiters } = require('../src/GameServer/Bot/Economy/MarketBuyerWaiters');
@@ -24,7 +25,7 @@ async function main() {
     const state = (id, item = 99, overrides = {}) => ({ characterId: id, phase: 'cold', activity: 'hunting', level: 1,
         adena: 2000, inventory: {}, vitals: { hp: 100 }, stats: { wanted: item },
         timing: { lastResolvedAt: now - 60000, nextResolveAt: now + 3600000 },
-        updatedAt: now, simulation: { ownerId: 'legacy_main', revision: 1, leaseId: null, leaseUntil: 0 }, ...overrides });
+        updatedAt: now, simulation: { revision: 1 }, ...overrides });
     const board = new BoardIndex();
     const record = (id, price = 100, count = 10, lines = null) => ({ id, ownerId: 900, storeType: 1,
         lines: lines || [{ lineId: 7, selfId: 99, count, price }] });

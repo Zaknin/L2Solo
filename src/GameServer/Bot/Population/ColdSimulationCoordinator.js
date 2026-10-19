@@ -766,7 +766,7 @@ class ColdSimulationCoordinator {
                 if (Number(payload.near.nearSeq || 0) < Number(session.heldNearSeq || 0)) { this.nearDecisions.refused++; break; }
                 this.nearDecisions.accepted++;
                 DecisionEvents.receive(session, decision, payload.near);
-                this.economyDecisions.accept(id, decision, null, state);
+                this.economyDecisions.accept(id, decision);
                 if (decision.feasibility) HotBoardReview.preparedOwner(id);
             } else if (payload.phase === 'economy_workshop_stale' && !this.stopping) {
                 this.economyDecisions.staleWorkshop(Number(payload.characterId),

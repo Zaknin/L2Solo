@@ -3,7 +3,9 @@
 // and answers that post (payload.near.nearSeq). The body acts on the newest
 // answer it got: a decision for an older post that arrives after a newer one
 // is refused, and an accepted one brings the mind it moved to the body. A
-// raise the body posted waits until a decision names it (raiseSeq).
+// raise the body posted waits until a decision names it (raiseSeq). The
+// worker side (its own mind kept over a post's, a raise taken once) is in
+// test_worker_economy_publication.
 const assert = require('node:assert/strict');
 require('./helpers/databaseIsolation');
 require('../src/Global');

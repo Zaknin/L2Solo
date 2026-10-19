@@ -99,6 +99,7 @@ const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const DecisionEvents = require('../AI/DecisionEvents');
+const SavedStats = require('../SavedStats');
 const { stateKey } = require('./SpotOccupancyIndex');
 const DecisionSections = invoke('GameServer/Bot/Economy/DecisionSections');
 const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
@@ -375,7 +376,9 @@ const occupationPlanner = new ColdOccupationPlanner({
                 board: input.board, routeRows, workshops: workshopsFor,
                 timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, npcOffersFor: OccupationSources.npcOffersFor,
                 buyOrderEscrow: input.buyOrderEscrow, workshop: noWorkshop(),
-                rememberContext: false, caller: `economy_${input.mode}`, trigger: 'native_own_action' });
+                // A refresh keeps no context; a near post is held and its clean repeat hits the verdict.
+                ...(input.mode === 'refresh' ? { rememberContext: false } : {}),
+                caller: `economy_${input.mode}`, trigger: 'native_own_action' });
             // The shared money packet is derived from this same graph. Use it
             // in preparation only; the native writer owns physical funding.
             input.state = { ...input.state, stats: { ...input.state.stats, ...input.economy.statsPacket } };
@@ -517,6 +520,9 @@ const occupationPlanner = new ColdOccupationPlanner({
             // The near bot's decision on its post: the card, and beside it the
             // mind keys the body takes and the post and raise it answers.
             owner.published = workshop.decision;
+            // The published packet moves the record's mind, as the far step's merge does,
+            // so the next post's events compare against it and a raise is taken once.
+            Object.assign(owner.state.stats ||= {}, workshop.statsPacket);
             owner.nearRoute = { key: input.routeKey, rows: workshop.routeRows };
             send('ready', { phase: 'economy_decided', characterId: id, economyDecision: workshop.decision,
                 near: { statsPacket: workshop.statsPacket, shotRestock: workshop.shotRestock, personalCraft: workshop.personalCraft,
@@ -688,6 +694,9 @@ const softInputFor = (characterId, timestamp) => ({ board: boardReady(), buyOrde
 // far step's one bump. The decision is then taken on this row (mode near).
 function nearEvents(id, previousEntry, entry) {
     const previous = previousEntry.state, row = entry.state, stats = row.stats ||= {};
+    // The worker owns the near mind: a post's mind keys are discarded and the
+    // record's stand, so a late post cannot roll back a raise.
+    for (const key of SavedStats.MIND_KEYS) stats[key] = previous.stats?.[key];
     const raise = row.raise, applied = Number(previousEntry.raiseSeq || 0);
     if (raise && Number(raise.seq) > applied) DecisionEvents.applyRaise(stats, Number(raise.bits) || 0, raise.impossible === true);
     entry.raiseSeq = Math.max(applied, Number(raise?.seq || 0));

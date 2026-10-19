@@ -254,7 +254,7 @@ function setup() {
     const previousCachedState = LifeState.cachedState;
     const waitingMeeting = { characterId: 930021, phase: 'cold', activity: 'hunting', updatedAt: 1000,
         stats: { tradeMeeting: [7, 1] }, timing: { nextResolveAt: 2000 },
-        simulation: { revision: 40, ownerId: 'legacy_main', leaseId: null } };
+        simulation: { revision: 40 } };
     const paidLeg = { ...waitingMeeting, activity: 'traveling', updatedAt: 1001,
         stats: { ...waitingMeeting.stats, travel: { reason: 'trade_meeting', arrivalAt: 3000 } },
         timing: { nextResolveAt: 3000 }, simulation: { ...waitingMeeting.simulation, revision: 41 } };

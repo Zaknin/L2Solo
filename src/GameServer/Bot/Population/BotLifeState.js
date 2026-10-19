@@ -74,8 +74,7 @@ function notifyMarketReviewState(state, previous) {
     if (!state?.characterId) return;
     const left = previous?.simulation || {};
     const right = state.simulation || {};
-    if (previous?.phase === state.phase && left.ownerId === right.ownerId
-        && left.revision === right.revision && left.leaseId === right.leaseId) return;
+    if (previous?.phase === state.phase && left.revision === right.revision) return;
     for (const listener of marketReviewListeners) {
         try { listener(state.characterId); }
         catch (error) { utils.infoWarn('BotLife', 'market lifecycle listener failed: %s', error.message); }
@@ -139,7 +138,7 @@ function notifyNearFacts(session, reason) {
             if (session.nearRaise) row.raise = { ...session.nearRaise };
             // lazy: cycle the coordinator requires this module at its top.
             invoke('GameServer/Bot/Population/ColdSimulationCoordinator').markDirty(row,
-                { reason, critical: isCriticalSnapshotReason(reason, row), near: true });
+                { reason, critical: isCriticalSnapshotReason(reason, row) || !!row.raise, near: true });
         } catch (error) {
             utils.infoWarn('BotLife', 'near fact %s post failed: %s', reason, error.message);
         }
@@ -639,12 +638,7 @@ function normalize(row) {
         inventory,
         ...(row.acceptedIncoming === undefined ? {} : { acceptedIncoming: row.acceptedIncoming || {} }),
         ...(row.incomingPending ? { incomingPending: true } : {}),
-        simulation: {
-            ownerId: row.simulationOwner || 'legacy_main',
-            revision: Math.max(0, Number(row.simulationRevision || 0)),
-            leaseId: row.simulationLeaseId || null,
-            leaseUntil: Math.max(0, Number(row.simulationLeaseUntil || 0))
-        },
+        simulation: { revision: Math.max(0, Number(row.simulationRevision || 0)) },
         updatedAt: Number(row.updatedAt || 0)
     });
 }
@@ -823,14 +817,11 @@ function rowFromState(state) {
         partyId: persistedState.party?.partyId || null,
         inventorySummary: safeJson(persistedState.inventory || {}),
         ...SavedStats.statsColumns(persistedState.stats),
-        // `save()` does not bind the ownership columns: a far row's revision
-        // moves in SQL and save() writes the moved number back here. Until then
-        // the row carries the state's own, so normalize(row) never resets the
-        // cached revision to zero.
-        simulationOwner: persistedState.simulation?.ownerId || 'legacy_main',
+        // `save()` does not bind the revision: a far row's revision moves in
+        // SQL and save() writes the moved number back here. Until then the row
+        // carries the state's own, so normalize(row) never resets the cached
+        // revision to zero.
         simulationRevision: Math.max(0, Number(persistedState.simulation?.revision || 0)),
-        simulationLeaseId: persistedState.simulation?.leaseId || null,
-        simulationLeaseUntil: Math.max(0, Number(persistedState.simulation?.leaseUntil || 0)),
         equipmentAdvance,
         updatedAt: now()
     };
@@ -940,18 +931,20 @@ function save(row, options = {}) {
             -- mind on main is the worker's copy, the next save carries the
             -- same copy, and a refused save is a stale actor snapshot, so a
             -- second unguarded statement would buy nothing. Over a far row
-            -- (old phase cold) the worker is the mind's one writer: a main
-            -- save there (npc liquidation, a purchase, leaving a party) keeps
-            -- the row's mind; the hot->cold hand-off (old phase hot) still
-            -- carries main's. RETURNING hands the kept mind back, so the
-            -- cache and the snapshot the worker receives carry the row's.
-            mindJson = CASE WHEN ${TABLE}.phase = 'cold' THEN ${TABLE}.mindJson ELSE excluded.mindJson END,
+            -- (old phase cold) the revision fences it: a save built on the
+            -- row's revision writes its mind (a worker packet main applies
+            -- for a lifecycle step, a purchase's money); one built on an
+            -- older copy (the row moved past it since) keeps the row's. The
+            -- hot->cold hand-off (old phase hot) carries main's. RETURNING
+            -- hands the written mind back, so the cache and the snapshot the
+            -- worker receives carry the row's.
+            mindJson = CASE WHEN ${TABLE}.phase = 'cold' AND ${TABLE}.simulationRevision > ?
+                THEN ${TABLE}.mindJson ELSE excluded.mindJson END,
             updatedAt = excluded.updatedAt,
             -- A main write to a far row moves its revision: a worker step
             -- begun before it is refused stale_revision and rebases.
             ${Database.MOVE_FAR_REVISION}
-        WHERE ${TABLE}.simulationOwner = 'legacy_main'
-          AND COALESCE(json_extract(${TABLE}.statsJson, '$.clanInventoryRevision'), 0)
+        WHERE COALESCE(json_extract(${TABLE}.statsJson, '$.clanInventoryRevision'), 0)
               <= COALESCE(json_extract(excluded.statsJson, '$.clanInventoryRevision'), 0)
           AND COALESCE(json_extract(${TABLE}.statsJson, '$.clanLevelSpVersion'), 0)
               <= COALESCE(json_extract(excluded.statsJson, '$.clanLevelSpVersion'), 0)
@@ -989,7 +982,9 @@ function save(row, options = {}) {
             row.updatedAt,
             Number(row.nameGeneratorVersion || 0),
             Number(row.appearanceVersion || 0),
-            row.mindJson
+            row.mindJson,
+            // The revision the save was built on (the mind's fence above).
+            Math.max(0, Number(row.simulationRevision || 0))
         ]
     ];
     NativeWriteCheckpoint.bindRow(beforeWrite?.value, statement, row.characterId);
@@ -1109,7 +1104,7 @@ function hydrateCache() {
             if (row.nativeLearnedSkills != null || hennaRepair || seedRepair) {
                 // Startup repair precedes cache publication and worker reads.
                 // Use the existing guarded save; do not learn/spend here.
-                if (state.phase === 'cold' && state.simulation?.ownerId === 'legacy_main') {
+                if (state.phase === 'cold') {
                     const repaired = rowFromState(state);
                     await save(repaired);
                     state = normalize(repaired);
@@ -1145,9 +1140,9 @@ function classProgressionNeeded(state, classId, level) {
         || invoke('GameServer/Skills/SkillBookCatalog').needsTraining(state);
 }
 
-// The far bots main trains after a commit: cold, its own, alive.
+// The far bots main trains after a commit: cold, alive.
 function mainTrainsFar(state) {
-    return !!state && state.phase === 'cold' && state.simulation?.ownerId === 'legacy_main' && state.activity !== 'dead';
+    return !!state && state.phase === 'cold' && state.activity !== 'dead';
 }
 
 function refreshColdCombatProfile(state) {
@@ -1543,7 +1538,6 @@ function expireStalePartyRequests() {
     // a restart cannot turn one historical queue into a new SQLite spike.
     const staggerMs = Math.min(120000, Math.max(0, Math.floor(cooldownMs / 2)));
     const target = `phase = 'cold'
-        AND simulationOwner = 'legacy_main'
         AND (partyId IS NULL OR partyId = '')
         AND activity IN ('hunting', 'resting', 'party_wait')
         AND partyRequestStatus = 'open'
@@ -1597,7 +1591,6 @@ function deferUnformablePartyRequests(characterIds = [], reason = 'no_compatible
     const placeholders = ids.map(() => '?').join(', ');
     const selection = `characterId IN (${placeholders})
         AND phase = 'cold'
-        AND simulationOwner = 'legacy_main'
         AND (partyId IS NULL OR partyId = '')
         AND activity IN ('hunting', 'resting', 'party_wait')
         AND partyRequestStatus = 'open'
@@ -1776,10 +1769,6 @@ const BotLifeState = {
                     marketCounts.set(Number(row.characterId), counts);
                 }
             })
-            // A process restart invalidates every in-process logical owner,
-            // even when its wall-clock lease had time remaining. Reclaim the
-            // rows before any legacy startup repair can touch them.
-            .then(() => invoke('GameServer/Bot/Population/ColdSimulationOwner').recoverStartupLeases())
             .then(() => invoke('GameServer/Clan/ClanSupplyPolicy').init())
             .then(() => Database.reconcileBotClanMembership()).then(({ repairedMembers, repairedParties }) => {
                 if (repairedMembers || repairedParties) {
@@ -1877,12 +1866,12 @@ const BotLifeState = {
     // A command refused because the row moved past the cache (NativeWriteCheckpoint
     // drift): the row is the owner of the checkpoint; read it back so the next
     // command carries it instead of retrying the same stale copy forever (L127).
-    // A handoff or lease in flight is published by its owner, not here.
+    // A handoff in flight is published by its owner, not here.
     reloadRow(characterId, drift = []) {
         const id = Number(characterId);
-        if (drift.some(key => ['phase', 'simulationOwner', 'simulationLeaseId'].includes(key))) return Promise.resolve(null);
+        if (drift.includes('phase')) return Promise.resolve(null);
         return Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ? LIMIT 1', [id]], 'bot-life:reload').then(([row]) => {
-            if (!row || row.phase !== 'cold' || row.simulationOwner !== 'legacy_main') return null;
+            if (!row || row.phase !== 'cold') return null;
             if (Diagnostics.active()) Diagnostics.count('command', 'checkpoint_reload', drift.join(','));
             return this.acceptNewerLifecycleRow(row);
         });
@@ -1910,7 +1899,6 @@ const BotLifeState = {
     acceptInventoryProjection(row) {
         const current = cache.get(Number(row?.characterId));
         if (!current || !row?.inventoryPatch || current.phase !== row.phase
-            || current.simulation?.ownerId !== row.simulationOwner
             || Number(current.simulation?.revision || 0) >= Number(row.simulationRevision)) return current || null;
         const inventory = { ...current.inventory };
         for (const [id, item] of Object.entries(row.inventoryPatch)) {
@@ -1956,7 +1944,7 @@ const BotLifeState = {
     },
 
     // A committed deal publishes only learning here. A cold worker keeps its
-    // inventory/lease; delayed postcommit handlers cannot rewind later counts.
+    // inventory; delayed postcommit handlers cannot rewind later counts.
     acceptMarketTrades(characterId, counts) {
         const id = Number(characterId);
         const merged = { ...(marketCounts.get(id) || {}) };
@@ -2267,20 +2255,15 @@ const BotLifeState = {
         )), Promise.resolve([]));
     },
 
-    statesForParty(partyId, options = {}) {
+    statesForParty(partyId) {
         if (!initialized || !partyId) return Promise.resolve([]);
-
-        const ownerId = options.ownerId ? String(options.ownerId) : null;
-        const ownerClause = ownerId ? 'AND simulationOwner = ?' : '';
-        const params = ownerId ? [partyId, ownerId] : [partyId];
 
         return Database.execute([
             `SELECT * FROM ${TABLE}
             WHERE phase = 'cold'
             AND partyId = ?
-            ${ownerClause}
             ORDER BY level DESC, characterId ASC`,
-            params
+            [partyId]
         ]).then((rows) => rows.map((row) => {
             const state = normalize(row);
             cache.set(state.characterId, state);
@@ -2306,7 +2289,6 @@ const BotLifeState = {
                     partyRequestStatus, partyRequestPriority, updatedAt, level
                 FROM ${TABLE}
                 WHERE phase = 'cold'
-                AND simulationOwner = 'legacy_main'
                 AND (partyId IS NULL OR partyId = '')
                 AND spotId IS NOT NULL
                 AND ${activityClause}
@@ -2367,7 +2349,6 @@ const BotLifeState = {
         return Database.execute([
             `SELECT COUNT(*) AS candidateCount FROM ${TABLE}
             WHERE phase = 'cold'
-            AND simulationOwner = 'legacy_main'
             AND (partyId IS NULL OR partyId = '')
             AND spotId IS NOT NULL
             AND ${activityClause}`,
@@ -2399,7 +2380,6 @@ const BotLifeState = {
                     ) AS candidateRank
                 FROM ${TABLE}
                 WHERE phase = 'cold'
-                AND simulationOwner = 'legacy_main'
                 AND (partyId IS NULL OR partyId = '')
                 AND partyObjectiveSpot IN (${placeholders})
                 AND ${activityClause}
@@ -2536,10 +2516,7 @@ const BotLifeState = {
     clearParty(partyId, reason = 'party_dissolved') {
         if (!initialized || !partyId) return Promise.resolve(0);
 
-        // Main-owned rows are the only rows this legacy cleanup path may
-        // write. Cold-worker-owned members will be released by the worker's
-        // party resolution, avoiding a predictable CAS conflict here.
-        return this.statesForParty(partyId, { ownerId: 'legacy_main' }).then((members) => (
+        return this.statesForParty(partyId).then((members) => (
             members.reduce((chain, member) => (
                 chain.then((cleared) => this.leaveParty(member, reason)
                     .then((updated) => cleared + (updated ? 1 : 0)))
@@ -2555,16 +2532,11 @@ const BotLifeState = {
 
         // A runtime party reconciliation can discover members after the
         // party row has already been dissolved. Release every cold member
-        // here, handing worker-owned rows back to the main lifecycle owner
-        // before applying the normal party departure transition.
+        // here with the normal party departure transition.
         return this.statesForParty(partyId).then((members) => (
             members.reduce((chain, member) => (
-                chain.then((released) => {
-                    const ownerHandoff = member.simulation?.ownerId
-                        && member.simulation.ownerId !== 'legacy_main';
-                    return this.leaveParty(member, reason, { ownerHandoff: !!ownerHandoff })
-                        .then((updated) => released + (updated ? 1 : 0));
-                })
+                chain.then((released) => this.leaveParty(member, reason)
+                    .then((updated) => released + (updated ? 1 : 0)))
             ), Promise.resolve(0))
         )).catch((err) => {
             utils.infoWarn('BotLife', 'failed to release dissolved party %s: %s', partyId, err.message);
@@ -2884,7 +2856,7 @@ const BotLifeState = {
         const trainingWriteOptions = nativeWriteOptions && needsClassProgression && options.projectClassProgression !== true
             ? { beforeWrite: Database.createColdTrainingGuard(state, () => {}, nativeWriteOptions.beforeWrite) }
             : nativeWriteOptions || (options.persist !== false && options.projectClassProgression !== true && needsClassProgression
-                && state.phase === 'cold' && state.simulation?.ownerId === 'legacy_main'
+                && state.phase === 'cold'
                 ? { beforeWrite: Database.createColdTrainingGuard(state, () => {}) } : undefined);
         const progression = needsClassProgression
             ? (options.projectClassProgression === true ? Promise.resolve(BotClassProgression.plan({
@@ -3059,12 +3031,11 @@ const BotLifeState = {
         // full inventory/cold-combat payload is hydrated after selection.
         return Database.execute([
             `SELECT characterId, characterName, bot_life_state.level, activity, spotId,
-                activityStartedAt, updatedAt, simulationOwner, simulationRevision,
+                activityStartedAt, updatedAt, simulationRevision,
                 payloadJson
             FROM ${TABLE} INDEXED BY bot_life_state_party_candidate_projection
             INNER JOIN bot_party_candidate_projection USING (characterId)
             WHERE phase = 'cold'
-            AND simulationOwner = 'legacy_main'
             AND (partyId IS NULL OR partyId = '')
             AND NOT EXISTS (
                 SELECT 1 FROM clan_operation_members reserved
@@ -3105,12 +3076,7 @@ const BotLifeState = {
                     ...(equipmentPlan ? { equipmentPlan } : {}),
                     ...(partyHistory ? { partyHistory } : {})
                 },
-                simulation: {
-                    ownerId: row.simulationOwner || 'legacy_main',
-                    revision: Math.max(0, Number(row.simulationRevision || 0)),
-                    leaseId: null,
-                    leaseUntil: 0
-                },
+                simulation: { revision: Math.max(0, Number(row.simulationRevision || 0)) },
                 updatedAt: Number(row.updatedAt || 0),
                 projection: true
             };
@@ -3136,7 +3102,6 @@ const BotLifeState = {
             FROM ${TABLE} states
             INNER JOIN characters c ON c.id = states.characterId
             WHERE states.phase = 'cold'
-            AND states.simulationOwner = 'legacy_main'
             AND (states.partyId IS NULL OR states.partyId = '')
             AND states.spotId IS NOT NULL
             AND states.activity IN ('hunting', 'resting', 'party_wait')
@@ -3167,7 +3132,6 @@ const BotLifeState = {
             const state = normalize(row);
             state.clanId = Number(row.candidateClanId || 0);
             state.classId = Number(row.candidateClassId || state.stats?.classId || 0);
-            state.simulationOwner = state.simulation.ownerId;
             state.partyId = state.party.partyId;
             state.stats = {
                 ...(state.stats || {}),
@@ -3213,7 +3177,6 @@ const BotLifeState = {
             const state = normalize(row);
             state.classId = Number(row.candidateClassId);
             state.clanId = Number(row.candidateClanId);
-            state.simulationOwner = state.simulation.ownerId;
             state.partyId = state.party.partyId;
             state.stats = { ...state.stats, classId: state.classId, clanId: state.clanId };
             state.candidateCursor = { classId: state.classId, level: state.level, characterId: state.characterId };
@@ -3230,23 +3193,19 @@ const BotLifeState = {
             .slice(0, 64);
         if (!ids.length) return Promise.resolve([]);
         const placeholders = ids.map(() => '?').join(', ');
-        const ownerId = options.ownerId ? String(options.ownerId) : null;
-        const ownerClause = ownerId ? 'AND simulationOwner = ?' : '';
         const unassignedClause = `${options.unassigned ? "AND (partyId IS NULL OR partyId = '')" : ''}
             ${options.unassigned || options.excludeReserved ? `AND NOT EXISTS (
                 SELECT 1 FROM clan_operation_members reserved
                 WHERE reserved.characterId = bot_life_state.characterId
                 AND reserved.status = 'active'
             )` : ''}`;
-        const params = [...ids, ...(ownerId ? [ownerId] : [])];
 
         return Database.execute([
             `SELECT ${TABLE}.*, c.classId AS canonicalClassId, c.clanId AS canonicalClanId FROM ${TABLE}
             INNER JOIN characters c ON c.id = ${TABLE}.characterId
             WHERE characterId IN (${placeholders})
-            ${ownerClause}
             ${unassignedClause}`,
-            params,
+            ids,
             { read: true }
         ], 'bot-life:states-by-id').then((rows) => rows.map((row) => {
             const state = normalize(row);
@@ -3254,13 +3213,11 @@ const BotLifeState = {
             state.clanId = Number(row.canonicalClanId || 0);
             state.stats = { ...state.stats, classId: state.classId, clanId: state.clanId };
             cache.set(state.characterId, state);
-            // The cache feeds cold worker snapshots: an own flat simulationOwner
-            // there makes the worker read it as flat wire input and refuse every
-            // command (bot never scheduled again), and an own flat partyId outlives
+            // The cache feeds cold worker snapshots: an own flat partyId outlives
             // a party release (the release clears only party.partyId), so the
-            // released bot stays a party member to the due list and the kernel.
-            // Clan readers get both on a copy.
-            return { ...state, partyId: state.party.partyId, simulationOwner: state.simulation.ownerId };
+            // released bot would stay a party member to the due list and the
+            // kernel. Clan readers get it on a copy.
+            return { ...state, partyId: state.party.partyId };
         })).catch((err) => {
             utils.infoWarn('BotLife', 'failed to hydrate %d party candidate(s): %s', ids.length, err.message);
             return [];
@@ -3367,13 +3324,7 @@ const BotLifeState = {
                     return null;
                 }
                 Metrics.recordDbFlush();
-                const snapshot = cache.get(Number(state.characterId)) || normalize({
-                    ...row,
-                    simulationOwner: result.ownerId,
-                    simulationRevision: result.revision,
-                    simulationLeaseId: result.leaseId,
-                    simulationLeaseUntil: result.leaseUntil
-                });
+                const snapshot = cache.get(Number(state.characterId)) || normalize({ ...row, simulationRevision: result.revision });
                 notifyColdSnapshot(snapshot, `party_left_${reason}`, { critical: true });
                 return snapshot;
             }).catch((err) => {
@@ -3700,41 +3651,6 @@ const BotLifeState = {
         return next;
     },
 
-    applyWarehouseGearCleanup(characterId, selections = [], options = {}) {
-        const id = Number(characterId);
-        if (!Number.isSafeInteger(id) || id <= 0 || !Array.isArray(selections) || !selections.length) {
-            return Promise.resolve({ ok: false, reason: 'invalid_request', characterId: id || null });
-        }
-
-        const previous = pendingWrites.get(id) || Promise.resolve();
-        const ready = initialized ? Promise.resolve(true) : this.init();
-        const next = previous.then(() => ready).then((isReady) => {
-            if (!isReady) throw new Error('state table unavailable');
-            return Database.liquidateWarehouseGear(id, selections, options);
-        }).then((result) => {
-            if (!result?.ok || !result.state) return result;
-            const snapshot = normalize(result.state);
-            cache.set(id, snapshot);
-            Metrics.recordDbFlush();
-            notifyColdSnapshot(snapshot, 'warehouse_gear_cleanup', { critical: true });
-            return { ...result, state: snapshot };
-        }).catch((error) => {
-            utils.infoWarn('BotLife', 'failed warehouse gear cleanup for %d: %s', id, error.message || error);
-            return {
-                ok: false,
-                reason: error.code === 'WAREHOUSE_GEAR_CHANGED' ? 'warehouse_changed' : 'cleanup_error',
-                characterId: id,
-                error
-            };
-        });
-
-        const tracked = next.finally(() => {
-            if (pendingWrites.get(id) === tracked) pendingWrites.delete(id);
-        });
-        pendingWrites.set(id, tracked);
-        return next;
-    },
-
     learnCraftableRecipes(state, { recipeIds = null } = {}) {
         if (!state?.characterId) return Promise.resolve(state || null);
         if (!recipeIds) {
@@ -3859,9 +3775,6 @@ const BotLifeState = {
             oldest: null
         };
 
-        // The owner and lease end left this summary with their one reader,
-        // PopulationService.logSummary's claimed_by reason; the owner SQL in
-        // this file goes with the lease columns.
         const noteOldest = (state, dueAt, ageMs) => {
             if (ageMs <= summary.oldestAgeMs && summary.oldest) return;
             summary.oldestAgeMs = Math.max(0, ageMs);
@@ -4060,12 +3973,7 @@ const BotLifeState = {
         const next = {
             ...(current || {}),
             ...(committedState || {}),
-            simulation: {
-                ownerId: result.ownerId || 'legacy_main',
-                revision: Math.max(0, Number(result.revision || 0)),
-                leaseId: result.leaseId || null,
-                leaseUntil: Math.max(0, Number(result.leaseUntil || 0))
-            }
+            simulation: { revision: Math.max(0, Number(result.revision || 0)) }
         };
         cache.set(id, next);
         notifyMarketReviewState(next, current);
@@ -4136,8 +4044,8 @@ const BotLifeState = {
             return { rows: [], cursor: { afterId, highWaterId }, done: true };
         }
         const rows = await Database.execute([
-            `SELECT characterId, phase, activity, simulationOwner, simulationRevision,
-                simulationLeaseId, simulationLeaseUntil, activityStartedAt, nextResolveAt,
+            `SELECT characterId, phase, activity, simulationRevision,
+                activityStartedAt, nextResolveAt,
                 lastResolvedAt, lastHotAt, updatedAt
             FROM ${TABLE}
             WHERE characterId > ? AND characterId <= ? ORDER BY characterId ASC LIMIT ?`,

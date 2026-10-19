@@ -45,7 +45,7 @@ const ids = [730291, 730292, 730293, 730294, 730295, 730296, 730297, 730298, 730
                     count: 2, price: 100, certificate: Intent.encode({ itemId: 1867, amount: 2, price: 100, key: 'resale:1867',
                         recipeId: 0, valueHours: 2, valueRate: 100 }) }],
                 parties: parties.map(p => ({ ...p, route: { fee: 20, scroll: false, method: 'walk', durationMs: 100 } })) };
-            const members = await Life.statesByIds([partner, seller], { ownerId: 'legacy_main', unassigned: true });
+            const members = await Life.statesByIds([partner, seller], { unassigned: true });
             const due = Date.now() + 45000, partyId = `b5_race_${seller}`;
             const party = PartyState.prepareCommit({ partyId, leaderId: partner, memberIds: [partner, seller], spotId: 'cruma',
                 nextResolveAt: due, status: 'active', roleCoverage: { tank: 1, healer: 1 },
@@ -75,7 +75,7 @@ const ids = [730291, 730292, 730293, 730294, 730295, 730296, 730297, 730298, 730
                 // The acceptance rewrites both life rows, so the join prepared before it is stale first
                 // (membership_conflict); a join re-prepared from fresh rows meets the trade fence itself.
                 assert.match(String(joined.value?.reason), /^(membership_conflict|party_trade_busy)$/, 'party side refuses the race loser');
-                const fresh = (await Life.statesByIds([partner, seller], { ownerId: 'legacy_main', unassigned: true }))
+                const fresh = (await Life.statesByIds([partner, seller], { unassigned: true }))
                     .map(member => Life.preparePartyAssignment(member, partyId, member.characterId === partner ? 'tank' : 'healer', partner, due));
                 const retried = await Database.commitBackgroundPartyMembership({ party: party.row, members: fresh });
                 assert.equal(retried.reason, 'party_trade_busy', 'a fresh join is refused for the trade-busy bot');

@@ -23,7 +23,7 @@ async function seed(id, account) {
         exp: 0, sp: 0, adena: 10000, phase: 'cold', activity: 'shopping', homeRegion: 'Giran', currentRegion: 'Giran',
         loc: { x: 83000, y: 148000, z: -3400 }, vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
         stats: { classId: 57, money: [36000, 0, 0, 0] },
-        inventory: { 57: { selfId: 57, amount: 10000 } }, simulation: { ownerId: 'legacy_main', revision: 0 },
+        inventory: { 57: { selfId: 57, amount: 10000 } }, simulation: { revision: 0 },
         timing: {}, updatedAt: Date.now() }, 'native_fixture');
 }
 async function run() {

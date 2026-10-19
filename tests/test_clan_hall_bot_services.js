@@ -88,7 +88,7 @@ function stateFor(id, classId = 88) {
             classProgressionClassId: classId,
             coldCombat: { effects: [], skills: [], skillSource: 'hot' }
         },
-        simulation: { ownerId: 'legacy_main', revision: 0, leaseUntil: 0 }
+        simulation: { revision: 0 }
     };
 }
 function hotActor(state) {
