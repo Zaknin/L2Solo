@@ -74,7 +74,8 @@ const SurvivalFloor = require('./SurvivalFloor');
 const CombinedErrands = require('./CombinedErrandPolicy');
 const TradeMeetingService = invoke('GameServer/AfkTrade/TradeMeetingService');
 const activationFailureLogAt = new Map();
-// The completion key a far bot already waited on in town, this visit (main only).
+// The completion key a far bot already waited on in town since its last
+// buy or improvement this visit (main only; the visit's end clears it).
 const exchangeWaits = new Map();
 // Returned by a resolveColdState branch method that did not take its branch.
 const COLD_RESOLVE_NEXT = Symbol('cold_resolve_next');
@@ -3219,6 +3220,7 @@ const PopulationService = {
                 // Consumed inputs retire this card. Replan in town before
                 // another purchase or the return to a hunting spot.
                 ColdSimulationCoordinator.economyDecisions.release(updatedState.characterId);
+                exchangeWaits.delete(Number(updatedState.characterId));
                 return { ok: true, state: improved.state, debug: result.debug };
             }
         }
@@ -3270,6 +3272,7 @@ const PopulationService = {
         const hotRow = LifeState.hotRow(purchasedState.characterId);
         if (hotRow) return hotRow;
         if (marketResult.purchased) {
+            exchangeWaits.delete(Number(purchasedState.characterId));
             const batchState = {
                 ...purchasedState,
                 activity: 'shopping',
@@ -3320,16 +3323,15 @@ const PopulationService = {
                 // A paid-for C piece waits for a fresh worker command in town.
                 // Returning to the field here loses the purchase -> break ->
                 // exchange handoff when the purchase retired the previous card.
-                // One wait per key a visit: a worker that does not answer with
-                // the improving card on it has chosen otherwise, and its later
-                // card brings the bot back (acquisitionTravel).
+                // One wait per key until the next buy or improvement: a worker
+                // that does not answer with the improving card on it has chosen
+                // otherwise, and its later card brings the bot back (acquisitionTravel).
                 const crystals = invoke('GameServer/Bot/Economy/BotCrystallization');
                 const id = Number(restockedState.characterId);
                 const exchangeKey = restockedState.activity === 'shopping' && crystals.ready(restockedState)
                     && crystals.completionKey(restockedState);
-                const waited = exchangeWaits.get(id) === exchangeKey;
-                exchangeWaits.delete(id);
-                if (exchangeKey && !waited) {
+                if (!exchangeKey) exchangeWaits.delete(id);
+                else if (exchangeWaits.get(id) !== exchangeKey) {
                     exchangeWaits.set(id, exchangeKey);
                     return LifeState.upsertState({ ...restockedState, timing: { ...restockedState.timing,
                         nextResolveAt: Date.now() + 1000 } }, 'equipment_exchange_continue').then(saved => {
@@ -3338,6 +3340,7 @@ const PopulationService = {
                     });
                 }
                 const returnState = GoalExecutor.finishMarketVisit(restockedState);
+                if (returnState) exchangeWaits.delete(id);
                 return returnState
                     ? LifeState.upsertState(returnState, 'market_visit_complete').then((saved) => saved || returnState)
                     : restockedState;
