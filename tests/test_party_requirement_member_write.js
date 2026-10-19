@@ -22,6 +22,7 @@ const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l2solo-party-requiremen
 const ACCOUNT = 'bot_party_requirement_write';
 const PARTY = 'bgp-requirement-write';
 const DEPARTURE_PARTY = 'bgp-requirement-departure';
+const LEADER_PARTY = 'bgp-requirement-leader-departure';
 
 async function row(id) {
     return (await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [id]]))[0];
@@ -39,7 +40,7 @@ const plan = target => ({ status: 'active', strategy: 'direct_drop', partyNeed: 
         await Database.createAccount(ACCOUNT, 'fixture');
         await Life.init();
         await Parties.init();
-        const member = async (name, partyId, leaderId, stats = {}) => {
+        const member = async (name, partyId, leaderId, stats = {}, fields = {}) => {
             const characterId = Number((await Database.createCharacter(ACCOUNT, { name,
                 race: 0, classId: 0, maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0,
                 locX: 1, locY: 1, locZ: 0 })).insertId);
@@ -48,7 +49,7 @@ const plan = target => ({ status: 'active', strategy: 'direct_drop', partyNeed: 
                 party: { partyId, role: 'member', leaderId: leaderId || characterId },
                 stats: { classId: 0, generatedCold: true, leaderId: leaderId || characterId, ...stats },
                 loc: { locX: 1, locY: 1, locZ: 0 }, vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
-                timing: { nextResolveAt: Date.now() + 86400000 } }, 'party_requirement_write_fixture');
+                timing: { nextResolveAt: Date.now() + 86400000 }, ...fields }, 'party_requirement_write_fixture');
             return characterId;
         };
         const id = await member('PartyMember', PARTY);
@@ -133,6 +134,49 @@ const plan = target => ({ status: 'active', strategy: 'direct_drop', partyNeed: 
             'the party row drops the departed member');
         assert.equal(Population.partyRequirementRefreshDue.has(DEPARTURE_PARTY), false, 'a landed departure clears the re-plan mark');
         console.log('PASS a party departure holds on the member revision it read');
+
+        // A required party of four: its grouped leader and one member no
+        // longer need it, two still do. The leader's departure lands and a
+        // new leader is synced onto the members kept; the other released
+        // member's review moves it first, so its departure is skipped and the
+        // leader sync writes it from the copy after that review.
+        const grouped = await member('LeaderGrouped', LEADER_PARTY, 0, {}, { activity: 'grouped', spotId: 'requirement-spot' });
+        const reviewed = await member('LeaderReviewed', LEADER_PARTY, grouped);
+        const needA = await member('LeaderNeedA', LEADER_PARTY, grouped, { equipmentPlan: plan(9401) });
+        const needB = await member('LeaderNeedB', LEADER_PARTY, grouped, { equipmentPlan: plan(9402) });
+        const leaderParty = { partyId: LEADER_PARTY, status: 'active', leaderId: grouped, memberIds: [grouped, reviewed, needA, needB],
+            spotId: 'requirement-spot', stats: { objective: { priority: 'required', spotId: 'requirement-spot' } } };
+        const groupedBefore = await row(grouped);
+        assert.equal(groupedBefore.activity, 'grouped', 'fixture: the leader is grouped');
+        const reviewedRead = Number(Life.cachedState(reviewed).simulation.revision);
+        const review = Life.serializeClanLevelUp(reviewed, async () => {
+            const [trained] = await Database.execute([`UPDATE bot_life_state SET sp = 999,
+                simulationRevision = simulationRevision + 1 WHERE characterId = ? RETURNING *`, [reviewed], { read: true }]);
+            return Life.acceptLifecycleRow(trained);
+        });
+        Population.partyRequirementRefreshDue.clear();
+        const leaderRefresh = Population.applyWorkerPartyRequirements(leaderParty, refresh);
+        await Promise.all([review, leaderRefresh]);
+        const groupedLeft = await row(grouped);
+        assert.equal(groupedLeft.partyId, null, 'the grouped leader departs');
+        assert.equal(groupedLeft.activity, 'hunting', 'a grouped member departs to the solo resume activity');
+        assert.ok(Number(groupedLeft.nextResolveAt) < Number(groupedBefore.nextResolveAt),
+            'a grouped member departs with its next resolve moved to the solo resume');
+        assert.ok(Number(groupedLeft.activityStartedAt) >= Number(groupedBefore.updatedAt || 0),
+            'a grouped member departs with its activity restarted');
+        assert.equal(groupedLeft.spotId, 'requirement-spot', 'a non-raid departure keeps its spot');
+        assert.equal(Life.cachedState(grouped).activity, 'hunting', 'the cache takes the solo resume');
+        const kept2 = await row(reviewed);
+        assert.equal(kept2.partyId, LEADER_PARTY, 'the beaten departure keeps the reviewed member in the party');
+        assert.equal(Number(kept2.sp), 999, 'the leader sync keeps the reviewed sp');
+        assert.ok(Number(kept2.simulationRevision) > reviewedRead, 'the review moved the reviewed member');
+        const newLeader = Number(Parties.find(LEADER_PARTY)?.leaderId);
+        assert.notEqual(newLeader, grouped, 'the departed leader is replaced');
+        assert.equal(Number(Life.cachedState(reviewed).party?.leaderId), newLeader, 'the kept member follows the new leader');
+        assert.equal(Number(Life.cachedState(reviewed).sp), 999, 'the cache keeps the reviewed sp after the leader sync');
+        assert.equal(Population.partyRequirementRefreshDue.has(LEADER_PARTY), true,
+            'a skipped departure marks the party re-plan due again');
+        console.log('PASS a leader sync after a departure writes the kept members from their newest copy');
     } finally {
         fs.rmSync(directory, { recursive: true, force: true });
     }

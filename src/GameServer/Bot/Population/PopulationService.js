@@ -2469,9 +2469,9 @@ const PopulationService = {
             return [];
         }
         let changed = false, skipped = false;
-        const skip = () => {
+        const skip = (kind) => {
             skipped = true;
-            Config.developerDiagnostics && Diagnostics.count('party_requirement', 'member_write', 'skipped');
+            Config.developerDiagnostics && Diagnostics.count('party_requirement', 'member_write', `skipped_${kind}`);
         };
         for (const { characterId, plan } of resolution.memberPlans || []) {
             const member = LifeState.cachedState(characterId);
@@ -2481,7 +2481,7 @@ const PopulationService = {
             // review runs meanwhile; a write it beat is skipped and the
             // party's re-plan is marked due again below.
             const written = await LifeState.writePartyRequirementPlan(member, plan);
-            if (written === false) skip();
+            if (written === false) skip('plan');
             changed = !!written || changed;
         }
         // ARCH-NOTE: A bounded worker refresh may span resolves; release members only after its complete projection.
@@ -2505,10 +2505,16 @@ const PopulationService = {
         const departed = new Set();
         await departures.reduce((chain, member) => chain.then(async () => {
             const left = await LifeState.leaveParty(member, 'party_objective_complete', { heldOnRevision: true });
+            // Beaten (false) or failed (null): the member stays, re-planned.
             if (left) departed.add(Number(member.characterId));
-            else if (left === false) skip();
+            else skip('departure');
         }), Promise.resolve());
-        const retainedMembers = refreshedMembers.filter((member) => !departed.has(Number(member.characterId)));
+        // The copies read before the departures are stale for a member whose
+        // own review beat its departure: the leader sync below writes the
+        // member whole, so it takes the owner's newest copy.
+        const retainedMembers = refreshedMembers
+            .filter((member) => !departed.has(Number(member.characterId)))
+            .map((member) => LifeState.cachedState(member.characterId) || member);
         const objectiveMember = retainedMembers.find((member) => (
             member.stats?.equipmentPlan?.partyNeed === 'required'
         )) || retainedMembers.find((member) => partyObjectiveForState(member));
