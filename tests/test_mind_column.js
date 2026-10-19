@@ -1,7 +1,8 @@
 // The mind (SavedStats.MIND_KEYS: the worker's decision, its money packet) is
 // saved in its own column. A far commit refused on its revision still keeps
-// the worker's mind; main's saves write the mind of a near bot and never write
-// over a far bot's; the clan goal member repair writes the body only.
+// the worker's mind; main's saves write the mind of a near bot, and of a far
+// bot only when built on the row's revision (an older copy never writes over
+// the worker's); the clan goal member repair writes the body only.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -100,6 +101,13 @@ async function bodyMoney(id) {
         assert.equal(saved.activity, 'trading', 'the main save writes the body');
         assert.deepEqual(JSON.parse(saved.mindJson).money, NEW_MONEY, 'the main save keeps the far row\'s mind');
         assert.deepEqual(Life.cachedState(cold).stats.money, NEW_MONEY, 'main\'s cache takes the far row\'s mind back');
+        // A main save built on the row's revision (a worker packet main
+        // applies for a lifecycle step) writes its mind into the far row.
+        const APPLIED_MONEY = [66000, 0, 14000, 0];
+        const current = Life.cachedState(cold);
+        await Life.upsertState({ ...current, stats: { ...current.stats, money: APPLIED_MONEY } }, 'mind_column_applied');
+        assert.deepEqual(JSON.parse((await row(cold)).mindJson).money, APPLIED_MONEY, 'a save on the row\'s revision writes its mind');
+        assert.deepEqual(Life.cachedState(cold).stats.money, APPLIED_MONEY, 'main\'s cache keeps the applied mind');
 
         // (4) The clan goal member repair writes the body and leaves the mind.
         const member = await create('cold', { money: NEW_MONEY });
@@ -110,7 +118,7 @@ async function bodyMoney(id) {
         const memberAfter = await row(member);
         assert.equal(JSON.parse(memberAfter.statsJson).goalRepairProbe, true, 'the goal write writes the body');
         assert.equal(memberAfter.mindJson, memberBefore.mindJson, 'the goal write leaves the mind');
-        console.log('PASS the mind column: refused far commits keep it, main saves never write a far row\'s');
+        console.log('PASS the mind column: refused far commits keep it, main saves write a far row\'s only on its revision');
     } finally {
         fs.rmSync(directory, { recursive: true, force: true });
     }
