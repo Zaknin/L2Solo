@@ -1,18 +1,11 @@
 const Config = require('./PopulationConfig');
-const { INTERVAL_MS } = require('./ColdCompetitionMonitor');
+const { INTERVAL_MS, hunterSpot } = require('./ColdCompetitionMonitor');
 const PartyTarget = require('./PartyHuntingTarget');
 const { StableOwnerMap } = require('./StableOwnerSet');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
 const metaKey = Symbol('coldCompetitionCandidate');
 const partyOf = state => state?.party?.partyId || state?.partyId || null;
 const unitOf = state => partyOf(state) || `solo:${state?.characterId}`;
-// spot: the spot the bot stands at (spotOf).
-const baseHunter = (state, spotOf) => {
-    if (state?.phase !== 'cold' || !['hunting', 'grouped'].includes(state.activity)
-        || !(state.vitals?.hp > 0) || state.stats?.travel || state.stats?.coldCompetition?.wait) return false;
-    const spot = spotOf(state);
-    return !!spot && state.spotId === spot.id;
-};
 function add(map, key, value) {
     if (!map.has(key)) map.set(key, new Set());
     map.get(key).add(value);
@@ -125,7 +118,7 @@ class ColdCompetitionCandidates {
         const sequence = this.sequence?.(id) ?? old?.sequence ?? ++this.nextSequence;
         this.detach(previousRecord || record, old);
         const state = packet.state;
-        const meta = { id, sequence, hunter: baseHunter(state, this.spotOf), spot: state.spotId,
+        const meta = { id, sequence, hunter: !!hunterSpot(state, this.spotOf), spot: state.spotId,
             party: partyOf(state), ledParty: this.leaderParty(id)?.partyId ?? null, unit: unitOf(state),
             clan: this.memory.clanSocial?.identity({ id, clanId: Number(state.stats?.clanId || 0) }).clanId
                 ?? Number(state.stats?.clanId || 0), targets: [], deadlineKey: {}, deadlineToken: null };

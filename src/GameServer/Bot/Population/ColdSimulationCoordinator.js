@@ -1986,17 +1986,6 @@ class ColdSimulationCoordinator {
             this.tableChannel.flush();
             return;
         }
-        // Prime the recipe cache: a crafter's recipes table row is published
-        // before the commit answer that the worker plans from.
-        for (const result of results) {
-            const state = LifeState.cachedState(result.characterId) || result.nextState;
-            if (state) await this.step('economyPlan', result.characterId, () => this.ensureCraftRecipes(state));
-        }
-        if (this.worker !== worker || this.workerEpoch !== epoch) {
-            this.finishCommitAcknowledgements(results, false);
-            this.tableChannel.flush();
-            return;
-        }
         const acknowledgements = results.flatMap((result) => {
             const inputToken = Protocol.leaseRenewalToken(result.proposal?.token);
             const proposalId = result.proposal?.proposalId;

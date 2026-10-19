@@ -62,12 +62,16 @@ const registeredStates = new Map();
 
 function remove(id, { recipes: dropRecipes = true, publish = true } = {}) {
     registeredStates.delete(Number(id));
+    // A bot with a 'recipes' row: a cold crafter, or one whose recipes are loaded.
+    const recipeRowShown = dropRecipes && (crafters.has(Number(id)) || knownRecipes.has(Number(id)));
     const removedRecipes = owners.get(Number(id)) || [];
     for (const row of publicRecipeRows(id)) { togglePublicDigest(row, -1); publicCandidates.remove(`w:${Number(id)}:${row[1]}`); }
     if (publish) for (const recipeId of removedRecipes) invoke('GameServer/Bot/Population/ColdTableChannel').shared
         .changed('board', { key: `w:${Number(id)}:${recipeId}`, removed: true });
     invoke('GameServer/Bot/Economy/ShotMarketIndex').native().remove(id);
     if (dropRecipes) recipesChanged(id);
+    // Not under publish: the board rows publishRows rewrites do not include it.
+    if (recipeRowShown) TableChannel.changed('recipes', { key: Number(id), removed: true });
     for (const recipeId of owners.get(Number(id)) || []) {
         const records = byRecipe.get(recipeId);
         records?.delete(Number(id));
@@ -271,7 +275,10 @@ const recipeRow = id => ({ characterId: Number(id), ...knowledgeFor(id) });
 // The 'recipes' table: one row per bot whose recipes main has loaded; the cold
 // worker plans a far service crafter from it. A cache drop (recipesChanged)
 // keeps the row until the next load replaces it, so the worker plans on the
-// last known book meanwhile, not on none.
+// last known book meanwhile, not on none. Every learning reaches that load:
+// a cold one sends the bot's snapshot (ColdSimulationCoordinator.ensureCraftRecipes),
+// a hot one its return to cold (acceptColdState); a bot that leaves (remove)
+// takes its row away.
 if (isMainThread) TableChannel.register('recipes', { key: row => row.characterId,
     allRows: () => [...knownRecipes.keys()].map(recipeRow) });
 async function review(state) {

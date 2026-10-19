@@ -236,10 +236,23 @@ try {
         null,
         'a cold raid party already at its virtual raid spot must not repeat the same 25-second travel'
     );
-    // The worker's spot of a bot (SpotService.standingSpot over its catalog),
-    // while the position search would answer the surrounding field.
-    assert.strictEqual(SpotService.standingSpot(raidMembers[0], [currentSpot, raidSpot]).id, raidSpot.id,
-        'the cold resolver must receive the virtual raid profile instead of its surrounding grid sector');
+    // The worker's spot of a bot (SpotService.standingSpot over its catalog):
+    // a declared raid profile, else the spot under its position, else its
+    // declared spot. The position search answers the field around the raid.
+    const fieldSpot = { id: 'raid-field', name: 'Field around the raid' };
+    const standingCatalog = [currentSpot, raidSpot, fieldSpot];
+    const originalFindCurrentSpot = SpotService.findCurrentSpot;
+    SpotService.findCurrentSpot = (loc, spots) => (loc && spots === standingCatalog ? fieldSpot : null);
+    try {
+        assert.strictEqual(SpotService.standingSpot(raidMembers[0], standingCatalog).id, raidSpot.id,
+            'the cold resolver must receive the virtual raid profile instead of its surrounding grid sector');
+        assert.strictEqual(SpotService.standingSpot({ ...raidMembers[0], spotId: currentSpot.id }, standingCatalog).id, fieldSpot.id,
+            'an ordinary declared spot yields to the spot under the bot');
+        assert.strictEqual(SpotService.standingSpot({ ...raidMembers[0], spotId: currentSpot.id, loc: null }, standingCatalog).id,
+            currentSpot.id, 'with no spot under the bot its declared spot stands');
+    } finally {
+        SpotService.findCurrentSpot = originalFindCurrentSpot;
+    }
 
     const retreatAt = Date.now();
     const retreatState = { characterId: 2, phase: 'cold', activity: 'hunting', level: 16,

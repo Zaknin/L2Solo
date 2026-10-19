@@ -8,6 +8,14 @@ const INTERVAL_MS = 30000;
 const PAIR_COOLDOWN_MS = 2 * 60000;
 const BOT_COOLDOWN_MS = 2 * 60000;
 const unitKeyOf = (partyId, id) => partyId || `solo:${id}`;
+// The spot a cold bot competes at: alive, hunting, not travelling or waiting,
+// and standing at its own spot (spotOf); null when it does not compete.
+function hunterSpot(state, spotOf) {
+    if (state?.phase !== 'cold' || !['hunting', 'grouped'].includes(state.activity)
+        || !(state.vitals?.hp > 0) || state.stats?.travel || state.stats?.coldCompetition?.wait) return null;
+    const spot = spotOf(state);
+    return spot && state.spotId === spot.id ? spot : null;
+}
 const TendencyRoll = require('../AI/TendencyRoll');
 const { ColdRevengeMonitor } = require('./ColdRevengeMonitor');
 class ColdCompetitionMonitor {
@@ -71,11 +79,8 @@ class ColdCompetitionMonitor {
         const groups = new Map(), untargeted = new Map();
         let active = 0;
         for (const { state } of entries) {
-            if (state?.phase !== 'cold' || !['hunting', 'grouped'].includes(state.activity)
-                || !(state.vitals?.hp > 0) || state.stats?.travel
-                || state.stats?.coldCompetition?.wait) continue;
-            const spot = this.spotOf(state);
-            if (!spot || state.spotId !== spot.id) continue;
+            const spot = hunterSpot(state, this.spotOf);
+            if (!spot) continue;
             active++;
             const partyId = state.party?.partyId || state.partyId || null;
             if (partyId && !partyTargets.has(partyId)) {
@@ -248,4 +253,4 @@ class ColdCompetitionMonitor {
     }
     snapshot() { return this.report; }
 }
-module.exports = { ColdCompetitionMonitor, INTERVAL_MS };
+module.exports = { ColdCompetitionMonitor, INTERVAL_MS, hunterSpot };
