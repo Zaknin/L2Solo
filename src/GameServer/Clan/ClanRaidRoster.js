@@ -16,7 +16,7 @@ function identity(marker) {
 const same = (left, right) => JSON.stringify(identity(left)) === JSON.stringify(identity(right));
 function inputFingerprint(member) {
     return Demand.memberFingerprint({ characterId: id(member), classId: Number(member.classId ?? member.stats?.classId ?? 0),
-        level: Number(member.level), clanId: 0, phase: 'cold', simulationOwner: 'legacy_main',
+        level: Number(member.level), clanId: 0, phase: 'cold',
         inventory: member.inventory || {}, stats: { coldCombat: member.stats?.coldCombat, hennas: member.stats?.hennas } });
 }
 const markerFor = party => party?.stats?.objective?.fullRoster || null;
@@ -65,10 +65,10 @@ function beforeOffensiveEffect(session, actor, target, dispatchedParty = null) {
     return invoke('GameServer/Bot/Population/HotPartyLifecycle').openMarkedRaidAtImpact(party, session, actor, target, boss, nativeImpact);
 }
 function assessmentMembers(members) {
-    // The native planner accepts main-owned cold states. Execution callers
-    // have already proved their actual hot/leased-party ownership separately.
+    // The native planner accepts cold states. Execution callers have already
+    // proved their actual hot or party state separately.
     return members.map(member => ({ ...member, classId: Number(member.classId ?? member.stats?.classId ?? 0),
-        phase: 'cold', simulationOwner: 'legacy_main', partyId: member.partyId || member.party?.partyId }));
+        phase: 'cold', partyId: member.partyId || member.party?.partyId }));
 }
 function selectMembers(members, objective, options = {}) {
     const marker = objective?.fullRoster;
@@ -102,7 +102,6 @@ function admission(party, members, spot, options = {}) {
             || current[3] !== Number(member.level) || current[4]
             || String(member.partyId || member.party?.partyId || '') !== String(party.partyId)
             || member.phase !== (options.phase || 'cold')
-            || !['legacy_main', 'cold_simulation_owner'].includes(String(member.simulationOwner || member.simulation?.ownerId || 'legacy_main'))
             || !(Number(member.vitals?.hp ?? member.hp) > 0) || member.stats?.travel || member.stats?.tradeMeeting
             || member.stats?.playerPartyTakeover;
     })) return fail('raid_roster_member_changed');

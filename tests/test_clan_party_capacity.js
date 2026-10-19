@@ -21,7 +21,7 @@ const members = [1, 2].map(characterId => ({ characterId, phase: 'cold', activit
         { ...ordinary, stats: { objective: { priority: 'required' } } },
         { ...ordinary, stats: { marketAbsences: { 3: { until: now + 1000 } } } }
     ]) assert.strictEqual(Capacity.elective(protectedParty, now), false);
-    for (const override of [{ phase: 'hot' }, { simulation: { ownerId: 'worker' } },
+    for (const override of [{ phase: 'hot' },
         { stats: { pvpEncounter: {} } }, { stats: { clanPartyObjective: objective } }]) {
         assert.strictEqual(Capacity.safeMembers(ordinary, [{ ...members[0], ...override }, members[1]]), false);
     }

@@ -180,20 +180,6 @@ async function main() {
         }
         assert.strictEqual(goalWrites, 0, 'the same goal is not rewritten for a moved reserve');
 
-        // A member the cold worker owns is not bought for (its next review is).
-        await Database.execute(["UPDATE bot_life_state SET simulationOwner = 'cold_simulation_owner' WHERE characterId = ?", [POOR + 10]]);
-        LifeState.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [POOR + 10]]))[0]);
-        let buys = 0;
-        Market.acquire = async (...args) => { buys += 1; return acquire(...args); };
-        try {
-            await Equipment.resolveClan(await Goals.clanProjectionById(92), null);
-        } finally {
-            Market.acquire = acquire;
-        }
-        assert.strictEqual(buys, 0, 'no purchase is tried for a worker-owned member');
-        const [untouched] = await Database.execute(['SELECT COALESCE(SUM(amount), 0) AS n FROM clan_warehouse_items WHERE clanId = 92 AND selfId = 57']);
-        assert.strictEqual(Number(untouched.n), 3000000, 'no money moves for a worker-owned member');
-
         // The clan funds both blades of a dual sword in one review; the member buys them on one errand.
         const bladeId = Number(dual.target.selfId);
         const blades = async () => Number((await Database.execute(['SELECT COALESCE(SUM(amount), 0) AS n FROM items WHERE characterId = ? AND selfId = ?',

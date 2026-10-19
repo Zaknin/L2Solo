@@ -112,15 +112,8 @@ async function assign(clan, order, goal) {
     const Equipment = invoke('GameServer/Clan/ClanEquipmentService');
     await Equipment.releaseConflictingRosterParties([...new Set([craft.customerId,
         ...Object.values(craft.nativePlan.craftProviders).map(provider => provider.characterId)])], goal);
-    let [member] = await Life.statesByIds([craft.customerId]);
+    const [member] = await Life.statesByIds([craft.customerId]);
     if (!member) return { ok: false, code: 'clan_craft_customer_unavailable' };
-    if (member.simulation?.ownerId === 'cold_simulation_owner') {
-        if (!await Database.materializeClanSupplies(member.characterId, member.simulation.revision,
-            craft.materials.map(material => material.selfId))) return { ok: false, code: 'stale_snapshot' };
-        const handoff = await invoke('GameServer/Bot/Population/ColdSimulationOwner').handoffToMain(member);
-        if (!handoff.ok) return { ok: false, code: 'clan_craft_customer_unavailable' };
-        [member] = await Life.statesByIds([craft.customerId]);
-    }
     const assignmentGoal = { ...goal, goalKey: `player-order:${order.id}:craft`,
         target: { ...goal.target, memberId: craft.customerId }, orderSettings: {
             itemId: order.itemId, amount: order.amount, strategy: order.strategy,

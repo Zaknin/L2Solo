@@ -62,8 +62,7 @@ async function main() {
         assert.deepEqual((await Life.clanOperationCandidates({ classIds: [15], minLevel: 45, maxLevel: 55, cursor })).map(member => member.characterId),
             next.map(member => member.characterId), 'unrelated timestamp changes never move continuation');
         assert.equal((await Life.statesByIds(Array.from({ length: 240 }, (_, i) => base + i))).length, 64);
-        const [hydrated] = await Life.statesByIds([base]);
-        assert.equal(hydrated.simulationOwner, hydrated.simulation.ownerId, 'clan readers see the flat owner on the returned row');
+        await Life.statesByIds([base]);
         assert(!Object.hasOwn(Life.cachedState(base), 'simulationOwner'), 'E272: cached worker snapshot source has no flat owner');
         assert(require('../src/GameServer/Bot/Population/ColdSimulationProtocol').commandCheckpoint(Life.cachedState(base)),
             'E272: cached state stays commandable by the cold worker');

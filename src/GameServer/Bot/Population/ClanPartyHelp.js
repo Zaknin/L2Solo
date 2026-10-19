@@ -32,7 +32,6 @@ function request(characterId, clanId, now = Date.now()) {
 
 function available(state, grouped = false, requestingHelp = false) {
     return state?.phase === 'cold' && !Identity.isStaticService(state)
-        && String(state.simulation?.ownerId || 'legacy_main') === 'legacy_main'
         && ['hunting', 'resting', 'party_wait', ...(grouped ? ['grouped'] : [])].includes(state.activity)
         && Number(state.vitals?.hp || 0) > 0
         && !state.stats?.coldCompetition?.wait && !state.stats?.pvpEncounter && !state.stats?.travel
@@ -66,7 +65,7 @@ async function processOne({ commit, create, release }, now = Date.now()) {
     const ids = new Set((clan?.members || []).map(member => Number(member.id)));
     if (!ids.has(entry.characterId)) { pending.delete(entry.characterId); return null; }
     const rows = await LifeState.statesByIds([entry.characterId, ...[...ids].filter(id => id !== entry.characterId)],
-        { ownerId: 'legacy_main', excludeReserved: true });
+        { excludeReserved: true });
     const requester = rows.find(state => Number(state.characterId) === entry.characterId);
     const duty = require('./ClanPartyDuty').objective(requester)
         || Parties.find(requester?.party?.partyId)?.stats?.objective;

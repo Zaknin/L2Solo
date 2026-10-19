@@ -36,7 +36,7 @@ function recordReason(code) {
 async function stateFor(characterId) {
     const cached = LifeState.cachedState(characterId);
     if (cached) return cached;
-    const states = await LifeState.statesByIds([characterId], { ownerId: 'legacy_main', unassigned: true });
+    const states = await LifeState.statesByIds([characterId], { unassigned: true });
     return states[0] || null;
 }
 
