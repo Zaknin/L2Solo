@@ -1,5 +1,6 @@
 const { DiagnosticMetricMap } = require('../Bot/Population/DiagnosticMetricMap');
 const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
+const SavedStats = require('../Bot/SavedStats');
 const Database = invoke('Database');
 const ClanService = invoke('GameServer/Clan/ClanService');
 const Config = invoke('GameServer/Clan/ClanSimulationConfig');
@@ -44,7 +45,7 @@ async function clanProjection() {
                members.id AS characterId, members.name AS memberName,
                members.classId, members.level AS memberLevel, members.clanId AS memberClanId,
                life.accountName, life.activity, life.phase, life.adena, life.simulationRevision,
-               life.inventorySummary, life.statsJson
+               life.inventorySummary, life.statsJson, life.mindJson
         FROM clan_simulation_clans simulated
         JOIN clans ON clans.id = simulated.clanId
         JOIN characters members ON members.clanId = simulated.clanId
@@ -64,7 +65,7 @@ async function clanProjection() {
                 members: []
             });
         }
-        const stats = parseJson(row.statsJson, {});
+        const stats = SavedStats.merge(row.statsJson, row.mindJson);
         const member = {
             characterId: number(row.characterId),
             id: number(row.characterId),

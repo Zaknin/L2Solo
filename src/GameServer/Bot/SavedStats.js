@@ -22,4 +22,47 @@ function compact(stats = {}) {
     });
     return next;
 }
-module.exports = { compact };
+
+// The mind: what the background thread decided for the bot (its stats packet
+// and published card). It is saved in its own column (bot_life_state.mindJson),
+// so a refused body write never takes the decision with it.
+const MIND_KEYS = Object.freeze(['decisionSeq', 'activityLeaf', 'wishFocus', 'wishSections', 'wishDirty',
+    'dormantWishes', 'money', 'stockTargets', 'wishAdvisory']);
+
+// A whole stats object (or a stats patch) as its two saved halves.
+function split(stats = {}) {
+    const body = compact(stats), mind = {};
+    for (const key of MIND_KEYS) {
+        if (!Object.hasOwn(body, key)) continue;
+        mind[key] = body[key];
+        delete body[key];
+    }
+    return { body, mind };
+}
+
+function parsedObject(json) {
+    if (!json) return {};
+    if (typeof json === 'object') return { ...json };
+    try {
+        const value = JSON.parse(json);
+        return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+// The one stats object of a saved row: the mind over the body. A row without
+// a mind column (a transient row, an older fixture) is its body alone.
+function merge(statsJson, mindJson) {
+    const stats = parsedObject(statsJson);
+    if (!mindJson || mindJson === '{}') return stats;
+    return Object.assign(stats, parsedObject(mindJson));
+}
+
+// The two columns a whole-stats writer saves.
+function statsColumns(stats) {
+    const { body, mind } = split(stats || {});
+    return { statsJson: JSON.stringify(body), mindJson: JSON.stringify(mind) };
+}
+
+module.exports = { compact, MIND_KEYS, split, merge, statsColumns };

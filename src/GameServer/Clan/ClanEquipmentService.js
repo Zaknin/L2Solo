@@ -7,6 +7,7 @@ const Database = invoke('Database');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const ComponentProgress = invoke('GameServer/Bot/AI/EquipmentAcquisitionProgress');
 const ClanCredit = require('./ClanPurchaseCredit');
+const SavedStats = require('../Bot/SavedStats');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const Policy = invoke('GameServer/Clan/ClanEquipmentPolicy');
@@ -366,8 +367,10 @@ async function suspendWaitingAssignments(clan, goal, previousGoal) {
         // The write moves the row's revision: a far proposal built on the
         // superseded goal is refused instead of restoring it. It holds only on
         // the revision read here, so a commit landing meanwhile is not overwritten.
+        // Only the body is written: the repair moves no mind key, and the
+        // row's mind may be newer than main's copy.
         cleared += (await Database.writeClanGoalMember(current.characterId, repaired.activity,
-            JSON.stringify(repaired.stats), number(current.simulation?.revision))).repairedMembers;
+            JSON.stringify(SavedStats.split(repaired.stats).body), number(current.simulation?.revision))).repairedMembers;
     }
     return { ...reformed, cleared };
 }

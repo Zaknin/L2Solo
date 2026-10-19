@@ -126,12 +126,12 @@ async function main() {
         await Runtime.tick();
         const [after] = await Database.execute(['SELECT COALESCE(SUM(amount), 0) AS n FROM clan_contributions WHERE clanId = ? AND targetLevel = 1', [created.clanId]]);
         assert.strictEqual(Number(after.n), before, 'one pass per clan and hour');
-        await Database.execute([`UPDATE bot_life_state SET statsJson=json_set(statsJson,'$.money',json(?)) WHERE characterId=?`,
+        await Database.execute([`UPDATE bot_life_state SET mindJson=json_set(mindJson,'$.money',json(?)) WHERE characterId=?`,
             [JSON.stringify([77000, 2e-5, 15000, 1200000, 4e-5, 20000, 1463]), PAYER]]);
         await Database.execute(['UPDATE items SET amount=amount+1000000 WHERE characterId=? AND selfId=57', [PAYER]]);
         const protectedDues = await settle(PAYER, { timestamp: Date.now() + 1 });
         assert.strictEqual(protectedDues.amount, 0, 'dues cannot spend money reserved toward an unfunded own wish');
-        await Database.execute([`UPDATE bot_life_state SET statsJson=json_set(statsJson,'$.money',json(?)) WHERE characterId=?`,
+        await Database.execute([`UPDATE bot_life_state SET mindJson=json_set(mindJson,'$.money',json(?)) WHERE characterId=?`,
             [JSON.stringify([77000, 1.3e-5, 15000, 0, 4e-5, 20000, 1463]), PAYER]]);
         await Database.execute(['UPDATE items SET amount=amount+1000000 WHERE characterId=? AND selfId=57', [PAYER]]);
         assert((await settle(PAYER, { timestamp: Date.now() + 2 })).amount > 0, 'after the gap is paid ordinary earned dues resume');

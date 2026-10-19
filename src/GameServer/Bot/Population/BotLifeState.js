@@ -18,11 +18,13 @@ const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanne
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
+const BotEnemyMemory = invoke('GameServer/Bot/AI/BotEnemyMemory');
 const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
 const { WorkerCommandAdmissionRefusal, checkWorkerCommandAdmission } = require('./WorkerCommandAdmission');
 const NativeWriteCheckpoint = require('./NativeWriteCheckpoint');
 const Uptime = require('./Uptime');
 const EconomyCommit = require('../Economy/EconomyCommit');
+const SavedStats = require('../SavedStats');
 
 const TABLE = 'bot_life_state';
 const GearSkillHints = invoke('GameServer/Bot/AI/GearSkillHints');
@@ -124,7 +126,6 @@ function hasStaleRateModelPlan(state) {
 function safeJson(value) {
     return JSON.stringify(value || {});
 }
-function statsJson(value) { return safeJson(require('../SavedStats').compact(value)); }
 
 function parseJson(raw, fallback = {}) {
     if (!raw) return fallback;
@@ -550,7 +551,7 @@ function compactResolveDebug(debug = {}) {
 }
 
 function normalize(row) {
-    const stats = SpotRiskPolicy.marksInSteps(parseJson(row.statsJson, {}), Date.now());
+    const stats = SpotRiskPolicy.marksInSteps(SavedStats.merge(row.statsJson, row.mindJson), Date.now());
     delete stats.marketTrades;
     delete stats.priceBeliefs;
     // The retired combat profile hold record (no reader).
@@ -666,7 +667,7 @@ function recordFromSession(session, phase, reason = '') {
         coldPvp: { ...(cache.get(characterId)?.stats?.coldPvp || {}),
             ...invoke('GameServer/Social/CombatHelpMemory').threatSnapshot(actor, timestamp),
             flagUntil: actor.fetchPvpFlag?.() === 1 ? Number(session.pvpFlagUntil || 0) : 0 },
-        pvpEnemies: invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session),
+        pvpEnemies: BotEnemyMemory.snapshot(session),
         pvpIncidents: invoke('GameServer/Social/PvpResponsibility').snapshot(actor, timestamp),
         revengeUntil: Math.max(Number(session.nextRevengeAt || 0), Number(cache.get(characterId)?.stats?.revengeUntil || 0)),
         clanGearExchangeRevision: Number(cache.get(characterId)?.stats?.clanGearExchangeRevision || 0),
@@ -741,7 +742,7 @@ function recordFromSession(session, phase, reason = '') {
         deathCount: 0,
         partyId: null,
         inventorySummary: safeJson(inventory),
-        statsJson: statsJson(stats),
+        ...SavedStats.statsColumns(stats),
         updatedAt: timestamp
     };
 }
@@ -784,7 +785,7 @@ function rowFromState(state) {
         deathCount: persistedState.stats?.deaths || 0,
         partyId: persistedState.party?.partyId || null,
         inventorySummary: safeJson(persistedState.inventory || {}),
-        statsJson: statsJson(persistedState.stats || {}),
+        ...SavedStats.statsColumns(persistedState.stats),
         // Legacy lifecycle writes are fenced in SQLite by simulationOwner, but
         // `save()` intentionally does not rewrite the ownership columns. Keep
         // the authoritative ownership snapshot on the transient row as well,
@@ -855,8 +856,8 @@ function save(row, options = {}) {
             spotId, activity, phase, activityStartedAt, nextResolveAt,
             lastResolvedAt, lastHotAt, locX, locY, locZ, hp, maxHp, mp, maxMp,
             targetLevelBand, deathCount, partyId, inventorySummary, statsJson, updatedAt,
-            nameGeneratorVersion, appearanceVersion
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            nameGeneratorVersion, appearanceVersion, mindJson
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(characterId) DO UPDATE SET
             accountName = excluded.accountName,
             characterName = excluded.characterName,
@@ -895,6 +896,11 @@ function save(row, options = {}) {
                     (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 1),
                     (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 2),
                     (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 3))),
+            -- The mind rides under the same guard as the body: a near bot's
+            -- mind on main is the worker's copy, the next save carries the
+            -- same copy, and a refused save is a stale actor snapshot, so a
+            -- second unguarded statement would buy nothing.
+            mindJson = excluded.mindJson,
             updatedAt = excluded.updatedAt
         WHERE ${TABLE}.simulationOwner = 'legacy_main'
           AND COALESCE(json_extract(${TABLE}.statsJson, '$.clanInventoryRevision'), 0)
@@ -934,7 +940,8 @@ function save(row, options = {}) {
             row.statsJson,
             row.updatedAt,
             Number(row.nameGeneratorVersion || 0),
-            Number(row.appearanceVersion || 0)
+            Number(row.appearanceVersion || 0),
+            row.mindJson
         ]
     ];
     NativeWriteCheckpoint.bindRow(beforeWrite?.value, statement, row.characterId);
@@ -1200,7 +1207,7 @@ function recoverDissolvedPartyMembers() {
 
 function mergeSessionIntoLifeState(session, state, phase, reason = '', options = {}) {
     const observed = recordFromSession(session, phase, reason);
-    const observedStats = parseJson(observed.statsJson, {});
+    const observedStats = SavedStats.merge(observed.statsJson, observed.mindJson);
     const observedInventory = parseJson(observed.inventorySummary, {});
     const timestamp = now();
     const physicalLoc = options.physicalLocation
@@ -1900,7 +1907,8 @@ const BotLifeState = {
             row.activity = 'crafting';
             row.currentRegion = craftState.currentRegion || row.currentRegion;
             row.spotId = craftState.spotId || row.spotId;
-            row.statsJson = safeJson({ ...(craftState.stats || {}), pvpEnemies: invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session), lastReason: reason });
+            Object.assign(row, SavedStats.statsColumns({ ...(craftState.stats || {}),
+                pvpEnemies: BotEnemyMemory.snapshot(session), lastReason: reason }));
         }
         const characterId = row.characterId;
         const previous = pendingWrites.get(characterId) || Promise.resolve();
@@ -1968,7 +1976,7 @@ const BotLifeState = {
                     activityStartedAt: now(),
                     nextResolveAt: null
                 },
-                stats: { ...(craftState.stats || {}), ...membershipStats, pvpEnemies: invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session), lastReason: reason },
+                stats: { ...(craftState.stats || {}), ...membershipStats, pvpEnemies: BotEnemyMemory.snapshot(session), lastReason: reason },
                 inventory: parseJson(row.inventorySummary, {})
             };
             return this.upsertState(nextState, reason, { releaseHot: true });
@@ -3856,7 +3864,7 @@ const BotLifeState = {
         if (!initialized || !cache.has(id)) return Promise.resolve(false);
         const previous = pendingWrites.get(id) || Promise.resolve();
         const next = previous.catch(() => {}).then(async () => {
-            const enemies = invoke('GameServer/Bot/AI/BotEnemyMemory').snapshot(session);
+            const enemies = BotEnemyMemory.snapshot(session);
             const incidents = invoke('GameServer/Social/PvpResponsibility').snapshot(session.actor);
             const people = session.peopleKnowledge;
             const current = cache.get(id);

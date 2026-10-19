@@ -161,7 +161,7 @@ async function main() {
 
         // An unchanged goal is not written again when the saved operating reserve moves.
         await Database.execute(['UPDATE characters SET level = 44 WHERE id = ?', [POOR + 10]]);
-        await Database.execute(["UPDATE bot_life_state SET level = 44, statsJson = json_set(statsJson, '$.money[2]', 16000) WHERE characterId = ?", [POOR + 10]]);
+        await Database.execute(["UPDATE bot_life_state SET level = 44, mindJson = json_set(mindJson, '$.money[2]', 16000) WHERE characterId = ?", [POOR + 10]]);
         LifeState.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [POOR + 10]]))[0]);
         const reserveBefore = Number((await LifeState.findByCharacterId(POOR + 10)).stats.equipmentPlan.market.reserve);
         const upsertState = LifeState.upsertState;

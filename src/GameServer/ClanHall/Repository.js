@@ -614,9 +614,10 @@ module.exports = function ({
         settleClanDues({ clanId, characterId, rate = 0, investFraction = 0, timestamp = Date.now() }) {
             return withCharacterFlush(Number(characterId), () => {
                 // ARCH-NOTE: Dues also spend a bot's wallet; read its fixed money packet before the transaction instead of stripping it.
+                // The packet is a mind key (SavedStats.MIND_KEYS): its own column.
                 const member = one(`SELECT c.level, c.classId,
                     COALESCE((SELECT SUM(amount) FROM items WHERE characterId=c.id AND selfId=57),0) AS adena,
-                    json_extract(l.statsJson,'$.money') AS money FROM characters c
+                    json_extract(l.mindJson,'$.money') AS money FROM characters c
                     LEFT JOIN bot_life_state l ON l.characterId=c.id WHERE c.id=?`, [Number(characterId)]);
                 const personal = { level: n(member?.level), adena: n(member?.adena), stats: { classId: n(member?.classId),
                     money: member?.money ? json(member.money) : undefined } };
