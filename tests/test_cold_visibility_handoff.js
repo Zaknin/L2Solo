@@ -26,7 +26,7 @@ function playerAt(locX, locY, locZ) {
         phase: 'cold',
         loc: { locX: 1200, locY: 2200, locZ: -4976 },
         stats: {},
-        simulation: { ownerId: 'cold_worker', revision: 1, leaseId: 'visible' }
+        simulation: { revision: 1 }
     };
     assert.strictEqual(coordinator.visibleToRealPlayer(visible), true,
         'a cold actor on the player-visible floor must be protected from background resolution');

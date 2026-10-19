@@ -13,7 +13,7 @@ function bot(characterId, { priority, spotId = 'spot_a', persona = social, level
         characterId, name: `Bot${characterId}`, level, phase: 'cold', activity: 'hunting', spotId, persona,
         party: { partyId: null, role: 'dps', leaderId: null },
         stats: { role: 'dps', partyRequest: { status: 'open', priority, requestedAt, spotId, npcId: 20001 } },
-        timing: { activityStartedAt: requestedAt }, simulation: { ownerId: 'legacy_main', revision: 1 }, updatedAt: 5000
+        timing: { activityStartedAt: requestedAt }, simulation: { revision: 1 }, updatedAt: 5000
     };
 }
 

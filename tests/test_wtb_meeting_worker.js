@@ -57,7 +57,7 @@ invoke('GameServer/Bot/Economy/PurchaseFunding').spendable = () => 1000000;
             phase: 'cold', activity: 'shopping', currentRegion: 'Giran', loc: point, inventory: {}, adena: 1000000,
             vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 }, stats: { classId: 0 },
             timing: { lastResolvedAt: now, nextResolveAt: now + 600000 },
-            simulation: { ownerId: 'legacy_main', revision: 0, leaseId: null, leaseUntil: 0 } };
+            simulation: { revision: 0 } };
         send('snapshot_page', { rows: [{ state }], done: true, ack: true });
         await until(message => message.type === 'ready' && message.payload.phase === 'state_loaded');
         const request = (token, price) => ({ token, actorA: 42, actorB: 43, seqA: 1, seqB: 1, town: 'Giran', point,

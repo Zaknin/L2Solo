@@ -9,11 +9,11 @@ const { ColdSimulationCoordinator } = invoke('GameServer/Bot/Population/ColdSimu
 const clone = value => JSON.parse(JSON.stringify(value));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const row = id => ({ characterId: id, phase: 'cold', activity: 'shopping', updatedAt: 100,
-    simulation: { ownerId: 'legacy_main', revision: 0, leaseId: null, leaseUntil: 0 },
+    simulation: { revision: 0 },
     timing: { activityStartedAt: 80, nextResolveAt: 100, lastResolvedAt: 50, lastHotAt: 0 } });
 // Construct the expected wire input independently of the proposed new helper,
 // so actual current handler positives run before baseline contract failures.
-const checkpoint = state => { const cp = Protocol.safetyCheckpoint(state); delete cp.simulationLeaseUntil; return cp; };
+const checkpoint = state => Protocol.safetyCheckpoint(state);
 const command = (state, kind = 'lifecycle') => ({ characterId: state.characterId, kind,
     commandId: `command:${state.characterId}:1`, commandCheckpoint: checkpoint(state), state: clone(state),
     precomputedResult: { patch: {}, events: [], materialize: {}, nextResolveAt: 1000 },
@@ -84,14 +84,6 @@ async function run() {
         assert.equal(result.ok, false); assert.equal(result.reason, 'stale_command');
         assert.deepEqual(result.state, currentRows.get(1)); assert.equal(result.commandId, input.commandId);
         assert.deepEqual(result.commandCheckpoint, input.commandCheckpoint);
-    });
-    await check('deadline-only native renewal retains original command identity', async () => {
-        const h = fixture(), input = command(currentRows.get(1));
-        currentRows.set(1, { ...currentRows.get(1), simulation: { ...currentRows.get(1).simulation, leaseUntil: 100000 } });
-        await h.submit([input]); await h.coordinator.commandTail;
-        assert.equal(h.calls.length, 1);
-        const result = acknowledgements(h)[0].message.payload.results[0];
-        assert.equal(result.commandId, input.commandId); assert.deepEqual(result.commandCheckpoint, input.commandCheckpoint);
     });
     await check('current command error preserves retry and original identity', async () => {
         const h = fixture({ error: Error('current_operation_error') }), input = command(currentRows.get(1));

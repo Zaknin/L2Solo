@@ -158,7 +158,6 @@ function settleSnapshot() {
     assert.strictEqual(raceDetached.party.partyId, null);
     assert.strictEqual(raceDetached.activity, 'traveling');
     assert.strictEqual(raceDetached.stats.travel.reason, 'market_sale_inventory');
-    assert.strictEqual(raceDetached.simulation.ownerId, 'legacy_main');
     assert(Number(raceDetached.simulation.revision) > stepRevision,
         'the atomic main transition must advance the revision past the step base');
     const [staleCommit] = await Owner.commitBatch([{

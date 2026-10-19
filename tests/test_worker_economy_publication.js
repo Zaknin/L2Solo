@@ -57,7 +57,7 @@ async function runWorker(state, predicate) {
         loc: { locX: 83000, locY: 148000, locZ: -3400 }, currentRegion: 'Giran',
         inventory: {}, stats: { classId: 0, clanId: 9, generatedCold: true },
         timing: { nextResolveAt: now + 60000, lastResolvedAt: now - 60000 }, updatedAt: now,
-        simulation: { ownerId: 'legacy_main', revision: 1, leaseId: null, leaseUntil: 0 },
+        simulation: { revision: 1 },
         vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 } };
     const hot = await runWorker(state, message => message.type === 'ready' && message.payload.phase === 'economy_decided');
     const decision = Decisions.compact(hot.payload.economyDecision);

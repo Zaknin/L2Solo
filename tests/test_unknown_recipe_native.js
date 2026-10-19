@@ -21,7 +21,7 @@ async function seed(id, money) {
         exp: 0, sp: 0, adena: money, phase: 'cold', activity: 'shopping', homeRegion: 'Giran', currentRegion: 'Giran',
         loc: { locX: 83396, locY: 147904, locZ: -3400 }, vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 },
         stats: { classId: 57, money: [1000, .001, 0, 0] }, inventory: { 57: { selfId: 57, amount: money } },
-        simulation: { ownerId: 'legacy_main', revision: 0 }, timing: {}, updatedAt: Date.now() }, 'recipe_fixture');
+        simulation: { revision: 0 }, timing: {}, updatedAt: Date.now() }, 'recipe_fixture');
 }
 (async () => {
     Database.init(); invoke('GameServer/World/World').user = { sessions: [], revision: 0 };

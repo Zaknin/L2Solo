@@ -28,7 +28,7 @@ const members = [901, 902].map(characterId => ({ characterId, name: `GoalPopulat
     stats: { classId: 0, role: 'dps', partyRequest: { status: 'open', priority: 'required',
         requestedAt: timestamp - 1000, spotId: 'goal-spot', npcId: 123 } },
     vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 }, timing: {},
-    simulation: { ownerId: 'legacy_main', revision: 2 } }));
+    simulation: { revision: 2 } }));
 let writes = 0, announcements = 0, queries = 0;
 const spot = { id: 'goal-spot', name: 'Goal spot', center: { locX: 1, locY: 1, locZ: 1 } };
 

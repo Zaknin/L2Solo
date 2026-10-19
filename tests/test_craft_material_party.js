@@ -17,7 +17,7 @@ const plan = { status: 'active', strategy: 'craft', recipeId: 424, target: { sel
 const state = { characterId: 990201, level: 65, classId: 8, phase: 'cold', activity: 'hunting', spotId: 'solo',
     party: { partyId: null, role: 'dps' }, clanId: 1, adena: 1000000,
     stats: { classId: 8, role: 'dps', equipmentPlan: plan, wishFocus: ['power:5726:12', 0, 1] },
-    inventory: {}, simulation: { ownerId: 'legacy_main', revision: 1 }, updatedAt: timestamp };
+    inventory: {}, simulation: { revision: 1 }, updatedAt: timestamp };
 const spots = Array.from({ length: 40 }, (_, i) => ({ id: `camp:${i}`, raidBoss: false }));
 const entries = spots.map((spot, i) => ({ spot, kind: 'drop', npcLevel: 60, reward: { selfId: 626 },
     sourceCount: 40 - i, totalCount: 40 }));

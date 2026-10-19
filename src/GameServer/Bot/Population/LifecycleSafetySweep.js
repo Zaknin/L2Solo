@@ -66,9 +66,7 @@ class LifecycleSafetySweep {
 
     eligible(row) {
         const checkpoint = Protocol.safetyCheckpoint(row);
-        if (!checkpoint || !['cold', 'hot'].includes(checkpoint.phase)
-            || checkpoint.simulationLeaseId || checkpoint.simulationLeaseUntil > this.now()
-            || !['legacy_main', 'cold_worker'].includes(checkpoint.simulationOwner)) return null;
+        if (!checkpoint || !['cold', 'hot'].includes(checkpoint.phase)) return null;
         const state = this.cachedState(checkpoint.characterId);
         if (!state || !Protocol.sameSafetyCheckpoint(checkpoint, Protocol.safetyCheckpoint(state))) return null;
         if (checkpoint.phase === 'cold' && this.cold.excluded(checkpoint.characterId)) return null;

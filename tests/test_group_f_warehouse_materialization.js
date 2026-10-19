@@ -57,11 +57,10 @@ async function duringMaterialization(characterId, hydrate) {
         await waiting;
         const before = await counts(characterId);
         assert.deepEqual([before.saved, before.bag, before.warehouse], [30, 10, 20]);
-        assert.equal(before.life.simulationOwner, 'legacy_main');
         assert.equal(before.life.phase, 'cold');
         assert.equal(before.life.activity, 'hunting');
         const selected = hydrate
-            ? (await Life.statesByIds([characterId], { ownerId: 'legacy_main', unassigned: true }))[0]
+            ? (await Life.statesByIds([characterId], { unassigned: true }))[0]
             : Life.cachedState(characterId);
         assert.equal(selected.inventory[STEM].amount, hydrate ? 30 : 10);
         // This fixture is already at Giran's service. Both attempts enter

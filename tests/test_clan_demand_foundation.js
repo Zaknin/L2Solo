@@ -87,7 +87,7 @@ async function main() {
         assert.equal((await projection(identity)).joinAvailability, 1);
         await query("UPDATE characters SET username='bot_pop_demand' WHERE id=?", [identity]);
         await query("UPDATE bot_life_state SET accountName='bot_pop_demand' WHERE characterId=?", [identity]);
-        const clauses = ["phase='hot'", "simulationOwner='cold_worker'", "partyId='foreign-party'", "activity='crafting'", 'spotId=NULL',
+        const clauses = ["phase='hot'", "statsJson=json_set(statsJson,'$.craftShop',json('{}'))", "partyId='foreign-party'", "activity='crafting'", 'spotId=NULL',
             "statsJson=json_set(statsJson,'$.craftStationId',1)", "statsJson=json_set(statsJson,'$.playerPartyTakeover',1)"];
         for (let i = 0; i < clauses.length; i++) await query(`UPDATE bot_life_state SET ${clauses[i]} WHERE characterId=?`, [base + 150 + i]);
         await query("INSERT INTO accounts(username,password) VALUES('bot_craft_demand','fixture')");
@@ -225,7 +225,7 @@ async function main() {
 function pureCapabilities() {
     const readiness = Gear.combatReadiness;
     Gear.combatReadiness = () => ({ hasWeapon: true, armorCount: 5, armorRank: 2, weaponRank: 2, effectiveLevel: 54 });
-    const member = (id, classId, skills = []) => ({ characterId: id, classId, level: 50, phase: 'cold', simulationOwner: 'legacy_main',
+    const member = (id, classId, skills = []) => ({ characterId: id, classId, level: 50, phase: 'cold',
         stats: { classId, coldCombat: { skillSource: 'database', skills: Combat.skillSnapshotsFromRecords(skills) } } });
     const heal = [{ selfId: 1015, level: 1 }], buff = [{ selfId: 1068, level: 1 }];
     try {

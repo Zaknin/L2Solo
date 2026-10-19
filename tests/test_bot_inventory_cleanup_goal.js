@@ -218,20 +218,10 @@ assert.strictEqual(travel.activity, 'traveling');
 assert.strictEqual(travel.stats.travel.reason, 'market_sale_inventory');
 assert.strictEqual(travel.stats.travel.arrivalActivity, 'shopping');
 
-const proposalTravel = PopulationService.prepareInventoryCleanupProposal(state, now, {
-    ownerId: 'test-owner',
-    revision: 1,
-    leaseId: 'test-lease',
-    leaseUntil: now + 30000
-});
+const proposalTravel = PopulationService.prepareInventoryCleanupProposal(state, now, { revision: 1 });
 assert(proposalTravel, 'worker proposal commit must also start a market trip');
 assert.strictEqual(proposalTravel.activity, 'traveling');
-assert.deepStrictEqual(proposalTravel.simulation, {
-    ownerId: 'test-owner',
-    revision: 1,
-    leaseId: 'test-lease',
-    leaseUntil: now + 30000
-});
+assert.deepStrictEqual(proposalTravel.simulation, { revision: 1 });
 assert.strictEqual(proposalTravel.stats.forcedMarketCleanup.cleanupReason, 'inventory_capacity',
     'worker cleanup travel must carry durable intent through arrival');
 assert.deepStrictEqual(proposalTravel.cleanup, {

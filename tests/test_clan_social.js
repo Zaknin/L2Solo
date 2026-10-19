@@ -110,9 +110,9 @@ async function run() {
     await DB.close(); DB.init();
     assert.deepStrictEqual(await load(10), snapshot, 'warning/probation survive a real SQLite reopen');
     assert(!(await DB.expelDisciplinedClanMember(10, 2, snapshot.revision - 1)).ok, 'stale discipline cannot expel');
-    await DB.execute(["UPDATE bot_life_state SET simulationLeaseId='busy' WHERE characterId=2", []]);
+    await DB.execute([`UPDATE bot_life_state SET statsJson=json_set(COALESCE(statsJson,'{}'),'$.pvpEncounter',json('{"key":"busy"}')) WHERE characterId=2`, []]);
     assert.strictEqual((await DB.expelDisciplinedClanMember(10, 2, snapshot.revision)).reason, 'member_busy');
-    await DB.execute(['UPDATE bot_life_state SET simulationLeaseId=NULL WHERE characterId=2', []]);
+    await DB.execute([`UPDATE bot_life_state SET statsJson=json_remove(statsJson,'$.pvpEncounter') WHERE characterId=2`, []]);
     const expelled = await DB.expelDisciplinedClanMember(10, 2, snapshot.revision);
     assert(expelled.ok, JSON.stringify(expelled));
     assert.strictEqual((await DB.execute(['SELECT clanId FROM characters WHERE id=2', []]))[0].clanId, 0);

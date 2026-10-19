@@ -27,7 +27,7 @@ function state(characterId = 1, overrides = {}) {
         level: 20,
         timing: { lastResolvedAt: 1000, nextResolveAt: 2000 },
         stats: {},
-        simulation: { ownerId: 'legacy_main', revision: 3, leaseId: null, leaseUntil: 0 },
+        simulation: { revision: 3 },
         updatedAt: 1000,
         ...overrides
     };
@@ -211,7 +211,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         state: state(1, {
             activity: 'resting',
             timing: { lastResolvedAt: now, nextResolveAt: now + 30000 },
-            simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
+            simulation: { revision: 5 }
         })
     }] });
     assert.strictEqual(kernel.snapshot().inFlight, 0);
@@ -506,7 +506,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     assert.strictEqual(sentKernel.inFlight.size, 1, 'a sent step keeps its slot until its commit ack');
     assert.strictEqual(sentKernel.snapshot().stallRecoveries, 0);
     commitAck(sentKernel, { results: [{ ok: true, characterId: 8,
-        state: state(8, { simulation: { ownerId: 'legacy_main', revision: 4, leaseId: null, leaseUntil: 0 } }) }] });
+        state: state(8, { simulation: { revision: 4 } }) }] });
     assert.strictEqual(sentKernel.snapshot().lateAcks, 0, 'the ack of a slow commit is not late');
     assert.strictEqual(sentKernel.inFlight.size, 0);
     assert.strictEqual(sentKernel.states.get(8).state.simulation.revision, 4, 'the slow commit\'s state lands');
@@ -562,7 +562,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     ackRaceKernel.flush(null, true);
     ackRaceKernel.upsert(standOn(ackRaceKernel, { state: state(8, {
         timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow },
-        simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
+        simulation: { revision: 5 }
     }) }, { id: 'newer-catalog' }));
     assert.strictEqual(ackRaceKernel.scheduleTokens.has(8), false,
         'a newer catalog snapshot must not schedule a second writer while the prior revision is in flight');
@@ -571,7 +571,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         characterId: 8,
         state: state(8, {
             timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow },
-            simulation: { ownerId: 'legacy_main', revision: 4, leaseId: null, leaseUntil: 0 }
+            simulation: { revision: 4 }
         })
     }] });
     assert.strictEqual(ackRaceKernel.scheduleTokens.has(8), true,
@@ -605,7 +605,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     partyKernel.upsert({
         state: {
             ...members[1],
-            simulation: { ownerId: 'legacy_main', revision: 9, leaseId: null, leaseUntil: 0 }
+            simulation: { revision: 9 }
         }
     });
     partyKernel.tick();
@@ -1002,7 +1002,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     const oversizedState = state(91, {
         inventory: oversizedInventory,
         stats: { equipmentPlan: { status: 'active' } },
-        simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
+        simulation: { revision: 5 }
     });
     const oversizedEmitted = [];
     const oversizedKernel = recordingKernel({
@@ -1347,7 +1347,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         commitAck(numbersKernel, { results: [ack] });
         const held = numbersKernel.states.get(62).state;
         assert.deepStrictEqual(held, Protocol.committedState(next, ack));
-        assert.deepStrictEqual(held.simulation, { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 });
+        assert.deepStrictEqual(held.simulation, { revision: 5 });
         assert.deepStrictEqual([held.activity, held.timing, held.updatedAt, held.bagRevision, held.skillsRevision, held.hennaRevision],
             ['resting', next.timing, at + 1, 3, 2, 1], 'the proposal and the ack numbers make the held state');
         assert.strictEqual(numbersKernel.inFlight.has(62), false, 'the proposed state goes with the in-flight record');
@@ -1457,7 +1457,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     assert(emptyKernel.busy(250) && emptyKernel.busy(251), 'every member stays in flight until the commit ACK');
     emptyKernel.partyPut(emptyParty.partyId, { ...emptyParty, nextResolveAt: emptyNow + 60000, revision: 5 });
     commitAck(emptyKernel, { results: emptyCommits.map(proposal => ({ ok: true, characterId: proposal.characterId,
-        state: { ...proposal.nextState, simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 } } })) });
+        state: { ...proposal.nextState, simulation: { revision: 5 } } })) });
     assert.strictEqual(emptyKernel.busy(250), false);
     assert.strictEqual(emptyKernel.scheduleTokens.get(250).dueAt, emptyNow + 60000, 'the leader is due at the row\'s next due');
     emptyNow += 1000;
@@ -1468,7 +1468,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     const refusedCommits = await emptyRound();
     commitAck(emptyKernel, { results: refusedCommits.map(proposal => ({ ok: false, characterId: proposal.characterId,
         reason: 'party_group_aborted', detail: 'party_revision_stale',
-        state: { ...proposal.baseState, simulation: { ownerId: 'legacy_main', revision: 6, leaseId: null, leaseUntil: 0 } } })) });
+        state: { ...proposal.baseState, simulation: { revision: 6 } } })) });
     assert.strictEqual(emptyKernel.busy(250), false);
     assert(emptyKernel.scheduleTokens.get(250).dueAt >= emptyNow + 1000,
         'a refused commit with no new row waits a second, not the row\'s past due');

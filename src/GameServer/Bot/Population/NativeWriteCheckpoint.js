@@ -1,11 +1,9 @@
 const Protocol = require('./ColdSimulationProtocol');
 const { WorkerCommandAdmissionRefusal, checkWorkerCommandAdmission } = require('./WorkerCommandAdmission');
 
-const columns = Object.freeze(['characterId', 'phase', 'activity', 'simulationOwner', 'simulationRevision',
-    'simulationLeaseId', 'activityStartedAt', 'nextResolveAt', 'lastResolvedAt', 'lastHotAt', 'updatedAt']);
+const columns = Protocol.CHECKPOINT_FIELDS;
 const timing = ['activityStartedAt', 'nextResolveAt', 'lastResolvedAt', 'lastHotAt'];
 // The bound lifecycle statement is the native 32-column BotLifeState.save ROW (and its revision).
-// Ownership fields remain unchanged in its UPDATE and come from the private proof.
 const rowParameters = Object.freeze({ characterId: 0, activity: 10, phase: 11,
     activityStartedAt: 12, nextResolveAt: 13, lastResolvedAt: 14, lastHotAt: 15, updatedAt: 28 });
 const sessions = new WeakMap();
@@ -69,7 +67,7 @@ function checkRow(proof, statement) {
     const proposed = { ...captured.expected };
     for (const [key, index] of Object.entries(rowParameters)) proposed[key] = statement[1][index];
     const next = nativePoint(proposed);
-    if (!next || next.phase !== 'cold' || next.simulationOwner !== 'legacy_main') refuse();
+    if (!next || next.phase !== 'cold') refuse();
 }
 
 function checkTarget(proof, characterId) {
@@ -79,7 +77,7 @@ function checkTarget(proof, characterId) {
 
 function check(proof, row) {
     const captured = captures.get(proof), current = nativePoint(row);
-    if (!captured || !current || current.phase !== 'cold' || current.simulationOwner !== 'legacy_main'
+    if (!captured || !current || current.phase !== 'cold'
         || !Protocol.sameCommandCheckpoint(captured.expected, current)) refuseDrift(captured, current);
 }
 
@@ -98,7 +96,7 @@ function refuseDrift(captured, current) {
 function advance(proof, row) {
     const captured = captures.get(proof), next = nativePoint(row);
     if (!captured || !next || next.characterId !== captured.characterId
-        || next.phase !== 'cold' || next.simulationOwner !== 'legacy_main'
+        || next.phase !== 'cold'
         || !Protocol.sameCommandCheckpoint(captured.expected, captured.session.expected)) refuse();
     captured.session.expected = Object.freeze({ ...next });
 }

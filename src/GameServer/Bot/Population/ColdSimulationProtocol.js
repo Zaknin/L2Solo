@@ -328,9 +328,8 @@ function validateEnvelope(message, direction, options = {}) {
     return { ok: true, bytes };
 }
 
-const CHECKPOINT_FIELDS = ['characterId', 'phase', 'activity', 'simulationOwner', 'simulationRevision',
-    'simulationLeaseId', 'simulationLeaseUntil', 'activityStartedAt', 'nextResolveAt',
-    'lastResolvedAt', 'lastHotAt', 'updatedAt'];
+const CHECKPOINT_FIELDS = Object.freeze(['characterId', 'phase', 'activity', 'simulationRevision', 'activityStartedAt',
+    'nextResolveAt', 'lastResolvedAt', 'lastHotAt', 'updatedAt']);
 
 function safetyCheckpoint(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -343,10 +342,7 @@ function safetyCheckpoint(value) {
     };
     const checkpoint = {
         characterId: number(value.characterId), phase: value.phase, activity: value.activity,
-        simulationOwner: (nested ? value.simulation?.ownerId : value.simulationOwner) ?? 'legacy_main',
         simulationRevision: number(nested ? value.simulation?.revision : value.simulationRevision),
-        simulationLeaseId: (nested ? value.simulation?.leaseId : value.simulationLeaseId) ?? null,
-        simulationLeaseUntil: number(nested ? value.simulation?.leaseUntil : value.simulationLeaseUntil),
         activityStartedAt: number(nested ? value.timing?.activityStartedAt : value.activityStartedAt),
         nextResolveAt: number(nested ? value.timing?.nextResolveAt : value.nextResolveAt),
         lastResolvedAt: number(nested ? value.timing?.lastResolvedAt : value.lastResolvedAt),
@@ -355,9 +351,6 @@ function safetyCheckpoint(value) {
     };
     if (!checkpoint.characterId || typeof checkpoint.phase !== 'string' || !checkpoint.phase
         || typeof checkpoint.activity !== 'string' || !checkpoint.activity
-        || typeof checkpoint.simulationOwner !== 'string' || !checkpoint.simulationOwner
-        || (checkpoint.simulationLeaseId !== null
-            && (typeof checkpoint.simulationLeaseId !== 'string' || !checkpoint.simulationLeaseId))
         || CHECKPOINT_FIELDS.some(key => typeof checkpoint[key] === 'number' && !Number.isFinite(checkpoint[key]))) return null;
     return checkpoint;
 }
@@ -367,39 +360,39 @@ function sameSafetyCheckpoint(left, right) {
     return !!a && !!b && CHECKPOINT_FIELDS.every(key => a[key] === b[key]);
 }
 
-const COMMAND_CHECKPOINT_FIELDS = CHECKPOINT_FIELDS.filter(key => key !== 'simulationLeaseUntil');
 // The steps a `review` command runs after a far bot's commit: main names them
 // on the commit ack, the worker sends the command with their inputs.
 const REVIEW_STEPS = Object.freeze(['plan', 'buff', 'training']);
 
 function commandCheckpoint(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    // Native snapshots have nested ownership/timing; absent native values use
-    // the same conservative defaults as safety snapshots. Flat wire input must
-    // carry every typed field and cannot obtain those defaults.
-    const flat = Object.prototype.hasOwnProperty.call(value, 'simulationOwner');
+    // Native snapshots have nested revision/timing; absent native values use
+    // the same conservative defaults as safety snapshots. Flat wire input (a
+    // row or a checkpoint: a flat revision and no nested `simulation`) must
+    // carry every typed field and cannot obtain those defaults. A state that
+    // also carries a flat revision copy reads its nested one, as
+    // safetyCheckpoint does.
+    const flat = value.simulation === undefined && Object.prototype.hasOwnProperty.call(value, 'simulationRevision');
     let checkpoint;
     if (flat) {
-        if (!COMMAND_CHECKPOINT_FIELDS.every(key => Object.prototype.hasOwnProperty.call(value, key))) return null;
-        checkpoint = Object.fromEntries(COMMAND_CHECKPOINT_FIELDS.map(key => [key, value[key]]));
+        if (!CHECKPOINT_FIELDS.every(key => Object.prototype.hasOwnProperty.call(value, key))) return null;
+        checkpoint = Object.fromEntries(CHECKPOINT_FIELDS.map(key => [key, value[key]]));
     } else {
-        const native = safetyCheckpoint({ ...value, simulation: { ...value.simulation, leaseUntil: 0 } });
-        if (!native) return null;
-        checkpoint = Object.fromEntries(COMMAND_CHECKPOINT_FIELDS.map(key => [key, native[key]]));
+        // Not flat = nested, also without a `simulation` (revision 0).
+        checkpoint = safetyCheckpoint(value.simulation ? value : { ...value, simulation: {} });
+        if (!checkpoint) return null;
     }
     const integers = ['characterId', 'simulationRevision', 'activityStartedAt', 'nextResolveAt',
         'lastResolvedAt', 'lastHotAt', 'updatedAt'];
     if (!integers.every(key => Number.isSafeInteger(checkpoint[key]) && checkpoint[key] >= 0)
         || checkpoint.characterId === 0
-        || !['phase', 'activity', 'simulationOwner'].every(key => typeof checkpoint[key] === 'string' && checkpoint[key])
-        || (checkpoint.simulationLeaseId !== null
-            && (typeof checkpoint.simulationLeaseId !== 'string' || !checkpoint.simulationLeaseId))) return null;
+        || !['phase', 'activity'].every(key => typeof checkpoint[key] === 'string' && checkpoint[key])) return null;
     return checkpoint;
 }
 
 function sameCommandCheckpoint(left, right) {
     const a = commandCheckpoint(left), b = commandCheckpoint(right);
-    return !!a && !!b && COMMAND_CHECKPOINT_FIELDS.every(key => a[key] === b[key]);
+    return !!a && !!b && CHECKPOINT_FIELDS.every(key => a[key] === b[key]);
 }
 
 function meetingIdentity(value) {
@@ -419,7 +412,7 @@ function commandIdentity(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)
         || !Number.isSafeInteger(value.characterId) || value.characterId <= 0
         || typeof value.commandId !== 'string' || !value.commandId || value.commandId.length > 160) return null;
-    if (!value.commandCheckpoint || !COMMAND_CHECKPOINT_FIELDS.every(key =>
+    if (!value.commandCheckpoint || !CHECKPOINT_FIELDS.every(key =>
         Object.prototype.hasOwnProperty.call(value.commandCheckpoint, key))) return null;
     const checkpoint = commandCheckpoint(value.commandCheckpoint);
     if (!checkpoint || checkpoint.characterId !== value.characterId || checkpoint.phase !== 'cold'
@@ -452,7 +445,7 @@ function committedState(proposed, ack) {
     const numbers = ['revision', 'updatedAt', 'inventoryRevision', 'skillsRevision', 'hennaRevision'];
     if (!proposed || !ack || !numbers.every(key => Number.isSafeInteger(ack[key]) && ack[key] >= 0)) return null;
     return { ...proposed, inventory: InventorySummary.canonicalize(proposed.inventory),
-        simulation: { ownerId: 'legacy_main', revision: ack.revision, leaseId: null, leaseUntil: 0 },
+        simulation: { revision: ack.revision },
         bagRevision: ack.inventoryRevision, skillsRevision: ack.skillsRevision, hennaRevision: ack.hennaRevision,
         updatedAt: ack.updatedAt };
 }
@@ -476,6 +469,7 @@ module.exports = {
     commitAckIdentity,
     committedState,
     staleRefusal,
+    CHECKPOINT_FIELDS,
     safetyCheckpoint,
     sameSafetyCheckpoint,
     commandCheckpoint,

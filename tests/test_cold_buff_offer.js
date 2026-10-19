@@ -21,7 +21,7 @@ const state = (id, classId, revision) => ({ characterId: id, name: `Buff${id}`, 
     stats: { classId, money: [6000, 0, 0, 0], classProgressionLevel: 55, classProgressionClassId: classId,
         coldCombat: { skills: Profile.skillRecordsFromTree(classId, 55), effects: [] } },
     inventory: { 57: { selfId: 57, amount: 20000 } }, vitals: { hp: 100, maxHp: 100, mp: 2000, maxMp: 2000 },
-    simulation: { ownerId: 'legacy_main', revision, leaseId: null, leaseUntil: 0 } });
+    simulation: { revision } });
 async function run() {
     const world = await createWorld(ids.map(id => ({ id, level: 55 })), 'cold-buff-offer');
     const mark = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').markDirty;

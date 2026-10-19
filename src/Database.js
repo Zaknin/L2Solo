@@ -28,6 +28,7 @@ const EconomyCommit = require('./GameServer/Bot/Economy/EconomyCommit');
 const Diagnostics = require('./GameServer/Bot/Economy/EconomyDiagnostics');
 const ColdCombatProfile = require('./GameServer/Bot/Population/ColdCombatProfile');
 const SavedStats = require('./GameServer/Bot/SavedStats');
+const PartyCandidateProjection = require('./DatabasePartyCandidateProjection');
 let nativeDiagnosticFacts = null;
 let nativeDiagnosticCounts = null;
 let nativeDiagnosticOverflow = 0;
@@ -1473,7 +1474,7 @@ function applySchemaMigrations() {
             );
             CREATE INDEX IF NOT EXISTS clan_social_memory_updated ON clan_social_memory(updatedAt, clanId);
         `)],
-        [39, () => require('./DatabasePartyCandidateProjection').install(connection)],
+        [39, () => PartyCandidateProjection.install(connection)],
         [40, () => {
             if (!connection.prepare('PRAGMA table_info(characters)').all().some(column => column.name === 'skillCooldowns'))
                 connection.exec("ALTER TABLE characters ADD COLUMN skillCooldowns TEXT NOT NULL DEFAULT '[]'");
@@ -1596,7 +1597,7 @@ function applySchemaMigrations() {
                     spotId
                 )) VIRTUAL;
         `);
-        require('./DatabasePartyCandidateProjection').createIndex(connection);
+        PartyCandidateProjection.createIndex(connection);
     }]);
     // Personas v2 (step 3.1, N6a): eleven types by class and share, clan
     // leaders through the author's founder gate, remembered listing prices reset.
@@ -1710,7 +1711,7 @@ function applySchemaMigrations() {
         const shops = connection.prepare('DELETE FROM afk_trade_shops WHERE id = ?');
         for (const { id } of empty) { lines.run(id); shops.run(id); }
     }]);
-    migrations.push([66, () => require('./DatabasePartyCandidateProjection').upgradeRecruitment(connection)]);
+    migrations.push([66, () => PartyCandidateProjection.upgradeRecruitment(connection)]);
     // The stale-goal and market-goal reconcile passes are gone (the worker
     // decides goals); their indexes only cost every goal and state write.
     migrations.push([67, () => connection.exec(`
@@ -1801,6 +1802,66 @@ function applySchemaMigrations() {
             WHERE json_valid(statsJson) AND mindJson = '{}';
         `);
     }]);
+    // The phase says who runs a bot (cold: the background thread, hot: main);
+    // the row's ownership and loan columns, constant since the loan went,
+    // leave with the indexes and triggers that name them. A row a world
+    // saved while on loan is handed back first (its revision moves, as the
+    // startup reset did). DROP COLUMN refuses a column an index or a trigger
+    // still names: the known ones are dropped and created again without it,
+    // and an unknown one stops the migration by name.
+    migrations.push([72, () => {
+        const loanColumns = ['simulationOwner', 'simulationLeaseId', 'simulationLeaseUntil'];
+        const columns = new Set(connection.prepare('PRAGMA table_info(bot_life_state)').all().map((column) => column.name));
+        if (columns.has('simulationOwner')) connection.exec(`
+            UPDATE bot_life_state SET simulationOwner = 'legacy_main', simulationRevision = simulationRevision + 1,
+                simulationLeaseId = NULL, simulationLeaseUntil = 0
+            WHERE simulationOwner IS NOT 'legacy_main' OR simulationLeaseId IS NOT NULL OR simulationLeaseUntil <> 0;
+        `);
+        connection.exec(`
+            DROP TRIGGER IF EXISTS bot_party_candidate_insert;
+            DROP TRIGGER IF EXISTS bot_party_candidate_metadata;
+            DROP TRIGGER IF EXISTS bot_party_candidate_ordinary;
+            DROP INDEX IF EXISTS bot_life_state_simulation_owner_lease;
+            DROP INDEX IF EXISTS bot_life_state_party_owner_filter;
+            DROP INDEX IF EXISTS bot_life_state_party_request_expiry;
+            DROP INDEX IF EXISTS bot_life_state_warehouse_release;
+            DROP INDEX IF EXISTS bot_life_state_warehouse_demand;
+            DROP INDEX IF EXISTS bot_life_state_party_candidate_projection;
+        `);
+        const naming = connection.prepare(`SELECT type, name FROM sqlite_master
+            WHERE ${loanColumns.map(() => 'sql LIKE ?').join(' OR ')}`).all(...loanColumns.map((column) => `%${column}%`))
+            .filter((object) => !(object.type === 'table' && object.name === 'bot_life_state'));
+        if (naming.length) throw new Error(`migration 72: ${naming.map((object) => `${object.type} ${object.name}`).join(', ')} names a loan column`);
+        for (const column of loanColumns) {
+            if (columns.has(column)) connection.exec(`ALTER TABLE bot_life_state DROP COLUMN ${column}`);
+        }
+        connection.exec(`
+            CREATE INDEX bot_life_state_party_owner_filter
+                ON bot_life_state(phase, partyId, activity, spotId, updatedAt);
+            CREATE INDEX bot_life_state_party_request_expiry
+                ON bot_life_state(phase, partyRequestStatus, partyRequestedAt, partyRequestPriority);
+            CREATE INDEX bot_life_state_warehouse_release
+                ON bot_life_state(characterId, updatedAt)
+                WHERE phase = 'cold'
+                AND accountName NOT LIKE 'bot_craft_%'
+                AND (partyId IS NULL OR partyId = '')
+                AND activity IN ('hunting', 'resting');
+            CREATE INDEX bot_life_state_warehouse_demand
+                ON bot_life_state(updatedAt, characterId)
+                WHERE phase = 'cold'
+                AND accountName NOT LIKE 'bot_craft_%'
+                AND (partyId IS NULL OR partyId = '')
+                AND activity IN ('hunting', 'resting');
+        `);
+        PartyCandidateProjection.createIndex(connection);
+        const projection = connection.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_party_candidate_projection'").get();
+        const projectionColumns = projection
+            ? new Set(connection.prepare('PRAGMA table_info(bot_party_candidate_projection)').all().map((column) => column.name)) : new Set();
+        if (projectionColumns.has('joinAvailability')) {
+            PartyCandidateProjection.createAvailabilityTriggers(connection);
+            PartyCandidateProjection.refreshCandidates(connection);
+        }
+    }]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -1887,8 +1948,7 @@ function checkCapturedWriteAdmission(admission, characterId) {
             FROM bot_life_state WHERE characterId = ?`, [...admission.coldTraining.versions, characterId]);
         const current = Protocol.commandCheckpoint(row && { ...row, activityStartedAt: row.activityStartedAt || 0,
             nextResolveAt: row.nextResolveAt || 0, lastResolvedAt: row.lastResolvedAt || 0, lastHotAt: row.lastHotAt || 0 });
-        if (current?.phase !== 'cold' || current.simulationOwner !== LEGACY_SIMULATION_OWNER
-            || row.trainingVersionsCurrent !== 1
+        if (current?.phase !== 'cold' || row.trainingVersionsCurrent !== 1
             || (!admission.nativeProof && !Protocol.sameCommandCheckpoint(admission.coldTraining, current))) throw new ColdTrainingSourceRetired();
     }
     if (admission.nativeProof) {
@@ -2247,7 +2307,7 @@ function syncPlayerManagedClanUnsafe(clanId) {
 function syncEconomySnapshotUnsafe(characterId, state, changedIds, mp = null) {
     if (!state) return null;
     const row = one('SELECT * FROM bot_life_state WHERE characterId = ?', [Number(characterId)]);
-    if (!row || row.phase !== 'cold' || row.simulationOwner !== LEGACY_SIMULATION_OWNER
+    if (!row || row.phase !== 'cold'
         || (state.simulation && Number(row.simulationRevision) !== Number(state.simulation.revision))) {
         throw new Error('economy_state_changed');
     }
@@ -2270,7 +2330,6 @@ function economyOwnerUnsafe(characterId, authority, fresh = false) {
     if (!row || !BoardRules.isBotAccount(row.username) || !authority
         || row.phase !== authority.phase
         || Number(row.lastHotAt || 0) !== Number(authority.hotAt || 0)
-        || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.simulationLeaseId
         || (fresh && Number(row.simulationRevision) !== authority.revision)) throw Error('economy_owner_changed');
     return row;
 }
@@ -2466,7 +2525,7 @@ function partyAgreementUnsafe(previous, proposed) {
     const touched = new Set();
     const ready = id => {
         const row = coldSimulationRow(id);
-        if (!row || row.phase !== 'cold' || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.simulationLeaseId) {
+        if (!row || row.phase !== 'cold') {
             throw new Error('party_payment_owner_busy');
         }
         return row;
@@ -2539,12 +2598,11 @@ function syncAdenaSnapshotUnsafe(characterId, amount, event = null) {
 function updateColdInventorySnapshotUnsafe(characterId, selfId, event = null, expectedRevision = null, allowParty = false) {
     const id = Number(characterId);
     const itemId = Number(selfId);
-    const row = one(`SELECT phase, simulationOwner, simulationRevision, partyId,
+    const row = one(`SELECT phase, simulationRevision, partyId,
             inventorySummary, statsJson
         FROM bot_life_state WHERE characterId = ?`, [id]);
     if (!row) return { ok: false, code: 'missing_state' };
     if (String(row.phase || '') !== 'cold'
-        || (!allowParty && String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER)
         || (!allowParty && String(row.partyId || '') !== '')) {
         return { ok: false, code: 'stale_snapshot' };
     }
@@ -2571,7 +2629,7 @@ function updateColdInventorySnapshotUnsafe(characterId, selfId, event = null, ex
     const updated = write(`UPDATE bot_life_state
         SET inventorySummary = ?, adena = COALESCE(?, adena), statsJson = ?, simulationRevision = ?, updatedAt = ?
         WHERE characterId = ? AND phase = 'cold'
-          AND simulationOwner = ? AND simulationRevision = ?
+          AND simulationRevision = ?
           AND (? = 1 OR partyId IS NULL OR partyId = '')`, [
         JSON.stringify(inventory),
         itemId === 57 ? physical : null,
@@ -2579,7 +2637,6 @@ function updateColdInventorySnapshotUnsafe(characterId, selfId, event = null, ex
         nextRevision,
         now(),
         id,
-        String(row.simulationOwner || LEGACY_SIMULATION_OWNER),
         currentRevision,
         allowParty ? 1 : 0
     ]);
@@ -2616,8 +2673,6 @@ const UPSERT_MACRO = `INSERT INTO macros (characterId, id, icon, name, descr, ac
     ON CONFLICT(characterId, id) DO UPDATE SET icon = excluded.icon, name = excluded.name,
         descr = excluded.descr, acronym = excluded.acronym, commands = excluded.commands`;
 
-const LEGACY_SIMULATION_OWNER = 'legacy_main';
-const COLD_SIMULATION_OWNER = 'cold_simulation_owner';
 // A main write to a far bot's row moves its revision in the same statement,
 // so a worker proposal built before it is refused (stale_revision) and rebases
 // on the row. A near bot's row keeps its number (its saves check otherwise).
@@ -2828,7 +2883,7 @@ function syncColdDeathExperienceUnsafe(characterId, record, timestamp) {
 }
 
 // The accepted fight proposal carries the actual Drain Soul mark. The
-// native lease/admission transaction still owns the physical source check.
+// native admission transaction still owns the physical source check.
 function applySoulCrystalStepsUnsafe(characterId, steps, guard = () => {}) {
     if (!Array.isArray(steps) || steps.length > 18) throw Error('invalid_cold_soul_crystals');
     const Native = invoke('GameServer/Items/SoulCrystalProgression');
@@ -3003,8 +3058,7 @@ const COLD_COMMIT_RETURNING = `characterId, simulationRevision, inventoryRevisio
 // the far phase and the revision the step started from, with no row read
 // before it. The bag revision moves in this statement: RETURNING does not see
 // what an AFTER trigger writes, and a statement that moved it leaves the
-// trigger nothing to do. The owner and lease columns are set to their constant
-// values. Null when the guard refused.
+// trigger nothing to do. Null when the guard refused.
 // A refused commit writes nothing, the mind included: main moved the row, the
 // refusal hands that row back (coldSimulationRow), the worker rebases on it and
 // builds again (one build per refusal, stale_revision 0.3% of acks). Every mind
@@ -3021,8 +3075,8 @@ function writeColdCommitUnsafe(fields, patch) {
         assignments.push('inventoryRevision = CASE WHEN inventorySummary IS ? THEN inventoryRevision ELSE inventoryRevision + 1 END');
         params.push(patch.inventorySummary);
     }
-    assignments.push('simulationRevision = ?', 'simulationOwner = ?', 'simulationLeaseId = NULL', 'simulationLeaseUntil = 0');
-    params.push(expectedRevision + 1, LEGACY_SIMULATION_OWNER);
+    assignments.push('simulationRevision = ?');
+    params.push(expectedRevision + 1);
     return one(`UPDATE bot_life_state SET ${assignments.join(', ')}
         WHERE characterId = ? AND phase = 'cold' AND simulationRevision = ?
         RETURNING ${COLD_COMMIT_RETURNING}`, [...params, characterId, expectedRevision]) || null;
@@ -3387,7 +3441,7 @@ function repriceAfkTradeLineUnsafe(characterId, id, unitPrice, expectedRevision,
 
 // What a reprice moved: the owner's bag and the fenced cold row when an item
 // or Adena moved; a price-only change reads nothing and leaves the worker's
-// lease alone (ownerInventory null: the callers have nothing to sync).
+// row alone (ownerInventory null: the callers have nothing to sync).
 function afkTradeRepriceMovesUnsafe(characterId, changedIds, moved) {
     if (!moved) return { ownerInventory: null, coldLifeRows: {} };
     return {
@@ -4057,14 +4111,14 @@ function commitColdInteractionMemoryUnsafe(request) {
 const ClanMembership = require('./GameServer/Clan/ClanMembershipRepository')({ all, write, inTransaction, now });
 function recruitmentRows(where, params) {
     return all(`SELECT c.id AS characterId,c.classId,c.clanId,COALESCE(l.level,c.level) AS level,
-        l.accountName,l.phase,l.activity,l.spotId,l.partyId,l.simulationOwner,l.simulationRevision,l.inventorySummary,l.statsJson,
+        l.accountName,l.phase,l.activity,l.spotId,l.partyId,l.simulationRevision,l.inventorySummary,l.statsJson,
         COALESCE(p.joinAvailability,0) AS joinAvailability,
         (EXISTS(SELECT 1 FROM clan_operation_members r WHERE r.characterId=c.id AND r.status='active')
             OR EXISTS(SELECT 1 FROM board_trade_participants t WHERE t.characterId=c.id AND t.meetingId IS NOT NULL)) AS recruitmentReserved
         FROM characters c LEFT JOIN bot_life_state l ON l.characterId=c.id
         LEFT JOIN bot_party_candidate_projection p ON p.characterId=c.id WHERE ${where}`, params).map(row => ({ ...row,
             phase: row.phase || '', activity: row.activity || '', spotId: row.spotId || null, partyId: row.partyId || null,
-            simulationOwner: row.simulationOwner || 'legacy_main', stats: jsonObject(row.statsJson), inventory: jsonObject(row.inventorySummary) }));
+            stats: jsonObject(row.statsJson), inventory: jsonObject(row.inventorySummary) }));
 }
 function recruitmentSourceCurrent(source) {
     if (source?.kind === 'economic') {
@@ -4135,8 +4189,8 @@ function raidRosterCommitReason(partyRow, nextStats, raidCommit, hotMembers = nu
     if (!source?.raidWorldAvailable || source.raidInstanceId !== marker.raidInstanceId
         || Number(source.raidBossTemplateId) !== marker.npcId
         || raidCommit && raidCommit.snapshot?.raidInstanceId !== marker.raidInstanceId) return 'raid_roster_source_changed';
-    const rows = openingAtImpact ? all(`SELECT c.id AS characterId,c.classId,c.clanId,l.level,l.partyId,l.phase,
-        l.simulationOwner,l.simulationLeaseId FROM characters c JOIN bot_life_state l ON l.characterId=c.id
+    const rows = openingAtImpact ? all(`SELECT c.id AS characterId,c.classId,c.clanId,l.level,l.partyId,l.phase
+        FROM characters c JOIN bot_life_state l ON l.characterId=c.id
         WHERE c.id IN (${marker.memberIds.map(() => '?').join(',')})`, marker.memberIds)
         : recruitmentRows(`c.id IN (${marker.memberIds.map(() => '?').join(',')})`, marker.memberIds);
     if (rows.length !== 9 || proof.members.some(([id, classId, level, fingerprint]) => {
@@ -4144,7 +4198,7 @@ function raidRosterCommitReason(partyRow, nextStats, raidCommit, hotMembers = nu
         const input = hotMembers?.find(member => member.characterId === id) || row;
         return !row || row.clanId !== marker.clanId || row.classId !== classId || row.level !== level
             || owner.members.find(member => member[0] === id)?.[4]
-            || openingAtImpact && (row.phase !== 'hot' || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.simulationLeaseId)
+            || openingAtImpact && row.phase !== 'hot'
             || row.recruitmentReserved || row.partyId !== party.partyId || Roster.inputFingerprint(input) !== fingerprint;
     })) return 'raid_roster_member_changed';
     return null;
@@ -4163,7 +4217,7 @@ function recruitmentProofCurrent(clanId, level, state, proof) {
         && (Number(member.clanId) === clanId || Number(member.clanId) === 0 && recruitmentAvailable(member))));
 }
 function recruitmentAvailable(member) {
-    return Number(member.joinAvailability) === 1 && member.phase === 'cold' && member.simulationOwner === 'legacy_main' && !member.partyId
+    return Number(member.joinAvailability) === 1 && member.phase === 'cold' && !member.partyId
         && !member.recruitmentReserved && !member.stats?.tradeMeeting
         && !require('./GameServer/Clan/ClanSimulationPolicy').isStaticService(member)
         && !one("SELECT characterId FROM clan_operation_members WHERE characterId=? AND status='active' LIMIT 1", [member.characterId]);
@@ -5498,7 +5552,7 @@ const Database = {
                     return { ok: false, reason: 'party_recruitment_changed' };
             }
             const placeholders = characterIds.map(() => '?').join(', ');
-            const currentRows = all(`SELECT characterId, phase, simulationOwner, simulationRevision, partyId, updatedAt, statsJson
+            const currentRows = all(`SELECT characterId, phase, simulationRevision, partyId, updatedAt, statsJson
                 FROM bot_life_state WHERE characterId IN (${placeholders})`, characterIds);
             const currentById = new Map(currentRows.map((row) => [Number(row.characterId), row]));
             const conflicts = batch.filter((entry) => {
@@ -5506,7 +5560,6 @@ const Database = {
                 const current = currentById.get(Number(row.characterId));
                 return !current
                     || current.phase !== expectedPhase
-                    || String(current.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
                     || String(current.partyId || '') !== String(entry.expectedPartyId || '')
                     || Number(current.updatedAt || 0) !== Number(entry.expectedUpdatedAt || 0)
                     || entry.expectedSimulationRevision !== undefined
@@ -5563,13 +5616,12 @@ const Database = {
                         partyId = ?, statsJson = ?, updatedAt = ?, spotId = COALESCE(?, spotId), ${MOVE_FAR_REVISION}
                     WHERE characterId = ?
                     AND phase = ?
-                    AND simulationOwner = ?
                     AND COALESCE(partyId, '') = ?
                     AND updatedAt = ?`, [
                     row.activity, row.activityStartedAt, row.nextResolveAt,
                     row.partyId, combat ? JSON.stringify(stats) : row.statsJson, row.updatedAt,
                     expectedPhase === 'hot' ? row.spotId : null,
-                    row.characterId, expectedPhase, LEGACY_SIMULATION_OWNER,
+                    row.characterId, expectedPhase,
                     String(entry.expectedPartyId || ''), Number(entry.expectedUpdatedAt || 0)
                 ]);
                 if (result.affectedRows !== 1) {
@@ -5796,10 +5848,7 @@ const Database = {
             return {
                 ok: true,
                 characterId,
-                ownerId: LEGACY_SIMULATION_OWNER,
-                leaseId: null,
                 revision,
-                leaseUntil: 0,
                 reason: 'committed_released',
                 ...(pkDrops.length ? { pkDrops } : {}),
                 ...(memorySnapshots !== undefined ? { memorySnapshots } : {}),
@@ -5880,17 +5929,15 @@ const Database = {
     },
 
     endPvpEncounter(key, ids, outcome = 'pvp_expired') {
-        if (typeof key !== 'string' || !Array.isArray(ids) || ids.length > 18) return Promise.resolve({ rows: [], complete: false });
+        if (typeof key !== 'string' || !Array.isArray(ids) || ids.length > 18) return Promise.resolve({ rows: [], parties: [] });
         return inTransaction(() => {
             const rows = [], parties = [], partyIds = new Set(), timestamp = now();
-            let complete = true;
             for (const id of ids) {
                 const row = coldSimulationRow(Number(id));
                 const stats = row && JSON.parse(row.statsJson || '{}');
                 if (row?.partyId) partyIds.add(row.partyId);
                 if (stats?.pvpEncounter?.key !== key && !(stats?.coldCompetition?.key === key
                     && stats.coldCompetition.outcome === 'pvp_fighting' && !stats.pvpEncounter)) continue;
-                if (row.simulationLeaseId) { complete = false; continue; }
                 stats.pvpEncounter = null;
                 if (stats.coldCompetition?.key === key) {
                     stats.coldCompetition = { ...stats.coldCompetition, wait: null, outcome, endedAt: timestamp };
@@ -5903,13 +5950,12 @@ const Database = {
                 const party = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]);
                 const stats = party && JSON.parse(party.statsJson || '{}');
                 if (stats?.coldCompetition?.key !== key) continue;
-                if (JSON.parse(party.memberIdsJson).some(id => coldSimulationRow(id)?.simulationLeaseId)) { complete = false; continue; }
                 stats.coldCompetition = { ...stats.coldCompetition, wait: null, outcome, endedAt: timestamp };
                 write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                     [JSON.stringify(stats), Math.max(timestamp, Number(party.updatedAt) + 1), partyId]);
                 parties.push(one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]));
             }
-            return { rows, parties, complete };
+            return { rows, parties };
         }, 'bot-life:pvp-encounter-end');
     },
 
@@ -5929,8 +5975,6 @@ const Database = {
                 if (!row || row.phase !== request.expectedPhase || encounter?.key !== request.key
                     || declared.length !== ids.length || declared.some(id => !ids.includes(id))
                     || Number(row.simulationRevision) !== m.expectedRevision || Number(row.updatedAt) !== m.expectedUpdatedAt
-                    || ![LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER].includes(row.simulationOwner)
-                    || row.simulationLeaseId
                     || Object.keys(m.patch || {}).some(key => !COLD_SIMULATION_PATCH_COLUMNS.has(key))
                     || (m.patch.partyId || null) !== (row.partyId || null) || m.patch.phase !== request.phase) {
                     return { ok: false, reason: 'encounter_member_changed' };
@@ -5951,9 +5995,9 @@ const Database = {
                 const patch = { ...m.patch, updatedAt: timestamp };
                 const entries = Object.entries(patch);
                 const changed = write(`UPDATE bot_life_state SET ${coldPatchAssignments(entries).join(', ')},
-                    simulationOwner = ?, simulationRevision = simulationRevision + 1, simulationLeaseId = NULL, simulationLeaseUntil = 0
+                    simulationRevision = simulationRevision + 1
                     WHERE characterId = ? AND simulationRevision = ?`,
-                [...entries.map(([, v]) => v), LEGACY_SIMULATION_OWNER, m.characterId, m.expectedRevision]);
+                [...entries.map(([, v]) => v), m.characterId, m.expectedRevision]);
                 if (changed.affectedRows !== 1) throw Error('encounter lifecycle CAS failed');
                 // Staged actors must read the same physical resources as the life snapshot.
                 const combat = JSON.parse(patch.statsJson || '{}').coldCombat;
@@ -6001,7 +6045,6 @@ const Database = {
                 const row = rows[i], m = members[i];
                 if (!row || row.phase !== request.expectedPhase || row.partyId !== request.partyId
                     || Number(row.simulationRevision) !== m.expectedRevision || Number(row.updatedAt) !== m.expectedUpdatedAt
-                    || ![LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER].includes(row.simulationOwner)
                     || Object.keys(m.patch || {}).some(key => !COLD_SIMULATION_PATCH_COLUMNS.has(key))
                     || m.patch.partyId !== request.partyId || m.patch.phase !== request.phase) {
                     return { ok: false, reason: 'member_changed' };
@@ -6017,9 +6060,9 @@ const Database = {
             for (const m of members) {
                 const entries = Object.entries({ ...m.patch, updatedAt: timestamp });
                 const changed = write(`UPDATE bot_life_state SET ${coldPatchAssignments(entries).join(', ')},
-                    simulationOwner = ?, simulationRevision = simulationRevision + 1, simulationLeaseId = NULL, simulationLeaseUntil = 0
+                    simulationRevision = simulationRevision + 1
                     WHERE characterId = ? AND simulationRevision = ?`,
-                [...entries.map(([, value]) => value), LEGACY_SIMULATION_OWNER, m.characterId, m.expectedRevision]);
+                [...entries.map(([, value]) => value), m.characterId, m.expectedRevision]);
                 if (changed.affectedRows !== 1) throw Error('party lifecycle CAS failed');
             }
             write('UPDATE bot_background_parties SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
@@ -6056,9 +6099,7 @@ const Database = {
                 const row = rows[index];
                 if (!row || row.phase !== 'hot' || row.partyId !== request.partyId
                     || Number(row.simulationRevision) !== Number(member.expectedRevision)
-                    || Number(row.updatedAt) !== Number(member.expectedUpdatedAt)
-                    || String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
-                    || row.simulationLeaseId) {
+                    || Number(row.updatedAt) !== Number(member.expectedUpdatedAt)) {
                     return { ok: false, reason: 'member_changed' };
                 }
             }
@@ -6088,14 +6129,13 @@ const Database = {
                 };
                 const changed = write(`UPDATE bot_life_state SET
                     partyId = NULL, activity = 'hunting', activityStartedAt = ?, nextResolveAt = NULL,
-                    lastResolvedAt = ?, statsJson = ?, updatedAt = ?, simulationOwner = ?,
-                    simulationRevision = simulationRevision + 1, simulationLeaseId = NULL, simulationLeaseUntil = 0
+                    lastResolvedAt = ?, statsJson = ?, updatedAt = ?,
+                    simulationRevision = simulationRevision + 1
                     WHERE characterId = ? AND partyId = ? AND phase = 'hot' AND simulationRevision = ?`, [
                     timestamp,
                     timestamp,
                     JSON.stringify(stats),
                     timestamp,
-                    LEGACY_SIMULATION_OWNER,
                     member.characterId,
                     request.partyId,
                     member.expectedRevision
@@ -6137,9 +6177,7 @@ const Database = {
             const row = coldSimulationRow(id);
             const stats = parsedObject(row?.statsJson) || {};
             if (!row || row.partyId || Number(stats.playerPartyTakeover?.playerId) !== playerId
-                || stats.playerPartyTakeover?.partyId !== request.partyId
-                || String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
-                || row.simulationLeaseId) return null;
+                || stats.playerPartyTakeover?.partyId !== request.partyId) return null;
             delete stats.playerPartyTakeover;
             stats.leaderId = null;
             write(`UPDATE bot_life_state SET statsJson = ?, updatedAt = ?,
@@ -6175,9 +6213,7 @@ const Database = {
             for (const row of rows) {
                 const stats = parsedObject(row.statsJson) || {};
                 if (row.partyId || Number(stats.playerPartyTakeover?.playerId || 0) !== playerId
-                    || stats.playerPartyTakeover?.partyId !== partyId
-                    || String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
-                    || row.simulationLeaseId) {
+                    || stats.playerPartyTakeover?.partyId !== partyId) {
                     return { ok: false, reason: 'member_changed' };
                 }
             }
@@ -6196,8 +6232,8 @@ const Database = {
                 delete stats.playerPartyTakeover;
                 const changed = write(`UPDATE bot_life_state SET
                     partyId = ?, activity = 'grouped', activityStartedAt = ?, nextResolveAt = ?,
-                    lastResolvedAt = ?, statsJson = ?, updatedAt = ?, simulationOwner = ?,
-                    simulationRevision = simulationRevision + 1, simulationLeaseId = NULL, simulationLeaseUntil = 0
+                    lastResolvedAt = ?, statsJson = ?, updatedAt = ?,
+                    simulationRevision = simulationRevision + 1
                     WHERE characterId = ? AND partyId IS NULL AND simulationRevision = ?`, [
                     partyId,
                     timestamp,
@@ -6205,7 +6241,6 @@ const Database = {
                     timestamp,
                     JSON.stringify(stats),
                     timestamp,
-                    LEGACY_SIMULATION_OWNER,
                     Number(row.characterId),
                     Number(row.simulationRevision)
                 ]);
@@ -6271,46 +6306,22 @@ const Database = {
             // Without a patch only the revision moves: updatedAt stays the cached state's.
             const entries = patched ? Object.entries({ ...patch, updatedAt: patch.updatedAt ?? request.timestamp ?? now() }) : [];
             const assignments = entries.map(([column]) => `${escapeIdentifier(column)} = ?`);
-            assignments.push(
-                'simulationOwner = ?',
-                'simulationRevision = ?',
-                'simulationLeaseId = NULL',
-                'simulationLeaseUntil = 0'
-            );
+            assignments.push('simulationRevision = ?');
             const result = write(`UPDATE bot_life_state
                 SET ${assignments.join(', ')}
                 WHERE characterId = ? AND simulationRevision = ?`, [
                 ...entries.map(([, value]) => value),
-                LEGACY_SIMULATION_OWNER, nextRevision, characterId, revision
+                nextRevision, characterId, revision
             ]);
             if (result.affectedRows !== 1) return { ok: false, reason: 'cas_failed' };
             return {
                 ok: true,
                 characterId,
-                ownerId: LEGACY_SIMULATION_OWNER,
-                leaseId: null,
                 revision: nextRevision,
-                leaseUntil: 0,
                 reason: patched ? 'main_transition' : 'hot_handoff',
                 row: coldSimulationRow(characterId)
             };
         }, 'bot-life:hot-owner-handoff');
-    },
-
-    // A loan an older server left in a row returns to main at startup.
-    recoverColdSimulationLeases() {
-        return inTransaction(() => {
-            const candidates = all('SELECT characterId FROM bot_life_state WHERE simulationOwner = ?', [COLD_SIMULATION_OWNER]);
-            const result = write(`UPDATE bot_life_state
-                SET simulationOwner = ?, simulationRevision = simulationRevision + 1,
-                    simulationLeaseId = NULL, simulationLeaseUntil = 0
-                WHERE simulationOwner = ?`, [LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER]);
-            const rows = candidates.length
-                ? all(`SELECT characterId, simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil
-                    FROM bot_life_state WHERE characterId IN (${candidates.map(() => '?').join(', ')})`, candidates.map((row) => row.characterId))
-                : [];
-            return { ...result, rows };
-        }, 'bot-life:cold-owner-startup-recovery');
     },
 
     clearRaidBossState(npcId) {
@@ -6722,11 +6733,10 @@ const Database = {
     createColdTrainingGuard(state, validate, nativeBeforeWrite) {
         const Protocol = invoke('GameServer/Bot/Population/ColdSimulationProtocol');
         const expected = Protocol.commandCheckpoint({ characterId: state.characterId, phase: state.phase, activity: state.activity,
-            simulationOwner: state.simulation?.ownerId, simulationRevision: state.simulation?.revision,
-            simulationLeaseId: state.simulation?.leaseId || null,
+            simulationRevision: state.simulation?.revision,
             activityStartedAt: state.timing?.activityStartedAt || 0, nextResolveAt: state.timing?.nextResolveAt || 0,
             lastResolvedAt: state.timing?.lastResolvedAt || 0, lastHotAt: state.timing?.lastHotAt || 0, updatedAt: state.updatedAt });
-        if (!expected || expected.phase !== 'cold' || expected.simulationOwner !== LEGACY_SIMULATION_OWNER
+        if (!expected || expected.phase !== 'cold'
             || typeof validate !== 'function' || (nativeBeforeWrite !== undefined && typeof nativeBeforeWrite !== 'function')) {
             throw Error('invalid_cold_training_source');
         }
@@ -6889,12 +6899,12 @@ const Database = {
             let life = null;
             if (coldState) {
                 life = one(`SELECT phase, activity, currentRegion, locX, locY, locZ,
-                    simulationOwner, simulationRevision, partyId, inventorySummary,
+                    simulationRevision, partyId, inventorySummary,
                     json_extract(statsJson,'$.equipmentPlan') AS equipmentPlan FROM bot_life_state WHERE characterId=?`, [characterId]);
                 // A queued flush can hand the bot to a worker or add a craft
                 // reservation after the caller planned the withdrawal.
                 if (!life || Number(coldState.characterId) !== Number(characterId)
-                    || life.phase !== 'cold' || life.simulationOwner !== LEGACY_SIMULATION_OWNER
+                    || life.phase !== 'cold'
                     || life.partyId || !['hunting', 'resting', 'shopping', 'merchant'].includes(life.activity)
                     || life.activity !== townIntent.activity || life.currentRegion !== townIntent.currentRegion
                     || Number(life.locX) !== townIntent.locX || Number(life.locY) !== townIntent.locY || Number(life.locZ) !== townIntent.locZ
@@ -7818,8 +7828,8 @@ const Database = {
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const guard = () => {
                 checkCapturedWriteAdmission(admission, characterId);
-                const row = one('SELECT phase,simulationOwner FROM bot_life_state WHERE characterId=?',[characterId]);
-                if (row?.phase !== 'cold' || row.simulationOwner !== LEGACY_SIMULATION_OWNER) throw Error('soul_crystal_owner_changed');
+                const row = one('SELECT phase FROM bot_life_state WHERE characterId=?',[characterId]);
+                if (row?.phase !== 'cold') throw Error('soul_crystal_owner_changed');
             };
             guard(); applySoulCrystalStepsUnsafe(characterId, steps, guard);
             return { changed: steps.length };
@@ -7835,13 +7845,13 @@ const Database = {
                 checkCapturedWriteAdmission(admission, characterId);
                 options.validate?.();
                 if (!state) {
-                    const row = one('SELECT phase, simulationOwner FROM bot_life_state WHERE characterId = ?', [characterId]);
-                    if (row && (row.phase !== 'hot' || row.simulationOwner !== LEGACY_SIMULATION_OWNER)) throw Error('improvement_hot_source_changed');
+                    const row = one('SELECT phase FROM bot_life_state WHERE characterId = ?', [characterId]);
+                    if (row && row.phase !== 'hot') throw Error('improvement_hot_source_changed');
                 }
                 if (state) {
-                    const row = one(`SELECT phase, simulationOwner, simulationRevision, activity, currentRegion, locX, locY, locZ
+                    const row = one(`SELECT phase, simulationRevision, activity, currentRegion, locX, locY, locZ
                         FROM bot_life_state WHERE characterId = ?`, [characterId]);
-                    if (state.characterId !== characterId || row?.phase !== 'cold' || row.simulationOwner !== LEGACY_SIMULATION_OWNER
+                    if (state.characterId !== characterId || row?.phase !== 'cold'
                         || Number(row.simulationRevision) !== Number(state.simulation?.revision || 0)) throw Error('economy_state_changed');
                     // Cold travel lives in the lifecycle row; the offline
                     // character position can still be its previous hunt.
@@ -8172,8 +8182,7 @@ const Database = {
                         continue;
                     }
                     if (!row || (row === customer && step ? row.phase !== step.row.phase : row.phase !== 'cold')
-                        || row.simulationOwner !== LEGACY_SIMULATION_OWNER
-                        || row.simulationLeaseId || row.partyId || Number(row.phase === 'hot' ? row.physicalHp : row.hp) <= 0
+                        || row.partyId || Number(row.phase === 'hot' ? row.physicalHp : row.hp) <= 0
                         || ['dead', 'respawning', 'traveling'].includes(row.activity)
                         || Number(row.simulationRevision) !== Number(revision)) throw new Error('workshop ownership changed');
                 }
@@ -8247,8 +8256,7 @@ const Database = {
                 clanCrafter = rows.find(row => Number(row.characterId) === Number(crafterId));
                 const customer = rows.find(row => Number(row.characterId) === Number(customerId));
                 for (const [row, revision] of [[clanCrafter, clanCraft.crafterRevision], [customer, clanCraft.customerRevision]]) {
-                    if (!row || Number(row.clanId) !== Number(clanCraft.clanId) || row.phase !== 'cold'
-                        || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.partyId
+                    if (!row || Number(row.clanId) !== Number(clanCraft.clanId) || row.phase !== 'cold' || row.partyId
                         || Number(row.simulationRevision) !== Number(revision)) throw new Error('clan craft ownership changed');
                 }
                 if (!recipe || Number(clanCrafter.hp) <= 0 || Number(customer.hp) <= 0
@@ -9057,7 +9065,7 @@ const Database = {
             if (!simulated || simulated.leaderId === id || !member || Number(member.clanId) !== clan || !generatedBotRow(member)) {
                 return { ok: false, reason: 'discipline_membership_changed' };
             }
-            if (!life || life.simulationLeaseId || jsonObject(life.statsJson).pvpEncounter) return { ok: false, reason: 'member_busy' };
+            if (!life || jsonObject(life.statsJson).pvpEncounter) return { ok: false, reason: 'member_busy' };
             const at = now(), banUntil = at + 7 * 86400000;
             d.stage = 'expelled'; d.stageAt = at; d.banUntil = banUntil;
             relation.discipline = d;
@@ -9541,7 +9549,7 @@ const Database = {
 
             const placeholders = allMembers.map(() => '?').join(', ');
             const rows = all(`SELECT c.id, c.clanId, c.username, life.accountName, life.statsJson,
-                    life.phase, life.simulationOwner, life.simulationRevision, life.partyId
+                    life.phase, life.simulationRevision, life.partyId
                 FROM characters c
                 LEFT JOIN bot_life_state life ON life.characterId = c.id
                 WHERE c.id IN (${placeholders})`, allMembers);
@@ -9549,7 +9557,6 @@ const Database = {
                 (!guestSet.has(Number(row.id)) && Number(row.clanId) !== clan)
                 || !generatedBotRow(row)
                 || String(row.phase || '') !== 'cold'
-                || String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
                 || String(row.partyId || '') !== ''
             ))) return { ok: false, code: 'party_not_ready' };
 
@@ -9791,14 +9798,13 @@ const Database = {
             const simulation = one('SELECT clanId, stateJson FROM clan_simulation_clans WHERE clanId = ?', [clan]);
             const clanRow = one('SELECT id, level FROM clans WHERE id = ?', [clan]);
             const member = one('SELECT id, clanId FROM characters WHERE id = ?', [character]);
-            const life = one(`SELECT phase, simulationOwner, simulationRevision, partyId, inventorySummary, statsJson, adena
+            const life = one(`SELECT phase, simulationRevision, partyId, inventorySummary, statsJson, adena
                 FROM bot_life_state WHERE characterId = ?`, [character]);
             if (!simulation || !clanRow || !member || Number(member.clanId) !== clan) {
                 return { ok: false, code: 'warehouse_transfer_failed' };
             }
             if (Number(clanRow.level) < 1) return { ok: false, code: 'warehouse_level_unavailable' };
             if (!life || !['cold', 'hot'].includes(expectedPhase) || String(life.phase || '') !== expectedPhase
-                || (!allowParty && String(life.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER)
                 || (!allowParty && String(life.partyId || '') !== '')) {
                 return { ok: false, code: 'stale_snapshot' };
             }
@@ -9995,7 +10001,6 @@ const Database = {
             const stock = one('SELECT * FROM clan_warehouse_items WHERE id = ? AND clanId = ?', [Number(warehouseId), clan]);
             if (!member || Number(member.clanId) !== clan || !life || !stock) return { ok: false, code: 'stock_or_member_changed' };
             if (life.phase !== expectedPhase || !['cold', 'hot'].includes(life.phase)
-                || String(life.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
                 || life.phase === 'cold' && (!['hunting', 'resting', 'grouped'].includes(life.activity)
                     || validateCold && !validateCold())) {
                 return { ok: false, code: 'member_busy' };
@@ -10092,13 +10097,12 @@ const Database = {
             }
             const simulation = one('SELECT clanId, stateJson FROM clan_simulation_clans WHERE clanId = ?', [clan]);
             const member = one('SELECT id, clanId FROM characters WHERE id = ?', [beneficiary]);
-            const life = one(`SELECT phase, simulationOwner, simulationRevision, partyId
+            const life = one(`SELECT phase, simulationRevision, partyId
                 FROM bot_life_state WHERE characterId = ?`, [beneficiary]);
             if (!simulation || !member || Number(member.clanId) !== clan || !life) {
                 return { ok: false, code: 'warehouse_transfer_failed' };
             }
             if (String(life.phase || '') !== 'cold'
-                || String(life.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
                 || (!allowParty && String(life.partyId || '') !== '')) {
                 return { ok: false, code: 'stale_snapshot' };
             }

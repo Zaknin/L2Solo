@@ -9,7 +9,6 @@ const rootDir = path.resolve(__dirname, '..');
 const databasePath = path.join(rootDir, 'tmp', 'test-atomic-party-membership.sqlite');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
-const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 
 fs.rmSync(databasePath, { force: true });
 
@@ -44,7 +43,6 @@ for (let index = 1; index <= 4; index += 1) {
 seed.close();
 
 options.default.Database.path = path.relative(rootDir, databasePath);
-ColdSimulationOwner.recoverStartupLeases = () => Promise.resolve({ affectedRows: 0 });
 DataCache.init();
 Database.init();
 
@@ -55,7 +53,6 @@ Database.init();
     assert.strictEqual(await PartyState.init(), true);
 
     const firstMembers = await LifeState.statesByIds([3200001, 3200002], {
-        ownerId: 'legacy_main',
         unassigned: true
     });
     const firstPartyDue = Date.now() + 45000;
@@ -194,7 +191,6 @@ Database.init();
     console.log('PASS conditional joint goals: member/party/revision fences, duplicate rejection, no member writes');
 
     const conflictMembers = await LifeState.statesByIds([3200003, 3200004], {
-        ownerId: 'legacy_main',
         unassigned: true
     });
     const conflictParty = PartyState.prepareCommit({

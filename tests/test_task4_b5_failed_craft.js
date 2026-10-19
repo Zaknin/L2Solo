@@ -45,7 +45,7 @@ async function crafter(id, batches) {
         loc: { x: 83000, y: 148000, z: -3400 }, vitals: { hp: 100, maxHp: 100, mp, maxMp: mp },
         stats: { classId: 57, money: [36000, 0, 0, 0] },
         inventory: Life.inventorySummaryFromItems(await Database.fetchItems(id)),
-        simulation: { ownerId: 'legacy_main', revision: 0 }, timing: {}, updatedAt: Date.now() }, 'b5_failed_fixture');
+        simulation: { revision: 0 }, timing: {}, updatedAt: Date.now() }, 'b5_failed_fixture');
     const goal = JSON.stringify({ id: 'craft-target', type: 'buy_craft_material', status: 'active',
         target: { itemId: uncertain.productId, amount: uncertain.productCount * batches }, createdAt: 1, reviewedAt: 1 });
     await Database.execute(['INSERT OR REPLACE INTO bot_goal_state (characterId, goalJson, updatedAt) VALUES (?, ?, ?)', [id, goal, 1]]);

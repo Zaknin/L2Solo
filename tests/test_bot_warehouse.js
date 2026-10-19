@@ -54,7 +54,7 @@ async function run() {
                 ? { ...instance, amount: instance.amount - item.amount } : instance).filter(instance => instance.amount > 0) } : {})
         } };
         return { state: { ...state, inventory, simulation: { ...state.simulation,
-            ownerId: 'legacy_main', revision: Number(state.simulation?.revision || 0) + 1 } } };
+            revision: Number(state.simulation?.revision || 0) + 1 } } };
     };
     LifeState.acceptInventoryProjection = row => row.state;
     const material = { selfId: 1870, name: 'Animal Bone', amount: 20, kind: 'Other.Material', rank: 'none' };

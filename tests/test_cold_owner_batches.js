@@ -97,7 +97,7 @@ function lifecycle(character, profile, inventory, revision = 0) {
         // The native henna slots a loaded state carries (BotLifeState load).
         stats: { probe: character.name, hennas: [null, null, null] },
         inventory,
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision, leaseId: null, leaseUntil: 0 },
+        simulation: { revision },
         updatedAt: 1000
     };
 }
@@ -225,8 +225,7 @@ async function createProbe(index) {
     }
 
     const rows = await Database.execute([
-        `SELECT characterId, exp, sp, adena, lastResolvedAt, statsJson, simulationOwner,
-                simulationRevision, simulationLeaseId, simulationLeaseUntil
+        `SELECT characterId, exp, sp, adena, lastResolvedAt, statsJson, simulationRevision
          FROM bot_life_state ORDER BY characterId`, []
     ]);
     const persisted = new Map(rows.map((row) => [Number(row.characterId), row]));
@@ -236,9 +235,6 @@ async function createProbe(index) {
         assert.strictEqual(Number(row.sp), 100 + authoredProfiles[index].earnedSp);
         assert.strictEqual(Number(row.adena), 550 + index);
         assert.strictEqual(Number(row.lastResolvedAt), 3000);
-        assert.strictEqual(row.simulationOwner, Owner.LEGACY_OWNER_ID);
-        assert.strictEqual(row.simulationLeaseId, null);
-        assert.strictEqual(Number(row.simulationLeaseUntil), 0);
     }
     const physical = await Database.execute([
         `SELECT c.id, c.classId, c.level, c.exp, c.sp, c.karma, c.pk,
@@ -308,11 +304,10 @@ async function createProbe(index) {
     })), { timestamp: 4100 });
     assert(partyCommit.every((result) => result.ok), 'trusted party lifecycle commits plan and warehouse members together');
     const partyRows = await Database.execute([
-        `SELECT exp, simulationOwner, simulationLeaseId FROM bot_life_state
+        `SELECT exp FROM bot_life_state
          WHERE partyId = 'batch-party' ORDER BY characterId`, []
     ]);
     assert.deepStrictEqual(partyRows.map((row) => Number(row.exp)), partyExpectedExp);
-    assert(partyRows.every((row) => row.simulationOwner === Owner.LEGACY_OWNER_ID && row.simulationLeaseId === null));
 
     const releaseBase = partyMembers.map((member) => LifeState.cachedState(member.characterId));
     const releaseCommit = await Owner.commitBatch(releaseBase.map((member, index) => ({

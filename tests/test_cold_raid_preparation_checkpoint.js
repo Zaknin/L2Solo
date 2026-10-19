@@ -238,8 +238,6 @@ async function main() {
             assert.equal(row.exp, member.exp);
             assert.equal(row.sp, member.sp);
             assert.equal(row.adena, 1000);
-            assert.equal(row.simulationOwner, 'legacy_main');
-            assert.equal(row.simulationLeaseId, null);
             assert(Protocol.commandCheckpoint(Life.cachedState(member.characterId)), 'durable/cache checkpoint accepted');
         }
         assert.equal(after.tables.bot_background_parties[0].nextResolveAt, expectedDeadline);

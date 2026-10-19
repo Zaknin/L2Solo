@@ -24,7 +24,6 @@ function member(characterId, classId, overrides = {}) {
         classId,
         level: 50,
         phase: 'cold',
-        simulationOwner: 'legacy_main',
         ...overrides
     };
 }

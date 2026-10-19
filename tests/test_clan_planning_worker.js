@@ -203,7 +203,7 @@ async function parityAndIntegration() {
     } finally { await worker.shutdown(); }
 
     const clan = { id: 99, level: 3, leaderId: 990001, state: { mode: 'autonomous', updatedAt: 123, warehouseRevision: 1 },
-        members: [{ characterId: 990001, level: 40, classId: 4, phase: 'cold', simulationOwner: 'legacy_main',
+        members: [{ characterId: 990001, level: 40, classId: 4, phase: 'cold',
             inventory: {}, adena: 100000, stats: { classId: 4 } }] };
     clan.members.push({ ...structuredClone(clan.members[0]), characterId: 990003 });
     const originalWarehouse = Database.fetchClanWarehouseItems;

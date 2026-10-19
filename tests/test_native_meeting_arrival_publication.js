@@ -12,7 +12,7 @@ let row = { id: 7, actorA: id, actorB: id + 1, state: 'accepted', locX: 2000, lo
     legA: JSON.stringify({ sequence: 1, legId: 'soe:1000:0:0', fee: 0, scroll: true }) };
 let state = { characterId: id, phase: 'cold', activity: 'traveling', vitals: { hp: 100 },
     stats: { tradeMeeting: [7, 1], travel: { meetingId: 7 } }, loc: { locX: 0, locY: 0, locZ: 0 },
-    inventory: {}, simulation: { ownerId: 'cold_worker', revision: 1, leaseId: null } };
+    inventory: {}, simulation: { revision: 1 } };
 function publish(patch) { state = { ...state, ...patch, simulation: { ...state.simulation, revision: state.simulation.revision + 1 } };
     Life.acceptSimulationOwnership(id, state.simulation, state); }
 Life.acceptSimulationOwnership(id, state.simulation, state);
@@ -29,7 +29,7 @@ const db = {
             level: 20, hp: 100, maxHp: 100, mp: 100, maxMp: 100, adena: 0,
             locX: state.loc.locX, locY: state.loc.locY, locZ: state.loc.locZ,
             inventorySummary: '{}', statsJson: JSON.stringify(state.stats),
-            simulationOwner: state.simulation.ownerId, simulationRevision: state.simulation.revision,
+            simulationRevision: state.simulation.revision,
             updatedAt: Date.now(), nextResolveAt: Date.now() + 20000 };
         // A native reflection may reach the cache before the service receives
         // its transaction reply. Worker publication is still owed by that reply.
