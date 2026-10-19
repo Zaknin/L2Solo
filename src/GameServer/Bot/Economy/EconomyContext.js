@@ -997,8 +997,6 @@ function forState(state = {}, deps = {}) {
     }
     deps = resolved(state, deps);
     if (typeof deps.routeRows === 'function') deps.routeRows = deps.routeRows(state);
-    if (!deps.tripCost && !deps.routeRows && isMainThread)
-        deps.routeRows = preparedRouteRows(state) || invoke('GameServer/Bot/Population/ColdSimulationCoordinator').routeRows?.(state);
     const timestamp = Number(deps.timestamp || Date.now());
     const actorKey = deps.actorKey || `character:${Number(state.characterId || 0)}`;
     const sourceBoard = deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null);
@@ -1561,7 +1559,7 @@ function forActor(actor, session, deps = {}) {
     const memory = invoke('GameServer/Social/InteractionMemoryRuntime');
     const input = { ...deps, memory: memory.snapshot(Number(state.characterId)),
         memoryIdentity: memory.contentIdentity(Number(state.characterId)),
-        routeRows: deps.routeRows || preparedRouteRows(state) || coordinator.routeRows?.(state) };
+        routeRows: deps.routeRows || preparedRouteRows(state) };
     // Not collected: the worker's card never carries main's held proof.
     const prepared = {};
     const refreshed = ColdEconomyDecision.refreshAdvisory(state, accepted, input, { prepared });

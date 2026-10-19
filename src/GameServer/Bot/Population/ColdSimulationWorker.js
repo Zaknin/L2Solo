@@ -184,8 +184,9 @@ const boardFollower = boardIndex.follower();
 // during the copy asks for it again (table_resync); that copy's reset keeps
 // the flag and its last piece ends the wait.
 let boardReplacing = false, marketReplacing = false;
+// A bot's own route preparation in flight (occupationFor mode wish), keyed by
+// its id; the planner runs it in slot -id.
 const routeRequests = new Map();
-let nativeRouteSequence = 0;
 const publicWorkshopIndex = new (require('../Economy/PublicWorkshopIndex').PublicWorkshopIndex)();
 const publicWorkshopKeys = new Map(), workshopRevisions = new Map(), workshopDigests = new Map(), workshopScopeDigests = new Map();
 const digestToken = value => value ? `${value.xor}:${value.sum}:${value.count}` : '0:0:0';
@@ -245,9 +246,8 @@ const occupationPlanner = new ColdOccupationPlanner({
         : `${boardIndex.itemRevision(id)}:${tables.rows('market').get(`i:${id}`)?.[1] || 0}:${MarketCounters.revisionOf(MarketCounters.counterOf(id))}:${workshopRevisions.get(id) || 0}`,
     sourceScope: id => MarketCounters.counterOf(id),
     sourceScopeToken: scope => OccupationSources.recipeIndex(boardIndex).revision(scope),
-    ownCurrent: (id, input) => !shuttingDown && (id < 0 ? routeRequests.get(-id) === input
-        && (!input.native || kernel?.states.get(-id)?.state === input.sourceState)
-        : kernel?.states.get(id)?.state === input.sourceState),
+    ownCurrent: (id, input) => !shuttingDown && (id >= 0 || routeRequests.get(-id) === input)
+        && kernel?.states.get(Math.abs(id))?.state === input.sourceState,
     sameInput: (left, right) => left.mode === 'wish' || right.mode === 'wish'
         ? left.mode === right.mode && left.sourceState === right.sourceState && left.routeKey === right.routeKey
         : left.assetsKey === right.assetsKey && left.state.updatedAt === right.state.updatedAt
@@ -498,8 +498,6 @@ const occupationPlanner = new ColdOccupationPlanner({
 
         if (input.mode === 'wish') {
             if (id < 0 && routeRequests.get(-id) === input) {
-                if (!shuttingDown && !input.native) send('economy_route_result', { characterId: -id, requestId: input.requestId,
-                    key: input.routeKey, rows: Array.isArray(workshop) ? workshop : [] });
                 routeRequests.delete(-id);
                 occupationPlanner.release(id);
             }
@@ -556,12 +554,11 @@ function occupationFor(state, timestamp, options = {}, mode = 'occupation') {
         return Promise.resolve(routeRows);
     if (mode === 'wish') {
         const previous = routeRequests.get(id);
-        if (previous?.native && previous.sourceState === sourceState && previous.routeKey === routeKey)
+        if (previous?.sourceState === sourceState && previous.routeKey === routeKey)
             return occupationPlanner.request(-id, previous);
         if (!previous && routeRequests.size >= 64) return Promise.resolve([]);
         cancelRoute(id);
-        const input = { state: EconomicTrip.frame(state), sourceState, timestamp, mode: 'wish', native: true,
-            routeKey, requestId: ++nativeRouteSequence };
+        const input = { state: EconomicTrip.frame(state), sourceState, timestamp, mode: 'wish', routeKey };
         routeRequests.set(id, input);
         return occupationPlanner.request(-id, input);
     }
@@ -589,22 +586,6 @@ function cancelRoute(characterId) {
     const id = Number(characterId);
     routeRequests.delete(id);
     occupationPlanner.cancel(-id);
-}
-function requestRoute(payload) {
-    if (shuttingDown) return;
-    const id = payload.characterId, previous = routeRequests.get(id);
-    if (previous && !previous.native && previous.requestId === payload.requestId && previous.routeKey === payload.key) return;
-    if (payload.key !== EconomicTrip.key(payload.frame)) {
-        send('economy_route_result', { characterId: id, requestId: payload.requestId, key: payload.key, rows: [] }); return;
-    }
-    if (!previous && routeRequests.size >= 64) {
-        send('economy_route_result', { characterId: id, requestId: payload.requestId, key: payload.key, rows: [] }); return;
-    }
-    cancelRoute(id);
-    const input = { state: payload.frame, sourceState: null, timestamp: Date.now(), mode: 'wish',
-        routeKey: payload.key, requestId: payload.requestId };
-    routeRequests.set(id, input);
-    occupationPlanner.request(-id, input, { awaitResult: false });
 }
 const refreshedStates = new WeakSet();
 function assetsKey(state) {
@@ -1660,7 +1641,7 @@ function startKernel(config = {}) {
         const result = nativeSet(id, entry, card);
         if (previous !== entry.state) {
             const route = routeRequests.get(Number(id));
-            if (route?.native && route.sourceState !== entry.state) cancelRoute(id);
+            if (route && route.sourceState !== entry.state) cancelRoute(id);
             const held = occupationPlanner.slots.get(Number(id));
             const routeKey = EconomicTrip.key(entry.state);
             const incoming = held ? { ...held.input, state: entry.state, sourceState: entry.state, routeKey,
@@ -1883,9 +1864,6 @@ async function handle(message) {
         if (replaced) occupationPlanner.recheckSources();
         break;
     }
-    case 'economy_route_request':
-        requestRoute(payload);
-        break;
     case 'clan_social_page':
         if (!kernel) break;
         for (const snapshot of payload.rows || []) {

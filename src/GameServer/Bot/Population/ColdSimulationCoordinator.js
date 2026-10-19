@@ -111,18 +111,9 @@ class ColdSimulationCoordinator {
         this.historyCleanupInFlight = null;
         this.seen = new Set();
         this.economyDecisions = new ColdEconomyDecisions();
-        this.economyRoutes = new (invoke('GameServer/Bot/Economy/EconomyRouteCache').EconomyRouteCache)({
-            send: payload => !this.stopping && this.ready && !!this.post('economy_route_request', payload),
-            evictable: id => {
-                const record = World.registeredActorById(id);
-                return !record || record.retired || record.session?.actor !== record.actor || record.session.aiActive !== true;
-            },
-            prepared: id => EconomyContext.forgetContext(id, 'state_publication')
-        });
         this.unsubscribeWishRemovals = LifeState.subscribePublications(packet => {
             if (packet.kind !== 'remove') return;
             this.economyDecisions.forget(packet.characterId);
-            this.economyRoutes.forget(packet.characterId);
             EconomyContext.forget(packet.characterId);
         });
         this.seenOrder = [];
@@ -565,12 +556,6 @@ class ColdSimulationCoordinator {
         }
     }
 
-    routeRows(state) {
-        if (this.stopping || !this.ready) return null;
-        const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
-        return this.economyRoutes.read(state.characterId, Trip.key(state), Trip.frame(state));
-    }
-
     requestEconomyRefresh(characterId) {
         const id = Number(characterId), state = LifeState.cachedState(id);
         if (!state || this.stopping || !this.ready) return false;
@@ -699,9 +684,6 @@ class ColdSimulationCoordinator {
                 if (held?.meetingToken === result.commandId && result.ok === false)
                     this.finishMeetingPreparation(result.characterId, held, null, Error(result.reason || 'trade_meeting_preparation_refused'));
             }
-            break;
-        case 'economy_route_result':
-            if (!this.stopping) this.economyRoutes.accept(payload);
             break;
         case 'ready':
             if (payload.phase === 'loaded') {
@@ -1420,8 +1402,6 @@ class ColdSimulationCoordinator {
                 timer = setTimeout(() => reject(new Error('cold_worker_accept_timeout')), Math.max(50, Number(timeoutMs) || 500));
                 this.waiters.set(msgId, { resolve, reject });
             });
-            // A cold handoff retires the visible owner's unconsumed route.
-            this.economyRoutes.forget(Number(state.characterId));
             const current = LifeState.cachedState(state.characterId);
             if (entry.wishAdvisory && this.worker === worker && this.workerEpoch === epoch
                 && current?.phase === 'cold')
@@ -2055,7 +2035,6 @@ class ColdSimulationCoordinator {
         EconomyContext.forget(id);
         if (!this.worker || !this.ready) return { ok: true, reason: 'worker_not_ready' };
         this.fencedBots.add(id);
-        this.economyRoutes.forget(id);
         DiagnosticConfig.developerDiagnostics && (this.counters.fences += 1);
         const worker = this.worker, epoch = this.workerEpoch;
         const msgId = this.post('fence', { characterId: id, deadlineAt: Date.now() + timeoutMs });
@@ -2188,7 +2167,6 @@ class ColdSimulationCoordinator {
         this.cancelSafety();
         Metrics.clearColdSafetyEpoch(epoch);
         this.economyDecisions.clear();
-        this.economyRoutes.clear();
         DiagnosticConfig.developerDiagnostics && (this.counters.workerExits += 1);
         this.tableChannel.detach(this);
         this.worker = null;
@@ -2232,7 +2210,6 @@ class ColdSimulationCoordinator {
         for (const held of this.commitAcknowledgements.values()) held.resolve(false);
         this.commitAcknowledgements.clear();
         this.economyDecisions.clear();
-        this.economyRoutes.clear();
         if (!this.started) return { stopped: true };
         this.stopping = true;
         if (this.pvpEncounterTimer) clearInterval(this.pvpEncounterTimer);
