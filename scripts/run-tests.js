@@ -392,6 +392,7 @@ const tests = [
     'tests/test_next_e2_craft_choices.js',
     'tests/test_cold_occupation_planner.js',
     'tests/test_worker_economy_publication.js',
+    'tests/test_near_decision_order.js',
     'tests/test_cold_occupation_sources.js',
     'tests/test_economy_commit_native.js',
     'tests/test_bot_spot_risk_baseline.js',
