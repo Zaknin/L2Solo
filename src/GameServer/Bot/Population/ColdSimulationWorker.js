@@ -577,16 +577,11 @@ function askWorkshop(state, timestamp, routeRows, caller, options = {}) {
     return occupationFor(state, timestamp, { ...options, routeRows, routeKey: EconomicTrip.key(state) });
 }
 // The step's build workshop: the held build's while its build keeps it
-// (EconomyContext.heldWorkshop), else asked. Sampled owners also ask fresh
-// and count whether the kept one was the same craft choice.
-async function lifecycleWorkshop(state, timestamp, deps) {
+// (EconomyContext.heldWorkshop), else asked.
+function lifecycleWorkshop(state, timestamp, deps) {
     const kept = EconomyContext.heldWorkshop(state, deps);
     if (!kept) return askWorkshop(state, timestamp, deps.routeRows, 'lifecycle');
     economyDiagnostics.count('workshop', 'kept', 'lifecycle');
-    if (economyDiagnostics.enabled(state.characterId)) {
-        const fresh = await occupationFor(state, timestamp, { routeRows: deps.routeRows, routeKey: EconomicTrip.key(state) });
-        economyDiagnostics.count('workshop', 'skip', fresh?.recipeId === kept.recipeId && fresh?.productId === kept.productId ? 'same' : 'new');
-    }
     return kept;
 }
 async function refreshCraftPacket(state, timestamp, refreshed) {
