@@ -632,7 +632,7 @@ module.exports = {
                     const trip = startShopping(session, bot, BotAI, 'Heading to town for my planned improvement.');
                     if (trip !== 'deferred' && trip !== false) return;
                 }
-                invoke('GameServer/Bot/Economy/BotImprovementService').reviewHot(session)
+                improvementService.reviewHot(session)
                     .catch(error => utils.infoWarn('BotImprovement', '%s', error.message));
             }
             if (economy.network.activity?.activity === 'shopping') {

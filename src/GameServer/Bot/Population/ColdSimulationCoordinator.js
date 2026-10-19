@@ -27,8 +27,11 @@ const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const CraftWorkshopService = invoke('GameServer/Bot/Economy/CraftWorkshopService');
 const AfkMarket = invoke('GameServer/Bot/Economy/BotAfkMarketService');
 const ColdBuffService = invoke('GameServer/Bot/Economy/ColdBuffService');
+const World = invoke('GameServer/World/World');
+const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
+const HotBoardReview = invoke('GameServer/Bot/Economy/HotBoardReviewService');
 const Protocol = require('./ColdSimulationProtocol');
-const { ColdEconomyDecisions, wireAdvisory, echoHolds } = require('./ColdEconomyDecision');
+const { ColdEconomyDecisions, wireAdvisory, echoHolds, compact } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
 const ColdStateDelta = require('./ColdStateDelta');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
@@ -111,16 +114,16 @@ class ColdSimulationCoordinator {
         this.economyRoutes = new (invoke('GameServer/Bot/Economy/EconomyRouteCache').EconomyRouteCache)({
             send: payload => !this.stopping && this.ready && !!this.post('economy_route_request', payload),
             evictable: id => {
-                const record = invoke('GameServer/World/World').registeredActorById(id);
+                const record = World.registeredActorById(id);
                 return !record || record.retired || record.session?.actor !== record.actor || record.session.aiActive !== true;
             },
-            prepared: id => invoke('GameServer/Bot/Economy/EconomyContext').forgetContext(id, 'state_publication')
+            prepared: id => EconomyContext.forgetContext(id, 'state_publication')
         });
         this.unsubscribeWishRemovals = LifeState.subscribePublications(packet => {
             if (packet.kind !== 'remove') return;
             this.economyDecisions.forget(packet.characterId);
             this.economyRoutes.forget(packet.characterId);
-            invoke('GameServer/Bot/Economy/EconomyContext').forget(packet.characterId);
+            EconomyContext.forget(packet.characterId);
         });
         this.seenOrder = [];
         this.waiters = new Map();
@@ -757,14 +760,14 @@ class ColdSimulationCoordinator {
                 // The body keeps the newest one it got: an older post's decision
                 // arriving after it is refused. It never authorizes native spending.
                 const id = Number(payload.characterId), state = LifeState.cachedState(id);
-                const session = invoke('GameServer/World/World').registeredActorById(id)?.session;
-                const decision = payload.economyDecision ? invoke('GameServer/Bot/Population/ColdEconomyDecision').compact(payload.economyDecision) : null;
+                const session = World.registeredActorById(id)?.session;
+                const decision = payload.economyDecision ? compact(payload.economyDecision) : null;
                 if (state?.phase !== 'hot' || !decision || !payload.near || !session?.actor) break;
                 if (Number(payload.near.nearSeq || 0) < Number(session.heldNearSeq || 0)) { this.nearDecisions.refused++; break; }
                 this.nearDecisions.accepted++;
                 DecisionEvents.receive(session, decision, payload.near);
                 this.economyDecisions.accept(id, decision, null, state);
-                if (decision.feasibility) invoke('GameServer/Bot/Economy/HotBoardReviewService').preparedOwner(id);
+                if (decision.feasibility) HotBoardReview.preparedOwner(id);
             } else if (payload.phase === 'economy_workshop_stale' && !this.stopping) {
                 this.economyDecisions.staleWorkshop(Number(payload.characterId),
                     { updatedAt: Number(payload.updatedAt), echo: payload.echo });
@@ -2049,7 +2052,7 @@ class ColdSimulationCoordinator {
     async fenceBot(characterId, timeoutMs = 500) {
         const id = Number(characterId);
         this.economyDecisions.fence(id);
-        invoke('GameServer/Bot/Economy/EconomyContext').forget(id);
+        EconomyContext.forget(id);
         if (!this.worker || !this.ready) return { ok: true, reason: 'worker_not_ready' };
         this.fencedBots.add(id);
         this.economyRoutes.forget(id);

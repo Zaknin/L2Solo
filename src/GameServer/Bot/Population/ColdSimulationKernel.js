@@ -887,11 +887,13 @@ class ColdSimulationKernel {
         const version = Number(this.versions.get(characterId) || 0) + 1;
         this.versions.set(characterId, version);
         // The bot's one record: { state, version, route, materialMemo,
-        // economyPending, economyPlanHash, wishAdvisory, published }. Every
-        // field but the state and version is this thread's own and survives a
-        // new state: the kept route (BotRoute.trip) until its step's drops,
-        // the material memo (partyRequestForPlan), the economy plan sent and
-        // its hash, the card it holds and the decision it published.
+        // economyPending, economyPlanHash, wishAdvisory, published, raiseSeq,
+        // nearRoute }. Every field but the state and version is this thread's
+        // own and survives a new state: the kept route (BotRoute.trip) until
+        // its step's drops, the material memo (partyRequestForPlan), the
+        // economy plan sent and its hash, the card it holds, the decision it
+        // published and, for a near bot, the last raise applied and the route
+        // rows of its last decision (ColdSimulationWorker nearEvents, publish).
         this.states.set(characterId, { route: null, ...current, state, version }, card);
         this.occupancy.update(state);
         this.decisionEvents?.ownerChanged(characterId, previousRecord, current);
