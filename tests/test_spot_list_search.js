@@ -19,6 +19,8 @@ const Spots = invoke('GameServer/Bot/Population/SpotProfiles');
 const IncomeRoute = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute');
 const GoalExecutor = invoke('GameServer/Bot/Goals/GoalExecutor');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const GearPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
 
 const at = 1800000000000;
 const mage = { classId: 12, level: 29, role: 'mage', maxHp: 592, maxMp: 932,
@@ -129,6 +131,18 @@ assert.equal(Spots.findForState(state, { ...options, hasRoom: () => true })?.id,
         assert.equal(elsewhere?.stats.travel.reason, 'return_after_market', 'a full saved spot: still a return trip');
         assert(Index.spotById(profiles, elsewhere.stats.travel.spotId) && elsewhere.stats.travel.spotId !== first.id,
             'a full saved spot: the return goes to another spot of the catalogue');
+
+        // No other spot to offer: the bot still goes home, the room is read
+        // again at arrival.
+        Spots.cache = [first];
+        // The remembered region name differs from the spot's, so the trip shows
+        // which of the two the destination was read from.
+        const forgetful = { ...shopping, stats: { ...shopping.stats,
+            marketReturn: { ...shopping.stats.marketReturn, regionName: 'Remembered ground' } } };
+        const alone = GoalExecutor.finishMarketVisit(forgetful, at);
+        assert.equal(alone?.stats.travel.reason, 'return_after_market', 'a full saved spot alone: still a return trip');
+        assert.equal(alone.stats.travel.spotId, first.id, 'a full saved spot and no other spot fits: the bot goes home');
+        assert.equal(alone.stats.travel.regionName, first.name, 'the saved spot itself is the destination');
     } finally { SpotService.spots = savedCatalogue; }
 }
 
@@ -208,6 +222,23 @@ Spots.cache = originalCache;
             'the bot\'s own spot is never full to it');
         assert.equal(Spots.findForState(bot, search(listed, ['a'], () => true))?.id, 'a',
             'a filter the caller passes is read instead of main\'s index');
+
+        // A party-wait search on main (PartyWaitFallback.spotFor, no filter
+        // passed) reads the same index: a full planned spot is no fallback,
+        // the level search picks another; one with room is the fallback.
+        const safeFallback = GearPlanner.safeFallbackForPlan;
+        try {
+            const waitingOn = (spotId) => {
+                GearPlanner.safeFallbackForPlan = () => ({ spotId, npcId: 321 });
+                search(listed, ['a']);
+                // No class in the stats: no matchup profile refuses a spot.
+                return PartyWaitFallback.spotFor({ ...bot, stats: { role: 'nuker', deaths: 0 } }, { status: 'active' }, listed,
+                    { excludedSpotIds: new Set(), timestamp: at })?.spot?.id;
+            };
+            assert.equal(waitingOn('c'), 'c', 'a planned fallback with room is taken');
+            const other = waitingOn('a');
+            assert(other && other !== 'a', 'a full planned fallback on main: the level search picks another spot');
+        } finally { GearPlanner.safeFallbackForPlan = safeFallback; }
     } finally {
         IncomeRoute.spotList = saved.spotList; Ground.evaluate = saved.evaluate; Spots.cache = saved.cache;
     }

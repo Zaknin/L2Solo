@@ -144,6 +144,14 @@ function roomFilterFor(index, spots, state) {
     return (spotId) => index.physicalCount(spotId, { excludeKeys: self }) + 1 <= spotRoom(spots, spotId);
 }
 
+// The room filter a search takes when its caller passes none: a solo search
+// on main reads main's world index (ROUTE-ROOM-4); the worker always passes
+// its own, and a party search has no filter (null).
+function defaultRoomFilter(state, mode, spots) {
+    return isMainThread && mode !== 'party'
+        ? roomFilterFor(BotLifeState.occupancyIndex(), spots, state) : null;
+}
+
 // A solo fallback search must not become a travel loop between comparable
 // camps: the bot keeps its current camp when it is one of the candidates.
 function currentSpotAmong(candidates, currentSpot, mustRelocate) {
@@ -239,8 +247,7 @@ const SpotProfiles = {
         // passes its own index's filter (options.hasRoom); a solo search on
         // main (market return, competition retreat, a command's trip) reads
         // main's world index (ROUTE-ROOM-4); a party search has no filter.
-        const hasRoom = options.hasRoom ?? (isMainThread && mode !== 'party'
-            ? roomFilterFor(BotLifeState.occupancyIndex(), profiles, state) : null);
+        const hasRoom = options.hasRoom ?? defaultRoomFilter(state, mode, profiles);
         const full = (spot) => {
             if (!hasRoom || (currentSpot && spot.id === currentSpot.id)
                 || hasRoom(spot.id)) return false;
@@ -407,6 +414,7 @@ const SpotProfiles = {
 SpotProfiles.spotHunters = spotHunters;
 SpotProfiles.spotRoom = spotRoom;
 SpotProfiles.roomFilterFor = roomFilterFor;
+SpotProfiles.defaultRoomFilter = defaultRoomFilter;
 
 module.exports = SpotProfiles;
 // A getter also sees replaced period catalogs and manually hydrated profiles;
