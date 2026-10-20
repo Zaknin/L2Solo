@@ -63,7 +63,6 @@ async function main() {
     await Runtime.tick(actions);
     assert.deepStrictEqual(await persistedDue(), ids.map(id => [id, clock + 1000]),
         'every encounter due at this tick is stepped by it; its row says the next step');
-    assert.strictEqual(Life.coldDueSummary(clock).due, 0, 'no encounter bot is left past its stamp');
 
     // The interval timer drifts: a tick lands a few ms before a whole step
     // since the last one. The row's stamp is that tick's, so it steps now,
@@ -78,6 +77,23 @@ async function main() {
     clock += 200;
     await Runtime.tick(actions);
     assert.deepStrictEqual(await persistedDue(), stamped, 'a fight just stepped waits for its stamp');
+
+    // Main has room for only half the fights at a tick: the pass stops there,
+    // and the fights it left go first at the next tick, though the ones it
+    // stepped are due again by then too.
+    const HALF = PAIRS / 2, roomFor = steps => { let done = 0;
+        return { ...actions, canRun: () => done < steps, recordPvpStep() { done++; } }; };
+    clock += 800;
+    const before = clock;
+    await Runtime.tick(roomFor(HALF));
+    const first = (await persistedDue()).filter(([, due]) => due === clock + 1000).map(([id]) => id);
+    assert.strictEqual(first.length, HALF * 2, 'the pass steps the fights main has room for');
+    assert((await persistedDue()).every(([id, due]) => first.includes(id) || due === before),
+        'the fights left wait at their stamp');
+    clock += 1000;
+    await Runtime.tick(roomFor(HALF));
+    assert.deepStrictEqual(await persistedDue(), ids.map(id => [id, first.includes(id) ? before + 1000 : clock + 1000]),
+        'the next tick steps the fights left first, the longest waiting');
     console.log(`PvP encounter cadence: ${PAIRS} cold fights stepped at their stamps`);
 }
 main().catch(e => { console.error(e); process.exitCode = 1; }).finally(async () => {

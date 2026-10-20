@@ -33,6 +33,7 @@ const HotBoardReview = invoke('GameServer/Bot/Economy/HotBoardReviewService');
 const Protocol = require('./ColdSimulationProtocol');
 const { ColdEconomyDecisions, echoHolds } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
+const { STEP_MS: PVP_STEP_MS } = require('./PvpEncounterBudget');
 const ColdStateDelta = require('./ColdStateDelta');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
 const { ColdSnapshotQueue } = require('./ColdSnapshotQueue');
@@ -305,7 +306,7 @@ class ColdSimulationCoordinator {
             LifeState.allStates(2000).forEach(s => encounters.register(s.stats?.pvpEncounter));
             this.pvpEncounterTimer = setInterval(() => {
                 encounters.tick(this.competitionActions)?.catch(error => this.recordError(error));
-            }, encounters.STEP_MS);
+            }, PVP_STEP_MS);
             this.reconcileTimer = setInterval(() => {
                 // The hunted bosses' rows: players engaging or the boss dying.
                 RaidEncounterScope.reviewBosses(BackgroundPartyState.raidBossKeys());

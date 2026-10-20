@@ -1,10 +1,14 @@
 const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 const { seeded } = require('../AI/TendencyRoll');
-const { STEP_MS } = require('./PvpEncounterBudget');
+const { STEP_MS, PASS_MS } = require('./PvpEncounterBudget');
+const Database = invoke('Database');
+const ColdPartyConflict = require('./ColdPartyConflict');
 // Only active encounters are indexed. No per-tick scan of the population.
 const encounters = new Map();
 const pending = new Set();
 let running = null;
+// The longest pass since the status line last read it (passPeak).
+let peak = { steps: 0, ms: 0 };
 function register(encounter) {
     if (encounter?.key) encounters.set(encounter.key, encounter);
 }
@@ -29,7 +33,7 @@ function restoreTargets(e, roster) {
     }
 }
 async function finish(e, actions, reason = 'pvp_interrupted') {
-    const result = await invoke('Database').endPvpEncounter(e.key, ids(e), reason);
+    const result = await Database.endPvpEncounter(e.key, ids(e), reason);
     for (const row of result.rows) {
         const state = actions.life.acceptLifecycleRow(row);
         actions.onState(state.characterId);
@@ -60,49 +64,66 @@ async function finish(e, actions, reason = 'pvp_interrupted') {
 // one, or its end.
 const dueAt = e => Math.min(e.expiresAt, e.stepAt + STEP_MS);
 // One pass per timer tick (STEP_MS) steps every fight whose turn has come,
-// the longest-waiting first, while main has room (canRun). A fight is due
-// from half a step before its stamp: the tick nearest the stamp steps it, as
-// the interval timer drifts by a few ms against the step times.
+// the longest-waiting first, while main has room (canRun) and the pass is
+// within its wall budget (PASS_MS); what is left goes first next tick, as its
+// turn is older. The pass runs cooperatively: after a slice of DB work it
+// yields to the event loop, so timers, the player and other DB jobs run
+// between steps and canRun sees them. A fight is due from half a step before
+// its stamp: the tick nearest the stamp steps it, as the interval timer
+// drifts by a few ms against the step times.
 function tick(actions) {
     if (running || actions.stopping || actions.running || !actions.canRun()) return running;
-    running = (async () => {
-        const life = actions.life;
-        for (const e of [...encounters.values()].sort((a, b) => dueAt(a) - dueAt(b))) {
-            if (actions.stopping || !actions.canRun()) break;
-            if (pending.has(e.key) || encounters.get(e.key) !== e) continue;
-            if (e.expiresAt <= Date.now()) { await finish(e, actions, 'pvp_expired'); continue; }
-            const states = ids(e).map(id => life.cachedState(id));
-            if (states.some(s => snapshot(s)?.key !== e.key || !(s.vitals?.hp > 0))) {
-                await finish(e, actions); continue;
-            }
-            if (states.every(s => s.phase === 'hot')) continue;
-            if (states.some(s => s.phase !== 'cold') || Date.now() - e.stepAt < STEP_MS / 2) continue;
-            pending.add(e.key);
-            try {
-                const at = Date.now();
-                const participant = side => {
-                    const s = life.cachedState(side.principalId), p = side.partyId ? actions.parties.find(side.partyId) : null;
-                    return { id: s.characterId, partyId: side.partyId, size: side.memberIds.length,
-                        revision: Number(s.simulation?.revision || 0), memoryRevision: actions.memory.revision(s.characterId),
-                        partyRevision: p?.revision };
-                };
-                const event = { key: e.key, at, pressure: 3, spotId: e.spotId, npcId: e.npcId,
-                    actor: participant(e.sides[0]), peer: participant(e.sides[1]), action: e.reason === 'revenge' ? 'revenge' : 'contest', pvpIntent: true, willing: e.willing };
-                const result = await require('./ColdPartyConflict').apply({ ...actions, event, resume: e,
-                    incrementalPvp: true, onEncounter: register, waitMs: 15000, cooldownMs: 600000,
-                    rng: seeded(`${e.key}:${e.sequence}`) });
-                if (result.ok) {
-                    actions.recordPvpStep(result);
-                    if (!result.encounter) encounters.delete(e.key);
-                } else {
-                    actions.report && (actions.report.lastPvpStepFailure = { key: e.key, at, reason: result.reason });
-                    if (result.reason === 'encounter_separated_or_protected') await finish(e, actions, 'pvp_separated_or_protected');
-                    else if (e.expiresAt <= Date.now()) await finish(e, actions, 'pvp_expired');
-                }
-            } finally { pending.delete(e.key); }
-        }
-    })().finally(() => { running = null; });
+    running = Database.cooperatively(() => pass(actions)).finally(() => { running = null; });
     return running;
 }
+async function pass(actions) {
+    const life = actions.life, startedAt = Date.now();
+    let steps = 0;
+    for (const e of [...encounters.values()].sort((a, b) => dueAt(a) - dueAt(b))) {
+        if (actions.stopping || !actions.canRun() || Date.now() - startedAt >= PASS_MS) break;
+        if (pending.has(e.key) || encounters.get(e.key) !== e) continue;
+        if (e.expiresAt <= Date.now()) { steps++; await finish(e, actions, 'pvp_expired'); continue; }
+        const states = ids(e).map(id => life.cachedState(id));
+        if (states.some(s => snapshot(s)?.key !== e.key || !(s.vitals?.hp > 0))) {
+            steps++; await finish(e, actions); continue;
+        }
+        if (states.every(s => s.phase === 'hot')) continue;
+        if (states.some(s => s.phase !== 'cold') || Date.now() - e.stepAt < STEP_MS / 2) continue;
+        steps++;
+        pending.add(e.key);
+        try {
+            const at = Date.now();
+            const participant = side => {
+                const s = life.cachedState(side.principalId), p = side.partyId ? actions.parties.find(side.partyId) : null;
+                return { id: s.characterId, partyId: side.partyId, size: side.memberIds.length,
+                    revision: Number(s.simulation?.revision || 0), memoryRevision: actions.memory.revision(s.characterId),
+                    partyRevision: p?.revision };
+            };
+            const event = { key: e.key, at, pressure: 3, spotId: e.spotId, npcId: e.npcId,
+                actor: participant(e.sides[0]), peer: participant(e.sides[1]), action: e.reason === 'revenge' ? 'revenge' : 'contest', pvpIntent: true, willing: e.willing };
+            const result = await ColdPartyConflict.apply({ ...actions, event, resume: e,
+                incrementalPvp: true, onEncounter: register, waitMs: 15000, cooldownMs: 600000,
+                rng: seeded(`${e.key}:${e.sequence}`) });
+            if (result.ok) {
+                actions.recordPvpStep(result);
+                if (!result.encounter) encounters.delete(e.key);
+            } else {
+                actions.report && (actions.report.lastPvpStepFailure = { key: e.key, at, reason: result.reason });
+                if (result.reason === 'encounter_separated_or_protected') await finish(e, actions, 'pvp_separated_or_protected');
+                else if (e.expiresAt <= Date.now()) await finish(e, actions, 'pvp_expired');
+            }
+        } finally { pending.delete(e.key); }
+    }
+    const ms = Date.now() - startedAt;
+    if (ms > peak.ms) peak = { steps, ms };
+}
 async function stop() { if (running) await running; }
-module.exports = { encounters, pending, register, snapshot, active, ids, sessions, restoreTargets, tick, stop, STEP_MS };
+// The status line's numbers: the fights running now, and the steps and wall
+// ms of the longest pass since the last read (its only caller is the periodic
+// goal line, so a read starts the next window).
+function passPeak() {
+    const read = { live: encounters.size, ...peak };
+    peak = { steps: 0, ms: 0 };
+    return read;
+}
+module.exports = { encounters, pending, register, snapshot, active, ids, sessions, restoreTargets, tick, stop, passPeak };
