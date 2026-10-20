@@ -224,11 +224,9 @@ assert.strictEqual(proposalTravel.activity, 'traveling');
 assert.deepStrictEqual(proposalTravel.simulation, { revision: 1 });
 assert.strictEqual(proposalTravel.stats.forcedMarketCleanup.cleanupReason, 'inventory_capacity',
     'worker cleanup travel must carry durable intent through arrival');
-assert.deepStrictEqual(proposalTravel.cleanup, {
-    itemCount: need.slots,
-    npcOnlySlots: need.npcOnlySlots,
-    cleanupReason: 'inventory_capacity'
-}, 'forced cleanup keeps the independently evaluated physical bag intent');
+assert.strictEqual(proposalTravel.cleanup.itemCount, need.slots,
+    'forced cleanup keeps the independently evaluated physical bag intent');
+assert.strictEqual(proposalTravel.cleanup.cleanupReason, 'inventory_capacity');
 
 const staleRecoverIntent = PopulationService.marketListingIntent({
     ...proposalTravel,

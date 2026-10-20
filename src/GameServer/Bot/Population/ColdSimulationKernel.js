@@ -22,6 +22,7 @@ const { pressureFor } = require('./PopulationPressure');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 const ColdEconomyDecision = require('./ColdEconomyDecision');
 const BotErrands = require('./BotErrands');
+const PartyMarketBreak = require('./PartyMarketBreak');
 const { eligible: eligibleBuyer } = require('../Economy/MarketBuyerWaiters');
 const { SpotOccupancyIndex, stateKey } = require('./SpotOccupancyIndex');
 const C4Unseal = require('../../Items/C4Unseal');
@@ -310,7 +311,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
 
 // Resolved on first use, like the other lazy dependencies of the worker:
 // require() inside lifecycleKind ran per inventory item on every row.
-let PartyMarketBreak, ClanPartyDuty, BotCrystallization;
+let ClanPartyDuty, BotCrystallization;
 
 // A near bot's record (hot, nearSeq: its body's last post) against a hot row
 // without a newer post number: a writer's copy of the cached row
@@ -343,7 +344,7 @@ function lifecycleKind(state = {}, facts = NO_FACTS) {
     // any, is selected on the next state after the transition is durable.
     if (state.activity === 'traveling' || state.activity === 'dead'
         || (state.activity === 'resting' && Number(stats.restUntil || 0) > 0)) return 'resolver';
-    if ((PartyMarketBreak ||= require('./PartyMarketBreak')).ready(state)) return 'command';
+    if (PartyMarketBreak.ready(state)) return 'command';
     if (stats.partyMarketReturn && ['shopping', 'merchant'].includes(state.activity)) return 'command';
     // Finish town services before waiting for a clan hunt. The pure shopping
     // resolver only advances its deadline and cannot buy, sell or leave town.
@@ -2015,6 +2016,10 @@ class ColdSimulationKernel {
                 : null;
             if (!this.resolverSourceCurrent(source)) return;
             const projectedState = projection?.state || projection;
+            // The forced cleanup on the fight's result, over a trip this step
+            // started (main starts the cleanup trip).
+            const cleanupNeed = projectedState ? PartyMarketBreak.forcedCleanupNeed(
+                PartyMarketBreak.withoutStartedTrip(active.state, projectedState), timestamp) : null;
             const priority = playerWaitingTransition(active.state, null, this) ? 'P0'
                 : projection?.durable ? 'P1' : priorityForResult(active.state, result);
             const proposal = {
@@ -2031,6 +2036,7 @@ class ColdSimulationKernel {
                 economyEdges: Number(projection?.economyEdges || 0),
                 ...(projection?.economyPlan ? { economyPlan: projection.economyPlan } : {}),
                 ...(projection?.buffOffer ? { buffOffer: projection.buffOffer } : {}),
+                ...(cleanupNeed ? { cleanupNeed } : {}),
                 result: proposalResult(result),
                 options: { allowLifecycle: true, allowParty: !!active.state.stats?.tradeMeeting }
             };

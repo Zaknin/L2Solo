@@ -1499,17 +1499,11 @@ class ColdSimulationCoordinator {
         // The worker recorded this hunt's income: the main thread's level-band
         // table (the hour value of bots without a sample) learns it here.
         HuntEfficiency.observe(resolvedState);
-        // An atomic group commits all members or none: as before, its cleanup
-        // is decided on the step's base state, so a member its party releases in
-        // this commit does not fail the whole group.
-        const cleanupState = this.population?.prepareInventoryCleanupProposal?.(
-            proposal.atomicGroup ? stepState : resolvedState,
-            timestamp,
-            stepState.simulation,
-            stepState
-        );
+        // The worker decided the forced cleanup on this solo step (cleanupNeed);
+        // main only starts the trip.
+        const cleanupState = proposal.cleanupNeed ? this.population?.prepareInventoryCleanupProposal?.(
+            resolvedState, timestamp, stepState.simulation, stepState, proposal.cleanupNeed) : null;
         if (cleanupState) {
-            if (proposal.atomicGroup) return null;
             proposal.inventoryCleanupForced = true;
             delete cleanupState.cleanup;
             return cleanupState;

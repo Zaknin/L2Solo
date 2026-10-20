@@ -27,7 +27,6 @@ const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const ColdMarketListingService = invoke('GameServer/Bot/Economy/ColdMarketListingService');
 const BotWarehouse = invoke('GameServer/Bot/Economy/BotWarehouseService');
 const PersistentStateRetention = invoke('GameServer/Bot/Population/PersistentStateRetention');
-const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const PartyComposition = invoke('GameServer/Bot/Population/BackgroundPartyComposition');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
@@ -54,7 +53,6 @@ const PartyGoalPolicy = invoke('GameServer/Bot/Population/PartyGoalPolicy');
 const CraftMaterialParty = invoke('GameServer/Bot/Population/CraftMaterialParty');
 const RequiredPartyFormation = invoke('GameServer/Bot/Population/RequiredPartyFormation');
 const BotErrands = invoke('GameServer/Bot/Population/BotErrands');
-const CLEANUP_BUSY_FLAGS = ['marketReturn'];
 const ACTIVATION_BUSY_FLAGS = ['supplyErrand'];
 const BackgroundPartyLifecycle = invoke('GameServer/Bot/Population/BackgroundPartyLifecycle');
 const ClanPartyCapacity = invoke('GameServer/Bot/Population/ClanPartyCapacity');
@@ -455,10 +453,7 @@ async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
             ...member, stats: { ...member.stats, equipmentPlan: costedPlan }
         }, 'clan_material_farm_cost') || member;
         const cachedGoal = GoalService.snapshot(current.characterId);
-        const memberFloor = SurvivalFloor.forState(current, timestamp);
-        const cleanupNeeded = memberFloor?.action === 'unload'
-            ? { ...memberFloor, reason: memberFloor.reason === 'no_slot' ? 'inventory_capacity' : 'inventory_overweight' }
-            : ItemDisposition.inventoryCleanupNeed(current, { now: timestamp });
+        const cleanupNeeded = PartyMarketBreak.cleanupNeed(current, timestamp);
         const due = current !== member || !cachedGoal?.current
             || Number(cachedGoal.current.nextReviewAt || 0) <= timestamp;
         const goalSnapshot = due || cleanupNeeded
@@ -570,29 +565,15 @@ async function resumePartyMarketBreak(state, timestamp) {
     return { ok: !!saved, state: saved || state, reason: 'clan_party_return_wait' };
 }
 
-function inventoryCleanupGoal(state, timestamp = Date.now()) {
-    if (!state || state.phase !== 'cold' || state.party?.partyId || state.partyId
-        || state.stats?.travel || BotErrands.busyWith(state, CLEANUP_BUSY_FLAGS)
-        || ['traveling', 'shopping', 'merchant', 'crafting', 'dead', 'pk_hunting'].includes(state.activity)) return null;
-    const floor = SurvivalFloor.forState(state, timestamp);
-    const need = floor?.action === 'unload'
-        ? { ...floor, npcOnlySlots: ItemDisposition.npcOnlySlotCount(state),
-            reason: floor.reason === 'no_slot' ? 'inventory_capacity' : 'inventory_overweight' }
-        : ItemDisposition.inventoryCleanupNeed(state, { now: timestamp });
+// need: the cold worker's verdict on this state (a far step's proposal);
+// the command path decides here.
+function inventoryCleanupGoal(state, timestamp = Date.now(), need = PartyMarketBreak.forcedCleanupNeed(state, timestamp)) {
     if (!need) return null;
     return { ...invoke('GameServer/Bot/Goals/NeedsEvaluator').cleanupGoal(need), status: 'active' };
 }
 
-// A forced cleanup decided over a resolve outranks a trip that resolve
-// started (route, karma), as it did when it was decided before the fight;
-// the fight's outcome is kept.
-function withoutStartedTrip(before, resolved) {
-    if (before.activity === 'traveling' || resolved.activity !== 'traveling') return resolved;
-    return { ...resolved, activity: before.activity, stats: { ...(resolved.stats || {}), travel: null } };
-}
-
-function inventoryCleanupTravelState(state, timestamp = Date.now(), simulation = null) {
-    const cleanupGoal = inventoryCleanupGoal(state, timestamp);
+function inventoryCleanupTravelState(state, timestamp = Date.now(), simulation = null, need = undefined) {
+    const cleanupGoal = inventoryCleanupGoal(state, timestamp, need);
     if (!cleanupGoal) return null;
     const travelState = GoalExecutor.beginMarketTravel(state, cleanupGoal, timestamp);
     if (!travelState) return null;
@@ -3013,7 +2994,7 @@ const PopulationService = {
                 && (canResumeAffordableMarketPlan(updatedState)
                     || canResumeWarehouseMarketSale(updatedState));
             const cleanupTrip = cleanupAfterFight
-                ? inventoryCleanupTravelState(withoutStartedTrip(state, updatedState), startedAt)
+                ? inventoryCleanupTravelState(PartyMarketBreak.withoutStartedTrip(state, updatedState), startedAt)
                 : null;
             if (cleanupTrip) delete cleanupTrip.cleanup;
             const marketHandoff = cleanupTrip
@@ -3431,8 +3412,9 @@ const PopulationService = {
         }
     },
 
-    prepareInventoryCleanupProposal(state, timestamp = Date.now(), simulation = null, before = state) {
-        return inventoryCleanupTravelState(withoutStartedTrip(before, state), timestamp, simulation);
+    // need: the worker's forced cleanup verdict the proposal carries (cleanupNeed).
+    prepareInventoryCleanupProposal(state, timestamp = Date.now(), simulation = null, before = state, need = undefined) {
+        return inventoryCleanupTravelState(PartyMarketBreak.withoutStartedTrip(before, state), timestamp, simulation, need);
     },
 
     reserveCompetitionPartySlot() {
