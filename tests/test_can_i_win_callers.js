@@ -71,6 +71,9 @@ assert.strictEqual(dispute(solo(40), solo(40), calm, { ready: true, personal: { 
         'cold refresh: written since the scan, the carried unwillingness is outmatched');
     assert.strictEqual(decides, 1, 'cold refresh: only the written pair is decided again');
     Policy.decide = decide;
+    const unloaded = { ...ctx, memory: { assess: () => ({ ready: false }), revision: () => undefined } };
+    assert.deepStrictEqual(Refresh.refresh(event([false, true], 1), unloaded, Date.now()), { reason: 'memory_unavailable' },
+        'cold refresh: main without the bot\'s memory does not keep the verdict');
     assert.deepStrictEqual(Refresh.refresh(event([true, true]), ctx, Date.now()), { reason: 'decision_changed', decision: 'yield', recomputed: true },
         'cold refresh: carried willingness, four hidden levels above do not matter');
     const Tendency = require('../src/GameServer/Bot/AI/TendencyRoll');
