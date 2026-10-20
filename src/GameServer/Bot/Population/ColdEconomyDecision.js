@@ -448,7 +448,8 @@ function view(state, decision, deps = {}, preparedBase = null) {
     for (const key of basicsKeys) if (!Object.hasOwn(own, key)) lazy(key, () => basics()[key]);
     // Defined after the assign: Object.assign would invoke a getter in the literal.
     Object.assign(economy, own);
-    lazy('gapHorizonHours', gapHorizonHours);
+    // Kept on first read: a spread or a second read does not compute it again.
+    lazy('gapHorizonHours', () => (economy.gapHorizonHours = gapHorizonHours()));
     return economy;
 }
 // The view main reads for a bot that is not far (a near body's card, or none
