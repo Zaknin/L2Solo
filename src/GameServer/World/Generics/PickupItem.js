@@ -46,7 +46,15 @@ function pickupItem(session, actor, item) {
 
     let scheduled = 0;
     try {
-        session.dataSendToMeAndOthers(ServerResponse.deleteOb(id), claimedItem);
+        // Every client that got SpawnItem keeps the object until told, wherever
+        // its player stands now; a range broadcast left ghosts to those who walked away.
+        const deletePacket = ServerResponse.deleteOb(id);
+        const viewers = claimedItem.viewers || [];
+        viewers.forEach((viewer) => {
+            if (viewer.actor?.fetchIsOnline?.() === true) viewer.dataSendToMe(deletePacket);
+        });
+        if (!this.isBotSession(session) && !viewers.includes(session)) session.dataSendToMe(deletePacket);
+        claimedItem.viewers = null;
         allocations.forEach((entry, index) => {
             const award = this.purchaseItem(entry.session, selfId, entry.amount, selfId === 57 ? {} : {
                 enchant: claimedItem.fetchEnchantLevel?.() ?? 0,

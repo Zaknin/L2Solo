@@ -5,6 +5,7 @@ require('../src/Global');
 const pickupItem = invoke('GameServer/World/Generics/PickupItem');
 const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
 const ConsoleText = invoke('GameServer/ConsoleText');
+const World = invoke('GameServer/World/World');
 
 const originalAdenaAllocations = PartyCompanionService.adenaAllocations;
 const originalTransmit = ConsoleText.transmit;
@@ -13,18 +14,17 @@ try {
     const pickupMessages = [];
     const deletedObjects = [];
     const purchases = [];
+    const isDeleteObject = (packet) => Buffer.isBuffer(packet) && packet[0] === 0x12;
     const playerSession = {
         accountId: 'player',
-        dataSendToMe(packet) { pickupMessages.push({ session: this, packet }); },
-        dataSendToMeAndOthers(packet, item) { deletedObjects.push({ session: this, packet, item }); }
+        dataSendToMe(packet) {
+            if (isDeleteObject(packet)) deletedObjects.push({ session: this, id: packet.readInt32LE(1) });
+            else pickupMessages.push({ session: this, packet });
+        }
     };
-    const botSession = {
-        accountId: 'bot',
-        dataSendToMe(packet) { pickupMessages.push({ session: this, packet }); },
-        dataSendToMeAndOthers(packet, item) { deletedObjects.push({ session: this, packet, item }); }
-    };
-    playerSession.actor = { backpack: {} };
-    botSession.actor = { backpack: {} };
+    const botSession = { accountId: 'bot_pickup', botSession: true, dataSendToMe() {} };
+    playerSession.actor = { backpack: {}, fetchIsOnline: () => true };
+    botSession.actor = { backpack: {}, fetchIsOnline: () => true };
     const groundAdena = {
         fetchId: () => 700001,
         fetchSelfId: () => 57,
@@ -32,6 +32,7 @@ try {
     };
     const world = {
         items: { spawns: [groundAdena] },
+        isBotSession: World.isBotSession,
         purchaseItem(session, selfId, amount) { purchases.push({ session, selfId, amount }); }
     };
 
@@ -44,7 +45,7 @@ try {
     const playerActor = playerSession.actor;
     playerSession.actor = null;
     assert.strictEqual(pickupItem.call(world, playerSession, playerActor, groundAdena), false);
-    playerSession.actor = { backpack: {} };
+    playerSession.actor = { backpack: {}, fetchIsOnline: () => true };
     assert.strictEqual(pickupItem.call(world, playerSession, playerActor, groundAdena), false, 'a replaced actor must not collect an old pickup');
     playerSession.actor = playerActor;
     playerActor.isDead = () => true;
@@ -64,12 +65,30 @@ try {
         purchases.map(({ session, selfId, amount }) => ({ accountId: session.accountId, selfId, amount })),
         [
             { accountId: 'player', selfId: 57, amount: 20 },
-            { accountId: 'bot', selfId: 57, amount: 20 }
+            { accountId: 'bot_pickup', selfId: 57, amount: 20 }
         ],
         'a 40 Adena party drop must produce one 20/20 allocation, not two duplicate allocations'
     );
     assert.strictEqual(pickupMessages.length, 2, 'each recipient must see one pickup message only');
-    assert.strictEqual(deletedObjects.length, 1, 'the ground object deletion must be broadcast only by the winning pickup');
+    assert.deepStrictEqual(deletedObjects, [{ session: playerSession, id: 700001 }],
+        'the picking player must get one DeleteObject, sent only by the winning pickup');
+
+    // The player saw the drop, then walked beyond the 6000 visibility range;
+    // a bot picks the item up and the player's client must still drop the object.
+    deletedObjects.length = 0;
+    const farAdena = {
+        fetchId: () => 700003,
+        fetchSelfId: () => 57,
+        fetchAmount: () => 10,
+        viewers: [playerSession]
+    };
+    playerActor.fetchLocX = () => 90000;
+    playerActor.fetchLocY = () => 0;
+    world.items.spawns.push(farAdena);
+    PartyCompanionService.adenaAllocations = () => [{ session: botSession, amount: 10 }];
+    assert.strictEqual(pickupItem.call(world, botSession, botSession.actor, farAdena), true, 'the bot must claim the ground Adena');
+    assert.deepStrictEqual(deletedObjects, [{ session: playerSession, id: 700003 }],
+        'a player who saw the drop must get one DeleteObject even out of range when a bot picks it up');
 
     const groundSaber = {
         fetchId: () => 700002,

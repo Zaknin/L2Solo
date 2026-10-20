@@ -223,6 +223,8 @@ function select(session, actor, data) {
                 }
             }).catch(() => {
                 utils.infoWarn('GameServer', 'unknown World Id %d', data.id);
+                // The C4 client waits for an answer to Action; without one the player freezes.
+                session.dataSendToMe(ServerResponse.actionFailed());
             });
         });
     });

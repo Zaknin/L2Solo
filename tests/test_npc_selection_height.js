@@ -6,7 +6,7 @@ const World = invoke('GameServer/World/World');
 const Manager = invoke('GameServer/Bot/BotManager');
 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const Generics = invoke('GameServer/Actor/Generics');
-const original = { fetchNpc: World.fetchNpc, sessions: Manager.sessions,
+const original = { fetchNpc: World.fetchNpc, items: World.items, user: World.user, sessions: Manager.sessions,
     findProjection: AfkTrade.findProjection, attackRequest: Generics.attackRequest };
 
 (async () => {
@@ -39,8 +39,23 @@ const original = { fetchNpc: World.fetchNpc, sessions: Manager.sessions,
             }
         }
         assert.equal(attacks, 3, 'Player double clicks must still attack; repeated bot selection must not');
+
+        // An id no lookup knows (a ground item already picked up, a door id):
+        // the C4 client waits for an answer to Action and freezes without one.
+        World.fetchNpc = async () => { throw new Error('npc_not_found'); };
+        World.items = { spawns: [] };
+        World.user = { sessions: [], revision: 0 };
+        const clicker = { destId: null, fetchId: () => 2004243, fetchDestId() { return this.destId; },
+            setDestId(id) { this.destId = id; } };
+        const clickPackets = [];
+        select({ actor: clicker, accountId: 'player_ghost', dataSendToMe(packet) { clickPackets.push(packet); } },
+            clicker, { id: 700009 });
+        for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(clickPackets.map(packet => packet[0]), [0x25], 'A click on an unknown id must answer ActionFailed');
     } finally {
         World.fetchNpc = original.fetchNpc;
+        World.items = original.items;
+        World.user = original.user;
         Manager.sessions = original.sessions;
         AfkTrade.findProjection = original.findProjection;
         Generics.attackRequest = original.attackRequest;
