@@ -3,6 +3,7 @@
 const Rules = require('../../AfkTrade/BoardRules');
 const Places = require('./ShopPlaces');
 const Funding = require('./PurchaseFunding');
+const { withinCap } = require('./BuyAdPolicy');
 const { marketBuyStoreTitle } = require('./MarketStoreTitle');
 const AfkTradeService = invoke('GameServer/AfkTrade/AfkTradeService');
 const BotImprovementService = invoke('GameServer/Bot/Economy/BotImprovementService');
@@ -15,7 +16,7 @@ const key = line => `${Number(line.selfId)}:${Number(line.enchant || 0)}`;
 function sameBuyOrder(held, lines) {
     return held.length === lines.length && held.every(line => lines.some(wanted => key(wanted) === key(line)
         && Number(line.count) === Number(wanted.count)
-        && (!Number.isFinite(wanted.purchaseCap) || Number(line.price) <= wanted.purchaseCap)));
+        && withinCap(line.price, wanted.purchaseCap)));
 }
 
 // The wish queue already ordered and priced these bids. Allocate custody;

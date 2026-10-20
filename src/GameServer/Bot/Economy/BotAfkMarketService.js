@@ -465,7 +465,7 @@ async function publishBuyAds(ownerId, ads, lines, town, expectedAuthority = null
     for (const ad of ads) if (ad.town === town) for (const line of ad.lines || []) {
         const wanted = lines.find(row => Number(row.selfId) === Number(line.selfId)
             && Number(row.enchant || 0) === Number(line.enchant || 0));
-        if (!Number.isFinite(wanted?.purchaseCap) || !(line.price > wanted.purchaseCap) || !line.pricing) continue;
+        if (require('./BuyAdPolicy').withinCap(line.price, wanted?.purchaseCap) || !line.pricing) continue;
         reprices.push({ recordId: ad.id, lineId: line.id, selfId: line.selfId, expectedRevision: ad.revision,
             previousPricing: { ...line.pricing }, price: wanted.price, pricing: { ...line.pricing, price: wanted.price } });
     }

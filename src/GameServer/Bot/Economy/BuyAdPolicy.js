@@ -32,7 +32,7 @@ function retainedLines(state, lines, owned, town) {
     for (const line of lines) {
         const previous = owned.find(row => ['buy_ad', 'shop'].includes(row.kind) && row.storeType === 3 && row.town === town
             && Number(row.selfId) === Number(line.selfId) && Number(row.enchant || 0) === Number(line.enchant || 0));
-        const price = previous && (!Number.isFinite(line.purchaseCap) || Number(previous.price) <= line.purchaseCap)
+        const price = previous && withinCap(previous.price, line.purchaseCap)
             ? Number(previous.price) : Number(line.price);
         const available = Math.min(line.intent ? Infinity : money, PurchaseFunding.spendable(state, 0,
             { ...(line.intent ? { r: line.intent.valueRate } : { itemId: line.selfId }), survivalCost: line.survivalCost }));
@@ -160,4 +160,9 @@ function linesFor(state, goal, { money = Infinity, watchList, ...options } = {})
     return [];
 }
 
-module.exports = { survivalCost, goalMoney, bidFor, linesFor, retainedLines };
+// A held bid price stays while within the prepared purchase cap (no cap = any).
+function withinCap(price, cap) {
+    return !Number.isFinite(cap) || Number(price) <= cap;
+}
+
+module.exports = { survivalCost, goalMoney, bidFor, linesFor, retainedLines, withinCap };
