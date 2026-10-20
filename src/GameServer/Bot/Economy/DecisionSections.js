@@ -449,11 +449,11 @@ function events(before, after, escrow = 0, leaf = null) {
 // outputs are not inputs): the trip the leaf ordered under way (to its
 // hunting spot arriving to hunt, or to its town), or the arrival where it
 // led (its hunting spot, hunting or resting there; else its own activity).
-// The route's detour around the leaf's full hunting spot (BotRoute.trip)
-// stands in for it, unless the leaf hunts a material at its monster: the
-// trip names the leaf's spot (travel.leafSpotId), the arrival keeps the pair
-// leaf spot + ground reached (stats.standIn, BackgroundResolver.resolveTravel),
-// the leaf's own arrival while the bot stands on that ground.
+// The route's detour around the leaf's full hunting spot stands in for it
+// (BotRoute.trip decides which trip is one): the trip names the leaf's spot
+// (travel.leafSpotId), the arrival keeps the pair leaf spot + ground reached
+// (stats.standIn, BackgroundResolver.resolveTravel), the leaf's own arrival
+// while the bot stands on that ground.
 // Death, recall, a party pull, a flight or a yield are none of these and
 // stay events. Read by the held build's verdict and by the far step's round
 // check (factEvents' planned); its field-trip clause is
@@ -464,7 +464,7 @@ function occupationPlanned(state, leaf) {
     if (state.activity === 'traveling') {
         const travel = state.stats?.travel;
         if (!travel) return false;
-        return hunt && leaf.spotId != null ? (ownSpot(travel.spotId, leaf) || detourFor(travel.leafSpotId, leaf))
+        return hunt && leaf.spotId != null ? (ownSpot(travel.spotId, leaf) || ownSpot(travel.leafSpotId, leaf))
             && travel.arrivalActivity === 'hunting' && travel.townName == null
             : leaf.town != null && travel.townName != null && String(travel.townName) === String(leaf.town);
     }
@@ -476,15 +476,10 @@ function occupationPlanned(state, leaf) {
 function ownSpot(spotId, leaf) {
     return spotId != null && String(spotId) === String(leaf.spotId);
 }
-// A detour named for the leaf's spot (the trip's mark, the pair's leaf).
-function detourFor(spotId, leaf) {
-    // lazy: cycle ColdEconomyDecision requires this module at its top.
-    return ownSpot(spotId, leaf) && !invoke('GameServer/Bot/Population/ColdEconomyDecision').materialHunt(leaf);
-}
-// The bot stands on the ground its detour reached.
+// The bot stands on the ground its detour for the leaf's spot reached.
 function standsIn(state, leaf) {
     const pair = state.stats?.standIn;
-    return pair?.ground != null && String(pair.ground) === String(state.spotId) && detourFor(pair.leaf, leaf);
+    return pair?.ground != null && String(pair.ground) === String(state.spotId) && ownSpot(pair.leaf, leaf);
 }
 // One semantic comparison for state publication and the diagnostic event gate.
 // A reader supplies the baseline facts; money keeps its own soft verdict.

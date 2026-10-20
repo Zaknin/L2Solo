@@ -5,7 +5,7 @@
 // When X has no room, the route sends the bot to another spot Y: that detour
 // stands in for X (the pair leaf X, ground Y) while the bot stays on Y. A
 // material hunt, a flight (death pressure), an X the bot avoids (a backoff)
-// and a spot change without a trip are no stand-in: the move is an event.
+// and a spot change without a trip (or back) are no stand-in: the move is an event.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -31,6 +31,7 @@ async function run() {
     const { beginHuntingTrip } = invoke('GameServer/Bot/Population/HuntingTravel');
     const Resolver = invoke('GameServer/Bot/Population/BackgroundResolver');
     const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+    const Life = invoke('GameServer/Bot/Population/BotLifeState');
     Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(() => null, () => true);
     generation = Generation.metadata();
@@ -109,11 +110,17 @@ async function run() {
         assert.equal(verdict(arrived), true, 'the arrival at the stand-in spot keeps the decision');
         assert.deepEqual(round(routed, traveling), [], 'the round that starts the detour raises nothing');
         assert.deepEqual(round(arrived, arrived), [], 'a round on the stand-in spot raises nothing');
-        // The same moves under a leaf that hunts a material at its monster:
-        // not its own trip or arrival (the verdict's occupation reading).
+        // The same detour under a leaf that hunts a material at its monster
+        // (only that monster brings it in): the route names no stand-in, so
+        // neither the trip nor its arrival is the leaf's own.
         const material = { ...leaf, itemId: 1864, amount: 5 };
-        assert.equal(Sections.occupationPlanned(traveling, material), false, 'a material hunt\'s detour trip is an event');
-        assert.equal(Sections.occupationPlanned(arrived, material), false, 'a material hunt\'s stand-in arrival is an event');
+        const materialRoute = BotRoute.trip({}, routed, material, { spots, timestamp: T, hasRoom: full(X) });
+        assert(materialRoute?.needed && String(materialRoute.spotId) !== String(X), 'fixture: the material hunt detours too');
+        const materialTrip = beginHuntingTrip(routed, materialRoute, T);
+        const materialArrived = { ...materialTrip, ...Resolver.resolveSolo({ state: materialTrip,
+            timestamp: materialTrip.stats.travel.arrivalAt }).patch };
+        assert.equal(Sections.occupationPlanned(materialTrip, material), false, 'a material hunt\'s detour trip is an event');
+        assert.equal(Sections.occupationPlanned(materialArrived, material), false, 'a material hunt\'s detour arrival is an event');
         // The bot stands on another spot with no trip there (a pull, a
         // teleport): the stand-in was the ground it reached, not this one.
         const other = spots.find(spot => spot.raidBoss !== true && spot.center
@@ -121,8 +128,16 @@ async function run() {
         const moved = spotAt(arrived, other.id);
         assert.equal(verdict(moved), false, 'a spot change without a trip refuses the decision');
         assert.deepEqual(round(arrived, moved), ['occupation'], 'a spot change without a trip is an occupation event');
+        // A round there (the far step's projection), then back on the
+        // stand-in ground without the detour (a party arrival, a fallback
+        // spot): that return is a move of its own, an event.
+        const there = await Life.prepareResolve(moved, Resolver.resolveSolo({ state: moved, timestamp: T + 1000 }),
+            { timestamp: T + 1000, persist: false, projectClassProgression: true, moneyEscrowFor: () => 0 });
+        assert(there, 'fixture: the round projects');
+        const back = { ...spotAt(there, route.spotId), activity: 'hunting' };
+        assert(round(there, back).includes('occupation'), 'a return to the stand-in ground without the detour is an event');
     }
-    console.log('PASS exp hunting detour keeps / a material hunt and a move off the stand-in are events');
+    console.log('PASS exp hunting detour keeps / a material hunt, a move off the stand-in and a return to it are events');
 
     {
         // X has room but the bot avoids it (a backoff marked after the

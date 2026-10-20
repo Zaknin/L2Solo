@@ -26,6 +26,7 @@ const PartyComposition = invoke('GameServer/Bot/Population/BackgroundPartyCompos
 const ClanPartyDuty = invoke('GameServer/Bot/Population/ClanPartyDuty');
 const BotCrystallization = invoke('GameServer/Bot/Economy/BotCrystallization');
 const EquipmentIncomeRoute = invoke('GameServer/Bot/Economy/EquipmentIncomeRoute');
+const ColdEconomyDecision = invoke('GameServer/Bot/Population/ColdEconomyDecision');
 const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
 const PartyHuntingAssembly = require('./PartyHuntingAssembly');
 const CraftMaterialParty = require('./CraftMaterialParty');
@@ -287,7 +288,9 @@ function route(state, currentSpot, party, partyMembers = [], { spots, timestamp,
 // (leafChoice), a kept or searched level / gear trip stands in for it and
 // names it (leafSpotId, read by DecisionSections.occupationPlanned; counted
 // as route:trip:detour); a flight (death pressure, unsafe ground) names none:
-// it stays an event, as does a trip away from a spot the bot may not hunt.
+// it stays an event, as does a trip away from a spot the bot may not hunt
+// and the detour of a leaf that hunts a material at its monster (only that
+// monster brings the material in).
 const DETOUR_REASONS = new Set(['level_replan', 'equipment_source_replan']);
 function trip(owner, state, leaf, { spots, currentSpot = null, timestamp, hasRoom = null }) {
     if (!routable(state, null, [])) return null;
@@ -307,7 +310,7 @@ function trip(owner, state, leaf, { spots, currentSpot = null, timestamp, hasRoo
     const chosen = owner?.route || choose(state, currentSpot, null, [], { spots, timestamp, frame });
     if (owner && !owner.route) owner.route = chosen;
     const started = record(state, chosen, null, [], { spots, currentSpot, timestamp, frame });
-    if (!started || !wished?.full || !DETOUR_REASONS.has(started.reason)) return started;
+    if (!started || !wished?.full || !DETOUR_REASONS.has(started.reason) || ColdEconomyDecision.materialHunt(leaf)) return started;
     EconomyDiagnostics.count('route', 'trip', 'detour');
     return { ...started, leafSpotId: wished.spotId };
 }
