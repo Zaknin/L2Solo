@@ -1,0 +1,142 @@
+const assert = require('assert');
+require('../src/Global');
+const Data = invoke('GameServer/DataCache');
+const Life = invoke('GameServer/Bot/Population/BotLifeState');
+const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
+Data.init();
+
+// A far step starts early by its lead, the start -> commit ack time the
+// kernel measured on its own acks, so its commit lands by the bot's due; the
+// step is resolved as of the due, never earlier. The clock is stubbed; the
+// committed row is the real projection (BotLifeState.prepareResolve) of the
+// timestamp the step was resolved at.
+const ROUND_MS = 30000;
+// Bot 1 measures the lead round after round; the probed bots' next round
+// lies past the test.
+const PROBE_ROUND_MS = 10 * 3600 * 1000;
+const FLUSH_MS = 100;
+
+function soloState(characterId, nextResolveAt, overrides = {}) {
+    return {
+        characterId, phase: 'cold', activity: 'hunting', level: 35, exp: Number(Data.experience[34]) + 1000,
+        sp: 0, adena: 0, inventory: {}, loc: {}, spotId: 'field',
+        vitals: { hp: 1000, maxHp: 1000, mp: 500, maxMp: 500 },
+        timing: { lastResolvedAt: nextResolveAt - ROUND_MS, nextResolveAt },
+        stats: { classId: 1, classProgressionClassId: 1, classProgressionLevel: 35, deaths: 0 },
+        simulation: { revision: 3 }, updatedAt: nextResolveAt - ROUND_MS,
+        ...overrides
+    };
+}
+
+function world() {
+    const clock = { at: 0 };
+    const resolvedAt = new Map(), proposals = new Map(), commands = [];
+    const kernel = new ColdSimulationKernel({
+        now: () => clock.at,
+        flushTargetMs: FLUSH_MS,
+        resolveSolo: ({ state, timestamp }) => {
+            resolvedAt.set(Number(state.characterId), timestamp);
+            const roundMs = Number(state.characterId) === 1 ? ROUND_MS : PROBE_ROUND_MS;
+            return { patch: {}, events: [], nextResolveAt: timestamp + roundMs,
+                materialize: { exp: 0, sp: 0, adena: 0, items: [] }, debug: {} };
+        },
+        projectResolve: (state, result, timestamp) => Life.prepareResolve(state, result,
+            { timestamp, persist: false, projectClassProgression: true }),
+        emit: (type, payload) => {
+            if (type === 'proposal_batch') for (const proposal of payload.proposals) proposals.set(proposal.characterId, proposal);
+            if (type === 'command_request') commands.push(...payload.requests);
+            return true;
+        }
+    });
+    // Ticks at `at`: the bots whose step started there.
+    const tickAt = async (at) => {
+        clock.at = at;
+        const before = new Set(kernel.inFlight.keys());
+        kernel.tick();
+        await kernel.resolveChain;
+        return [...kernel.inFlight.keys()].filter(id => !before.has(id));
+    };
+    // The step's proposal leaves after the flush target; main commits it
+    // `ackAfterMs` after the step's start and answers with the row it wrote.
+    const commit = (id, ackAfterMs, startedAt) => {
+        clock.at = startedAt + Math.max(FLUSH_MS, ackAfterMs);
+        kernel.flushDue();
+        const proposal = proposals.get(id);
+        assert(proposal, 'the step sent its proposal');
+        proposals.delete(id);
+        const state = { ...proposal.nextState, simulation: { revision: proposal.revision + 1 } };
+        kernel.onCommitAck({ results: [{ ok: true, characterId: id, proposalId: proposal.proposalId, state }] });
+        return state;
+    };
+    // One round of bot `id` started at its due, committed `ackAfterMs` later.
+    const round = async (id, ackAfterMs) => {
+        const due = kernel.states.get(id).state.timing.nextResolveAt;
+        assert.deepStrictEqual(await tickAt(due), [id]);
+        return commit(id, ackAfterMs, due);
+    };
+    // A due between now and the measuring bot's next round.
+    const gap = () => kernel.states.get(1).state.timing.nextResolveAt - 10000;
+    return { clock, kernel, resolvedAt, commands, tickAt, commit, round, gap };
+}
+
+(async () => {
+    {
+        // No ack measured yet: the lead is 0 and a bot starts at its due, as before.
+        const { kernel, resolvedAt, tickAt, commit } = world();
+        const T = 100000;
+        kernel.upsert({ state: soloState(1, T) });
+        assert.deepStrictEqual(await tickAt(T - 1), [], 'without a measured lead nothing starts before its due');
+        assert.deepStrictEqual(await tickAt(T), [1]);
+        assert.strictEqual(resolvedAt.get(1), T);
+        const row = commit(1, 1500, T);
+        assert.strictEqual(row.timing.lastResolvedAt, T);
+        assert.strictEqual(row.timing.nextResolveAt, T + ROUND_MS);
+    }
+
+    {
+        // Slow commits (1.5 s from start to ack): the lead rises toward them,
+        // so a bot due at T starts before T, never more than its slowest step
+        // early, and its round is resolved and committed as of T.
+        const { kernel, resolvedAt, tickAt, commit, round, gap } = world();
+        kernel.upsert({ state: soloState(1, 10000) });
+        for (let i = 0; i < 20; i++) await round(1, 1500);
+        const T = gap();
+        kernel.upsert({ state: soloState(2, T) });
+        assert.deepStrictEqual(await tickAt(T - 1600), [], 'the lead never passes the slowest measured step');
+        assert.deepStrictEqual(await tickAt(T - 1000), [2], 'after slow commits the step starts before its due');
+        assert.strictEqual(resolvedAt.get(2), T, 'a step started early is resolved as of its due');
+        const row = commit(2, 1500, T - 1000);
+        assert.strictEqual(row.timing.lastResolvedAt, T, 'the committed row is stamped at the due, not at the early start');
+        assert.strictEqual(row.timing.nextResolveAt, T + PROBE_ROUND_MS, 'the next round counts from the due');
+        assert.deepStrictEqual(await tickAt(T + 1), [], 'a step started early is not started again at its due');
+
+        // Fast commits afterwards: the lead falls back slowly, not at once.
+        for (let i = 0; i < 3; i++) await round(1, FLUSH_MS);
+        const U = gap();
+        kernel.upsert({ state: soloState(3, U) });
+        assert.deepStrictEqual(await tickAt(U - 1000), [3], 'a few fast commits do not drop the lead');
+        commit(3, FLUSH_MS, U - 1000);
+        for (let i = 0; i < 300; i++) await round(1, FLUSH_MS);
+        const V = gap();
+        kernel.upsert({ state: soloState(4, V) });
+        assert.deepStrictEqual(await tickAt(V - 1000), [], 'many fast commits bring the lead down to them');
+        assert.deepStrictEqual(await tickAt(V), [4]);
+    }
+
+    {
+        // A command is main's world action on main's clock: it starts at its
+        // due even with a lead, and a step due behind it still starts early.
+        const { kernel, commands, tickAt, round, gap } = world();
+        kernel.upsert({ state: soloState(1, 10000) });
+        for (let i = 0; i < 20; i++) await round(1, 1500);
+        const T = gap();
+        kernel.upsert({ state: soloState(5, T - 500, { activity: 'shopping' }) });
+        kernel.upsert({ state: soloState(6, T) });
+        assert.deepStrictEqual(await tickAt(T - 1000), [6], 'the step behind a waiting command starts early');
+        assert.deepStrictEqual(commands.map(request => request.characterId), [], 'the command waits for its due');
+        await tickAt(T - 500);
+        assert.deepStrictEqual(commands.map(request => request.characterId), [5], 'the command starts at its due');
+    }
+
+    console.log('Cold step lead: a step starts its measured lead early, is resolved and committed as of its due; commands keep their due passed');
+})().catch((error) => { console.error(error); process.exitCode = 1; });
