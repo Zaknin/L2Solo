@@ -1397,10 +1397,14 @@ function forState(state = {}, deps = {}) {
     // The record of the workshop's ask, beside it (never on the workshop
     // object): the packet hour this build wrote with it (its own income in
     // it is no later drift), the physical wallet the search read (escrow 0),
-    // the kept recipe's cycle cash and its watch rows. A kept workshop
-    // carries its ask's record over.
-    context.workshopAsked = keptAsk || { hour: positive(context.statsPacket.money?.[0]), wallet: Funding.budget(state, 0),
-        cash: positive(workshop?.cash), rows: recipeRows };
+    // the kept recipe's cycle cash with the r the search afforded it at, the
+    // MP an answer of none waits for, and the recipe's watch rows. A kept
+    // workshop carries its ask's record over; a build handed no ask (deps
+    // workshopAsked: a near build's empty workshop) records none, so the next
+    // build after it asks.
+    context.workshopAsked = keptAsk || (Object.hasOwn(deps, 'workshopAsked') ? deps.workshopAsked
+        : { hour: positive(context.statsPacket.money?.[0]), wallet: Funding.budget(state, 0), cash: positive(workshop?.cash),
+            r: Number(workshop?.r), mpNeeded: positive(workshop?.mpNeeded), rows: recipeRows });
     // The build's facts for its baseline: the request's when they were read
     // over this state itself (no held leaf's field activity in between).
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
@@ -1817,10 +1821,13 @@ function heldWorkshopOf(held, mask, state) {
         && workshop.known !== false && Number.isFinite(workshop.incomePerHour) ? workshop : null;
 }
 // The ask's own drifting reads crossed since the ask (plan.workshopAsked):
-// the packet's hour beyond the bot's income error, the physical wallet beyond
-// the soft point's money error (none without one, as softEvents) or below the
-// kept recipe's cycle cash, or one of the kept recipe's watch rows crossed on
-// the board. A held build without the record asks. Judged only where a build
+// the packet's hour beyond the bot's income error; the kept recipe's cycle
+// cash beyond what the search's own predicate now spends at its r
+// (WealthCraftDecision: cash <= spendable(state, 0, { r })); the physical
+// wallet beyond the soft point's money error (none without one, -1, as
+// softEvents); MP reaching what an answer of none waited for; or one of the
+// kept recipe's watch rows crossed on the board. A held build without the
+// record asks. Judged only where a build
 // follows: a served held build keeps its workshop as it is (a re-ask there
 // would renew the card only, not the plan, and repeat every step).
 function askedInputsCrossed(held, state, board) {
@@ -1828,8 +1835,10 @@ function askedInputsCrossed(held, state, board) {
     if (!asked) return true;
     const hour = positive(state.stats?.money?.[0]);
     if (Math.abs(hour - asked.hour) > Sections.incomeError(state, held.plan.persona) * asked.hour) return true;
-    const wallet = Funding.budget(state, 0), moneyError = Number(held.plan.statsPacket.wishSections?.moneyError);
-    if (wallet < asked.cash || moneyError >= 0 && Math.abs(wallet - asked.wallet) > moneyError) return true;
+    if (asked.cash > 0 && Funding.spendable(state, 0, { r: asked.r }) < asked.cash) return true;
+    const moneyError = Number(held.plan.statsPacket.wishSections?.moneyError ?? -1);
+    if (moneyError >= 0 && Math.abs(Funding.budget(state, 0) - asked.wallet) > moneyError) return true;
+    if (asked.mpNeeded > 0 && Number(state.vitals?.mp) >= asked.mpNeeded) return true;
     return !!board && Sections.marketCrossed(board, asked.rows, Number(state.characterId));
 }
 // The workshop a build keeps: the held one while its section held and its

@@ -367,7 +367,8 @@ const occupationPlanner = new ColdOccupationPlanner({
             input.economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(input.state, {
                 board: input.board, routeRows, workshops: workshopsFor,
                 timestamp: input.timestamp, onSourceRead: input.read, onSourceScope: input.readScope, knownRecipes: input.knownRecipes, npcOffersFor: OccupationSources.npcOffersFor,
-                buyOrderEscrow: input.buyOrderEscrow, workshop: noWorkshop(),
+                // The empty workshop is no ask: the build records none (workshopAsked).
+                buyOrderEscrow: input.buyOrderEscrow, workshop: noWorkshop(), workshopAsked: null,
                 // A refresh keeps no context; a near post is held and its clean repeat hits the verdict.
                 ...(input.mode === 'refresh' ? { rememberContext: false } : {}),
                 caller: `economy_${input.mode}`, trigger: 'native_own_action' });

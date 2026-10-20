@@ -109,6 +109,10 @@ function* decisionSearch(state, knownRecipes, context, options, mode) {
     }
     const ownedFor = id => ownStock.get(Number(id)) || null;
     let best = null;
+    // The least MP of a recipe this MP cannot craft once (the batch limit,
+    // WealthCraftPolicy.searchQuantity): an occupation answer of none waits
+    // for it (EconomyContext.askedInputsCrossed).
+    let mpNeeded = Infinity;
     const learned = new Set((knownRecipes || []).map(row => Number(row.recipeId ?? row)));
     const seen = new Set();
     function* candidates() {
@@ -128,6 +132,8 @@ function* decisionSearch(state, knownRecipes, context, options, mode) {
         if (!recipe || recipe.type !== 'dwarven' || !CraftShopService.canCraft(state, recipe)) continue;
         const template = ItemTemplateIndex.find(DataCache.items, recipe.productId);
         if (!template || !recipe.materials?.length) continue;
+        const mpCost = Number(recipe.mpCost || 0);
+        if (mpCost > Number(state.vitals?.mp || 0)) mpNeeded = Math.min(mpNeeded, mpCost);
         const exits = options.prepareExits ? yield* options.prepareExits(state, recipe, template, trip)
             : exitsFor(state, recipe, template, trip, options);
         if (!options.prepareExits) yield 'exits';
@@ -161,18 +167,21 @@ function* decisionSearch(state, knownRecipes, context, options, mode) {
             && (!best || score > (mode === 'occupation' ? best.incomePerHour : best.valueHours))) best = { ...candidate, template, r, learning };
         yield 'funding';
     }
-    return best;
+    return mode === 'occupation' ? { best, mpNeeded: Number.isFinite(mpNeeded) ? mpNeeded : 0 } : best;
 }
 function chooseOpportunity(state, knownRecipes, context = Profit.contextFor(state), options = {}) {
     return Policy.drain(decisionSearch(state, knownRecipes, context, options, 'action'));
 }
-// cash: the chosen cycle's basket (cash cost plus fees), the wallet floor the
-// kept workshop is judged against (EconomyContext.askedInputsCrossed).
-function occupationResult(row) {
+// What the kept workshop is judged against (EconomyContext.askedInputsCrossed):
+// cash and r, the chosen cycle's basket (cash cost plus fees) and the value
+// per adena its affordability was read with (spendable(state, 0, { r }));
+// mpNeeded, for an answer of none, the least MP a recipe it could not craft
+// once needs (0: MP blocked none).
+function occupationResult({ best: row, mpNeeded }) {
     return row && row.incomePerHour > 0 && row.hours > 0 ? { known: true, recipeId: Number(row.recipe.recipeId),
         productId: Number(row.recipe.productId), incomePerHour: row.incomePerHour, cycleHours: row.hours,
-        cash: row.basket.cashCost + row.basket.actualCashFees }
-        : { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 };
+        cash: row.basket.cashCost + row.basket.actualCashFees, r: row.r }
+        : { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0, mpNeeded };
 }
 function createOccupation(state, knownRecipes, context, options = {}) {
     return { iterator: decisionSearch(state, knownRecipes, context, options, 'occupation'), done: false, value: null,
@@ -195,7 +204,8 @@ function stepOccupation(cursor) {
     cursor.stage = typeof next.value === 'object' ? Number(next.value?.stage || 0)
         : STAGES.indexOf(next.value) + 1;
     if (next.done) { cursor.done = true; cursor.value = cursor.mode === 'action' ? next.value : occupationResult(next.value);
-        if (next.value?.valueHours !== undefined) cursor.selectedValueHours = next.value.valueHours;
+        const chosen = cursor.mode === 'action' ? next.value : next.value.best;
+        if (chosen?.valueHours !== undefined) cursor.selectedValueHours = chosen.valueHours;
         cursor.iterator = null; }
     return cursor.done;
 }

@@ -431,8 +431,10 @@ async function run() {
     }
     // The crafter's workshop is kept with its held build: on the same route,
     // known, with a finite income, no kit event and none of its ask's reads
-    // crossed (the packet's hour beyond the bot's error, the wallet below the
-    // recipe's cash); otherwise it is asked again. The step judges its held
+    // crossed (the packet's hour beyond the bot's error, the recipe's cash
+    // beyond what the search would spend on it, the MP an answer of none
+    // waited for); otherwise it is asked again. A near build's empty workshop
+    // is no ask: the build after it asks. The step judges its held
     // build before the build (heldWorkshop): a valid verdict keeps the
     // workshop, a refusal keeps it while its ask's reads hold. A build with a
     // productive workshop watches its product's buyers and its materials'
@@ -440,7 +442,7 @@ async function run() {
     {
         const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
         const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
-        const workshop = { known: true, recipeId: 2, productId: 3, incomePerHour: 1200, cycleHours: 2, cash: 5000 };
+        const workshop = { known: true, recipeId: 2, productId: 3, incomePerHour: 1200, cycleHours: 2, cash: 5000, r: 1e9 };
         const state = { ...base, characterId: 990031 };
         const routeRows = Trip.prepared(state);
         const built = Economy.forState(state, { routeRows, workshop });
@@ -457,8 +459,7 @@ async function run() {
         // valid verdict keeps the workshop (no ask) and the build serves the
         // held decision, unless the held workshop is unknown or of another
         // route (asked); a refusal by its MP alone (sources) keeps it, with
-        // or without the card refused before; a wallet below the recipe's
-        // cash asks.
+        // or without the card refused before.
         const Card = invoke('GameServer/Bot/Population/ColdEconomyDecision');
         const diagnosticsBefore = Config.developerDiagnostics;
         const T = Date.now(), crafter = { ...base, characterId: 990032, craftLevel: 1, adena: 1000000 };
@@ -475,9 +476,9 @@ async function run() {
         Config.developerDiagnostics = true;
         try {
             // A refused step rebuilds the held entry: each case starts on a fresh one.
-            const fresh = () => {
+            const fresh = (heldWorkshop = workshop, heldDeps = {}) => {
                 Economy.forget(crafter.characterId);
-                const held = Economy.forState(crafter, { ...deps, workshop });
+                const held = Economy.forState(crafter, { ...deps, ...heldDeps, workshop: heldWorkshop });
                 const published = { ...crafter, stats: { ...crafter.stats, ...held.statsPacket } };
                 return { held, published, tired: { ...published, vitals: { ...published.vitals, mp: published.vitals.mp - 1 } } };
             };
@@ -502,28 +503,59 @@ async function run() {
             const afterCard = stepOf(tired, prepared.eventVerdict, before);
             assert.equal(afterCard.kept, workshop, 'a refusal by the MP alone keeps it after the card refused');
             assert.deepEqual(afterCard.verdicts, [1, 1], 'one verdict for the card, the step\'s workshop and its build');
-            ({ published } = fresh());
-            assert.equal(stepOf({ ...published, adena: 0 }).kept, null, 'a wallet below the recipe\'s cash asks');
             // The worker's order: the held workshop, else the planner's
             // answer (here a stub at the edge with another income). A raised
             // section other than the kit (a spot event, a quantity refusal's
-            // sources and money) keeps the workshop; a kit event or the hour
-            // value beyond the bot's error takes the planner's answer.
-            const answer = { known: true, recipeId: 2, productId: 3, incomePerHour: 3000, cycleHours: 2, cash: 5000 };
-            const incomeAfter = (dirty, edit = stats => stats) => {
-                ({ published } = fresh());
+            // sources and money) keeps the workshop; a kit event takes the
+            // planner's answer, and so does a refusal once one of the ask's
+            // own reads crossed.
+            const answer = { known: true, recipeId: 2, productId: 3, incomePerHour: 3000, cycleHours: 2, cash: 5000, r: 1e9 };
+            const incomeAfter = (dirty, edit = state => state, heldWorkshop = workshop, heldDeps = {}) => {
+                ({ published } = fresh(heldWorkshop, heldDeps));
                 const step = { ...deps }, eventVerdict = {};
-                const moved = { ...published, stats: edit({ ...published.stats, wishDirty: dirty }) };
+                const moved = edit({ ...published, stats: { ...published.stats, wishDirty: dirty } });
                 const kept = Economy.heldWorkshop(moved, step, eventVerdict) || answer;
+                if (!(dirty & Sections.COMPUTED.workshop)) assert(!(eventVerdict.collected.verdict.touchedSections & Sections.COMPUTED.workshop),
+                    'fixture: the refusal names no workshop section');
                 return Economy.forState(moved, { ...step, workshop: kept, eventVerdict }).workshop.incomePerHour;
             };
-            const bit = Sections.sectionBit;
+            const bit = Sections.sectionBit, refusal = bit('sources');
+            const money = (state, edit) => ({ ...state, stats: { ...state.stats, money: edit(state.stats.money.slice()) } });
             assert.equal(incomeAfter(bit('occupation')), 1200, 'a spot event keeps the workshop');
             assert.equal(incomeAfter(bit('sources') | bit('money')), 1200, 'a quantity refusal keeps the workshop');
             assert.equal(incomeAfter(bit('supply')), 1200, 'a supply event keeps the workshop');
             assert.equal(incomeAfter(bit('build')), 3000, 'a kit event asks again');
-            assert.equal(incomeAfter(bit('occupation'), stats => ({ ...stats, money: [stats.money[0] * 2, ...stats.money.slice(1)] })),
-                3000, 'the hour value beyond the bot\'s error asks again');
+            assert.equal(incomeAfter(refusal, state => money(state, packet => { packet[0] *= 2; return packet; })), 3000,
+                'a refusal after the hour value moved beyond the bot\'s error asks again');
+            // The search keeps a recipe whose cash it can spend at its r
+            // (WealthCraftDecision): a workshop asked at exactly that much.
+            // The wallet's drift is judged within the money error, which
+            // price knowledge sets (0 without it: any adena moved asks).
+            const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
+            const knowledgeBefore = Config.knowledgeErrorsEnabled;
+            Config.knowledgeErrorsEnabled = true;
+            try {
+                ({ held, published } = fresh());
+                const tight = { ...workshop, cash: Funding.spendable(published, 0, { r: workshop.r }) };
+                const moneyError = Number(held.plan.statsPacket.wishSections?.moneyError ?? -1);
+                assert(tight.cash > 0 && tight.cash < published.adena && (moneyError < 0 || moneyError >= 1),
+                    'fixture: the cash is spendable below the wallet, one adena is within the money error ' + JSON.stringify([tight.cash, moneyError]));
+                assert.equal(incomeAfter(refusal, state => ({ ...state, adena: state.adena - 1 }), tight), 3000,
+                    'a refusal after the wallet fell below what the recipe\'s cash needs asks again');
+            } finally { Config.knowledgeErrorsEnabled = knowledgeBefore; }
+            ({ published } = fresh());
+            const tight = { ...workshop, cash: Funding.spendable(published, 0, { r: workshop.r }) };
+            assert.equal(incomeAfter(refusal, state => money(state, packet => { packet[2] += 1; return packet; }), tight), 3000,
+                'a refusal after the reserve rose above what the recipe\'s cash leaves asks again');
+            // An answer of none for want of MP waits for that MP.
+            const mpNeeded = Number(crafter.vitals.mp) + 10;
+            const none = { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0, mpNeeded };
+            assert.equal(incomeAfter(refusal, state => ({ ...state, vitals: { ...state.vitals, mp: mpNeeded } }), none), 3000,
+                'a refusal after the MP reached what an answer of none waited for asks again');
+            // A near build's empty workshop (the worker's near forState) is no ask.
+            const nearEmpty = { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 };
+            assert.equal(incomeAfter(refusal, state => state, nearEmpty, { workshopAsked: null }), 3000,
+                'a refusal after a near build asks');
             const unknownCrafter = { ...crafter, characterId: 990033 };
             const unknownHeld = Economy.forState(unknownCrafter, { ...deps, workshop: { ...workshop, known: false } });
             const unknown = stepOf({ ...unknownCrafter, stats: { ...unknownCrafter.stats, ...unknownHeld.statsPacket } });
