@@ -52,10 +52,6 @@ const DEFAULTS = {
     // A full 1,700-bot world with warm economic caches exceeds 256 MiB
     // after major GC. Leave headroom for transient planning/clone allocations.
     coldWorkerHeapMb: 512,
-    // Young generation of the cold worker (Node default 48 = 16 MiB semi-space). V8 rounds the semi-space up to a
-    // power of two, so only 48 / 96 / 192 are real steps. Measured at 48: ~17 scavenges/s, wish builds (p99 117 ms)
-    // outlive the ~60 ms scavenge cycle, and the GC-pool CPU spikes coincide with these scavenge pauses.
-    coldWorkerYoungMb: 96,
     // Protect the player-facing loop immediately and keep it protected for a
     // short window after disconnect/relog. SimPlayer/BotSession instances do
     // not contribute to this signal.
@@ -257,7 +253,6 @@ const ENV_KEYS = {
     coldWorkerQueueMaxEntries: 'BOT_POPULATION_COLD_WORKER_QUEUE_ENTRIES',
     coldWorkerQueueMaxBytes: 'BOT_POPULATION_COLD_WORKER_QUEUE_BYTES',
     coldWorkerHeapMb: 'BOT_POPULATION_COLD_WORKER_HEAP_MB',
-    coldWorkerYoungMb: 'BOT_POPULATION_COLD_WORKER_YOUNG_MB',
     playerProtectionGraceMs: 'BOT_POPULATION_PLAYER_PROTECTION_GRACE_MS',
     schedulerLagThrottleMs: 'BOT_POPULATION_SCHEDULER_LAG_THROTTLE_MS',
     schedulerLagAbortMs: 'BOT_POPULATION_SCHEDULER_LAG_ABORT_MS',
