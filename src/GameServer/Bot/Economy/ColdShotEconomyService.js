@@ -174,35 +174,6 @@ function hasShotSurplus(state) {
     return [...SHOT_PRODUCT_IDS].some(id => Number(state.inventory?.[id]?.amount || 0) > Number(kept[id] || 0));
 }
 
-async function reviewDemand(state, now) {
-    if (!state || state.phase !== 'cold' || !['hunting', 'resting', 'shopping', 'grouped'].includes(state.activity)) return state;
-    // The stock rule and prices need no wish network; only the worth of a
-    // missing stack does (L25).
-    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    const basics = Economy.basics(state, { timestamp: now });
-    const stock = basics.stock('shots');
-    const missing = stock.survivalMissing + stock.missing;
-    if (!stock.needed || !missing) {
-        if (!state.stats?.shotDemand) return state;
-        return await persist({ ...state, stats: { ...state.stats, shotDemand: null } }, 'shot_market_demand_filled') || state;
-    }
-    const price = basics.price(stock.itemId);
-    if (!(price > 0)) return state;
-    const context = require('../Population/ColdEconomyDecision').economyFor(state, { timestamp: now });
-    const worth = context.worth(stock.itemId);
-    const maxSpend = Math.min(require('./PurchaseFunding').spendable(state, 0,
-        { itemId: stock.itemId, survivalCost: basics.kitCost(stock.itemId) }), missing * (worth ?? price));
-    const wanted = state.stats?.shotDemand;
-    if (!wanted || wanted.itemId !== stock.itemId || wanted.amount !== missing || wanted.maxSpend !== maxSpend) {
-        state = await persist({ ...state, stats: { ...state.stats,
-            shotDemand: { itemId: stock.itemId, amount: missing, maxSpend, at: now } } }, 'shot_market_demand') || state;
-    }
-    // The core's root stock:shots (the same stock rule) is executed by its
-    // card: board deals and buy ads by the economy plan, the trip and the
-    // NPC remainder by its goal and the town visit. Main plans no purchase.
-    return state;
-}
-
 async function obtainRecipe(state, selected, now) {
     const { recipe, route } = selected;
     const hourAdena = invoke('GameServer/Bot/AI/BotHuntEfficiency').hourValue(state, now).perHour;
@@ -417,7 +388,6 @@ async function review(state, now = Date.now(), options = {}) {
     if (active.has(id)) return { state };
     active.add(id);
     try {
-        state = await reviewDemand(state, now);
         Workshops.register(state);
         noteBuyer(state);
         // Gone for its restock, or another errand waits: no craft now.
@@ -478,7 +448,7 @@ async function execute(state, step, now = Date.now()) {
     return state;
 }
 
-module.exports = { review, reviewDemand, marketSnapshot, craftCandidate, recipeTarget,
+module.exports = { review, marketSnapshot, craftCandidate, recipeTarget,
     fundedDemand, scrapCraftRoutes, hasShotSurplus, SHOT_RECIPE_IDS, craft, obtainRecipe, execute, recheck,
     _resetForTests() { active.clear(); }
 };
