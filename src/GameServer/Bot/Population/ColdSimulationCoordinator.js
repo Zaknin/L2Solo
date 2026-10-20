@@ -1461,7 +1461,8 @@ class ColdSimulationCoordinator {
         let resolve;
         const promise = new Promise(done => { resolve = done; });
         // One small waiter per admitted queue owner; no retained state copy.
-        this.commitAcknowledgements.set(id, { proposalId: proposal.proposalId, source, promise, resolve });
+        this.commitAcknowledgements.set(id, { proposalId: proposal.proposalId, source, promise, resolve,
+            memberIds: proposal.atomicGroup?.memberIds });
     }
 
     finishCommitAcknowledgements(results, acknowledged = true) {
@@ -1783,6 +1784,8 @@ class ColdSimulationCoordinator {
                 ...(result.detail ? { detail: result.detail } : {}),
                 revision: result.revision,
                 raidStepId: result.proposal?.raidStepId,
+                ...(result.ok && Number.isFinite(result.eventWaitMs) && result.eventWaitMs > 0
+                    ? { eventWaitMs: result.eventWaitMs } : {}),
                 ...(numbers || { state }),
                 ...(result.ok ? this.reviewSteps(result.proposal, state) : {})
             }];
@@ -2021,8 +2024,18 @@ class ColdSimulationCoordinator {
         this.economyDecisions.forget(id);
         EconomyContext.forget(id);
         if (!this.worker || !this.ready) return { ok: true, reason: 'worker_not_ready' };
+        const worker = this.worker, epoch = this.workerEpoch;
         this.fencedBots.add(id);
         DiagnosticConfig.developerDiagnostics && (this.counters.fences += 1);
+        const commitAcks = new Set();
+        const captureCommitAcks = () => {
+            for (const [ownerId, held] of this.commitAcknowledgements) {
+                if (ownerId === id || held.memberIds?.includes(id)) commitAcks.add(held.promise);
+            }
+        };
+        // The member may already be acked while its leader's deferred work
+        // still precedes handoff. Keep those exact promises across both waits.
+        captureCommitAcks();
         const msgId = this.post('fence', { characterId: id, deadlineAt: Date.now() + timeoutMs });
         if (!msgId) return { ok: false, reason: 'fence_send_failed' };
         let timer = null;
@@ -2033,11 +2046,14 @@ class ColdSimulationCoordinator {
         try {
             const fenced = await response;
             if (fenced.proposal) {
-                this.queue.enqueue({ ...fenced.proposal, priority: 'P0' });
+                this.handleProposalBatch({ payload: { proposals: [{ ...fenced.proposal, priority: 'P0' }] } }, worker, epoch);
             }
+            // A proposal can arrive before the fence reply, including in it.
+            captureCommitAcks();
             const command = this.commandInflight.get(id);
             if (command) await Promise.race([command.catch(() => null), wait(timeoutMs)]);
             await this.queue.flushCharacter(id);
+            await Promise.all(commitAcks);
             return { ok: true, reason: 'fenced', ...fenced };
         } catch (error) {
             DiagnosticConfig.developerDiagnostics && (this.counters.fenceTimeouts += 1);
