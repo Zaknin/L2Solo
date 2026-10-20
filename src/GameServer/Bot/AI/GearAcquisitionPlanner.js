@@ -669,7 +669,7 @@ function preferredTarget(state = {}, options = {}) {
             .filter(item => !excluded.has(Number(item.selfId)) && suitable(item, state, role, gradeForLevel(state.level))
                 && Progression.priority(item, Number(item.etc?.slot), progression) > 0
                 && isSlotUpgrade(item, ownedItems, role, classId))
-            .map(item => ({ item, offer: marketOfferForTarget(item, state,
+            .map(item => ({ item, offer: decisionMarketOffer(item, state,
                 { ...options, maxMarketPrice: PurchaseFunding.budget(state) }) }))
             .filter(row => row.offer && Number(row.offer.price) <= PurchaseFunding.budget(state))
             .sort((left, right) => Number(left.offer.price) - Number(right.offer.price));
@@ -679,7 +679,7 @@ function preferredTarget(state = {}, options = {}) {
     const acquisitionState = options.wishTargetId ? Progression.preparation(state, progression) || state : state;
     const selectedItem = options.wishTargetId && catalogItem(options.wishTargetId);
     const readyHigher = selectedItem && Progression.marketOnly(state, selectedItem, progression)
-        && marketOfferForTarget(selectedItem, state, { ...options, maxMarketPrice: PurchaseFunding.budget(state) });
+        && decisionMarketOffer(selectedItem, state, { ...options, maxMarketPrice: PurchaseFunding.budget(state) });
     const acquisitionRank = readyHigher ? gradeForLevel(state.level)
         : Progression.acquisitionRankFor(acquisitionState, acquisitionState === state ? progression : undefined);
     const closesC = progression.required && rankIndex(gradeForLevel(state.level)) > rankIndex('c');
@@ -695,7 +695,7 @@ function preferredTarget(state = {}, options = {}) {
         .map((item) => ({ item, slot: targetSlotFor(item), recipe: Progression.marketOnly(state, item, progression)
             ? null : recipesByProduct.get(Number(item.selfId)) || null }))
         .filter(({ item, recipe }) => !recipeNeedsExcludedMaterial(recipe, state, excludedMaterials)
-            || !!marketOfferForTarget(item, state, options))
+            || !!decisionMarketOffer(item, state, options))
         .filter(({ recipe }) => !options.recipeId || Number(recipe?.recipeId) === Number(options.recipeId))
         .filter(({ item }) => Number(owned.get(Number(item.selfId)) || 0) < 1
             || missingPairedMilestoneSlot(state, item, progression)
@@ -1782,12 +1782,8 @@ function partyNeedReasonForSource(state = {}, source = {}) {
 
 function targetHasAvailableRoute(target, state = {}, options = {}) {
     if (!target) return false;
-    if (marketOfferForTarget(target, state, options)) return true;
-    return !!bestSourceForState(
-        sourceForItem(target.selfId, options.spots || [], state, options),
-        state,
-        options
-    );
+    if (decisionMarketOffer(target, state, options)) return true;
+    return !!decisionDirectSource(target.selfId, options.spots || [], state, options).direct;
 }
 
 function sourceIsExcluded(source, options = {}) {
@@ -1801,12 +1797,16 @@ function sourceIsExcluded(source, options = {}) {
 function bestSourceForState(sources = [], state = {}, options = {}) {
     if (!sources.length) return null;
     const minGap = voluntaryMinLevelGap(state);
-    const allowedSources = sources
-        .filter((source) => !sourceIsExcluded(source, options))
-        .filter((source) => sourceWithinVoluntaryHuntBand(state, source, minGap));
-    const safeSources = allowedSources.filter((source) => soloSafeForSource(state, source));
-    // A full source is met at arrival, not skipped here (ARCH-08-b).
-    return safeSources[0] || allowedSources[0] || null;
+    // The first solo-safe allowed source, else the first allowed one; the
+    // list is in effort order. A full source is met at arrival, not skipped
+    // here (ARCH-08-b).
+    let firstAllowed = null;
+    for (const source of sources) {
+        if (sourceIsExcluded(source, options) || !sourceWithinVoluntaryHuntBand(state, source, minGap)) continue;
+        if (soloSafeForSource(state, source)) return source;
+        firstAllowed ||= source;
+    }
+    return firstAllowed;
 }
 
 function itemIdForPlan(plan = {}) {
@@ -2047,10 +2047,13 @@ function spoilCapableFor(state = {}, options = {}) {
     return options.spoilCapable === true || roleFor(state) === 'spoiler';
 }
 
-// One decision (one sourceCache, one state, one spot list, as the raw list
-// above assumes) prices the same item for several candidates and materials.
-// Its best source and its market offer do not depend on the amount wanted, so
-// each is kept for the decision; the callers scale them by the amount.
+// One decision prices the same item for several candidates and materials. Its
+// best source and its market offer do not depend on the amount wanted, so each
+// is kept in the decision's sourceCache; the callers scale them by the amount.
+// Contract: the entries depend on the state (readiness, economicLower,
+// currentRegion, characterId), the spot list, excludedSpotIds,
+// raidRosterSize/raidEstimate, origin and findMarketOffer, all fixed within one
+// planFor; a caller sharing a sourceCache must keep them fixed.
 function decisionDirectSource(itemId, spots, state, options = {}) {
     const sourceCache = options.sourceCache;
     const key = `direct:${sourceListKey(itemId, state, options)}`;
@@ -2813,7 +2816,7 @@ function combinationPurchase(recipe, state, options = {}) {
     for (const material of materials.filter(entry => entry.missing > 0)) {
         const item = catalogItem(material.selfId);
         const offer = options.npcOnly
-            ? npcOfferForTarget(item, state, options) : marketOfferForTarget(item, state, options);
+            ? npcOfferForTarget(item, state, options) : decisionMarketOffer(item, state, options);
         if (!offer || offer.available === false || Number(offer.count ?? Infinity) < material.missing) return null;
         purchases.push({ material, item, offer });
     }
@@ -2866,7 +2869,7 @@ function combinationBladeMarketPlan(target, materials, state, planningOptions) {
         .filter((material) => Number(material.missing || 0) > 0)
         .map((material) => {
             const item = catalogItem(material.selfId);
-            return item ? { material, item, offer: marketOfferForTarget(item, state, planningOptions) } : null;
+            return item ? { material, item, offer: decisionMarketOffer(item, state, planningOptions) } : null;
         })
         .filter((candidate) => candidate?.offer)
         .sort((left, right) => Number(left.offer.price || Infinity) - Number(right.offer.price || Infinity));
@@ -2933,11 +2936,10 @@ function rawPlanFor(state = {}, options = {}) {
     }
     if (!GearLifecycle.allowsCrafting(state) || gradeForLevel(state.level) === 'none') {
         const target = preparedTarget?.item || preferredNoGradeTarget(state, planningOptions) || preferredDropTarget(state, planningOptions);
-        const source = target
-            ? bestSourceForState(sourceForItem(target.selfId, planningOptions.spots || [], state, planningOptions), state, planningOptions)
-            : null;
-        const offer = marketOfferForTarget(target, state, planningOptions);
-        const directEffort = source ? sourceEffort(source, state, planningOptions) : Infinity;
+        const { direct: source, unitEffort: directEffort } = target
+            ? decisionDirectSource(target.selfId, planningOptions.spots || [], state, planningOptions)
+            : { direct: null, unitEffort: Infinity };
+        const offer = decisionMarketOffer(target, state, planningOptions);
         const buy = offer && marketEffort(offer, state) <= directEffort;
         const sourceAssessment = source ? partyNeedAssessmentForSource(state, source) : null;
         return target && buy ? {
