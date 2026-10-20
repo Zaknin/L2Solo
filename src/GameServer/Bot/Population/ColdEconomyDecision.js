@@ -15,6 +15,7 @@ const RestartDecision = require('./EconomyRestartDecision');
 const CraftInputReservations = require('../Economy/CraftInputReservations');
 const Sections = require('../Economy/DecisionSections');
 const PurchaseFunding = require('../Economy/PurchaseFunding');
+const EconomicValuation = require('../Economy/EconomicValuation');
 const kinds = [undefined, 'improvement', 'book', 'resale', 'shots', 'potions'];
 function kindCode(kind) { const code = kinds.indexOf(kind); return code < 0 ? 255 : code; }
 function kindFor(code) { return kinds[code]; }
@@ -328,7 +329,7 @@ function capture(economy, state, seen = state) {
     // Workshop-only publications carry no hunting valuation. Clan membership
     // cannot turn that partial source into a second, fabricated economy review.
     if (Number(state?.stats?.clanId) > 0 && economy?.hunt) {
-        const horizonHours = economy.horizonHours ?? invoke('GameServer/Bot/Economy/EconomicValuation')
+        const horizonHours = economy.horizonHours ?? EconomicValuation
             .stageHours(state, economy.hunt.expPerHour, economy.persona);
         const itemId = Number(state.stats.equipmentPlan?.target?.selfId || 0);
         let valueHours = itemId ? Math.max(0, Number(economy.itemUsefulness(itemId)) || 0) : 0;
@@ -396,8 +397,9 @@ let basicsKeys = null;
 // The view's basics (the hour-value foundation with its income route search)
 // are built on first read: GoalService.review through NeedsEvaluator reads
 // only the card's leaf. The build takes the view's timestamp and board, as
-// the eager build did. Without the money packet, with an urgency or before
-// the first build the view's own fields need them at once.
+// the eager build did. Without the money packet or before the first build the
+// view's own fields need them at once. An urgent bot's gap horizon reads them
+// on first read too (MarketPricing.traderContext).
 function view(state, decision, deps = {}, preparedBase = null) {
     // lazy: worker main thread only: the worker passes its board in deps; the service reaches the Database and World.
     const board = deps.board || (isMainThread ? invoke('GameServer/AfkTrade/AfkTradeService').boardIndex() : null);
@@ -413,7 +415,7 @@ function view(state, decision, deps = {}, preparedBase = null) {
     };
     const packet = state.stats?.money;
     const valid = Array.isArray(packet) && packet.length >= 4;
-    if (!valid || decision?.urgency || !basicsKeys) basics();
+    if (!valid || !basicsKeys) basics();
     const hourAdena = valid ? Number(packet[0]) : base.hourAdena;
     const moneyPrice = valid ? Number(packet[1]) : hourAdena > 0 ? 1 / hourAdena : 0;
     const known = id => {
@@ -425,25 +427,29 @@ function view(state, decision, deps = {}, preparedBase = null) {
     const itemUsefulness = id => personalUsefulness(known(id) || 0, state, basics().persona.understanding, enabled, id);
     const activity = decision?.activity || null;
     const wish = decision?.wish ? { object: { kind: kindFor(decision.wish[0]), amount: decision.wish[1] }, price: decision.wish[2] } : null;
+    // The hours an urgent want may wait for a better price (PriceDecision.waitRate).
+    const gapHorizonHours = () => !decision?.urgency ? 0 : decision.urgency === URGENCY_SHOTS
+        ? basics().stock('shots').targetHours : decision.urgency === URGENCY_POTIONS
+            ? basics().stock('potions').targetHours
+            : EconomicValuation.stageHours(state, basics().hunt.expPerHour, basics().persona);
     const own = { state, hourAdena, moneyPrice, survivalReserve: valid ? Number(packet[2]) : base.survivalReserve,
-        gapHorizonHours: !decision?.urgency ? 0 : decision.urgency === URGENCY_SHOTS
-            ? base.stock('shots').targetHours : decision.urgency === URGENCY_POTIONS
-                ? base.stock('potions').targetHours
-                : invoke('GameServer/Bot/Economy/EconomicValuation').stageHours(state, base.hunt.expPerHour, base.persona),
         board, network: { activity }, activity, wish,
         craftReservations: Object.fromEntries(activity?.craftReservations || []),
         watchList: (decision?.watch || []).map(row => ({ itemId: row[0], amount: row[1], worth: row[2], kind: kindFor(row[3]) })),
         materials: decision?.materials || [], inputHash: decision?.inputHash || 0, decided: !!decision,
         workshop: decision?.workshop || unknownWorkshop(),
         itemUsefulness, worth: id => known(id) !== null && moneyPrice > 0 ? itemUsefulness(id) / moneyPrice : basics().price(id) };
-    if (base) return { ...base, ...own };
+    if (base) return { ...base, ...own, gapHorizonHours: gapHorizonHours() };
     // Own enumerable getters: a spread or a key walk of the view sees the
     // basics as before (and builds them); a write replaces the getter.
     const economy = {};
-    for (const key of basicsKeys) if (!Object.hasOwn(own, key)) Object.defineProperty(economy, key, {
-        enumerable: true, configurable: true, get: () => basics()[key],
+    const lazy = (key, get) => Object.defineProperty(economy, key, { enumerable: true, configurable: true, get,
         set: value => { Object.defineProperty(economy, key, { value, writable: true, enumerable: true, configurable: true }); } });
-    return Object.assign(economy, own);
+    for (const key of basicsKeys) if (!Object.hasOwn(own, key)) lazy(key, () => basics()[key]);
+    // Defined after the assign: Object.assign would invoke a getter in the literal.
+    Object.assign(economy, own);
+    lazy('gapHorizonHours', gapHorizonHours);
+    return economy;
 }
 // The view main reads for a bot that is not far (a near body's card, or none
 // before its first one; a player). Its worth is the full build's
