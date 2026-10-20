@@ -94,7 +94,10 @@ async function main() {
     const selector = new ColdSimulationKernel({ now: () => selectorAt,
         resolveSolo: () => { throw Error('no personal step for a group meeting'); },
         resolveParty: input => Resolver.resolve(input),
-        projectResolve: (state, resolution) => ({ ...state, ...resolution.patch }),
+        // As the worker's projection: the round's exp and next due land on the state.
+        projectResolve: (state, resolution) => ({ ...state, ...resolution.patch,
+            exp: Number(state.exp || 0) + Number(resolution.materialize?.exp || 0),
+            timing: { ...state.timing, nextResolveAt: resolution.nextResolveAt ?? state.timing?.nextResolveAt } }),
         emit: (type, payload, msgId) => selected.push({ type, payload, msgId }) });
     const future = members.map(state => state.characterId === 1 ? state : { ...state,
         stats: { ...state.stats, travel: { ...state.stats.travel, arrivalAt: at + 10000 } } });
@@ -116,7 +119,7 @@ async function main() {
     selector.partyPut(continuedParty.partyId, continuedParty);
     selector.onCommitAck({ results: selectedBatch.payload.proposals.map(proposal => ({
         ok: true, characterId: proposal.characterId, proposalId: proposal.proposalId,
-        state: { ...proposal.nextState, timing: { ...proposal.nextState.timing, nextResolveAt: proposal.result.nextResolveAt } },
+        state: proposal.nextState,
         context: {}
     })) });
     selector.tick();
@@ -126,11 +129,11 @@ async function main() {
     const idleBatch = selected.filter(message => message.type === 'proposal_batch').at(-1);
     const idleParty = idleBatch.payload.proposals.find(proposal => proposal.partyResolution).partyResolution.party;
     assert.equal(idleParty.nextResolveAt, selectorAt + 30000, 'a held completed leg returns to finite lifecycle scheduling');
-    assert(idleBatch.payload.proposals.every(proposal => proposal.result.materialize.exp === 0));
+    assert(idleBatch.payload.proposals.every(proposal => Number(proposal.nextState.exp || 0) === 0));
     selector.partyPut(idleParty.partyId, idleParty);
     selector.onCommitAck({ results: idleBatch.payload.proposals.map(proposal => ({ ok: true,
         characterId: proposal.characterId, proposalId: proposal.proposalId,
-        state: { ...proposal.nextState, timing: { ...proposal.nextState.timing, nextResolveAt: proposal.result.nextResolveAt } },
+        state: proposal.nextState,
         context: {}
     })) });
     for (let i = 0; i < 100; i++) selector.tick();

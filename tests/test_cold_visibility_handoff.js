@@ -1,9 +1,9 @@
 const assert = require('assert');
 
-require('../src/Global');
-
+const { createWorld } = require('./helpers/c4QuestHarness');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const HotPartyLifecycle = invoke('GameServer/Bot/Population/HotPartyLifecycle');
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 
 function playerAt(locX, locY, locZ) {
     return {
@@ -16,6 +16,9 @@ function playerAt(locX, locY, locZ) {
 }
 
 (async () => {
+    // Main judges the state it holds: the bot is in its cache.
+    const world = await createWorld([{ id: 7001 }], 'cold-visibility-handoff');
+    await LifeState.init();
     const coordinator = new ColdSimulationCoordinator();
     coordinator.population = {
         realPlayerSessionsNear: () => [playerAt(1000, 2000, -4976)]
@@ -28,6 +31,7 @@ function playerAt(locX, locY, locZ) {
         stats: {},
         simulation: { revision: 1 }
     };
+    await LifeState.upsertState(visible, 'visibility_fixture');
     assert.strictEqual(coordinator.visibleToRealPlayer(visible), true,
         'a cold actor on the player-visible floor must be protected from background resolution');
     assert.strictEqual(await coordinator.prepareProposal({
@@ -50,6 +54,7 @@ function playerAt(locX, locY, locZ) {
         ...visible,
         party: { partyId: 'visible-party', leaderId: visible.characterId }
     };
+    await LifeState.upsertState(transitioning, 'visibility_fixture');
     HotPartyLifecycle.pending.add('visible-party');
     try {
         assert.strictEqual(await coordinator.prepareProposal({
@@ -63,6 +68,7 @@ function playerAt(locX, locY, locZ) {
         HotPartyLifecycle.pending.delete('visible-party');
     }
 
+    await world.close();
     console.log('Cold visibility handoff checks passed');
 })().catch((error) => {
     console.error(error);

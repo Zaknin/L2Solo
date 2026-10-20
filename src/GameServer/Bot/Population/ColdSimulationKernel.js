@@ -269,7 +269,6 @@ function fencedPartyChange(run, party) {
 
 // fence: the group always carries the fenced party row change.
 function partyTransitionProposals(run, memberStates, party, timestamp, event = null, activity = 'party_travel', fence = false) {
-    const nextResolveAt = Number(memberStates[0]?.timing?.nextResolveAt || timestamp + 1000);
     const requestedLeaderId = Number(run.party.leaderId || 0);
     const resolutionMemberId = memberStates.some((state) => Number(state.characterId) === requestedLeaderId)
         ? requestedLeaderId
@@ -296,16 +295,10 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
             priority: 'P1',
             enqueuedAt: timestamp,
             revision: memberRevision(run, id),
-            baseState: run.members.find((member) => Number(member.characterId) === id) || state,
+            baseState: proposalBase(run.members.find((member) => Number(member.characterId) === id) || state),
             nextState: state,
             durable: null,
-            result: {
-                patch: {},
-                events,
-                materialize: { exp: 0, sp: 0, adena: 0, items: [] },
-                nextResolveAt: Number(state.timing?.nextResolveAt || nextResolveAt),
-                debug: { activity, partyId: run.party.partyId, spotId: party.spotId || null }
-            },
+            result: { events, debug: { activity, partyId: run.party.partyId, spotId: party.spotId || null } },
             options: { allowParty: true, allowLifecycle: true },
             atomicGroup,
             partyResolution: id === resolutionMemberId
@@ -438,25 +431,21 @@ function groupPayloadBytes(sizes = []) {
     return proposalPayloadBytes(sizes.length, sizes.reduce((sum, size) => sum + size, 0));
 }
 
-function compactProposal(proposal = {}, includeInventory = true) {
-    const baseState = proposal.baseState || null;
-    const result = proposal.result || {};
-    const compactBaseState = baseState
-        ? {
-            characterId: Number(baseState.characterId || proposal.characterId || 0),
-            ...(includeInventory ? { inventory: baseState.inventory || {} } : {})
-        }
-        : null;
+// What main reads of a step's base and result: the base bag (the commit's
+// explicit removals, ColdSimulationOwner) and the result's events, memory
+// events and debug. nextState carries the rest; main commits over its own
+// cached state, so no whole state travels twice.
+function proposalBase(state) {
+    return { characterId: Number(state.characterId), inventory: state.inventory || {} };
+}
+
+function proposalResult(result = {}) {
     return {
-        ...proposal,
-        ...(baseState ? { baseState: compactBaseState } : {}),
-        result: {
-            events: Array.isArray(result.events) ? result.events : [],
-            ...(result.memoryEvents ? { memoryEvents: result.memoryEvents } : {}),
-            debug: result.debug || {},
-            ...(DiagnosticConfig.developerDiagnostics === true && result.consumptionDiagnostics
-                ? { consumptionDiagnostics: result.consumptionDiagnostics } : {})
-        }
+        events: Array.isArray(result.events) ? result.events : [],
+        ...(result.memoryEvents ? { memoryEvents: result.memoryEvents } : {}),
+        debug: result.debug || {},
+        ...(DiagnosticConfig.developerDiagnostics === true && result.consumptionDiagnostics
+            ? { consumptionDiagnostics: result.consumptionDiagnostics } : {})
     };
 }
 
@@ -1913,7 +1902,7 @@ class ColdSimulationKernel {
                     ...(raid ? { raidStepId } : {}),
                     enqueuedAt: this.now(),
                     revision: memberRevision(run, id),
-                    baseState: state,
+                    baseState: proposalBase(state),
                     nextState: projectedState,
                     durable: projection?.durable || null,
                     ...(projection?.market ? { market: projection.market } : {}),
@@ -1924,13 +1913,13 @@ class ColdSimulationKernel {
                     economyEdges: resolvedParty.status === 'dissolved' ? 0 : Number(projection?.economyEdges || 0),
                     ...(projection?.economyPlan && resolvedParty.status !== 'dissolved'
                         ? { economyPlan: projection.economyPlan } : {}),
-                    result: {
+                    result: proposalResult({
                         ...result,
                         events: [
                             ...(result.events || []),
                             ...(resolution.events || []).filter((event) => Number(event.characterId || run.party.leaderId) === id)
                         ]
-                    },
+                    }),
                     options: { allowParty: true, allowLifecycle: true },
                     partyResolution: id === Number(run.party.leaderId) ? leaderResolution : null
                 };
@@ -2034,7 +2023,7 @@ class ColdSimulationKernel {
                 priority,
                 enqueuedAt: this.now(),
                 revision: Number(active.state.simulation?.revision || 0),
-                baseState: resolveState,
+                baseState: proposalBase(resolveState),
                 nextState: projectedState,
                 durable: projection?.durable || null,
                 ...(projection?.market ? { market: projection.market } : {}),
@@ -2042,7 +2031,7 @@ class ColdSimulationKernel {
                 economyEdges: Number(projection?.economyEdges || 0),
                 ...(projection?.economyPlan ? { economyPlan: projection.economyPlan } : {}),
                 ...(projection?.buffOffer ? { buffOffer: projection.buffOffer } : {}),
-                result,
+                result: proposalResult(result),
                 options: { allowLifecycle: true, allowParty: !!active.state.stats?.tradeMeeting }
             };
             handled = true;
@@ -2102,12 +2091,9 @@ class ColdSimulationKernel {
             }
             if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
                 DiagnosticConfig.developerDiagnostics && (this.stats.proposalOversize += group.length);
-                transportGroup = group.map(entry => compactProposal(entry, true));
+                // Without the base bag: main derives no explicit removals.
+                transportGroup = group.map(entry => ({ ...entry, baseState: { characterId: Number(entry.characterId) } }));
                 transportSizes = proposalSizes(transportGroup);
-                if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
-                    transportGroup = group.map(entry => compactProposal(entry, false));
-                    transportSizes = proposalSizes(transportGroup);
-                }
                 if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
                     transportGroup = transportGroup.map(entry => {
                         const base = this.inFlight.get(Number(entry.characterId))?.state;

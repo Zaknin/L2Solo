@@ -183,14 +183,12 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
             }
             await new Promise((resolve) => setTimeout(resolve, 25));
         }
-        const plans = new Map([7, 8].map((id) => [id, proposals.get(id).baseState?.stats?.equipmentPlan || null]));
         assert(!received.some((m) => m.type === 'fault'), JSON.stringify(received.filter((m) => m.type === 'fault')));
-        assert.strictEqual(plans.get(7)?.target?.selfId, posting.target.selfId,
-            'the worker keeps the target funded by the bot\'s own buy-order escrow');
         const compact = require('../src/GameServer/Bot/Population/ColdEconomyDecision').compact;
         const fundedDecision = compact(proposals.get(7).economyDecision), unfundedDecision = compact(proposals.get(8).economyDecision);
         assert(fundedDecision.activity, 'worker supplies its new native wish after the fight');
-        assert(fundedIds(proposals.get(7).nextState.stats.money).includes(posting.target.selfId));
+        assert(fundedIds(proposals.get(7).nextState.stats.money).includes(posting.target.selfId),
+            'the worker keeps the target funded by the bot\'s own buy-order escrow');
         assert(Funding.spendable(proposals.get(7).nextState, price, { itemId: posting.target.selfId }) >= price,
             'current native funded ratio plus own escrow can pay the actual NPC offer');
         assert(Funding.spendable(proposals.get(8).nextState, 0, { itemId: posting.target.selfId }) < price,

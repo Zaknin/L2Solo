@@ -115,7 +115,7 @@ invoke('GameServer/Bot/AI/GearAcquisitionPlanner').safeFallbackForPlan = (state)
             const { bytes, ...sent } = message;
             assert.strictEqual(bytes, Protocol.byteLength(sent));
         }
-        const planned = (id) => proposals.get(id).baseState;
+        const planned = (id) => proposals.get(id).nextState;
 
         assert.strictEqual(planned(101).spotId, scenarios[101].planned.spotId,
             'a required waiter takes the safe fallback of its plan');
