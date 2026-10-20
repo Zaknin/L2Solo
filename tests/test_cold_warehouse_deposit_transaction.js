@@ -8,6 +8,7 @@ fixture.assertConfigured(options.default);
 const Database = invoke('Database');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Warehouse = invoke('GameServer/Bot/Economy/BotWarehouseService');
 const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const STEM = 1864;
@@ -51,10 +52,10 @@ async function run() {
         // On the unfixed code the cache and saved summary still have 20.
         // The next real worker commit can therefore restore that physical bag.
         if (process.argv.includes('--reproduce')) {
+            const looted = { ...first.state.inventory, [STEM]: { ...first.state.inventory[STEM], amount: 21 } };
             const [commit] = await Owner.commitBatch([{ revision: first.state.simulation.revision,
-                nextState: { ...first.state, inventory: { ...first.state.inventory,
-                    [STEM]: { ...first.state.inventory[STEM], amount: 21 } } },
-                proposal: { baseState: { inventory: first.state.inventory } }
+                nextState: { ...first.state, inventory: looted },
+                proposal: InventorySummary.bagChange(first.state.inventory, looted)
             }]);
             assert(commit.ok);
             const actual = await facts(first.id);
@@ -67,15 +68,17 @@ async function run() {
         const after = await facts(first.id);
         assert.equal(after.saved, 0); assert.equal(after.bag, 0); assert.equal(after.stored, 20);
         assert.equal(JSON.parse(after.row.statsJson).fixtureNote, 'keep');
+        const stale = { ...first.state.inventory, [STEM]: { selfId: STEM, name: 'Stem', amount: 21 } };
         const [behind] = await Owner.commitBatch([{ revision: first.state.simulation.revision,
-            nextState: { ...first.state, inventory: { ...first.state.inventory, [STEM]: { selfId: STEM, name: 'Stem', amount: 21 } } },
-            proposal: { baseState: { inventory: first.state.inventory } } }]);
+            nextState: { ...first.state, inventory: stale },
+            proposal: InventorySummary.bagChange(first.state.inventory, stale) }]);
         assert.equal(behind.reason, 'stale_revision', 'a step from before the deposit is refused');
         const fresh = Life.acceptInventoryProjection(moved.coldLifeRow);
         assert(fresh); assert.equal(Number(fresh.inventory[STEM]?.amount || 0), 0);
+        const loot = { ...fresh.inventory, [STEM]: { selfId: STEM, name: 'Stem', amount: 1 } };
         const [commit] = await Owner.commitBatch([{ revision: fresh.simulation.revision,
-            nextState: { ...fresh, inventory: { ...fresh.inventory, [STEM]: { selfId: STEM, name: 'Stem', amount: 1 } } },
-            proposal: { baseState: { inventory: fresh.inventory } }
+            nextState: { ...fresh, inventory: loot },
+            proposal: InventorySummary.bagChange(fresh.inventory, loot)
         }]);
         assert(commit.ok);
         assert.equal((await facts(first.id)).bag, 1, 'fresh cold commit adds only the new loot');

@@ -196,8 +196,8 @@ class ColdCompetitionActions {
         // refuses the pair whole.
         const results = await this.owner.commitBatch(next.map((state, i) => ({
             revision: Number(states[i].simulation?.revision || 0), nextState: state,
-            atomicGroup: group, options: { allowLifecycle: true }, proposal: { baseState: states[i],
-                removedItemIds: InventorySummary.removedItemIds(states[i].inventory, state.inventory),
+            atomicGroup: group, options: { allowLifecycle: true }, proposal: {
+                ...InventorySummary.bagChange(states[i].inventory, state.inventory),
                 ...(contest && i === 1 ? { result: { memoryEvents: [RelationshipContext.enrich({ key: `${event.key}:contested`,
                     sourceId: state.characterId, targetId: states[0].characterId, kind: 'character',
                     type: 'mob_contested', at: now }, state)] } } : {}) }

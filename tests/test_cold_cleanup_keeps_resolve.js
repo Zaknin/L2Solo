@@ -5,6 +5,7 @@ const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
 
 const originals = {
@@ -57,7 +58,7 @@ const fightResult = () => ({
             characterId: 7301,
             revision: simulation.revision,
             enqueuedAt: Date.now(),
-            baseState: { characterId: base.characterId, inventory: base.inventory },
+            ...InventorySummary.bagChange(base.inventory, base.inventory),
             nextState: { ...base, exp: base.exp + 500, adena: base.adena + 600 },
             // The worker found the bag over the author's cleanup threshold.
             cleanupNeed: { reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 },

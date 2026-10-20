@@ -14,6 +14,7 @@ const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const World = invoke('GameServer/World/World');
 
 const databasePath = path.join(process.cwd(), 'tmp', 'test-board-money-journal.sqlite');
@@ -117,7 +118,7 @@ async function run() {
     const hunt = revision => Owner.commitBatch([{ revision,
         nextState: { ...leasedState, adena: hunted['57'].amount, inventory: hunted,
             simulation: { ...leasedState.simulation, revision } },
-        proposal: { baseState: { inventory: leasedState.inventory } } }], { timestamp: Date.now() });
+        proposal: InventorySummary.bagChange(leasedState.inventory, hunted) }], { timestamp: Date.now() });
     const [refused] = await hunt(stepRevision);
     assert.strictEqual(refused.reason, 'stale_revision', 'the deal moved the revision under the step');
     // Small lots are no longer pruned by a fixed minimum (45a13735): the 13

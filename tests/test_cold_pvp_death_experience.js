@@ -10,6 +10,7 @@ const DataCache = invoke('GameServer/DataCache');
 const Death = invoke('GameServer/Progression/DeathExperience');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Resolver = invoke('GameServer/Bot/Population/BackgroundResolver');
 const Pvp = require('../src/GameServer/Bot/Population/ColdPvpResolver');
 const { seeded } = require('../src/GameServer/Bot/AI/TendencyRoll');
@@ -102,7 +103,7 @@ async function main() {
     const commit = await Owner.commitBatch([killer, victim].map(state => ({
         revision: state.simulation.revision,
         nextState: result.updates.get(state.characterId), options: { allowParty: true, allowLifecycle: true },
-        proposal: { baseState: state, durable: { pvpKills: result.fighters.find(f => f.id === state.characterId).kills } }
+        proposal: { ...InventorySummary.bagChange(state.inventory, result.updates.get(state.characterId).inventory), durable: { pvpKills: result.fighters.find(f => f.id === state.characterId).kills } }
     })), { timestamp: at + 10, journalReason: 'pvp' });
     assert(commit.every(r => r.ok), JSON.stringify(commit));
     const [character] = await Database.execute(['SELECT level, exp FROM characters WHERE id = ?', [VICTIM]]);

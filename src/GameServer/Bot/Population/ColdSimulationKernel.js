@@ -319,8 +319,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, enqueuedA
             priority: 'P1',
             enqueuedAt,
             revision: memberRevision(run, id),
-            baseState: proposalBase(base),
-            ...proposalRemovals(base, state),
+            ...InventorySummary.bagChange(base.inventory, state.inventory),
             nextState: state,
             durable: null,
             result: { events, debug: { activity, partyId: run.party.partyId, spotId: party.spotId || null } },
@@ -456,21 +455,11 @@ function groupPayloadBytes(sizes = []) {
     return proposalPayloadBytes(sizes.length, sizes.reduce((sum, size) => sum + size, 0));
 }
 
-// What main reads of a step's base and result: the base bag (whether the
-// commit rewrites the physical items, ColdSimulationOwner) and the result's
-// events, memory events and debug. nextState carries the rest; main commits
-// over its own cached state, so no whole state travels twice.
-function proposalBase(state) {
-    return { characterId: Number(state.characterId), inventory: state.inventory || {} };
-}
-
-// The stacks the step emptied, built once with the proposal and kept top-level,
-// so no flush stage drops them: the commit deletes their physical rows.
-function proposalRemovals(base, next) {
-    const removedItemIds = InventorySummary.removedItemIds(base?.inventory, next?.inventory);
-    return removedItemIds.length ? { removedItemIds } : {};
-}
-
+// What main reads of a step's result: its events, memory events and debug.
+// nextState carries the rest and main commits over its own cached state, so
+// no base state travels; of the base, the proposal carries only what the step
+// did to the bag (InventorySummary bagChange, top-level, so no flush stage
+// drops it).
 function proposalResult(result = {}) {
     return {
         events: Array.isArray(result.events) ? result.events : [],
@@ -1987,8 +1976,7 @@ class ColdSimulationKernel {
                     ...(raid ? { raidStepId } : {}),
                     enqueuedAt: this.now(),
                     revision: memberRevision(run, id),
-                    baseState: proposalBase(state),
-                    ...proposalRemovals(state, projectedState),
+                    ...InventorySummary.bagChange(state.inventory, projectedState?.inventory),
                     nextState: projectedState,
                     durable: projection?.durable || null,
                     ...(projection?.market ? { market: projection.market } : {}),
@@ -2116,8 +2104,7 @@ class ColdSimulationKernel {
                 priority,
                 enqueuedAt: this.now(),
                 revision: Number(active.state.simulation?.revision || 0),
-                baseState: proposalBase(resolveState),
-                ...proposalRemovals(resolveState, projectedState),
+                ...InventorySummary.bagChange(resolveState.inventory, projectedState?.inventory),
                 nextState: projectedState,
                 durable: projection?.durable || null,
                 ...(projection?.market ? { market: projection.market } : {}),
@@ -2186,19 +2173,13 @@ class ColdSimulationKernel {
             }
             if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
                 DiagnosticConfig.developerDiagnostics && (this.stats.proposalOversize += group.length);
-                // Without the base bag: main rewrites the physical items; the
-                // emptied stacks still ride in removedItemIds.
-                transportGroup = group.map(entry => ({ ...entry, baseState: { characterId: Number(entry.characterId) } }));
+                transportGroup = group.map(entry => {
+                    const base = this.inFlight.get(Number(entry.characterId))?.state;
+                    if (!base || !entry.nextState) return entry;
+                    const { nextState, ...transport } = entry;
+                    return { ...transport, nextStateDelta: ColdStateDelta.create(base, nextState) };
+                });
                 transportSizes = proposalSizes(transportGroup);
-                if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
-                    transportGroup = transportGroup.map(entry => {
-                        const base = this.inFlight.get(Number(entry.characterId))?.state;
-                        if (!base || !entry.nextState) return entry;
-                        const { nextState, ...transport } = entry;
-                        return { ...transport, nextStateDelta: ColdStateDelta.create(base, nextState) };
-                    });
-                    transportSizes = proposalSizes(transportGroup);
-                }
                 if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
                     oversized.push(...group);
                     continue;

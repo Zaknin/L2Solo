@@ -36,7 +36,6 @@ function playerAt(locX, locY, locZ) {
         'a cold actor on the player-visible floor must be protected from background resolution');
     assert.strictEqual(await coordinator.prepareProposal({
         characterId: visible.characterId,
-        baseState: visible,
         token: visible.simulation,
         nextState: { ...visible, activity: 'hunting' },
         result: { events: [] }
@@ -59,7 +58,6 @@ function playerAt(locX, locY, locZ) {
     try {
         assert.strictEqual(await coordinator.prepareProposal({
             characterId: transitioning.characterId,
-            baseState: transitioning,
             token: transitioning.simulation,
             nextState: transitioning,
             result: { events: [] }

@@ -193,19 +193,17 @@ function commitBatch(entries = [], options = {}) {
         const canonicalInventory = InventorySummary.canonicalize(nextState.inventory);
         const canonicalState = { ...nextState, inventory: canonicalInventory };
         states.set(Number(nextState.characterId), canonicalState);
-        // The physical writer needs explicit removals even though persisted
-        // summaries omit empty stacks. Only remove items owned by this proposal:
-        // the stacks its step emptied (removedItemIds, InventorySummary).
-        const removedItemIds = entry.proposal?.removedItemIds || [];
-        const physicalInventory = { ...canonicalInventory };
-        removedItemIds.forEach((selfId) => {
+        // What the step did to the bag comes with the proposal (InventorySummary
+        // bagChange): the physical items are rewritten only when it moved, and
+        // a proposal without the flag rewrites them. The physical writer needs
+        // explicit removals even though persisted summaries omit empty stacks;
+        // only items owned by this proposal: the stacks its step emptied.
+        const inventoryChanged = entry.proposal?.bagChanged !== false;
+        const physicalInventory = inventoryChanged ? { ...canonicalInventory } : null;
+        if (inventoryChanged) (entry.proposal?.removedItemIds || []).forEach((selfId) => {
             if (!canonicalInventory[selfId]) physicalInventory[selfId] = { selfId: Number(selfId), amount: 0 };
         });
-        // The base bag only tells whether the bag changed; a proposal sent
-        // without it (an oversized group) rewrites the physical items.
-        const previousInventory = InventorySummary.canonicalize(entry.proposal?.baseState?.inventory);
         const inventorySummary = JSON.stringify(canonicalInventory);
-        const inventoryChanged = removedItemIds.length > 0 || JSON.stringify(previousInventory) !== inventorySummary;
         requests.push({
             characterId: Number(nextState.characterId),
             expectedRevision: entry.revision,

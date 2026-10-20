@@ -7,6 +7,7 @@ require('../src/Global'); isolated.assertConfigured(options.default);
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Database = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState'), Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Combat = invoke('GameServer/Bot/Population/ColdCombatProfile'), Gear = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const Roster = require('../src/GameServer/Clan/ClanRaidRoster');
 const Formation = require('../src/GameServer/Bot/Population/RequiredPartyFormation');
@@ -285,7 +286,7 @@ async function propose(proof, { reward = 100, status = 'active' } = {}) {
                 participants: { [party.partyId]: proof.startedAt }, updatedAt: Date.now() } } };
     const entries = members.map(member => ({ nextState: { ...member, exp: member.exp + reward },
         revision: member.simulation.revision, atomicGroup,
-        proposal: { baseState: member }, options: { allowParty: true, allowLifecycle: true } }));
+        proposal: InventorySummary.bagChange(member.inventory, member.inventory), options: { allowParty: true, allowLifecycle: true } }));
     return { entries };
 }
 async function reject(proof, mutation, restore, detail) {

@@ -2,6 +2,7 @@ const assert = require('assert'), fs = require('fs'), os = require('os'), path =
 require('../src/Global');
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Party = invoke('GameServer/Bot/Population/BackgroundPartyResolver');
 const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
@@ -18,7 +19,7 @@ async function commit(resolution, reject = false) {
         const projection = await Life.prepareResolve(state, result, { timestamp: at, persist: false, projectClassProgression: true });
         return { revision: state.simulation.revision, nextState: projection,
             options: { allowParty: true, allowLifecycle: true }, atomicGroup: { id: `revive:${at}`, memberIds: [1, 2] },
-            proposal: { baseState: state, result } };
+            proposal: { ...InventorySummary.bagChange(state.inventory, projection.inventory), result } };
     }));
     if (reject) entries[0].revision -= 1;
     return Owner.commitBatch(entries, { timestamp: at });

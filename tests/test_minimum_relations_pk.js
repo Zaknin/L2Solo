@@ -17,6 +17,7 @@ const Drops = require('../src/GameServer/PkDropPolicy');
 const People = require('../src/GameServer/Social/PeopleKnowledge');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const at = Date.now();
 let groups = 0;
 const done = name => { groups++; console.log('PASS ' + name); };
@@ -219,7 +220,7 @@ async function main() {
             const current = Life.cachedState(2), next = { ...current, activity: 'dead', vitals: { ...current.vitals, hp: 0 },
                 stats: { ...current.stats, deaths: 1 }, updatedAt: at + 200 };
             const [result] = await Owner.commitBatch([{ revision: current.simulation.revision, nextState: next,
-                options: { allowLifecycle: true }, proposal: { baseState: current, durable: { pvpKills: [{ victimId: 1, victimLevel: 1, pvp: false }] } } }], { timestamp: at + 200 });
+                options: { allowLifecycle: true }, proposal: { ...InventorySummary.bagChange(current.inventory, next.inventory), durable: { pvpKills: [{ victimId: 1, victimLevel: 1, pvp: false }] } } }], { timestamp: at + 200 });
             assert(result.ok); assert.equal(result.pkDrops.length, 2);
             assert.equal(Life.cachedState(2).inventory['19'], undefined);
             assert.equal(Life.cachedState(2).inventory['1864'], undefined);
