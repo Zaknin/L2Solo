@@ -341,9 +341,9 @@ module.exports = {
     start() { enabled = true; coordinator ||= new ClanPlanningCoordinator(); },
     enabled: () => enabled,
     context,
-    plan: (payload) => coordinator.plan(payload, invoke('GameServer/DataCache'), invoke('GameServer/Bot/Population/SpotProfiles').ensure()),
-    withJob: (deadlineAt, work) => coordinator.withJob(deadlineAt, invoke('GameServer/DataCache'), work),
-    prepareRaids: payload => coordinator.prepareRaids(payload, invoke('GameServer/DataCache'), invoke('GameServer/Bot/Population/SpotProfiles').ensure()),
+    plan: (payload) => coordinator.plan(payload, DataCache, invoke('GameServer/Bot/Population/SpotProfiles').ensure()),
+    withJob: (deadlineAt, work) => coordinator.withJob(deadlineAt, DataCache, work),
+    prepareRaids: payload => coordinator.prepareRaids(payload, DataCache, invoke('GameServer/Bot/Population/SpotProfiles').ensure()),
     metrics: () => coordinator?.metrics() || { running: false, pending: 0 },
     shutdown: () => coordinator?.shutdown()
 };
