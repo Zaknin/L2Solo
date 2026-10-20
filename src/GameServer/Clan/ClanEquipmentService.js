@@ -24,6 +24,7 @@ const RosterDemand = require('./ClanRosterDemand');
 const RaidEncounterScope = require('../RaidBoss/RaidEncounterScope');
 const ClanMembershipPolicy = require('./ClanMembershipPolicy');
 const ClanEquipmentPartyPolicy = require('../Bot/Population/ClanEquipmentPartyPolicy');
+const ClanRules = require('./ClanRules');
 
 const metrics = {
     resolves: 0,
@@ -850,7 +851,7 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
             return result;
         };
         const economicEnabled = recruitment && !economicAttempted
-            && require('./ClanRules').memberLimit(clan.level) > Number(clan.physicalMemberCount ?? clan.members.length);
+            && ClanRules.memberLimit(clan.level) > Number(clan.physicalMemberCount ?? clan.members.length);
         const requirements = economicEnabled ? (await nativePlan({ economicMode: 'discovery' })).economicRequirements : null;
         let plan;
         if (requirements?.length) {
