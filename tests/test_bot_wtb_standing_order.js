@@ -195,21 +195,17 @@ try {
     // A goal review returns the needs it evaluated, for the reconcile after it.
     const GoalService = invoke('GameServer/Bot/Goals/GoalService');
     const GoalState = invoke('GameServer/Bot/Goals/GoalState');
-    const savedGoalState = { snapshot: GoalState.snapshot, set: GoalState.set, setBatch: GoalState.setBatch };
+    const savedGoalState = { snapshot: GoalState.snapshot, set: GoalState.set };
     try {
         GoalState.snapshot = () => ({ characterId: 7, current: { ...recover, nextReviewAt: Date.now() + 60000 } });
         GoalState.set = (characterId, goal) => Promise.resolve({ characterId, current: goal });
-        GoalState.setBatch = (rows) => Promise.resolve(rows.map((row) => ({ characterId: row.characterId, current: row.goal })));
         const reviewNative = await nativeChoice.capture(resting(PIECE_BONE_GAITERS), {}, 'goal_review_native_input');
         const snapshot = await GoalService.review(reviewNative.state);
         assert(Array.isArray(snapshot?.candidates) && snapshot.candidates.length > 0, 'the review hands back its needs');
         assert(snapshot.current?.type, 'and the chosen goal');
-        const [batched] = await GoalService.reviewBatch([reviewNative.state]);
-        assert(Array.isArray(batched?.candidates) && batched.candidates.length > 0, 'a batch review hands back its needs too');
     } finally {
         GoalState.snapshot = savedGoalState.snapshot;
         GoalState.set = savedGoalState.set;
-        GoalState.setBatch = savedGoalState.setBatch;
     }
 } finally {
     LifeState.snapshot = original.snapshot;

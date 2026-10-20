@@ -5392,25 +5392,6 @@ const Database = {
         }, { operation: 'afk-trade:notifications-delivered' });
     },
 
-    upsertBotGoalStates(entries = []) {
-        const batch = (entries || []).map((entry) => ({
-            characterId: Number(entry?.characterId || 0),
-            goalJson: String(entry?.goalJson || ''),
-            updatedAt: Number(entry?.updatedAt || now())
-        })).filter((entry) => Number.isSafeInteger(entry.characterId) && entry.characterId > 0 && entry.goalJson);
-        if (!batch.length) return Promise.resolve(0);
-        return inTransaction(() => {
-            const values = batch.map(() => '(?, ?, ?)').join(', ');
-            const params = batch.flatMap((entry) => [entry.characterId, entry.goalJson, entry.updatedAt]);
-            write(`INSERT INTO bot_goal_state (characterId, goalJson, updatedAt)
-                VALUES ${values}
-                ON CONFLICT(characterId) DO UPDATE SET
-                    goalJson = excluded.goalJson,
-                    updatedAt = excluded.updatedAt`, params);
-            return batch.length;
-        }, 'bot-goals:batch-save');
-    },
-
     ensureSocialEntity(entity) {
         return inTransaction(() => ensureSocialEntityUnsafe(entity, now()), 'social:entity-upsert');
     },
