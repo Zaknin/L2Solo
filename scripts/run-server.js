@@ -32,7 +32,8 @@ function stopServer(signal) {
 
 function startServer() {
     log('starting NodeL2 with embedded SQLite');
-    serverChild = spawn(process.execPath, ['--openssl-legacy-provider', 'src/NodeL2'], {
+    // Use V8's minimum normal heap-growth factor while preserving worker hard limits.
+    serverChild = spawn(process.execPath, ['--openssl-legacy-provider', '--heap-growing-percent=10', 'src/NodeL2'], {
         cwd: rootDir,
         stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
         env: process.env,
