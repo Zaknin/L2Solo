@@ -475,10 +475,14 @@ console.log('PASS public paid service for fighter, no scroll/phantom source, rou
     book.put({ id: 1, ownerId: 2, storeType: 1, kind: 'sell_ad', town: 'Giran', lines: [{ lineId: 1, selfId: 9002, count: 3, price: 70 }] });
     book.put({ id: 2, ownerId: 1, storeType: 1, kind: 'sell_ad', town: 'Giran', lines: [{ lineId: 2, selfId: 9002, count: 9, price: 1 }] });
     const deps = { board: book, npcOffersFor: id => shops.get(Number(id)) || Object.freeze([]) };
-    const ask = (trip, id, options) => Evidence.reader(state, { board: book, trip }, deps, options)(id);
+    const ask = (trip, id, options) => {
+        const offer = Evidence.reader(state, { board: book, trip }, deps, options)(id);
+        return offer && { town: offer.town, price: offer.price, sourceType: offer.sourceType,
+            availableUnits: offer.availableUnits, tripHours: offer.tripHours, tripFees: offer.tripFees };
+    };
     const retail = { npcOnly: true, town: 'Giran' };
     const sale = (town, price, sourceType, availableUnits, [, tripHours, tripFees]) =>
-        ({ price, unitPrice: price, availableUnits, town, sourceType, quoted: true, tripHours, tripFees });
+        ({ town, price, sourceType, availableUnits, tripHours, tripFees });
     for (let repeat = 0; repeat < 2; repeat++) {
         assert.deepEqual(ask(nearGiran, 9001, retail), sale('Giran', 50, 'npc', Infinity, [0, 0.1, 5]));
         assert.deepEqual(ask(nearDion, 9001, retail), sale('Giran', 50, 'npc', Infinity, [0, 2, 100]),

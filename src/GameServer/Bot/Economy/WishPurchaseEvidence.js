@@ -22,8 +22,10 @@ function npcShape(npcOnly, town) {
     return shapes.get(key);
 }
 function npcCandidates(shape, offers) {
+    // The common case: every offer of the list, at most one per town.
+    if (!shape.npcOnly && !shape.town && offers.length <= NPC_LIMIT) return offers;
     const derive = () => {
-        if (!shape.npcOnly && !shape.town) return offers.length <= NPC_LIMIT ? offers : offers.slice(0, NPC_LIMIT);
+        if (!shape.npcOnly && !shape.town) return offers.slice(0, NPC_LIMIT);
         const kept = offers.filter(offer => (!shape.npcOnly || offer.sourceType === 'npc')
             && (!shape.town || offer.town === shape.town)).slice(0, NPC_LIMIT);
         // Without the board and the fixed shots these are the only offers:
