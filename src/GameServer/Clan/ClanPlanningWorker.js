@@ -105,11 +105,15 @@ const stubs = new Map([
     }],
     ['GameServer/World/Generics/NpcShopBuyLists', { allEntries: () => context.shopEntries || [] }]
 ]);
+const allowedModules = new Set();
 global.invoke = (name) => {
     if (stubs.has(name)) return stubs.get(name);
-    if (name === 'Database' || name === 'Server'
-        || /GameServer\/(World\/World$|Bot\/BotManager|Network|Persistence)/.test(name)) {
-        throw new Error(`clan planning worker forbidden dependency: ${name}`);
+    if (!allowedModules.has(name)) {
+        if (name === 'Database' || name === 'Server'
+            || /GameServer\/(World\/World$|Bot\/BotManager|Network|Persistence)/.test(name)) {
+            throw new Error(`clan planning worker forbidden dependency: ${name}`);
+        }
+        if (typeof name === 'string') allowedModules.add(name);
     }
     return originalInvoke(name);
 };
