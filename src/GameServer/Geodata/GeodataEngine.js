@@ -76,6 +76,65 @@ function getLocalY(y, regionY) {
     return y - ((regionY - REGION_OFFSET_Y) << 15);
 }
 
+function readHeight(buffer, blockOffset, cellX, cellY, z) {
+    // Read block type (1 byte)
+    const type = buffer.readUInt8(blockOffset);
+    let cellOffset = blockOffset + 1;
+
+    if (type === 0) { // FLAT
+        const flatZ = buffer.readInt16LE(cellOffset);
+        return flatZ;
+    } else if (type === 1) { // COMPLEX
+        const cellId = (cellX * 8) + cellY;
+        const value = buffer.readInt16LE(cellOffset + (cellId * 2));
+        const cellZ = ((value & 0xFFF0) << 16) >> 17;
+        return cellZ;
+    } else if (type === 2) { // MULTILEVEL
+        const targetCellId = (cellX * 8) + cellY;
+        let tempOffset = cellOffset;
+        for (let i = 0; i < targetCellId; i++) {
+            const layers = buffer.readUInt8(tempOffset);
+            tempOffset += 1 + (layers * 2);
+        }
+
+        const layers = buffer.readUInt8(tempOffset);
+        if (layers === 0) {
+            return z;
+        }
+
+        tempOffset += 1;
+        // Scan layers to find the one closest to current Z-height
+        let closestZ = z;
+        let minDiff = Infinity;
+
+        for (let l = 0; l < layers; l++) {
+            const value = buffer.readInt16LE(tempOffset + (l * 2));
+            const layerZ = ((value & 0xFFF0) << 16) >> 17;
+            const diff = Math.abs(layerZ - z);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closestZ = layerZ;
+            }
+        }
+        return closestZ;
+    }
+
+    return z;
+}
+
+function regionFailure(engine, store, key, error) {
+    // Files are immutable until restart; do not retry a corrupt region on every query.
+    engine.missing[key] = true;
+    delete engine.regions[key];
+    delete engine[`index_${key}`];
+    if (error && error.code !== 'ENOENT') {
+        console.error(`GeodataEngine :: Failed to load region ${key}:`, error);
+    } else {
+        const directory = store?.descriptor.directory || engine.getGeodataDir();
+        utils.infoWarn("GeodataEngine", "Geodata file not found: %s", path.join(directory, `${key}.l2j`));
+    }
+}
+
 const GeodataEngine = {
     regions: {}, // Loaded region buffers, keyed by "XX_YY"
     missing: {}, // Keys of missing regions, to prevent console spam and repeat disk checks
@@ -146,12 +205,16 @@ const GeodataEngine = {
 
     storageStats() {
         let attachedBytes = 0;
-        const entries = Object.entries(this.regions);
-        for (const [key, buffer] of entries) {
-            attachedBytes += buffer.byteLength + (this[`index_${key}`]?.byteLength || 0);
+        const attached = new Set(Object.keys(this.regions));
+        for (const buffer of Object.values(this.regions)) attachedBytes += buffer.byteLength;
+        for (const key of Object.keys(this)) {
+            if (!key.startsWith('index_') || !this[key]) continue;
+            attached.add(key.slice(6));
+            attachedBytes += this[key].byteLength || 0;
         }
-        return { ...(sharedGeodata?.stats() || { reservedBytes: 0, loadedBytes: 0, loadedRegions: 0 }),
-            attachedBytes, attachedRegions: entries.length };
+        return { ...(sharedGeodata?.stats() || { reservedBytes: 0, loadedBytes: 0, loadedRegions: 0,
+            rawRegions: 0, indexOnlyRegions: 0, heightFileReads: 0 }),
+            attachedBytes, attachedRegions: attached.size };
     },
 
     getRegionKey(x, y) {
@@ -166,7 +229,7 @@ const GeodataEngine = {
         }
         const store = getSharedGeodata(this.getGeodataDir());
         try {
-            const loaded = store.load(key, (buffer, index) => this.buildOffsetIndex(buffer, index));
+            const loaded = store.load(key, (buffer, index) => this.buildOffsetIndex(buffer, index), this[`index_${key}`]);
             if (loaded) {
                 this.regions[key] = loaded.buffer;
                 this[`index_${key}`] = loaded.index;
@@ -174,15 +237,10 @@ const GeodataEngine = {
                 return true;
             }
         } catch (err) {
-            if (err.code !== 'ENOENT') {
-                // Files are immutable until restart; do not retry a corrupt region on every query.
-                this.missing[key] = true;
-                console.error(`GeodataEngine :: Failed to load region ${key}:`, err);
-                return false;
-            }
+            regionFailure(this, store, key, err);
+            return false;
         }
-        this.missing[key] = true;
-        utils.infoWarn("GeodataEngine", "Geodata file not found: %s", path.join(store.descriptor.directory, `${key}.l2j`));
+        regionFailure(this, store, key);
         return false;
     },
 
@@ -199,85 +257,46 @@ const GeodataEngine = {
     },
 
     hasGeo(x, y) {
-        return !!this.regions[this.getRegionKey(x, y)];
+        const key = this.getRegionKey(x, y);
+        return !!(this.regions[key] || this[`index_${key}`]);
     },
 
     getHeight(x, y, z) {
         const regionX = getRegionX(x);
         const regionY = getRegionY(y);
-
-        const buffer = this.getRegionBuffer(regionX, regionY);
-        if (!buffer) {
-            return z; // Fallback to current Z height if region geodata is not loaded
-        }
-
-        // Calculate local coordinates inside the region (0 to 32767)
+        const key = `${regionX}_${regionY}`;
         const localX = getLocalX(x, regionX);
         const localY = getLocalY(y, regionY);
-
-        // Calculate block index inside the region (0 to 255)
-        const blockX = localX >> 7;
-        const blockY = localY >> 7;
-
-        // Calculate cell index inside the block (0 to 7)
+        const blockId = ((localX >> 7) * 256) + (localY >> 7);
         const cellX = (localX >> 4) & 7;
         const cellY = (localY >> 4) & 7;
-
-        const key = `${regionX}_${regionY}`;
-        const offsetIndex = this[`index_${key}`];
-        if (!offsetIndex) {
-            return z;
-        }
-
-        const blockId = (blockX * 256) + blockY;
-        const blockOffset = offsetIndex[blockId];
-        if (blockOffset === undefined) {
-            return z;
-        }
-
-        // Read block type (1 byte)
-        const type = buffer.readUInt8(blockOffset);
-        let cellOffset = blockOffset + 1;
-
-        if (type === 0) { // FLAT
-            const flatZ = buffer.readInt16LE(cellOffset);
-            return flatZ;
-        } else if (type === 1) { // COMPLEX
-            const cellId = (cellX * 8) + cellY;
-            const value = buffer.readInt16LE(cellOffset + (cellId * 2));
-            const cellZ = ((value & 0xFFF0) << 16) >> 17;
-            return cellZ;
-        } else if (type === 2) { // MULTILEVEL
-            const targetCellId = (cellX * 8) + cellY;
-            let tempOffset = cellOffset;
-            for (let i = 0; i < targetCellId; i++) {
-                const layers = buffer.readUInt8(tempOffset);
-                tempOffset += 1 + (layers * 2);
-            }
-
-            const layers = buffer.readUInt8(tempOffset);
-            if (layers === 0) {
+        const localBuffer = this.regions[key];
+        if (!localBuffer && this.missing[key]) return z;
+        let buffer = localBuffer;
+        let index = this[`index_${key}`];
+        let blockOffset = index?.[blockId];
+        if (!buffer) {
+            // Missing worker bootstrap must fail before the ordinary missing-file fallback.
+            const store = getSharedGeodata(this.getGeodataDir());
+            let loaded;
+            try {
+                loaded = store.loadHeightBlock(key, blockId, (data, target) => this.buildOffsetIndex(data, target), index);
+            } catch (error) {
+                regionFailure(this, store, key, error);
                 return z;
             }
-
-            tempOffset += 1;
-            // Scan layers to find the one closest to current Z-height
-            let closestZ = z;
-            let minDiff = Infinity;
-
-            for (let l = 0; l < layers; l++) {
-                const value = buffer.readInt16LE(tempOffset + (l * 2));
-                const layerZ = ((value & 0xFFF0) << 16) >> 17;
-                const diff = Math.abs(layerZ - z);
-                if (diff < minDiff) {
-                    minDiff = diff;
-                    closestZ = layerZ;
-                }
+            if (!loaded) {
+                regionFailure(this, store, key);
+                return z;
             }
-            return closestZ;
+            ({ buffer, index, blockOffset } = loaded);
+            // Attach after the local load, as full-region reads do. A decoder error
+            // in one block must not invalidate the region's other blocks.
+            this[`index_${key}`] = index;
+            if (loaded.raw) this.regions[key] = buffer;
         }
-
-        return z;
+        if (blockOffset === undefined || !buffer.length) return z;
+        return readHeight(buffer, blockOffset, cellX, cellY, z);
     },
 
     checkVirtualObstacles(x, y, regionKey) {
