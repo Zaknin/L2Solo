@@ -428,7 +428,6 @@ function stateFor(character, index, seedMeta = {}) {
     }, index);
     const vitals = seedMeta.vitals || vitalsFor(classInfo(base.classId), level);
     const now = Date.now();
-    const shotPlan = ShotStock.planFor({ classId, rank: 'none' });
 
     const initial = {
         characterId: Number(character.id),
@@ -474,12 +473,9 @@ function stateFor(character, index, seedMeta = {}) {
                 selfId: 57,
                 name: 'Adena',
                 amount: Number(character.adena || Math.round(level * 85))
-            },
-            [shotPlan.selfId]: {
-                selfId: shotPlan.selfId,
-                name: shotPlan.name,
-                amount: ShotStock.DEFAULT_TARGET_AMOUNT
             }
+            // Shots come from the items table (refreshInventory): the seed
+            // names nothing the bot does not physically hold.
         }
     };
     if (!base.serviceCrafter) return initial;
