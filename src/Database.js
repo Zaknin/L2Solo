@@ -3911,8 +3911,10 @@ function reconcileBotPurchasesUnsafe(characterId, held, configs, purchase, times
         && current.lines.filter(line => line.count > 0).length === rows.length
         && rows.every(line => current.lines.some(old => old.selfId === line.selfId && old.enchant === Number(line.enchant || 0)
             && old.count === line.count && old.price === line.price));
+    // A kept shop's escrow stays locked; a closing one refunds it to the bag
+    // first (closeBoardRecordUnsafe), so only then does it back the bids.
     const wallet = Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=57', [characterId]).amount)
-        + (current?.storeType === BoardRules.BUY ? current.escrowAdena : 0);
+        + (!same && current?.storeType === BoardRules.BUY ? current.escrowAdena : 0);
     const closed = [], changedIds = [];
     if (current && !same && (config || current.storeType === BoardRules.BUY)) {
         changedIds.push(...closeBoardRecordUnsafe(current, { at: timestamp }), 57);

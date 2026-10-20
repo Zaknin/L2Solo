@@ -174,6 +174,24 @@ async function run() {
     assert.equal(shop(9105).lines.length, 1, 'alternatives for one root cannot reserve both product and materials');
     assert.equal(records(9105).filter(row => row.kind === 'buy_ad').length, 2);
 
+    // A kept purchase shop's escrow stays locked: it cannot back a new meeting bid.
+    await bot(9106);
+    await apply(9106, REQUESTS.slice(0, 3));
+    const kept = shop(9106);
+    assert.equal(records(9106).length, 1);
+    const cash = (await DB.fetchItems(9106)).find(item => Number(item.selfId) === 57);
+    await DB.updateItemAmount(9106, cash.id, 1000);
+    const keptLines = kept.lines.map(line => ({ selfId: line.selfId, enchant: line.enchant, count: line.count,
+        price: line.price, name: line.name }));
+    await assert.rejects(DB.replaceBoardRecords(9106, 'buy_ad', [{ storeType: Afk.BUY, title: 'WTB', town: 'Giran', ...POINT,
+        lines: [{ selfId: 1867, count: 1, price: 1500, name: 'Item 1867' }] }], { expected: {}, buyShop: {
+        expected: { id: kept.id, revision: kept.revision },
+        config: { storeType: Afk.BUY, title: kept.title, town: kept.town, locX: kept.locX, locY: kept.locY, locZ: kept.locZ, lines: keptLines }
+    } }), /not_enough_adena/, 'the free wallet (1000) cannot back a 1500 bid while 1100 stays in the kept shop');
+    assert.equal(shop(9106).id, kept.id);
+    assert.equal(shop(9106).escrowAdena, kept.escrowAdena);
+    assert.equal(records(9106).length, 1);
+
     const batch = Plan.buyBatch(REQUESTS.map(([selfId, count, price]) => ({ selfId, count, price })));
     assert.equal(batch.buyAds.length, 8, 'worker transport carries the shop and meeting slots');
     const captured = Decision.capture({ inputKey: 'eight-purchase-requests', network: {
