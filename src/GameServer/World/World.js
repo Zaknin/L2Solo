@@ -461,6 +461,9 @@ const World = {
             membership.actor = null;
             membership.id = null;
             membership.cellX = membership.cellY = undefined;
+            // The client leaves the world (character select, logout, another
+            // character): the ground items it held are gone with it.
+            NpcVisibility.forgetSession(session);
             return true;
         } finally {
             if (accepted) notifyActorPublication(runtime, 'upsert', retired, 'retire');
