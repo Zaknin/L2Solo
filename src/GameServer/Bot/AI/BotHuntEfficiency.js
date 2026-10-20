@@ -3,9 +3,12 @@ const Rates = invoke('GameServer/ProgressionRates');
 const DataCache = invoke('GameServer/DataCache');
 const NpcSellRules = invoke('GameServer/Items/NpcSellRules');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 const MAX_SPOTS = 8;
 const MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+// The ranked rows a fit walk reads, as EquipmentIncomeRoute.select's maxChecks.
+const FIT_CHECKS = 32;
 // The bot hunts in a party or alone: the author keeps the two apart.
 function situationOf(state, mode) {
     const grouped = mode ? ['party','duo','party_pve'].includes(mode)
@@ -191,17 +194,48 @@ function bestIncome(rows, share = 1) {
 // No cohort median: a bot calibrates the common table only with its own
 // samples. This base income is independent from the wish network, so price
 // priors and providers cannot recurse through the common value of an hour.
-function huntIncome(state, timestamp = Date.now(), mode) {
-    const own = bestIncome(sampledRows(state, timestamp, mode), onSpotShare(state));
-    if (own?.perHour > 0) return { ...own, source: 'own' };
+// fits(spotId): the bot's own fit for a spot, when the caller knows it
+// (EconomyContext.foundation, a solo bot in the worker). The hunt then names
+// only spots the bot may hunt: own rows count only where it fits; an unfit
+// current spot or table pick gives way to a fitting row of the shared income
+// ranking, read in one walk of its first FIT_CHECKS rows (the income: the
+// first fitting row; the progress: the fitting row with the most exp), and
+// the hunt carries that row's numbers. Nothing fitting in the walk: the
+// table's pick stays. Counted as hunt:fit:kept|swap|none.
+function huntIncome(state, timestamp = Date.now(), mode, fits = null) {
+    const sampled = sampledRows(state, timestamp, mode);
+    const own = bestIncome(fits ? sampled.filter(row => fits(row.spotId)) : sampled, onSpotShare(state));
+    if (own?.perHour > 0) {
+        if (fits && Diagnostics.active()) Diagnostics.count('hunt', 'fit',
+            bestIncome(sampled, onSpotShare(state))?.spotId === own.spotId ? 'kept' : 'swap');
+        return { ...own, source: 'own' };
+    }
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const rewardOptions = { spoilSkillLevel: require('../Economy/SpotRewardExpectation').spoilSkillLevel(state) };
     const tableRole = Roles.tableRoleFor(state);
-    const current = state.spotId && Table.value(state.spotId, tableRole, levelOf(state), true, rewardOptions);
-    const progress = current || Table.best(tableRole, levelOf(state), true);
+    const level = levelOf(state);
+    const currentFits = !state.spotId || !fits || fits(state.spotId);
+    const current = state.spotId && currentFits && Table.value(state.spotId, tableRole, level, true, rewardOptions);
     const costs = consumablePrices(state);
-    const row = current && netIncome(current, costs) > 0 ? current : Table.rankedIncome(tableRole, levelOf(state), costs, -7, true, rewardOptions)[0]
-        || Table.rankedIncome(tableRole, levelOf(state), costs, -7, false, rewardOptions)[0];
+    const ranked = shots => Table.rankedIncome(tableRole, level, costs, -7, shots, rewardOptions);
+    let progress = current || Table.best(tableRole, level, true);
+    let row = current && netIncome(current, costs) > 0 ? current : ranked(true)[0] || ranked(false)[0];
+    const rowUnfit = fits && row && !fits(row.spotId || state.spotId);
+    const progressUnfit = fits && progress && !fits(progress.spotId || state.spotId);
+    if (rowUnfit || progressUnfit) {
+        const list = ranked(true).length ? ranked(true) : ranked(false);
+        let earning = null, leveling = null;
+        for (let at = 0; at < Math.min(list.length, FIT_CHECKS); at++) {
+            const entry = list[at];
+            if (!fits(entry.spotId)) continue;
+            earning ||= entry;
+            if (!leveling || entry.exp > leveling.exp) leveling = entry;
+            if (!progressUnfit) break;
+        }
+        if (rowUnfit && earning) row = earning;
+        if (progressUnfit && leveling) progress = leveling;
+        Diagnostics.count('hunt', 'fit', earning ? 'swap' : 'none');
+    } else if (fits) Diagnostics.count('hunt', 'fit', currentFits ? 'kept' : 'swap');
     if (!row) return { perHour: 0, perKill: 0, expPerHour: 0, source: 'unavailable' };
     const income = netIncome(row, costs);
     return { perHour: income * onSpotShare(state), perKill: row.kills > 0 ? income / row.kills : 0,
