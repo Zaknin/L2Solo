@@ -2,6 +2,8 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
+require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const Codec = require('../src/GameServer/AfkTrade/TradeMeetingCodec');
 
@@ -25,7 +27,7 @@ invoke('GameServer/Bot/Economy/PurchaseFunding').spendable = () => 1000000;
 
 (async () => {
     const epoch = 'wtb-meeting-limit', received = [];
-    const worker = new Worker(source, { eval: true, workerData: { workerEpoch: epoch,
+    const worker = new Worker(source, { eval: true, workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: epoch,
         workerPath: path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js') } });
     let failure;
     worker.on('error', error => { failure = error; });

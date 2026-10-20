@@ -1,5 +1,6 @@
 'use strict';
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
@@ -11,7 +12,7 @@ const StateWire = require('../src/GameServer/Bot/Population/ColdStateWire');
 async function runWorker(state, predicate, followUp = null) {
     const epoch = `economy-publication-${state.characterId}`, received = [];
     const worker = new Worker(path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js'),
-        { workerData: { workerEpoch: epoch }, resourceLimits: { maxOldGenerationSizeMb: 256 } });
+        { workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: epoch }, resourceLimits: { maxOldGenerationSizeMb: 256 } });
     let failure, exited = false;
     worker.on('error', error => { failure = error; });
     worker.on('message', message => received.push(message));
