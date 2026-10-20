@@ -1,4 +1,7 @@
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 require('../src/Global');
 
 const Data = invoke('GameServer/DataCache');
@@ -30,6 +33,14 @@ for (let x = 0; x < 8; x++) for (let y = 0; y < 8; y++) {
 }
 
 try {
+    const geodataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spawn-drop-height-'));
+    const originalGeodataDir = process.env.L2NODE_GEODATA_DIR;
+    restores.push(() => {
+        if (originalGeodataDir === undefined) delete process.env.L2NODE_GEODATA_DIR;
+        else process.env.L2NODE_GEODATA_DIR = originalGeodataDir;
+        fs.rmSync(geodataDir, { recursive: true, force: true });
+    });
+    process.env.L2NODE_GEODATA_DIR = geodataDir;
     replace(Geo, 'regions', { [regionKey]: block });
     replace(Geo, `index_${regionKey}`, new Uint32Array(65536));
     const packets = [];
@@ -109,7 +120,9 @@ try {
     assert.strictEqual(world.items.spawns.at(-1).fetchLocZ(), -4400,
         'loot resolves the corpse floor, including the six-unit actor offset');
 
-    replace(Geo, 'getRegionBuffer', () => null);
+    // Remove the synthetic data; the empty directory has no fallback region file.
+    replace(Geo, 'regions', {});
+    replace(Geo, `index_${regionKey}`, undefined);
     const fallback = SpawnNpcs.spawnNpc(world, definition); created.push(fallback);
     assert.strictEqual(fallback.fetchLocZ(), -3818, 'missing geodata retains the authored territory height');
     Rewards.call(world, session, { ...npc, fetchLocZ: () => -4394 });
