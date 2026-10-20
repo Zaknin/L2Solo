@@ -423,6 +423,23 @@ try {
     assert.strictEqual(recoveryBuffsApplied, 1, 'no Newbie Guide buffs are granted without a guide in town');
     recoveryNeedsBuff = false;
 
+    // A guide trip started inside the town radius whose route then carries the
+    // bot beyond it must not end silently: it keeps its guide or sets the retry.
+    const driftBot = bot({ locX: -84081 + 7400, locY: 243227, locZ: -3723, level: 10 });
+    const driftSession = {
+        plan: 'getting_buffed',
+        preBuffPlan: 'hunting',
+        preBuffLocation: { locX: -84081 + 7400, locY: 243227, locZ: -3723 }
+    };
+    publishTravelSession(driftSession, driftBot);
+    GettingBuffedState.tick(driftSession, driftBot, noTeleportGenerics, farGuideAi);
+    assert.strictEqual(driftSession.plan, 'getting_buffed', 'a guide within the town radius starts the trip');
+    driftBot.locX = -84081 + 7600;
+    publishTravelSession(driftSession, driftBot);
+    GettingBuffedState.tick(driftSession, driftBot, noTeleportGenerics, farGuideAi);
+    assert(driftSession.plan === 'getting_buffed' || Number(driftSession.newbieGuideRetryAt || 0) > Date.now(),
+        'a trip whose route leaves the town radius must keep its guide or wait for the retry time');
+
     const shoppingLeader = {
         fetchIsOnline: () => true,
         fetchLocX: () => -84020,

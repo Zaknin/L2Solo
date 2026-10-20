@@ -128,16 +128,29 @@ function abandonUnreachableVisit(session, bot, BotAI) {
     TownChatter.say(session, BotAI, 'newbie-guide-unreachable', Speech.lines('town.newbie-guide-unreachable'), { priority: 'coordination' });
 }
 
+// The guide of this trip, chosen once at its start and kept on the trip's
+// resume record (every trip entry writes a fresh one): null = no guide trip.
+function chosenGuide(session, bot, BotAI) {
+    const resume = session.resumeAfterBuff ??= {};
+    if (resume.newbieGuide === undefined) resume.newbieGuide = HotTownRebuff.tripGuide(session, bot, BotAI);
+    return resume.newbieGuide;
+}
+
 module.exports = {
     tick(session, bot, Generics, BotAI) {
         const resume = session.resumeAfterBuff;
         if (Number(resume?.readyAt || 0) > Date.now()) return;
 
-        // A guide beyond its town radius has no town path, so its route failures are not counted.
-        const guide = HotTownRebuff.tripGuide(session, bot, BotAI);
+        const guide = chosenGuide(session, bot, BotAI);
         const shouldVisitGuide = !!guide && (resume?.conditionalNewbieBuff !== true || BotBuffs.needsNewbieRefresh(bot, 0));
         if (!shouldVisitGuide) {
             finishVisit(session, bot, Generics);
+            return;
+        }
+        // A guide beyond its town radius has no town path, so its route failures
+        // are not counted: a route that leaves that radius ends the trip as unreachable.
+        if (!HotTownRebuff.guideInReach(bot, guide)) {
+            abandonUnreachableVisit(session, bot, BotAI);
             return;
         }
 

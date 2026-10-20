@@ -21,12 +21,17 @@ function distance2d(first, second) {
     );
 }
 
-// The closest newbie guide when it stands within the town radius of the
-// point (an actor or a plain location), else null: the one guide-town rule.
+// Whether the guide stands within the town radius of the point (an actor or
+// a plain location): the one guide-town rule.
+function guideInReach(point, guide) {
+    return !!guide && distance2d(pointOf(point), guide) <= GUIDE_TOWN_RADIUS;
+}
+
+// The closest newbie guide when it is in reach of the point, else null.
 function nearGuide(point, BotAI) {
     const at = pointOf(point);
     const guide = BotAI?.getClosestNewbieGuide?.(at.locX, at.locY);
-    return guide && distance2d(at, guide) <= GUIDE_TOWN_RADIUS ? guide : null;
+    return guideInReach(at, guide) ? guide : null;
 }
 
 // The guide a newbie-guide trip may head to from the actor, else null: the one
@@ -84,6 +89,7 @@ module.exports = {
     GUIDE_TOWN_RADIUS,
     TOWN_CENTER_RADIUS,
     currentVisit,
+    guideInReach,
     markCompleted,
     nearGuide,
     needsVisit,
