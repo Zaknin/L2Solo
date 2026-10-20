@@ -36,6 +36,7 @@ const { fnv1a32 } = require('../Fnv1a');
 const engine = new WishNetwork();
 const Trip = require('./EconomicTrip');
 const IncomeRoute = require('./EquipmentIncomeRoute');
+const SpotEconomics = require('./SpotEconomics');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
 const SpotService = invoke('GameServer/Bot/AI/SpotService');
@@ -1263,7 +1264,8 @@ function forState(state = {}, deps = {}) {
     context.routeKey = Trip.key(state); context.routeRows = fullRoute(deps.routeRows) ? deps.routeRows : null;
     const tripHour = context.hourAdena;
     context.trip = deps.tripCost || Trip.preparedReader(context.routeRows || [], { hourAdena: tripHour });
-    const readSpot = invoke('GameServer/Bot/Economy/SpotEconomics').create(state, { ...deps, timestamp, persona, price, deathHours: context.deathHours });
+    const readSpot = SpotEconomics.create(state, { ...deps, timestamp, persona, price, deathHours: context.deathHours,
+        hunt: buildHunt(base.hunt) });
     context.spotValue = readSpot;
     if (state.incomingPending) {
         // ARCH-NOTE: an oversized incoming projection waits on the existing
@@ -1552,12 +1554,18 @@ function valueReaders(state, network, values, persona, knowledgeEnabled, kitCost
                 Funding.stockTerms(wish, id, kitCost(id)));
         } };
 }
+// The build's hunt as the spot reader's hour baseline: a leaf-fit or plain
+// hunt. An income-route hunt is not one (its exp is the route spot's share and
+// it may hunt without shots): the reader then keeps its own bare hunt.
+function buildHunt(hunt) {
+    return hunt?.source === 'route' ? undefined : hunt;
+}
 // Spot values are read inside a build (providers); a later view makes its
 // reader only when asked.
 function lazySpotValue(state, plan, deps) {
     let reader;
-    return (...args) => (reader ||= invoke('GameServer/Bot/Economy/SpotEconomics').create(state,
-        { ...deps, timestamp: plan.timestamp, persona: plan.persona, deathHours: plan.deathHours }))(...args);
+    return (...args) => (reader ||= SpotEconomics.create(state,
+        { ...deps, timestamp: plan.timestamp, persona: plan.persona, deathHours: plan.deathHours, hunt: buildHunt(plan.hunt) }))(...args);
 }
 const buyback = id => invoke('GameServer/Items/NpcSellRules')
     .npcBuyPrice(Number(ItemIndex.find(DataCache.items, id)?.template?.price || 0));

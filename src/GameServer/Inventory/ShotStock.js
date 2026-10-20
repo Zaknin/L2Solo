@@ -153,8 +153,7 @@ function usePolicy(state, prepared = {}) {
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     let best = prepared.bestTable, without = prepared.withoutShots, hour = prepared.hourAdena;
     if (!Object.hasOwn(prepared, 'bestTable')) {
-        const role = state.party?.role || state.stats?.role || BotRoles.inferRole(state.stats?.classId || 0);
-        const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
+        const tableRole = BotRoles.tableRoleFor(state);
         const hunt = Hunt.huntIncome(state, prepared.timestamp || Date.now(), prepared.mode);
         const spot = hunt.spotId || state.spotId;
         best = (spot && Table.value(spot, tableRole, state.level, hunt.useShots !== false))

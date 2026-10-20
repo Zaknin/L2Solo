@@ -15,7 +15,9 @@ function moneyWeight(state) {
     return Number.isFinite(price) && price > Math.max(0, Number(state.adena) || 0) ? 1 : 0;
 }
 
-function create(state, { timestamp = Date.now(), mode, persona, deathHours, moneyWeight: weight = moneyWeight(state), price } = {}) {
+// hunt: the build's own hunt (EconomyContext), so one build reads one hour;
+// a caller outside a build leaves it out and gets the bot's bare hunt.
+function create(state, { timestamp = Date.now(), mode, persona, deathHours, moneyWeight: weight = moneyWeight(state), price, hunt } = {}) {
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Learning = invoke('GameServer/Bot/AI/KnowledgeLearning');
@@ -24,7 +26,8 @@ function create(state, { timestamp = Date.now(), mode, persona, deathHours, mone
     const positive = value => Math.max(0, Number(value) || 0);
     persona ||= invoke('GameServer/Bot/AI/BotPersona').of(state) || { traits: {}, understanding: 0.3 };
     const tableRole = BotRoles.tableRoleFor(state);
-    const hunt = Hunt.huntIncome(state, timestamp, mode);
+    hunt ??= Hunt.huntIncome(state, timestamp, mode);
+    // The previous build's packet hour comes first, by design; the hunt only fills a missing packet.
     const packetHour = Number(state.stats?.money?.[0]);
     const huntHour = Number(hunt.perHour);
     const bestIncome = packetHour > 0 && Number.isFinite(packetHour) || huntHour > 0 && Number.isFinite(huntHour)

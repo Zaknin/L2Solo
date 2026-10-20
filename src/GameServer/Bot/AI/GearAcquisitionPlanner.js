@@ -846,7 +846,9 @@ function marketOfferForTarget(target, state = {}, options = {}) {
     });
 }
 
-// What one kill earns the bot: its measured hour value per kill.
+// What one kill earns the bot: its measured hour value per kill. Table hunt
+// by design: the money packet is positional with a checked length
+// (Database.js) and carries no per-kill value.
 function expectedAdenaPerKill(state = {}) {
     return HuntEfficiency.hourValue(state).perKill;
 }
