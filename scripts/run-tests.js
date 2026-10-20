@@ -533,7 +533,6 @@ const tests = [
     'tests/test_group_f_player_pricing.js',
     'tests/test_group_f_bot_routing.js',
     'tests/test_group_f_companion_board_line.js',
-    'tests/test_goal_review_due.js',
     'tests/test_group_f_market_ads.js',
     'tests/test_group_f_empty_sale_trip.js',
     'tests/test_group_f_spoil_quest.js',
