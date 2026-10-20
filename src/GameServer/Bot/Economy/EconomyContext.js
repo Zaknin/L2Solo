@@ -1584,6 +1584,29 @@ function stockTargets(base) {
     const potions = base.stock('potions'), shots = base.stock('shots');
     return [potions.itemId, potions.target, shots.itemId, shots.target, shots.current];
 }
+// The bot's missing shot stack as crafters see it (stats.shotDemand, read by
+// MarketDemandIndex and CraftWorkshopService): null when the stock rule wants
+// none, the previous row (its age kept) while item, amount and cap hold. The
+// far step's output (ColdSimulationWorker planLifecycle), over the step's own
+// economy and its money packet. Escrow 0 and worth ?? price, as the
+// main-thread review read them: a worth of 0 (an item off the bot's wish
+// card) caps the spend at 0, only no worth falls back to the price.
+// Only the activities the main-thread review posted for; any other step
+// keeps the previous row as it is.
+const SHOT_DEMAND_ACTIVITIES = ['hunting', 'resting', 'shopping', 'grouped'];
+function shotDemand(economy, state, timestamp, previous = null) {
+    if (!SHOT_DEMAND_ACTIVITIES.includes(state.activity)) return previous;
+    const stock = economy.stock('shots');
+    const missing = stock.survivalMissing + stock.missing;
+    if (!stock.needed || !missing) return null;
+    const price = stock.unitPrice;
+    if (!(price > 0)) return previous;
+    const funded = { ...state, stats: { ...state.stats, money: economy.statsPacket.money } };
+    const maxSpend = Math.min(Funding.spendable(funded, 0, { itemId: stock.itemId, survivalCost: economy.kitCost(stock.itemId) }),
+        missing * (economy.worth(stock.itemId) ?? price));
+    if (previous && previous.itemId === stock.itemId && previous.amount === missing && previous.maxSpend === maxSpend) return previous;
+    return { itemId: stock.itemId, amount: missing, maxSpend, at: timestamp };
+}
 function keptTargets(state = {}, deps = {}) {
     const row = state.stats?.stockTargets, ShotStock = invoke('GameServer/Inventory/ShotStock'), plan = ShotStock.planForState(state);
     const beginnerCurrent = ShotStock.beginnerAmount(state, plan);
@@ -1790,5 +1813,5 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, stateForActor, preparedRouteRows, heldWorkshop, heldWorkshopOf, keptWorkshop, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, shotDemand, stateForActor, preparedRouteRows, heldWorkshop, heldWorkshopOf, keptWorkshop, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome };
