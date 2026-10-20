@@ -308,8 +308,11 @@ async function selectedSpoil() {
         assert(planned.selection.plan.economicTeam?.requirements.some(row => row.kind === 'spoil' && row.itemId === item.selfId));
         const team = planned.selection.plan.economicTeam;
         assert.deepEqual(team.prospectiveIds, [base + 200]);
-        const beforeLevel = npc.template.level; npc.template.level++;
-        assert(!Demand.economicSourceCurrent(team.source), 'canonical source level race invalidates selected spoil proof'); npc.template.level = beforeLevel;
+        // Datapack rows are frozen: race the level on a swapped-in copy, then put the row back.
+        const npcAt = Data.npcs.indexOf(npc);
+        Data.npcs[npcAt] = { ...npc, template: { ...npc.template, level: npc.template.level + 1 } }; Index.invalidate(Data.npcs);
+        assert(!Demand.economicSourceCurrent(team.source), 'canonical source level race invalidates selected spoil proof');
+        Data.npcs[npcAt] = npc; Index.invalidate(Data.npcs);
         const waiting = await Equipment.resolveClan(clan, clan.state.productionGoal, { planning: planned, ownerSection: 'productionGoal' });
         assert(waiting.ok && waiting.joined.accepted === base + 200, JSON.stringify({ code: waiting.code, joined: waiting.joined }));
         clan = await projection();
