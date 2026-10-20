@@ -109,9 +109,11 @@ function* decisionSearch(state, knownRecipes, context, options, mode) {
     }
     const ownedFor = id => ownStock.get(Number(id)) || null;
     let best = null;
-    // The least MP of a recipe this MP cannot craft once (the batch limit,
-    // WealthCraftPolicy.searchQuantity): an occupation answer of none waits
-    // for it (EconomyContext.askedInputsCrossed).
+    // The least MP that lets a repeatable recipe one batch more where MP was
+    // its binding batch cap (WealthCraftPolicy.searchQuantity: income per
+    // hour grows with the batch, the trip's hours and fees spread over it),
+    // within the bot's max MP: an occupation answer of none waits for it
+    // (EconomyContext.askedInputsCrossed).
     let mpNeeded = Infinity;
     const learned = new Set((knownRecipes || []).map(row => Number(row.recipeId ?? row)));
     const seen = new Set();
@@ -132,8 +134,6 @@ function* decisionSearch(state, knownRecipes, context, options, mode) {
         if (!recipe || recipe.type !== 'dwarven' || !CraftShopService.canCraft(state, recipe)) continue;
         const template = ItemTemplateIndex.find(DataCache.items, recipe.productId);
         if (!template || !recipe.materials?.length) continue;
-        const mpCost = Number(recipe.mpCost || 0);
-        if (mpCost > Number(state.vitals?.mp || 0)) mpNeeded = Math.min(mpNeeded, mpCost);
         const exits = options.prepareExits ? yield* options.prepareExits(state, recipe, template, trip)
             : exitsFor(state, recipe, template, trip, options);
         if (!options.prepareExits) yield 'exits';
@@ -156,6 +156,10 @@ function* decisionSearch(state, knownRecipes, context, options, mode) {
             existingOutput: Number(ownStock.get(Number(recipe.productId))?.count || 0)
                 + Number(outputStock.get(Number(recipe.productId)) || 0)
                 + Number(state.acceptedIncoming?.[recipe.productId] || 0) };
+        if (mode === 'occupation' && exits.some(exit => exit.repeatable === true)) {
+            const byMp = Policy.mpBatches(budgetState, recipe), need = (byMp + 1) * Number(recipe.mpCost || 0);
+            if (byMp < Policy.contextBatches(recipeContext) && !(need > Number(state.vitals?.maxMp))) mpNeeded = Math.min(mpNeeded, need);
+        }
         const candidate = yield* Policy.searchQuantity({ state: budgetState, recipe,
             planFor: (id, missing) => options.planPurchase?.(state, id, missing, { npc: true, cost: trip }),
             exits, ownedFor, context: recipeContext, mode });

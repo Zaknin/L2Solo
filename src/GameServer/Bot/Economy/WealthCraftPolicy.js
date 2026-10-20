@@ -187,13 +187,21 @@ function evaluateBasket(args, recipe, planFor, exit, ownedFor, context, batches 
     const basket = input.basket || basketFor(input.recipe, input.planFor, input.ownedFor, input.batches ?? 1, input.context);
     return drain(evaluatePrepared({ ...input, basket }));
 }
+// The batches one search may try (searchQuantity): what the MP pays for, and
+// the context's cap within MAX_BATCHES. Each term apart, so a caller can tell
+// which one binds (WealthCraftDecision: an answer of none waits for MP).
+function mpBatches(state, recipe) {
+    const mp = Number(recipe?.mpCost || 0);
+    return mp > 0 ? Math.floor(Number(state?.vitals?.mp || 0) / mp) : MAX_BATCHES;
+}
+function contextBatches(context = {}) {
+    return Math.min(MAX_BATCHES, Math.max(0, Math.floor(Number(context.maxBatches ?? MAX_BATCHES))));
+}
 function* searchQuantity({ state, recipe, planFor, exits = [], ownedFor = () => null, context = {}, mode = 'action' }) {
     let best = null;
     // Complete bounded search also handles discontinuous quote/fee breakpoints.
     // Zero is the without-case; never force production when every value is <=0.
-    const mp = Number(recipe?.mpCost || 0);
-    const limit = Math.min(MAX_BATCHES, mp > 0 ? Math.floor(Number(state?.vitals?.mp || 0) / mp) : MAX_BATCHES,
-        Math.max(0, Math.floor(Number(context.maxBatches ?? MAX_BATCHES))));
+    const limit = Math.min(mpBatches(state, recipe), contextBatches(context));
     const first = context.fixedBatches === undefined ? 1 : Number(context.fixedBatches);
     const end = context.fixedBatches === undefined ? limit : Math.min(limit, first);
     if (!Number.isSafeInteger(first) || first < 1 || first > MAX_BATCHES) return null;
@@ -225,5 +233,5 @@ function opportunityFor(state, recipe, planFor, exits = [], ownedFor = () => nul
     if (recipe?.type !== 'dwarven') return null;
     return chooseQuantity({ state, recipe, planFor, exits, ownedFor, context });
 }
-module.exports = { MAX_BATCHES, basketFor, craftMargin, evaluateBasket, chooseQuantity,
+module.exports = { MAX_BATCHES, mpBatches, contextBatches, basketFor, craftMargin, evaluateBasket, chooseQuantity,
     opportunityFor, prepareBasket, evaluatePrepared, searchQuantity, drain };

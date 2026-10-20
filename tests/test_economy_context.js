@@ -552,6 +552,26 @@ async function run() {
             const none = { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0, mpNeeded };
             assert.equal(incomeAfter(refusal, state => ({ ...state, vitals: { ...state.vitals, mp: mpNeeded } }), none), 3000,
                 'a refusal after the MP reached what an answer of none waited for asks again');
+            // The search's own MP cap: an answer of none at MP that pays for
+            // fewer batches than a repeatable cycle (its trip's hours and fees
+            // spread over the batch) needs waits for one batch more; MP that
+            // regrows to each answer's need reaches the productive cycle.
+            const Occupation = invoke('GameServer/Bot/Economy/WealthCraftDecision');
+            const batchRecipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(79), batchMp = Number(batchRecipe.mpCost);
+            const freeTrip = () => 0;
+            freeTrip.details = () => ({ hours: 0, fees: 0 });
+            const occupationAt = mp => Occupation.chooseOccupation({ characterId: 990034, phase: 'cold', activity: 'hunting', level: 60,
+                craftLevel: 9, adena: 10000000, vitals: { mp, maxMp: 10 * batchMp }, inventory: {}, stats: { classId: 57, money: [1000, .001, 0, 0] } },
+            [{ recipeId: batchRecipe.recipeId }], { hourAdena: 1000, moneyPrice: .001, mpPerHour: 100000, maxBatches: 10, trip: freeTrip }, {
+                staticExits: () => [{ type: 'static', price: 1000, count: 1000, town: 'Dion', repeatable: true, tripDetails: { hours: 1, fees: 1500 } }],
+                offersFor: () => [],
+                planPurchase: (owner, id, n) => ({ town: 'Giran', units: n, whole: true, cost: n, landed: n, repeatable: true, npc: n,
+                    lines: [{ line: { lineId: id, revision: 1 }, count: n, price: 1 }], tripDetails: { hours: 0, fees: 0 } }) });
+            let batchAnswer = occupationAt(3 * batchMp);
+            assert.equal(batchAnswer.incomePerHour, 0, 'fixture: three batches do not pay the trip');
+            for (let mp = 3 * batchMp, wakes = 0; !(batchAnswer.incomePerHour > 0) && batchAnswer.mpNeeded > mp && wakes < 10; wakes++)
+                batchAnswer = occupationAt(mp = batchAnswer.mpNeeded);
+            assert(batchAnswer.incomePerHour > 0, 'MP regrowing to each answer\'s need reaches the productive cycle');
             // A near build's empty workshop (the worker's near forState) is no ask.
             const nearEmpty = { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 };
             assert.equal(incomeAfter(refusal, state => state, nearEmpty, { workshopAsked: null }), 3000,
