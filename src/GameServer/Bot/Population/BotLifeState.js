@@ -403,6 +403,9 @@ function equipmentCompletionSignal(state = {}) {
 // load is always a process restart (the launcher loads saves only while the
 // server is stopped), so a key here never outlives its database.
 const ENQUEUED_ADVANCE_LIMIT = 4096;
+// A far bot counts as overdue (coldDue) past this: a step takes 2-5 s from
+// its due time to its commit on main (user 2026-10-20).
+const COLD_OVERDUE_MS = 10000;
 const enqueuedAdvanceKeys = new Set();
 
 function enqueueEquipmentGoalAdvance(signal) {
@@ -3772,8 +3775,11 @@ const BotLifeState = {
     },
 
     coldDueSummary(timestamp = now()) {
+        // overdue: due longer than a step takes from its time to its commit
+        // on main; a bot inside that span is being stepped, not queued.
         const summary = {
             due: 0,
+            overdue: 0,
             highLevel: 0,
             replans: 0,
             oldestAgeMs: 0,
@@ -3811,6 +3817,7 @@ const BotLifeState = {
             }
 
             const dueAt = nextResolveAt > 0 ? nextResolveAt : Number(state.updatedAt || timestamp);
+            if (timestamp - dueAt > COLD_OVERDUE_MS) summary.overdue += 1;
             noteOldest(state, dueAt, timestamp - dueAt);
         });
 
