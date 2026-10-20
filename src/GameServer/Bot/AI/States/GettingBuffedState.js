@@ -133,21 +133,22 @@ module.exports = {
         const resume = session.resumeAfterBuff;
         if (Number(resume?.readyAt || 0) > Date.now()) return;
 
-        const shouldVisitGuide = resume?.conditionalNewbieBuff !== true || BotBuffs.needsNewbieRefresh(bot, 0);
+        // A guide beyond its town radius has no town path, so its route failures are not counted.
+        const guide = HotTownRebuff.tripGuide(session, bot, BotAI);
+        const shouldVisitGuide = !!guide && (resume?.conditionalNewbieBuff !== true || BotBuffs.needsNewbieRefresh(bot, 0));
         if (!shouldVisitGuide) {
             finishVisit(session, bot, Generics);
             return;
         }
 
-        const closestGuide = BotAI.getClosestNewbieGuide(bot.fetchLocX(), bot.fetchLocY());
         const guideTarget = {
-            locX: closestGuide.locX,
-            locY: closestGuide.locY,
-            locZ: closestGuide.locZ,
-            npcSelfId: closestGuide.npcSelfId,
-            name: closestGuide.name ? `${closestGuide.name} Newbie Guide` : 'Newbie Guide',
-            town: closestGuide.name,
-            head: closestGuide.head
+            locX: guide.locX,
+            locY: guide.locY,
+            locZ: guide.locZ,
+            npcSelfId: guide.npcSelfId,
+            name: guide.name ? `${guide.name} Newbie Guide` : 'Newbie Guide',
+            town: guide.name,
+            head: guide.head
         };
         const guideApproach = TownNpcApproach.planOpen(session, bot, guideTarget, 'newbie_guide');
         if (guideApproach?.waiting) return;

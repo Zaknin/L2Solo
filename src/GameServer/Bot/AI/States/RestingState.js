@@ -10,12 +10,11 @@ const EffectStore    = invoke('GameServer/Effects/EffectStore');
 const BotRetreatPlanner = invoke('GameServer/Bot/AI/BotRetreatPlanner');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const DangerMoment = invoke('GameServer/Bot/AI/DangerMoment');
+const HotTownRebuff = invoke('GameServer/Bot/AI/HotTownRebuff');
 
 const REST_FOLLOW_WAKE_DISTANCE = 600;
 const EMERGENCY_RETREAT_DISTANCE = 850;
 const MANA_REGEN_CAST_RETRY_MS = 8000;
-const NEWBIE_GUIDE_TOWN_RADIUS = 7500;
-const NEWBIE_GUIDE_RECOVERY_MAX_LEVEL = 20;
 const PARTY_REST_FORMATION_TOLERANCE = 45;
 
 function point(actor) {
@@ -79,16 +78,6 @@ function needsRecovery(session, bot) {
         bot.fetchHp() / Math.max(1, bot.fetchMaxHp()),
         bot.fetchMp() / Math.max(1, bot.fetchMaxMp()),
         { locked: !!session.recoveryLocked });
-}
-
-function canRecoverAtNewbieGuide(bot, BotAI) {
-    if (Number(bot?.fetchLevel?.() || 0) > NEWBIE_GUIDE_RECOVERY_MAX_LEVEL) return false;
-    const guide = BotAI.getClosestNewbieGuide?.(bot.fetchLocX(), bot.fetchLocY());
-    if (!guide) return false;
-
-    const dx = bot.fetchLocX() - guide.locX;
-    const dy = bot.fetchLocY() - guide.locY;
-    return Math.sqrt((dx * dx) + (dy * dy)) <= NEWBIE_GUIDE_TOWN_RADIUS;
 }
 
 function beginNewbieGuideRecovery(session, bot, playerSession) {
@@ -186,7 +175,7 @@ module.exports = {
             // Newbie Guide instead of making the new party wait for normal
             // seated regeneration. This checks the bot's own position, so it
             // never leaves a farming spot just because the leader is in town.
-            if (!session.explicitRestOrder && !combatTargetId && !recovered && canRecoverAtNewbieGuide(bot, BotAI)) {
+            if (!session.explicitRestOrder && !combatTargetId && !recovered && HotTownRebuff.recoveryGuide(session, bot, BotAI)) {
                 beginNewbieGuideRecovery(session, bot, playerSession);
                 recordWakeDecision(session, bot, hpRatio < 0.95 ? 'recover_hp' : 'recover_mp', 'newbie_guide_recovery');
                 BotAI.say(session, "I'm recovering at the Newbie Guide, then I'll return to you.");

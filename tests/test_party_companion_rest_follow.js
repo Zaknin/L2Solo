@@ -2376,6 +2376,20 @@ try {
     assert.strictEqual(recoverySession.plan, 'getting_buffed', 'a low-level companion already in a Newbie Guide town should recover there instead of sitting');
     assert.strictEqual(recoverySession.roleDecision.reason, 'newbie_guide_recovery', 'Newbie Guide recovery should be visible in bot status');
 
+    // An abandoned guide trip waits for its retry time: the companion sits instead.
+    const retryRecoveryBot = fakeActor(2000077, { locX: -84001, locY: 243227, locZ: -3723, level: 20, hp: 20, maxHp: 100, mp: 100, maxMp: 100 });
+    const retryRecoverySession = fakeSession('bot_newbie_retry_recovery_party', retryRecoveryBot);
+    retryRecoverySession.followPlayerSession = recoveryLeaderSession;
+    retryRecoverySession.partyCompanion = true;
+    retryRecoverySession.plan = 'following';
+    retryRecoverySession.newbieGuideRetryAt = Date.now() + 60000;
+    publishSessions([recoveryLeaderSession, retryRecoverySession]);
+    FollowingState.tick(retryRecoverySession, retryRecoveryBot, {}, {
+        getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
+        say() {}, executeCombat() {}, executePvPCombat() {}
+    });
+    assert.strictEqual(retryRecoverySession.plan, 'resting', 'a companion whose guide route waits for its retry time should rest instead of retrying the trip');
+
     const fieldRecoveryBot = fakeActor(2000045, { locX: 0, locY: 0, level: 20, hp: 20, maxHp: 100, mp: 100, maxMp: 100 });
     const fieldRecoverySession = fakeSession('bot_field_recovery_party', fieldRecoveryBot);
     fieldRecoverySession.followPlayerSession = fieldRefreshLeaderSession;

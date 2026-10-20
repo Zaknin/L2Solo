@@ -617,9 +617,8 @@ module.exports = {
         // starter town also refreshes once per visit before going back out.
         if (!session.followPlayerSession) {
             const townBuffVisit = HotTownRebuff.syncVisit(session, bot, BotAI);
-            const townVisitNeedsRebuff = HotTownRebuff.needsVisit(session, townBuffVisit)
-                && Number(session.newbieGuideRetryAt || 0) <= Date.now();
-            if (townVisitNeedsRebuff || BotBuffs.needsNewbieRefresh(bot, 0)) {
+            const townVisitNeedsRebuff = HotTownRebuff.needsVisit(session, townBuffVisit);
+            if ((townVisitNeedsRebuff || BotBuffs.needsNewbieRefresh(bot, 0)) && HotTownRebuff.tripGuide(session, bot, BotAI)) {
                 session.preBuffLocation = { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() };
                 session.preBuffPlan = 'hunting';
                 session.resumeAfterBuff = townVisitNeedsRebuff
