@@ -109,11 +109,13 @@ function* decisionSearch(state, knownRecipes, context, options, mode) {
     }
     const ownedFor = id => ownStock.get(Number(id)) || null;
     let best = null;
-    // The least MP that lets a repeatable recipe one batch more where MP was
-    // its binding batch cap (WealthCraftPolicy.searchQuantity: income per
-    // hour grows with the batch, the trip's hours and fees spread over it),
-    // within the bot's max MP: an occupation answer of none waits for it
-    // (EconomyContext.askedInputsCrossed).
+    // The MP of the largest batch a repeatable recipe can ever take where MP
+    // was its binding batch cap (WealthCraftPolicy.searchQuantity: income per
+    // hour grows with the batch, the trip's hours and fees spread over it):
+    // an occupation answer of none waits for it once
+    // (EconomyContext.askedInputsCrossed). The search tries every smaller
+    // batch at that MP; one batch more per wake would re-ask a recipe no
+    // batch can pay for at every MP step. Without a max MP, one batch more.
     let mpNeeded = Infinity;
     const learned = new Set((knownRecipes || []).map(row => Number(row.recipeId ?? row)));
     const seen = new Set();
@@ -157,8 +159,10 @@ function* decisionSearch(state, knownRecipes, context, options, mode) {
                 + Number(outputStock.get(Number(recipe.productId)) || 0)
                 + Number(state.acceptedIncoming?.[recipe.productId] || 0) };
         if (mode === 'occupation' && exits.some(exit => exit.repeatable === true)) {
-            const byMp = Policy.mpBatches(budgetState, recipe), need = (byMp + 1) * Number(recipe.mpCost || 0);
-            if (byMp < Policy.contextBatches(recipeContext) && !(need > Number(state.vitals?.maxMp))) mpNeeded = Math.min(mpNeeded, need);
+            const mpCost = Number(recipe.mpCost || 0), byMp = Policy.mpBatches(budgetState, recipe);
+            const byMaxMp = Math.floor(Number(state.vitals?.maxMp) / mpCost);
+            const top = Math.min(Policy.contextBatches(recipeContext), Number.isFinite(byMaxMp) ? byMaxMp : byMp + 1);
+            if (byMp < top) mpNeeded = Math.min(mpNeeded, top * mpCost);
         }
         const candidate = yield* Policy.searchQuantity({ state: budgetState, recipe,
             planFor: (id, missing) => options.planPurchase?.(state, id, missing, { npc: true, cost: trip }),
