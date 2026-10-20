@@ -1,3 +1,4 @@
+const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
 const sessions = new WeakMap();
 
 function stateOf(source) {
@@ -22,10 +23,12 @@ function enrich(event, source, target = null) {
     const human = !!target?.session?.accountId && !String(target.session.accountId).startsWith('bot_');
     let hours = Number(event.hours);
     if (!Number.isFinite(hours) && state) {
-        const income = invoke('GameServer/Bot/AI/BotHuntEfficiency').huntIncome(state, event.at);
+        const income = Hunt.huntIncome(state, event.at);
+        // The adena hour is the bot's (its packet); the exp hour and the death
+        // price read the table hunt by design: the packet carries no exp hour.
         if (event.type === 'killed') hours = invoke('GameServer/Bot/Economy/EconomicValuation').deathHours(state, income);
         else if (Number(event.lossExp) > 0 && income.expPerHour > 0) hours = event.lossExp / income.expPerHour;
-        else if (Number(event.valueAdena) > 0 && income.perHour > 0) hours = event.valueAdena / income.perHour;
+        else if (Number(event.valueAdena) > 0) hours = event.valueAdena / Hunt.hourValue(state, event.at, undefined, income).perHour;
     }
     return { ...event, playedHours: playedHours(source, event.at), traits: persona?.traits || {},
         ...(human ? { player: true } : {}), ...(Number.isFinite(hours) && hours >= 0 ? { hours } : {}) };
