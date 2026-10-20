@@ -153,16 +153,13 @@ function usePolicy(state, prepared = {}) {
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     let best = prepared.bestTable, without = prepared.withoutShots, hour = prepared.hourAdena;
     if (!Object.hasOwn(prepared, 'bestTable')) {
-        const role = state.party?.role || state.stats?.role || BotRoles.inferRole(state.stats?.classId || 0);
-        const tableRole = role === 'melee' ? 'dps' : role === 'nuker' ? 'mage' : role === 'crafter' ? 'spoiler' : role;
-        const timestamp = prepared.timestamp || Date.now();
-        const hunt = Hunt.huntIncome(state, timestamp, prepared.mode);
+        const tableRole = BotRoles.tableRoleFor(state);
+        const hunt = Hunt.huntIncome(state, prepared.timestamp || Date.now(), prepared.mode);
         const spot = hunt.spotId || state.spotId;
         best = (spot && Table.value(spot, tableRole, state.level, hunt.useShots !== false))
             || Table.best(tableRole, state.level, hunt.useShots !== false);
         without = spot ? Table.value(spot, tableRole, state.level, false) : null;
-        // The table rows above are the current spot's; the hour is the bot's (its packet).
-        hour = Hunt.hourValue(state, timestamp, prepared.mode, hunt).perHour;
+        hour = Hunt.huntHour(hunt, state);
     }
     const rawUse = plan.perAction > 0 ? Math.max(0, Number(best?.shots) || 0) : 0;
     const benefit = Math.max(0, 1 - Math.max(0, Number(without?.exp) || 0) / Math.max(1, Number(best?.exp) || 0));

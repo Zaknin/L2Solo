@@ -27,6 +27,7 @@ function create(state, { timestamp = Date.now(), mode, persona, deathHours, mone
     persona ||= invoke('GameServer/Bot/AI/BotPersona').of(state) || { traits: {}, understanding: 0.3 };
     const tableRole = BotRoles.tableRoleFor(state);
     hunt ??= Hunt.huntIncome(state, timestamp, mode);
+    // The previous build's packet hour comes first, by design; the hunt only fills a missing packet.
     const packetHour = Number(state.stats?.money?.[0]);
     const huntHour = Number(hunt.perHour);
     const bestIncome = packetHour > 0 && Number.isFinite(packetHour) || huntHour > 0 && Number.isFinite(huntHour)

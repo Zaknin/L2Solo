@@ -258,11 +258,8 @@ function huntHour(hunt, state = {}) {
         || table.rankedIncome(tableRole, levelOf(state), costs, -7, false, rewardOptions)[0];
     return Math.max(1, row ? netIncome(row, costs) : 0);
 }
-// The bot's hour outside a build: its money packet (written by its last
-// build from that build's own hunt), else the hunt's hour. hunt: a hunt the
-// caller already holds, not computed again. A party or solo mode reads the
-// hunt of that situation, never the packet.
-function hourValue(state, timestamp = Date.now(), mode, hunt = huntIncome(state, timestamp, mode)) {
+function hourValue(state, timestamp = Date.now(), mode) {
+    const hunt = huntIncome(state, timestamp, mode);
     const packetHour = !mode && Number(state.stats?.money?.[0]);
     return { perHour: packetHour > 0 ? packetHour : huntHour(hunt, state), perKill: hunt.perKill,
         expPerHour: hunt.expPerHour, source: hunt.source };
