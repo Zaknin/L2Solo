@@ -12,7 +12,7 @@ const spot = { id: '24_20:antharas_lair', name: 'Assembly test', center: point,
 const party = { partyId: 'assembly-party', leaderId: 1, memberIds: [1, 2], status: 'active',
     spotId: spot.id, nextResolveAt: at, cohesion: 1,
     stats: { fightsResolved: 10, sessionExpiresAt: at + 3600000 } };
-const members = [1, 2].map(characterId => ({ characterId, name: `Hunter${characterId}`, level: 40,
+const members = [1, 2].map(characterId => ({ characterId, name: `Hunter${characterId}`, level: 40, exp: 1000,
     phase: 'cold', activity: 'grouped', spotId: spot.id, loc: { ...point },
     party: { partyId: party.partyId, leaderId: 1, role: 'dps' },
     vitals: { hp: 2000, maxHp: 2000, mp: 1000, maxMp: 1000 },
@@ -87,7 +87,8 @@ async function main() {
         resolveSolo: () => { throw Error('party must not become solo combat'); },
         resolveParty: options => Resolver.resolve(options),
         emit: (type, payload) => messages.push({ type, payload }),
-        projectResolve: (state, result) => ({ ...state, ...result.patch }) });
+        // The round's exp lands on the projected state, as the worker's projection does.
+        projectResolve: (state, result) => ({ ...state, ...result.patch, exp: state.exp + Number(result.materialize?.exp || 0) }) });
     for (const state of scattered) {
         kernel.upsert({ state });
         kernel.inFlight.set(state.characterId, { state, startedAt: at, partyId: party.partyId });
@@ -96,7 +97,7 @@ async function main() {
     await kernel.resolvePartyStep(party.partyId);
     const batch = messages.find(m => m.type === 'proposal_batch');
     assert(batch, JSON.stringify(messages));
-    assert(batch.payload.proposals.every(p => p.result.materialize.exp === 0));
+    assert(batch.payload.proposals.every(p => p.nextState.exp === scattered.find(s => s.characterId === p.characterId).exp));
     assert.deepStrictEqual(batch.payload.proposals.map(p => p.nextState.loc), scattered.map(s => s.loc));
     assert.strictEqual(batch.payload.proposals.find(p => p.partyResolution).partyResolution.party.nextResolveAt, at + 30000);
 
@@ -148,7 +149,7 @@ async function main() {
             rows: [[workerParty.partyId, workerParty]], removed: [], last: true }] });
         send('snapshot_page', { done: true, rows: workerMembers.map(state => ({ state })) });
         const proposal = await until(m => m.type === 'proposal_batch');
-        assert(proposal.payload.proposals.every(p => p.result.materialize.exp === 0));
+        assert(proposal.payload.proposals.every(p => p.nextState.exp === workerMembers.find(s => s.characterId === p.characterId).exp));
         assert(proposal.payload.proposals.every(p => !p.result.memoryEvents?.length));
         assert(!received.some(m => m.type === 'fault'), JSON.stringify(received));
     } finally { await worker.terminate(); }

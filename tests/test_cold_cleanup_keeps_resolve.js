@@ -1,15 +1,11 @@
 const assert = require('assert');
 
-require('../src/Global');
-
+const { createWorld } = require('./helpers/c4QuestHarness');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
-const DataCache = invoke('GameServer/DataCache');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
-
-DataCache.init();
 
 const originals = {
     inventoryCleanupNeed: ItemDisposition.inventoryCleanupNeed,
@@ -18,7 +14,7 @@ const originals = {
     recordMany: LifeEvents.recordMany
 };
 
-function hunter(characterId, simulation) {
+function hunter(characterId) {
     return {
         characterId,
         name: `Overloaded${characterId}`,
@@ -33,8 +29,7 @@ function hunter(characterId, simulation) {
         vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
         inventory: {},
         stats: {},
-        timing: {},
-        ...(simulation ? { simulation } : {})
+        timing: {}
     };
 }
 
@@ -46,7 +41,10 @@ const fightResult = () => ({
 });
 
 (async () => {
+    // Main commits over the state it holds: the bots are in its cache.
+    const world = await createWorld([{ id: 7301, level: 40 }, { id: 7303, level: 40 }], 'cold-cleanup-keeps-resolve');
     try {
+        await LifeState.init();
         // Every bot is over the author's cleanup threshold.
         ItemDisposition.inventoryCleanupNeed = () => ({ reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 });
 
@@ -56,13 +54,13 @@ const fightResult = () => ({
             realPlayerSessions: () => [],
             prepareInventoryCleanupProposal: (...args) => PopulationService.prepareInventoryCleanupProposal(...args)
         };
-        const simulation = { revision: 3 };
-        const base = hunter(7301, simulation);
+        const base = await LifeState.upsertState(hunter(7301), 'cleanup_resolve_fixture');
+        const simulation = base.simulation;
         const proposal = {
             characterId: 7301,
             revision: simulation.revision,
             enqueuedAt: Date.now(),
-            baseState: base,
+            baseState: { characterId: base.characterId, inventory: base.inventory },
             nextState: { ...base, exp: base.exp + 500, adena: base.adena + 600 },
             result: fightResult()
         };
@@ -99,13 +97,13 @@ const fightResult = () => ({
 
         // An atomic group commits all members or none: a member its party
         // releases in this commit is judged as claimed (still in the party).
-        const member = { ...hunter(7303, simulation), activity: 'grouped',
-            party: { partyId: 'dissolving', leaderId: 7303 } };
+        const member = await LifeState.upsertState({ ...hunter(7303), activity: 'grouped',
+            party: { partyId: 'dissolving', leaderId: 7303 } }, 'cleanup_resolve_fixture');
         const released = await coordinator.prepareProposal({
             characterId: 7303,
-            revision: simulation.revision,
+            revision: member.simulation.revision,
             enqueuedAt: Date.now(),
-            baseState: member,
+            baseState: { characterId: member.characterId, inventory: member.inventory },
             atomicGroup: { id: 'party:dissolving', memberIds: [7303] },
             nextState: { ...member, activity: 'hunting', party: { partyId: null }, exp: member.exp + 500 },
             result: fightResult()
@@ -138,6 +136,7 @@ const fightResult = () => ({
         Object.assign(ItemDisposition, { inventoryCleanupNeed: originals.inventoryCleanupNeed });
         Object.assign(LifeState, { applyResolve: originals.applyResolve, upsertState: originals.upsertState });
         LifeEvents.recordMany = originals.recordMany;
+        await world.close();
     }
 })().catch((error) => {
     console.error(error);

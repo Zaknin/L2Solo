@@ -1475,7 +1475,9 @@ class ColdSimulationCoordinator {
         if (proposal.atomicGroup?.raidCommit) {
             if (!invoke('GameServer/Bot/Population/ColdRaidAuthority').prepare(proposal.atomicGroup.raidCommit)) return null;
         }
-        const state = LifeState.cachedState(proposal.characterId) || proposal.baseState;
+        // The proposal's base is its bag, not a state: a bot main does not
+        // hold is refused (prepare_rejected) and the worker requeues it.
+        const state = LifeState.cachedState(proposal.characterId);
         if (!state) return null;
         if (Number(state.stats?.clanId) > 0) proposal[CLAN_BEFORE] = { level: state.level, sp: state.sp, inventory: state.inventory };
         const partyId = String(state.party?.partyId || state.partyId || '');
@@ -1491,9 +1493,7 @@ class ColdSimulationCoordinator {
         const timestamp = Number(proposal.enqueuedAt || Date.now());
         // The worker's fight has already happened: a forced cleanup trip
         // starts from the state after it, so its exp, adena and loot stay.
-        const resolvedState = proposal?.nextState || (proposal.result
-            ? await LifeState.prepareResolve(stepState, proposal.result, { persist: false, timestamp })
-            : null);
+        const resolvedState = proposal.nextState;
         if (!resolvedState) return null;
         // The worker recorded this hunt's income: the main thread's level-band
         // table (the hour value of bots without a sample) learns it here.
@@ -1766,7 +1766,7 @@ class ColdSimulationCoordinator {
             const characterId = Number(result.characterId), proposalId = result.proposal?.proposalId;
             if (!Number.isSafeInteger(characterId) || characterId <= 0
                 || typeof proposalId !== 'string' || !proposalId || proposalId.length > 240) return [];
-            const state = LifeState.cachedState(result.characterId) || result.nextState || result.proposal?.baseState || null;
+            const state = LifeState.cachedState(result.characterId) || result.nextState || null;
             const numbers = result.ok ? this.ackNumbers(result, state) : null;
             if (result.ok) this.ackState[numbers ? 'without' : 'with'] += 1;
             return [{
