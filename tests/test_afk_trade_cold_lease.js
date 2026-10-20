@@ -8,6 +8,7 @@ const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const World = invoke('GameServer/World/World');
 const databasePath = path.join(process.cwd(), 'tmp', 'test-afk-trade-cold-lease.sqlite');
 const IRON_ORE = 1869;
@@ -105,7 +106,7 @@ async function fillDuringStep({ label, storeType, lines, ownerItems, counterpart
     next['1864'] = { selfId: 1864, name: 'Stem', amount: 2 };
     const [refused] = await Owner.commitBatch([{ revision: stepRevision,
         nextState: { ...stepped, adena: next['57'].amount, inventory: next },
-        proposal: { baseState: { inventory: stepped.inventory } } }], { timestamp: Date.now() });
+        proposal: InventorySummary.bagChange(stepped.inventory, next) }], { timestamp: Date.now() });
     assert.strictEqual(refused.reason, 'stale_revision', `${label}: the step from before the deal is refused`);
 
     const retry = LifeState.cachedState(owner.id);
@@ -115,7 +116,7 @@ async function fillDuringStep({ label, storeType, lines, ownerItems, counterpart
     hunted['1864'] = { selfId: 1864, name: 'Stem', amount: 2 };
     const [commit] = await Owner.commitBatch([{ revision: retry.simulation.revision,
         nextState: { ...retry, adena: hunted['57'].amount, inventory: hunted },
-        proposal: { baseState: { inventory: retry.inventory } } }], { timestamp: Date.now() });
+        proposal: InventorySummary.bagChange(retry.inventory, hunted) }], { timestamp: Date.now() });
     assert(commit.ok, `${label}: the retry commits`);
     const after = await amounts(owner.id);
     const expected = { ...settled, 57: 30 + Number(settled[57] || 0) };
@@ -157,7 +158,7 @@ async function writeDuringStep({ label, storeType, lines, ownerItems, counterpar
     next['1864'] = { selfId: 1864, name: 'Stem', amount: 2 };
     const nextState = { ...stepped, adena: next['57'].amount, inventory: next };
     const [commit] = await Owner.commitBatch([{ revision: stepRevision, nextState,
-        proposal: { baseState: { inventory: stepped.inventory } } }], { timestamp: Date.now() });
+        proposal: InventorySummary.bagChange(stepped.inventory, next) }], { timestamp: Date.now() });
     assert.strictEqual(commit.ok, false, `${label}: the worker commit after the shop write fails its CAS`);
     assert.strictEqual(commit.reason, 'stale_revision');
     assert.deepStrictEqual(await amounts(owner.id), afterFill, `${label}: the rejected commit leaves the fill in items`);
@@ -180,7 +181,7 @@ async function writeDuringStep({ label, storeType, lines, ownerItems, counterpar
     hunted['57'].amount += 30;
     const [second] = await Owner.commitBatch([{ revision: retry.simulation.revision,
         nextState: { ...retry, adena: hunted['57'].amount, inventory: hunted },
-        proposal: { baseState: { inventory: retry.inventory } } }], { timestamp: Date.now() });
+        proposal: InventorySummary.bagChange(retry.inventory, hunted) }], { timestamp: Date.now() });
     assert(second.ok, `${label}: the retry commits`);
     assert.deepStrictEqual(await amounts(owner.id), { ...afterFill, 57: afterFill[57] + 30 },
         `${label}: no adena or items lost`);

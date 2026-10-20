@@ -22,6 +22,7 @@ const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const BotMarket = invoke('GameServer/Bot/Economy/BotAfkMarketService');
 const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
@@ -175,7 +176,7 @@ async function run() {
             const state = LifeState.cachedState(id);
             const revision = (await Database.execute(['SELECT simulationRevision FROM bot_life_state WHERE characterId = ?', [id]]))[0].simulationRevision;
             owners.push({ id, revision, state, request: { revision, nextState: structuredClone(state),
-                proposal: { baseState: { inventory: state.inventory } } } });
+                proposal: InventorySummary.bagChange(state.inventory, state.inventory) } });
         }
         await Database.execute([`CREATE TEMP TRIGGER audit_batch_failure
             BEFORE UPDATE OF inventorySummary ON main.bot_life_state WHEN NEW.characterId = ${owners[1].id}

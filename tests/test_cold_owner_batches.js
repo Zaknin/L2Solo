@@ -11,6 +11,7 @@ isolated.assertConfigured(options.default);
 
 const Database = invoke('Database');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Data = invoke('GameServer/DataCache');
 const Skillset = invoke('GameServer/Actor/Skillset');
@@ -171,7 +172,7 @@ async function createProbe(index) {
         revision: stepRevisions[index],
         nextState: nextStates[index],
         proposal: {
-            baseState: states[index],
+            ...InventorySummary.bagChange(states[index].inventory, nextStates[index].inventory),
             durable: index < 2 ? {
                 classId: index + 1,
                 skills: [{ selfId: 1000 + index, name: `Batch Skill ${index}`, passive: index === 0, level: 2 },

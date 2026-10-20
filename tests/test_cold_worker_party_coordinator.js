@@ -52,6 +52,13 @@ async function createMember(index, spot, dueAt) {
             // legitimate departure to buy its first usable weapon.
             JSON.stringify({ 1: { selfId: 1, amount: 1, equipped: true, equippedCount: 1, equippedSlots: [7], slot: 7 } }), dueAt]
     ]);
+    // The physical row the summary names: a commit whose step does not move
+    // the bag leaves the items table as it is, and a main write that rebuilds
+    // the summary from it (cold training) must find the weapon there.
+    await Database.execute([
+        `INSERT INTO items (selfId, name, amount, enchant, equipped, slot, characterId) VALUES (1, 'Short Sword', 1, 0, 1, 7, ?)`,
+        [Number(character.id)]
+    ]);
     return Number(character.id);
 }
 

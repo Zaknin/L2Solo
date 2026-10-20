@@ -9,6 +9,7 @@ require('../src/Global');
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Agreement = require('../src/GameServer/Bot/Population/PartyAgreement');
 const Goals = require('../src/GameServer/Bot/Population/PartyGoalPolicy');
 const Composition = invoke('GameServer/Bot/Population/BackgroundPartyComposition');
@@ -61,7 +62,7 @@ async function loot(party, units, { stale = false } = {}) {
         const inventory = { ...state.inventory };
         for (const item of result.materialize.items) inventory[item.selfId] = { ...item, amount: Number(inventory[item.selfId]?.amount || 0) + item.amount };
         return { revision: state.simulation.revision, atomicGroup,
-            options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: state }, nextState: { ...state, inventory } };
+            options: { allowParty: true, allowLifecycle: true }, proposal: InventorySummary.bagChange(state.inventory, inventory), nextState: { ...state, inventory } };
     });
     if (stale) entries[1].revision -= 1;
     const before = await images(party.memberIds);

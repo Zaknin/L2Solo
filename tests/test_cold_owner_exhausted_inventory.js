@@ -27,12 +27,10 @@ const id = 730093;
         const nextState = { ...state, inventory: { ...state.inventory,
             1463: { ...state.inventory[1463], amount: 0 } } };
         delete nextState.inventory[1060];
-        // An oversized party group travels without its base bag (the kernel's
-        // flush): the step's emptied stacks still reach the commit.
-        const entry = { revision: state.simulation.revision, nextState, proposal: {
-            baseState: { characterId: id },
-            removedItemIds: InventorySummary.removedItemIds(state.inventory, nextState.inventory)
-        } };
+        // No base bag travels with a proposal: the step's emptied stacks reach
+        // the commit as their own field.
+        const entry = { revision: state.simulation.revision, nextState,
+            proposal: InventorySummary.bagChange(state.inventory, nextState.inventory) };
         const [result] = await Owner.commitBatch([entry], { timestamp: timestamp + 1 });
         assert(result.ok);
         assert.equal(await world.amount(id, 1463), 0, 'the last consumed shots must be removed physically');
@@ -50,6 +48,24 @@ const id = 730093;
         const [replay] = await Owner.commitBatch([entry], { timestamp: timestamp + 2 });
         assert.equal(replay.ok, false);
         assert.equal(await world.amount(id, 1463), 8, 'rejected proposals must not delete physical items');
+
+        // No base bag travels: the step's own flag says whether the bag moved.
+        // A step that left the bag as it was does not touch the physical rows,
+        // even where they disagree with its summary (a trade moved them since).
+        await Database.setItem(id, { selfId: 57, amount: 5, slot: 0 });
+        const drifted = await world.amount(id, 57);
+        const kept = Life.cachedState(id);
+        const [quiet] = await Owner.commitBatch([{ revision: kept.simulation.revision, nextState: { ...kept },
+            proposal: InventorySummary.bagChange(kept.inventory, kept.inventory) }], { timestamp: timestamp + 3 });
+        assert(quiet.ok);
+        assert.equal(await world.amount(id, 57), drifted, 'an unchanged bag must not rewrite the physical items');
+        // A step that moved the bag writes it.
+        const moved = Life.cachedState(id);
+        const movedState = { ...moved, inventory: { ...moved.inventory, 57: { ...moved.inventory[57], amount: 700 } } };
+        const [write] = await Owner.commitBatch([{ revision: moved.simulation.revision, nextState: movedState,
+            proposal: InventorySummary.bagChange(moved.inventory, movedState.inventory) }], { timestamp: timestamp + 4 });
+        assert(write.ok);
+        assert.equal(await world.amount(id, 57), 700, 'a changed bag must be written physically');
         console.log('Cold owner exhausted inventory checks passed');
     } finally {
         await world.close();

@@ -1,6 +1,6 @@
 'use strict';
-// A worker proposal carries only the bag of its base state, not the state:
-// main commits it over its own cached state. A bot main does not hold in its
+// A worker proposal carries no base state: main commits it over its own
+// cached state. A bot main does not hold in its
 // cache gets the proposal refused, and its row stays as it was.
 const assert = require('node:assert/strict');
 const { createWorld, Database } = require('./helpers/c4QuestHarness');
@@ -35,7 +35,7 @@ async function lifeRow() {
             timing: { lastResolvedAt: at, nextResolveAt: at + 60000 }, simulation: { revision: 0 }, updatedAt: at };
         coordinator.handleProposalBatch({ payload: { proposals: [{
             proposalId: `${id}:1`, characterId: id, priority: 'P2', enqueuedAt: at, revision: 0,
-            baseState: { characterId: id, inventory: {} }, nextState,
+            bagChanged: false, nextState,
             result: { events: [], debug: { activity: 'hunting' } },
             options: { allowLifecycle: true }
         }] } });

@@ -14,6 +14,7 @@ const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
 const { BoardIndex, rowOf, recordOf } = require('../src/GameServer/AfkTrade/BoardIndex');
@@ -238,7 +239,7 @@ async function run() {
         const next = structuredClone(stepped);
         next.stats.workerAfterDeal = true;
         const step = revision => Owner.commitBatch([{ revision, nextState: next,
-            proposal: { baseState: { inventory: stepped.inventory } } }], { timestamp: Date.now() });
+            proposal: InventorySummary.bagChange(stepped.inventory, next.inventory) }], { timestamp: Date.now() });
         const [refused] = await step(stepped.simulation.revision);
         assert.strictEqual(refused.reason, 'stale_revision', 'the fill moved the far owner\'s revision under the step');
         const [{ simulationRevision }] = await Database.execute(['SELECT simulationRevision FROM bot_life_state WHERE characterId = ?', [owner]]);

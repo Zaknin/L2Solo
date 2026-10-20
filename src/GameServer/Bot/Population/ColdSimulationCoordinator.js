@@ -35,6 +35,7 @@ const { ColdEconomyDecisions, echoHolds } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
 const { STEP_MS: PVP_STEP_MS } = require('./PvpEncounterBudget');
 const ColdStateDelta = require('./ColdStateDelta');
+const InventorySummary = require('./InventorySummary');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
 const { ColdSnapshotQueue } = require('./ColdSnapshotQueue');
 const ColdSafetyTransport = require('./ColdSafetyTransport');
@@ -1476,8 +1477,8 @@ class ColdSimulationCoordinator {
         if (proposal.atomicGroup?.raidCommit) {
             if (!invoke('GameServer/Bot/Population/ColdRaidAuthority').prepare(proposal.atomicGroup.raidCommit)) return null;
         }
-        // The proposal's base is its bag, not a state: a bot main does not
-        // hold is refused (prepare_rejected) and the worker requeues it.
+        // No base state travels with a proposal: a bot main does not hold is
+        // refused (prepare_rejected) and the worker requeues it.
         const state = LifeState.cachedState(proposal.characterId);
         if (!state) return null;
         if (Number(state.stats?.clanId) > 0) proposal[CLAN_BEFORE] = { level: state.level, sp: state.sp, inventory: state.inventory };
@@ -1506,6 +1507,13 @@ class ColdSimulationCoordinator {
         if (cleanupState) {
             proposal.inventoryCleanupForced = true;
             delete cleanupState.cleanup;
+            // The trip pays here (scroll, fee): the worker's bag flag and
+            // emptied stacks did not see it, so the commit adds what it moved.
+            // A set union: preparing the same proposal again adds nothing twice
+            // (a flag left true by it costs one physical write, never a skip).
+            const paid = InventorySummary.bagChange(resolvedState.inventory, cleanupState.inventory);
+            if (paid.bagChanged) proposal.bagChanged = true;
+            if (paid.removedItemIds) proposal.removedItemIds = [...new Set([...(proposal.removedItemIds || []), ...paid.removedItemIds])];
             return cleanupState;
         }
         // The worker's step result commits as it is: the room at a spot is

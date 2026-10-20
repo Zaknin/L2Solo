@@ -32,6 +32,7 @@ const Resolver = invoke('GameServer/Bot/Population/BackgroundPartyResolver');
 const Background = invoke('GameServer/Bot/Population/BackgroundResolver');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Raid = invoke('GameServer/Bot/Population/ColdRaidEncounter');
 const Protocol = invoke('GameServer/Bot/Population/ColdSimulationProtocol');
 const at = Date.now();
@@ -138,7 +139,7 @@ async function prepareBatch(deadlineOverride) {
             { persist: false, projectClassProgression: true, timestamp: at });
         if (deadlineOverride !== undefined) nextState.timing.nextResolveAt = deadlineOverride;
         return { revision: state.simulation.revision, nextState, atomicGroup,
-            options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: state, result } };
+            options: { allowParty: true, allowLifecycle: true }, proposal: { ...InventorySummary.bagChange(state.inventory, nextState.inventory), result } };
     }));
     return { entries, stageId, resolution, before: image() };
 }
