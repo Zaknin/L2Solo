@@ -3,6 +3,7 @@ const path = require('node:path');
 const { Worker } = require('node:worker_threads');
 const TableChannel = require('../Bot/Population/ColdTableChannel');
 const { SpotCatalogWriter } = require('./ClanSpotCatalog');
+const BotGear = invoke('GameServer/Bot/AI/BotGear');
 const EMPTY_SPOTS = [];
 const yieldLoop = () => new Promise((resolve) => setImmediate(resolve));
 // The item-origin catalog (ItemAcquisitionCatalog) reads only which NPCs
@@ -22,9 +23,13 @@ function catalogRows(catalogs, name) {
 
 class ClanPlanningCoordinator {
     constructor({ workerFile = path.join(__dirname, 'ClanPlanningWorker.js'), timeoutMs = 30000, maxPending = 8, restartDelayMs = 5000,
-        tableChannel = TableChannel.shared } = {}) {
+        tableChannel = TableChannel.shared, planningContext = context } = {}) {
         this.workerFile = workerFile;
         this.tableChannel = tableChannel;
+        // The static planning context (context() below) and the worker it
+        // was published to; plan and prepare_raids carry only its revision.
+        this.planningContext = planningContext;
+        this.contextPublication = null;
         // A new worker is a new epoch for the table channel.
         this.epoch = 0;
         this.timeoutMs = timeoutMs;
@@ -40,7 +45,7 @@ class ClanPlanningCoordinator {
         this.spotGeneration = 0;
         this.retryAt = 0;
         this.closed = false;
-        this.stats = { completed: 0, failures: 0, timeouts: 0, rejected: 0, restarts: 0, maxRunMs: 0 };
+        this.stats = { completed: 0, failures: 0, timeouts: 0, rejected: 0, restarts: 0, maxRunMs: 0, contextPublishes: 0 };
     }
 
     fail(worker, error) {
@@ -48,6 +53,7 @@ class ClanPlanningCoordinator {
         this.worker = null;
         this.spotWriter = null;
         this.spotPublishedWorker = null;
+        this.contextPublication = null;
         this.tableChannel.detach(this);
         this.retryAt = Date.now() + this.restartDelayMs;
         DiagnosticConfig.developerDiagnostics && (this.stats.failures++);
@@ -166,13 +172,30 @@ class ClanPlanningCoordinator {
         finally { if (this.spotInitializing === publication) this.spotInitializing = null; }
     }
 
+    // The static context crosses once per worker and context revision: a
+    // restarted worker (fail() clears the publication) or a new revision
+    // (rate, recipes, configured stores) publishes it before the request.
+    async ensureContext() {
+        const current = await this.planningContext();
+        const worker = this.worker;
+        const held = this.contextPublication;
+        if (held?.worker === worker && held.revision === current.revision) return held.promise;
+        const promise = this.send('planning_context', { context: current }).then(() => current.revision);
+        const publication = { worker, revision: current.revision, promise };
+        this.contextPublication = publication;
+        promise.catch(() => { if (this.contextPublication === publication) this.contextPublication = null; });
+        DiagnosticConfig.developerDiagnostics && (this.stats.contextPublishes++);
+        return promise;
+    }
+
     async plan(payload, catalogs, spotCatalog = catalogs.spots || EMPTY_SPOTS) {
         if (this.activeJob && payload.jobKey !== this.activeJob) throw new Error('clan planning worker job busy');
         await this.ready(catalogs);
         const writer = await this.ensureSpotCatalog(spotCatalog);
+        const contextRevision = await this.ensureContext();
         if (payload.deadlineAt && Date.now() >= payload.deadlineAt) throw new Error('clan planning deadline');
         this.tableChannel.flush();
-        const result = await this.send('plan', { payload: writer.pack(payload) });
+        const result = await this.send('plan', { payload: writer.pack({ ...payload, contextRevision }) });
         DiagnosticConfig.developerDiagnostics && (this.stats.completed++);
         DiagnosticConfig.developerDiagnostics && (this.stats.maxRunMs = Math.max(this.stats.maxRunMs, result.durationMs));
         // The worker's heap after this run (WorkerHeapTelemetry.heapRecord).
@@ -197,9 +220,10 @@ class ClanPlanningCoordinator {
     async prepareRaids(payload, catalogs, spotCatalog) {
         if (!this.activeJob || payload.jobKey !== this.activeJob) throw new Error('clan planning job not admitted');
         const writer = await this.ensureSpotCatalog(spotCatalog);
+        const contextRevision = await this.ensureContext();
         if (Date.now() >= payload.deadlineAt) throw new Error('clan planning deadline');
         this.tableChannel.flush();
-        return this.send('prepare_raids', { payload: writer.pack(payload) });
+        return this.send('prepare_raids', { payload: writer.pack({ ...payload, contextRevision }) });
     }
 
     async shutdown() {
@@ -209,6 +233,7 @@ class ClanPlanningCoordinator {
             this.worker = null;
             this.spotWriter = null;
             this.spotPublishedWorker = null;
+            this.contextPublication = null;
             this.tableChannel.detach(this);
             for (const entry of this.pending.values()) {
                 clearTimeout(entry.timer);
@@ -226,6 +251,11 @@ let coordinator = null;
 let enabled = false;
 const staticMarkets = new Map();
 const staticMarketBuilds = new Map();
+// The planning context crosses to the worker once per revision. A new
+// revision only when one of its owners hands out a new value: the per-rate
+// NPC market, the configured stores' rows, the published recipes, the settings.
+let planningContext = null;
+let planningContextRevision = 0;
 
 function offerRow(offer) {
     // Live sessions, actors and mutable store entries never cross the boundary.
@@ -238,11 +268,11 @@ async function context() {
     const market = invoke('GameServer/Bot/Economy/MarketOpportunity');
     const craft = invoke('GameServer/Bot/Economy/CraftShopService');
     const shops = invoke('GameServer/World/Generics/NpcShopBuyLists');
-    const items = invoke('GameServer/Bot/AI/BotGear').currentWearableRows(cache.items);
-    const recipes = [...craft.publishedStationRecipes().recipes];
+    const recipes = craft.publishedStationRecipes().recipes;
     const rate = invoke('GameServer/ProgressionRates').profile().multiplier;
     if (!staticMarkets.has(rate)) {
         if (!staticMarketBuilds.has(rate)) staticMarketBuilds.set(rate, (async () => {
+            const items = BotGear.currentWearableRows(cache.items);
             const npcOffers = [];
             const supplyIds = [...new Set([...items.map(item => item.selfId),
                 ...recipes.flatMap(recipe => recipe.materials.map(row => row.selfId))])];
@@ -266,15 +296,24 @@ async function context() {
         try { staticMarkets.set(rate, await staticMarketBuilds.get(rate)); }
         finally { staticMarketBuilds.delete(rate); }
     }
-    // The board reaches the worker as its 'board' table; the configured
-    // merchants' live stores come with each plan.
-    const fixedOffers = market.fixedStoreOffers().map(offerRow);
+    const staticMarket = staticMarkets.get(rate);
+    // The board reaches the worker as its 'board' table. The configured
+    // stores' rows are frozen per economy rate and store config
+    // (FixedShotOffers.offers): the same array until one of them changes.
+    const fixed = market.fixedStoreOffers();
     const general = {};
     for (const key of ['progressionPreset', 'expRate', 'spRate', 'adenaRate', 'dropChanceRate', 'spoilRate', 'maxLevel']) {
         general[key] = global.options.default.General?.[key];
     }
     const progression = { contentCap: global.options.default.Progression?.contentCap };
-    return { ...staticMarkets.get(rate), fixedOffers, recipes, general, progression, progressionRate: process.env.L2NODE_PROGRESSION_RATE };
+    const progressionRate = process.env.L2NODE_PROGRESSION_RATE;
+    const settings = [...Object.values(general), progression.contentCap, progressionRate].join('|');
+    const held = planningContext;
+    if (held?.staticMarket !== staticMarket || held.fixed !== fixed || held.recipes !== recipes || held.settings !== settings) {
+        planningContext = { staticMarket, fixed, recipes, settings, value: { revision: ++planningContextRevision, ...staticMarket,
+            fixedOffers: fixed.map(offerRow), recipes, general, progression, progressionRate } };
+    }
+    return planningContext.value;
 }
 
 module.exports = {

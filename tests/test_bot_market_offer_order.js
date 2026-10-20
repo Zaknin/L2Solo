@@ -81,8 +81,7 @@ async function clanWorkerTie() {
                 target: { selfId: 123, slot: 7 } } } };
         const expected = planForMember(member);
         assert.strictEqual(expected.market.sourceType, 'afk_player_store');
-        assert.deepStrictEqual(await worker.plan({ member, spots: [], warehouseRows: [], options: {},
-            context: await Runtime.context() }, DataCache), expected,
+        assert.deepStrictEqual(await worker.plan({ member, spots: [], warehouseRows: [], options: {} }, DataCache), expected,
         'the clan worker must take the same tied offer as the main thread');
     } finally {
         AfkTrade._resetForTests();

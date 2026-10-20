@@ -26,6 +26,7 @@ let npcOffers = new Map();
 const tables = new TableMirror();
 const ClanSupplies = invoke('GameServer/Clan/ClanSupplyPolicy');
 const PersonalWarehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+const BotMarketPricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
 tables.watch('clan_supplies', { reset() {}, remove() {}, put: (_key, row) => ClanSupplies.prepareRow(row) });
 tables.watch('personal_warehouse', { reset() {}, remove() {}, put: (_key, row) => PersonalWarehouse.prepareRow(row) });
 ClanSupplies.useRowSource(id => tables.rows('clan_supplies').get(id), () => tables.ready('clan_supplies'));
@@ -49,6 +50,24 @@ const indexOffers = (rows = []) => {
     }
     return index;
 };
+// The static planning context, once per worker and revision
+// (ClanPlanningCoordinator.ensureContext); each request names its revision.
+function useContext(next) {
+    context = next;
+    global.options.default.General = context.general;
+    global.options.default.Progression = context.progression;
+    if (context.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
+    else process.env.L2NODE_PROGRESSION_RATE = context.progressionRate;
+    fixedOffers = indexOffers(context.fixedOffers);
+    npcOffers = indexOffers(context.npcOffers);
+    BotMarketPricing.useNpcOfferSnapshot([
+        ...(context.npcOffers || []), ...(context.npcPriceRows || [])
+    ]);
+}
+function restore(payload) {
+    if (payload.contextRevision !== context.revision) throw new Error('stale clan planning context');
+    return spotCatalog.restore(payload);
+}
 const market = {
     get TOWN_NPC_SELLERS() { return context.towns || {}; },
     npcOffersAll: (id) => npcOffers.get(Number(id)) || [],
@@ -107,17 +126,12 @@ parentPort.on('message', (message) => {
             require('../Items/ItemAcquisitionCatalog').reset();
         } else if (message.type === 'spot_catalog') {
             spotCatalog.apply(message.page);
+        } else if (message.type === 'planning_context') {
+            useContext(message.context);
         } else if (message.type === 'end_planning_job') {
             if (raidJob?.key === message.jobKey) raidJob = null;
         } else if (message.type === 'prepare_raids') {
-            const payload = spotCatalog.restore(message.payload);
-            if (payload.context) {
-                context = payload.context;
-                global.options.default.General = context.general;
-                global.options.default.Progression = context.progression;
-                if (context.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-                else process.env.L2NODE_PROGRESSION_RATE = context.progressionRate;
-            }
+            const payload = restore(message.payload);
             if (payload.deadlineAt && Date.now() >= payload.deadlineAt) throw Error('clan planning deadline');
             if (raidJob?.key !== payload.jobKey) raidJob = { key: payload.jobKey, readiness: new Map() };
             raidJob.clan = payload.clan; raidJob.prospects = payload.prospects;
@@ -128,17 +142,7 @@ parentPort.on('message', (message) => {
             parentPort.postMessage({ id: message.id, result: raidJob.prepared });
             return;
         } else if (message.type === 'plan') {
-            const payload = spotCatalog.restore(message.payload);
-            context = payload.context;
-            global.options.default.General = context.general;
-            global.options.default.Progression = context.progression;
-            if (context.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-            else process.env.L2NODE_PROGRESSION_RATE = context.progressionRate;
-            fixedOffers = indexOffers(context.fixedOffers);
-            npcOffers = indexOffers(context.npcOffers);
-            invoke('GameServer/Bot/Economy/BotMarketPricing').useNpcOfferSnapshot([
-                ...(context.npcOffers || []), ...(context.npcPriceRows || [])
-            ]);
+            const payload = restore(message.payload);
             planner ||= require('./ClanEquipmentPlanner');
             const forbidden = Object.keys(require.cache).some((filename) =>
                 /[\\/]src[\\/]Database\.js$|[\\/]World[\\/]World\.js$|[\\/]Bot[\\/]BotManager\.js$/.test(filename));

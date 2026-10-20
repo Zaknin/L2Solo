@@ -644,7 +644,7 @@ async function prepareRecruitment(clan, profiles, previousGoal, options) {
         prospects = await LifeState.statesByIds(eligible.map(row => row.characterId), { unassigned: true });
     }
     let remaining = 64 - retainedIds.length;
-    const prepare = pool => options.jobKey ? PlanningWorker.prepareRaids({ jobKey: options.jobKey, deadlineAt: options.planningDeadline, context: options.workerContext,
+    const prepare = pool => options.jobKey ? PlanningWorker.prepareRaids({ jobKey: options.jobKey, deadlineAt: options.planningDeadline,
         clan, spots: profiles, prospects: pool, previousGoal, economicRequirements: scan.requirements }) : Promise.resolve({
             ...RosterDemand.prepare(clan, profiles, pool, previousGoal),
             economicProspects: RosterDemand.retainedEconomicProspects(pool, scan.requirements) });
@@ -732,7 +732,6 @@ async function planningForClan(clan, previousGoal = null, options = {}) {
 }
 
 async function planningForClanAdmitted(clan, previousGoal = null, options = {}) {
-    if (options.jobKey) options.workerContext = await PlanningWorker.context();
     // A planning pass compares the same clan snapshot against many raid bosses.
     // Readiness only depends on the member snapshot, so calculate it once per
     // member instead of rebuilding equipped-item projections for every boss.
@@ -802,14 +801,9 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
     const beneficiaryFingerprints = workerFingerprint
         ? Object.fromEntries(members.map((member) => [memberId(member), beneficiaryFingerprint(member)]))
         : null;
-    let workerContext;
     let economicAttempted = false;
     const planningDeadline = number(options.planningDeadline)
         || Date.now() + Math.min(45000, Math.max(1000, Config.actionLeaseMs - 5000));
-    if (workerFingerprint && members.length) {
-        try { workerContext = options.workerContext || await PlanningWorker.context(); }
-        catch (error) { throw planningDeferred(error.message); }
-    }
     for (let index = 0; index < members.length; index++) {
         if (workerFingerprint && Date.now() >= planningDeadline) throw planningDeferred('clan planning deadline');
         const member = members[index];
@@ -830,7 +824,7 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
         const nativePlan = async extra => {
             const requestOptions = { ...memberOptions, ...extra };
             if (workerFingerprint) return PlanningWorker.plan({ member, spots: memberSpots, warehouseRows, options: requestOptions,
-                context: workerContext, deadlineAt: planningDeadline, jobKey: options.jobKey });
+                deadlineAt: planningDeadline, jobKey: options.jobKey });
             return requestOptions.economicMode ? RosterDemand.economicPlan(planForMember, {
                 clan: recruitment.clan, prospects: recruitment.prospects, prepared: recruitment }, member, memberSpots, warehouseRows, requestOptions)
                 : planForMember(member, memberSpots, warehouseRows, requestOptions);
