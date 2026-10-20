@@ -443,6 +443,7 @@ const tests = [
     'tests/test_bot_goal_copies.js',
     'tests/test_cold_cleanup_keeps_resolve.js',
     'tests/test_cold_cleanup_economy_authority.js',
+    'tests/test_cold_cleanup_need_worker.js',
     'tests/test_forced_cleanup_existing_shop.js',
     'tests/test_shop_town_unreached_retry.js',
     'tests/test_e311_stuck_shopping.js',

@@ -45,9 +45,6 @@ const fightResult = () => ({
     const world = await createWorld([{ id: 7301, level: 40 }, { id: 7303, level: 40 }], 'cold-cleanup-keeps-resolve');
     try {
         await LifeState.init();
-        // Every bot is over the author's cleanup threshold.
-        ItemDisposition.inventoryCleanupNeed = () => ({ reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 });
-
         // Resolver path: the worker's projected state already holds the fight.
         const coordinator = new ColdSimulationCoordinator();
         coordinator.population = {
@@ -62,6 +59,8 @@ const fightResult = () => ({
             enqueuedAt: Date.now(),
             baseState: { characterId: base.characterId, inventory: base.inventory },
             nextState: { ...base, exp: base.exp + 500, adena: base.adena + 600 },
+            // The worker found the bag over the author's cleanup threshold.
+            cleanupNeed: { reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 },
             result: fightResult()
         };
         const prepared = await coordinator.prepareProposal(proposal);
@@ -86,9 +85,11 @@ const fightResult = () => ({
         assert.strictEqual(routed.stats.travel?.reason, 'market_sale_inventory');
         assert.strictEqual(routed.exp, base.exp + 500, 'and the fight before it is kept');
 
-        // A bot that died in the fight stays dead; the cleanup waits.
+        // A bot that died in the fight stays dead; the cleanup waits (the
+        // worker sends no need for it).
         const died = await coordinator.prepareProposal({
             ...proposal,
+            cleanupNeed: undefined,
             result: fightResult(),
             nextState: { ...base, activity: 'dead' }
         });
@@ -112,7 +113,9 @@ const fightResult = () => ({
         assert.strictEqual(released.exp, member.exp + 500);
         assert(!released.stats?.forcedMarketCleanup);
 
-        // Command path: the worker's precomputed fight is applied before the trip.
+        // Command path: the worker's precomputed fight is applied before the
+        // trip; main decides the cleanup there, on a bag over the threshold.
+        ItemDisposition.inventoryCleanupNeed = () => ({ reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 });
         const applied = [];
         const recorded = [];
         LifeState.applyResolve = async (state, result) => {
