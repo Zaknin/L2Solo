@@ -96,7 +96,6 @@ function tableRow(snapshot) {
 function store(snapshot) {
     cache.set(snapshot.characterId, snapshot);
     TableChannel.changed('goals', tableRow(snapshot));
-    GoalState.watch?.put(snapshot.characterId, Number(snapshot.current?.nextReviewAt || 0));
 }
 
 TableChannel.register('goals', {
@@ -105,10 +104,6 @@ TableChannel.register('goals', {
 });
 
 const GoalState = {
-    // { put(characterId, nextReviewAt), reset() }: told of every goal write
-    // beside its 'goals' row (GoalService's due list of reviews).
-    watch: null,
-
     init() {
         if (initialized) return Promise.resolve(true);
         if (initPromise) return initPromise;
@@ -190,30 +185,6 @@ const GoalState = {
         });
     },
 
-    setBatch(entries = []) {
-        const snapshots = (entries || []).map((entry) => {
-            const characterId = Number(entry?.characterId || 0);
-            const current = normalizeGoal(entry?.goal);
-            if (!characterId || !current) return null;
-            return { characterId, current, updatedAt: now(), inputHash: entry.inputHash };
-        }).filter(Boolean);
-        if (!snapshots.length) return Promise.resolve([]);
-        return this.init().then((ready) => {
-            if (!ready) return [];
-            return Database.upsertBotGoalStates(snapshots.map((snapshot) => ({
-                characterId: snapshot.characterId,
-                goalJson: safeJson(snapshot.current),
-                updatedAt: snapshot.updatedAt
-            }))).then(() => {
-                snapshots.forEach(store);
-                return snapshots;
-            });
-        }).catch((err) => {
-            utils.infoWarn('BotGoals', 'failed to save %d goal states: %s', snapshots.length, err.message);
-            return [];
-        });
-    },
-
     clear(characterId, status = 'abandoned') {
         const existing = this.snapshot(characterId);
         if (!existing?.current) return Promise.resolve(existing || null);
@@ -249,7 +220,6 @@ const GoalState = {
     reset() {
         for (const id of cache.keys()) TableChannel.changed('goals', { key: id, removed: true });
         cache.clear();
-        this.watch?.reset();
         initialized = false;
         initPromise = null;
     }
