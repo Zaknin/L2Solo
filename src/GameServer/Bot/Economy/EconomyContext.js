@@ -40,6 +40,7 @@ const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const ColdTrip = invoke('GameServer/Bot/Population/ColdTrip');
 const TravelRoutes = invoke('GameServer/Bot/Travel/TravelRoutes');
 const GearProgression = invoke('GameServer/Bot/AI/PersonalGearProgression');
+const TradeIntent = require('./TradeIntent');
 // The bound of an event proof's packed and wire forms.
 const PROOF_RAW_BYTES = 65536;
 // The cold worker holds one plan per bot (~1,700), apart from the planner's in-flight builds: a
@@ -1310,7 +1311,7 @@ function forState(state = {}, deps = {}) {
         : urgent.key === 'stock:potions' ? base.stock('potions').targetHours : projection.horizon;
     Object.assign(context, valueReaders(state, network, projection.values, persona, knowledgeEnabled,
         base.kitCost, () => context.statsPacket.money));
-    context.watchList = invoke('GameServer/Bot/Economy/TradeIntent').project(state, network, projection, id => context.worth(id) ?? price(id),
+    context.watchList = TradeIntent.project(state, network, projection, id => context.worth(id) ?? price(id),
         BoardRules.BOT_SHOP_LINES + BoardRules.BOT_RECORDS.buy_ad);
     context.intentPending = context.watchList === null;
     context.watchList ||= [];

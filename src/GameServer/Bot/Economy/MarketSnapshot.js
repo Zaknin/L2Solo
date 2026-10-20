@@ -9,6 +9,7 @@ const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
 const World = invoke('GameServer/World/World');
 const MarketEconomyOverview = require('../../../MarketEconomyOverview');
 const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
+const TownTransitPolicy = invoke('GameServer/Bot/AI/TownTransitPolicy');
 
 function emptyTown() {
     return { dynamicWts: 0, dynamicWtb: 0, fixedWts: 0, fixedWtb: 0, sellLines: 0, buyLines: 0, sellUnits: 0, buyUnits: 0 };
@@ -190,7 +191,7 @@ function playerStores(sessions, itemsById) {
             ownerName: actor.fetchName?.() || session.name,
             storeType: store.storeType,
             title: store.title,
-            town: store.town || invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(actor),
+            town: store.town || TownTransitPolicy.townAt(actor),
             loc: {
                 locX: actor.fetchLocX?.(),
                 locY: actor.fetchLocY?.(),

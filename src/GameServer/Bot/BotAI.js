@@ -25,6 +25,7 @@ const BotRangedCombatPositioning = invoke('GameServer/Bot/AI/BotRangedCombatPosi
 const HealingPotionStock = invoke('GameServer/Bot/AI/HealingPotionStock');
 const { performance } = require('perf_hooks');
 const ActorQueries = require('../World/ActorSpatialQueries');
+const BotTownTravel = invoke('GameServer/Bot/AI/BotTownTravel');
 
 // Visibility refreshes and damage can request an immediate AI pass from
 // several nearby actors at once.  Without a small gate each request cancels
@@ -441,7 +442,7 @@ const BotAI = {
 
         // Accepted board custody owns travel and waiting before ordinary AI;
         // combat and death still release that hold and retain their priority.
-        if (invoke('GameServer/Bot/AI/BotTownTravel').holdMeeting(session, bot, botDead || defendingPvp)) return;
+        if (BotTownTravel.holdMeeting(session, bot, botDead || defendingPvp)) return;
 
         if (!botDead && !defendingPvp
             && invoke('GameServer/Bot/AI/ClanAllianceSupportAI').tick(session, bot, invoke(path.actor))) return;

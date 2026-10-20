@@ -6,6 +6,8 @@ const TownChatter = invoke('GameServer/Bot/AI/TownChatter');
 const TownTransitPolicy = invoke('GameServer/Bot/AI/TownTransitPolicy');
 const Karma = invoke('GameServer/Karma');
 const TripPayment = invoke('GameServer/Bot/Travel/TripPayment');
+const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const TradeMeetings = invoke('GameServer/AfkTrade/TradeMeetingService');
 
 const SOE_SKILL_ID = 2013;
 const SOE_CAST_MS = TripPayment.SCROLL_CAST_MS;
@@ -32,7 +34,7 @@ function inCombat(session, bot) {
 // Preserve the plan so an existing shopping continuation can still resume it.
 function holdMeeting(session, bot, interrupted = false) {
     const id = Number(bot.fetchId());
-    const current = invoke('GameServer/Bot/Population/BotLifeState').cachedState?.(id);
+    const current = BotLifeState.cachedState?.(id);
     const state = current || (session.coldLifeState?.characterId === id ? session.coldLifeState : null);
     const marker = session.tradeMeetingPresence;
     const meetingId = (marker?.actorId === id && marker.id) || state?.stats?.tradeMeeting?.[0];
@@ -46,7 +48,7 @@ function holdMeeting(session, bot, interrupted = false) {
         session.meetingAiHold = { actor: bot, id: meetingId };
         // Wake once on acquisition/recovery, never poll the native queue on
         // waiting ticks. Physical arrivals continue through presenceChanged.
-        require('../../AfkTrade/TradeMeetingService').wake(id);
+        TradeMeetings.wake(id);
     }
     return true;
 }
@@ -301,7 +303,7 @@ async function requestMeeting(session, bot, meeting, side) {
         if (error.message === 'trade_meeting_gatekeeper_unavailable') {
             const cancelled = await Database.cancelTradeMeeting(meeting.id, 'route_unavailable');
             for (const row of Object.values(cancelled?.coldLifeRows || {})) Life.acceptLifecycleRow(row);
-            require('../../AfkTrade/TradeMeetingService').wake(bot.fetchId());
+            TradeMeetings.wake(bot.fetchId());
             return;
         }
         throw error;

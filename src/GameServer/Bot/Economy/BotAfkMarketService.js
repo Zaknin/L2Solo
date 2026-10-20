@@ -19,6 +19,7 @@ const EconomyCommit = require('./EconomyCommit');
 const { marketStoreTitle, marketBuyStoreTitle } = invoke('GameServer/Bot/Economy/MarketStoreTitle');
 
 const BoardRules = require('../../AfkTrade/BoardRules');
+const BotBuyShopService = require('./BotBuyShopService');
 const MAX_LINES = BoardRules.BOT_SHOP_LINES;
 const reviewedInventory = new Map();
 const pending = new Map();
@@ -476,7 +477,7 @@ async function publishBuyAds(ownerId, ads, lines, town, expectedAuthority = null
         if (result.skipped) throw Error('afk_trade_shop_changed');
     }
     const state = LifeState.snapshot(ownerId);
-    return require('./BotBuyShopService').publish(state, lines, town, { priority, expectedAuthority,
+    return BotBuyShopService.publish(state, lines, town, { priority, expectedAuthority,
         appearance: async () => {
             const [rows, inventory] = await Promise.all([
                 Database.execute(['SELECT * FROM characters WHERE id=? LIMIT 1', [ownerId]], 'bot-afk:buyer'),

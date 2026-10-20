@@ -21,14 +21,16 @@ function registerPlayer(session) {
     refreshPlayers();
 }
 function refreshPlayers() {
+    // lazy: worker the worker loads this module; player workshops (World, ManufactureShop) are main-thread only
     const World = invoke('GameServer/World/World');
-    const Manufacture = invoke('GameServer/Crafting/ManufactureShop');
+    const Manufacture = invoke('GameServer/Crafting/ManufactureShop'); // lazy: worker main-thread only, as World above
     for (const [id, owned] of playerShops) {
         const { session, actor } = owned;
         const rows = [];
         if (session.actor === actor && (World.user?.sessions || []).includes(session)
             && actor.fetchIsOnline?.() !== false && !actor.isDead?.()
             && Number(actor.fetchPrivateStoreType?.()) === Manufacture.MANUFACTURE) {
+            // lazy: worker main-thread player workshops only (see refreshPlayers)
             const town = invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(actor);
             if (!town) {
                 for (const row of owned.rows) { togglePublicDigest(row, -1); playerCandidates.remove(`p:${id}:${row[1]}`); }
@@ -263,11 +265,13 @@ async function craft(ownerId, recipeId, customerId, { expectedPrice = null, expe
         const player = playerLookup(ownerId, recipeId, customer);
         if (player) {
             liveOrder = true;
+            // lazy: worker a player workshop order runs on main; the worker loads this module
             const session = (invoke('GameServer/World/World').user?.sessions || [])
                 .find(entry => Number(entry.actor?.fetchId?.()) === Number(customerId));
             if (!session || !customer || expectedPrice !== null && Number(expectedPrice) !== player.price)
                 throw Error('workshop price changed');
             admitted = await Commit.admit(customer, Commit.KINDS.craft);
+            // lazy: worker a player workshop order runs on main; the worker loads this module
             const result = await invoke('GameServer/Crafting/ManufactureShop').craft(session, Number(ownerId), Number(recipeId), random,
                 { botOrder: true, batches, expectedPrice: player.price, funding, economyCommand: admitted.command });
             if (!result || !result.committed) throw Error('player_workshop_unavailable');

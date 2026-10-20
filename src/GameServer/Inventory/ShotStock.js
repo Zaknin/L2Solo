@@ -518,11 +518,13 @@ async function purchaseActorRestock(actor, options = {}) {
         && Number(actor.session.coldLifeState?.characterId) === Number(actor.fetchId());
     const localQuote = botActor && town && options.unitPrice === undefined
         ? invoke('GameServer/Bot/Economy/NpcRestockPlan').quoteFor(plan.selfId, town) : null;
+    // lazy: cycle MarketOpportunity reads ShotStock at load
     const Market = invoke('GameServer/Bot/Economy/MarketOpportunity');
     const offers = town ? [
         ...AfkTrade.offers(plan.selfId, AfkTrade.SELL, { characterId: actor.fetchId(), town }),
         ...Market.privateOffers(plan.selfId, town).filter(offer => offer.store?.kind === 'player'
             && Number(offer.sourceId) !== Number(actor.fetchId())
+            // lazy: cycle PrivateStoreTrade reaches ShotStock at load
             && invoke('GameServer/PrivateStoreTrade').inRange(actor, offer.session.actor))
     ] : [];
     const restock = restockPlan(actor, { plan, targetAmount: options.targetAmount,
@@ -540,6 +542,7 @@ async function purchaseActorRestock(actor, options = {}) {
         try {
             const live = line.offer.sourceType === 'private_store';
             const result = live
+                // lazy: worker the cold worker loads ShotStock; TradeService is main-thread only
                 ? await invoke('GameServer/Bot/TradeService').buyFromStore(actor, line.offer.store, plan.selfId, line.amount,
                     { objectId: line.offer.objectId, expectedUnitPrice: line.price, funding: line.funding })
                 : await AfkTrade.buyFromShop(actor.fetchId(), line.offer.store, plan.selfId, line.amount,
@@ -629,11 +632,13 @@ function restockTarget(actor, town, excludedIds = []) {
 // seller before the restock; an actor in another part of town cannot pay it remotely.
 function liveRestockTarget(actor, town) {
     if (!town) return null;
+    // lazy: cycle MarketOpportunity reads ShotStock at load
     const Market = invoke('GameServer/Bot/Economy/MarketOpportunity');
     const plan = planForActor(actor);
     const offers = Market.hotOffers(plan.selfId, { town, buyerCharacterId: actor.fetchId(),
         accept: offer => String(offer.sourceType).startsWith('afk_') || offer.store?.kind === 'player' });
     if (!offers.some(offer => offer.store?.kind === 'player')) return null;
+    // lazy: cycle NpcRestockPlan reads ShotStock at load
     const quote = invoke('GameServer/Bot/Economy/NpcRestockPlan').quoteFor(plan.selfId, town);
     const restock = restockPlan(actor, { plan, offers, unitPrice: quote?.price });
     const line = restock.shops[0];

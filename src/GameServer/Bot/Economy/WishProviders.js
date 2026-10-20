@@ -12,6 +12,7 @@ const SoulCrystals = require('../../Items/SoulCrystalProgression');
 const DualSwords = require('../../Items/C4DualSwordCombinations');
 const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+const DataCache = invoke('GameServer/DataCache');
 // A module read inside a hot function: require() walks the module path on
 // every call, so each path is resolved once here. The relative require keeps
 // the module's dependency boundary (tests pass their own require).
@@ -439,7 +440,7 @@ function buildProjection(state, ctx, deps) {
         // A visible early buyer can order consumables without changing the
         // authored equipment progression or the cold executor's admission.
         if (earlyCustomer && (state.phase !== 'hot'
-            || Number(need('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(id))?.etc?.slot) > 0)) return null;
+            || Number(need('../../Item/ItemTemplateIndex').find(DataCache.items, Number(id))?.etc?.slot) > 0)) return null;
         const own = ownCapable ? Profit.craftFacts(recipe, { batches: 1, ...craftLabour() }) : null;
         let workshop = !ownOnly && recipe && deps.workshops ? knownWorkshop(recipe, state, ctx, deps) : null;
         if (workshop && own?.status === 'ready' && knownRecipes.has(Number(recipe.recipeId))

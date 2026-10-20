@@ -6,6 +6,7 @@ const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const TownNpcCatalog = invoke('GameServer/Bot/Economy/TownNpcCatalog');
 const DecisionEvents = invoke('GameServer/Bot/AI/DecisionEvents');
+const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
 
 const MAX_PURCHASES_PER_VISIT = 12;
 
@@ -17,7 +18,7 @@ function currentState(session, bot, town, economy = null) {
     // Autonomous shopping shares the physical actor's route inputs. A
     // nearby town is a destination until the actor actually reaches it.
     const physical = session.partyCompanion === true ? null : economy?.state
-        || invoke('GameServer/Bot/Economy/EconomyContext').stateForActor(bot, session);
+        || EconomyContext.stateForActor(bot, session);
     const previous = session.coldLifeState || {};
     const inventory = LifeState.inventorySummaryFromItems(bot.backpack?.fetchItems?.() || []);
     return {
