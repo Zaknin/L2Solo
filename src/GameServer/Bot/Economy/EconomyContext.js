@@ -1588,9 +1588,9 @@ function stockTargets(base) {
 // MarketDemandIndex and CraftWorkshopService): null when the stock rule wants
 // none, the previous row (its age kept) while item, amount and cap hold. The
 // far step's output (ColdSimulationWorker planLifecycle), over the step's own
-// economy and its money packet. Two choices kept on purpose: escrow 0, as the
-// main-thread review read it; worth || price, since a full context values an
-// item off the bot's wish card at 0, not null.
+// economy and its money packet. Escrow 0 and worth ?? price, as the
+// main-thread review read them: a worth of 0 (an item off the bot's wish
+// card) caps the spend at 0, only no worth falls back to the price.
 // Only the activities the main-thread review posted for; any other step
 // keeps the previous row as it is.
 const SHOT_DEMAND_ACTIVITIES = ['hunting', 'resting', 'shopping', 'grouped'];
@@ -1603,7 +1603,7 @@ function shotDemand(economy, state, timestamp, previous = null) {
     if (!(price > 0)) return previous;
     const funded = { ...state, stats: { ...state.stats, money: economy.statsPacket.money } };
     const maxSpend = Math.min(Funding.spendable(funded, 0, { itemId: stock.itemId, survivalCost: economy.kitCost(stock.itemId) }),
-        missing * (economy.worth(stock.itemId) || price));
+        missing * (economy.worth(stock.itemId) ?? price));
     if (previous && previous.itemId === stock.itemId && previous.amount === missing && previous.maxSpend === maxSpend) return previous;
     return { itemId: stock.itemId, amount: missing, maxSpend, at: timestamp };
 }

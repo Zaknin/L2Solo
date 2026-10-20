@@ -246,6 +246,19 @@ async function images(ids) {
         const stockedStep = (await workerPlan({ ...stockedFighter, stats: { ...stockedFighter.stats, shotDemand: demand } },
             { timestamp: now + 70000, townVisit: true })).plan;
         assert.equal(stockedStep.statsPacket.shotDemand, null, 'a stocked fighter clears its old demand');
+        // An unchanged demand keeps its row with its old `at`: the crafters'
+        // index drops a row 30 min after `at` (MarketDemandIndex).
+        const heldStep = (await workerPlan({ ...fighter, stats: { ...fighter.stats, shotDemand: demand } },
+            { timestamp: now + 80000, townVisit: true })).plan;
+        assert.deepEqual(heldStep.statsPacket.shotDemand, demand, 'an unchanged demand keeps its row and its age');
+        // A step outside hunting/resting/shopping/grouped leaves the row as it
+        // was: none posted for a missing stack, an old one not cleared.
+        const offStep = (await workerPlan({ ...fighter, activity: 'traveling' },
+            { timestamp: now + 70000, townVisit: true })).plan;
+        assert.equal('shotDemand' in offStep.statsPacket, false, 'a traveling step posts no demand row');
+        const offStocked = (await workerPlan({ ...stockedFighter, activity: 'traveling', stats: { ...stockedFighter.stats, shotDemand: demand } },
+            { timestamp: now + 70000, townVisit: true })).plan;
+        assert.deepEqual(offStocked.statsPacket.shotDemand, demand, 'a traveling step keeps the previous row');
 
         // MVP-1: the money price comes only from wishes with a step now, so a
         // short walk to Gludio pays for the batch; this field is far enough
