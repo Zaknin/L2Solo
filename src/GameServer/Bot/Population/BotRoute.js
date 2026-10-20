@@ -9,7 +9,8 @@
 //   (ROUTE-ROOM-3); it reads no leaf and no focus.
 // - record: the trip from where the bot stands now (destinations, travel
 //   time, the reason fields), built per read and never kept.
-// leafChoice: the spot the step's own decision names, when it may go there.
+// leafChoice: the spot the step's own decision names, when it may go there
+// (leafFitReader: the one fit test, the economy's leaf reads it too).
 // Callers: the worker's trip start (planLifecycle: trip), the party run (the
 // worker's partyRoute, ColdSimulationKernel), the competition retreat on main
 // (ColdSimulationCoordinator retreatRoute). Worker-safe: every spot lookup
@@ -179,26 +180,44 @@ function evacuationSpot(state, currentId, spots, frame) {
         suitable.length ? suitable : emergencyCandidates, state, emergencyOptions)?.spot || null : null;
 }
 
+// The one fit test of a solo bot's hunting-leaf spot, read by leafChoice and
+// by the economy that names the leaf (EconomyContext.foundation): a reader
+// spotId -> 'fit' or why not: 'missing' (not in the catalog), 'raid' (a raid
+// profile), 'excluded' (the bot's risk exclusions, read once in the frame),
+// 'unfit' (its ground, its matchup, or its level: SpotService.isSuitable, or
+// an economic hunt within 15 levels). One frame and one ground and matchup
+// reader serve every spot it is asked about.
+function leafFitReader(state, { spots, timestamp, frame = null }) {
+    frame = frame || frameFor(state, null, [], timestamp);
+    const level = Number(state.level || 1);
+    let allowed = null;
+    return (spotId) => {
+        const spot = SpotIndex.spotById(spots, spotId);
+        if (!spot) return 'missing';
+        if (spot.raidBoss === true) return 'raid';
+        if (frame.excludedSpotIds.has(String(spot.id))) return 'excluded';
+        allowed ||= LevelingRoutes.spotAllowedReaderFor(state, frame.solo());
+        return allowed(spot) && (SpotService.isSuitable(spot, level, frame.options)
+            || EquipmentIncomeRoute.economicHunt(state) && Number(spot.avgLevel || spot.minLevel || 1) >= level - 15)
+            ? 'fit' : 'unfit';
+    };
+}
+
 // The spot a solo bot's own hunting leaf names, as a choice for record, when
-// the bot may hunt there: not a raid profile, not excluded, allowed for its
-// kit, and fitting its level (or an economic hunt within 15 levels). With
-// the worker's room filter (frame.options.hasRoom, ROUTE-ROOM-2) a fitting
-// spot other than the bot's own with no room for it is no leaf trip either:
-// returned with full: true (counted as route:trip:leaf_full), the kept route
-// decides and its trip stands in for it (trip); the room is checked again at
-// arrival. Null: the kept route decides.
+// the bot may hunt there (leafFitReader). With the worker's room filter
+// (frame.options.hasRoom, ROUTE-ROOM-2) a fitting spot other than the bot's
+// own with no room for it is no leaf trip either: returned with full: true
+// (counted as route:trip:leaf_full), the kept route decides and its trip
+// stands in for it (trip); the room is checked again at arrival. Null: the
+// kept route decides.
 function leafChoice(state, leaf, { spots, timestamp, frame = null }) {
     if (leaf?.activity !== 'hunting' || !leaf.spotId || !routable(state, null, [])) return null;
-    const wished = SpotIndex.spotById(spots, leaf.spotId);
-    if (!wished) { EconomyDiagnostics.count('route', 'trip', 'leaf_missing'); return null; }
-    if (wished.raidBoss === true) return null;
     frame = frame || frameFor(state, null, [], timestamp);
-    if (frame.excludedSpotIds.has(String(wished.id))) return null;
-    const level = Number(state.level || 1);
-    const fits = LevelingRoutes.isSpotAllowedForState(wished, state, frame.solo())
-        && (SpotService.isSuitable(wished, level, frame.options)
-            || EquipmentIncomeRoute.economicHunt(state) && Number(wished.avgLevel || wished.minLevel || 1) >= level - 15);
-    if (!fits) { EconomyDiagnostics.count('route', 'trip', 'leaf_unfit'); return null; }
+    const verdict = leafFitReader(state, { spots, timestamp, frame })(leaf.spotId);
+    if (verdict === 'missing') { EconomyDiagnostics.count('route', 'trip', 'leaf_missing'); return null; }
+    if (verdict === 'unfit') { EconomyDiagnostics.count('route', 'trip', 'leaf_unfit'); return null; }
+    if (verdict !== 'fit') return null;
+    const wished = SpotIndex.spotById(spots, leaf.spotId);
     const hasRoom = frame.options.hasRoom;
     if (hasRoom && String(wished.id) !== String(state.spotId || '') && !hasRoom(wished.id)) {
         EconomyDiagnostics.count('route', 'trip', 'leaf_full');
@@ -338,4 +357,4 @@ function dropReason(sectionsMoved, before = {}, after = {}) {
     return planKey(before.plan, before.request) !== planKey(after.plan, after.request) ? 'plan' : '';
 }
 
-module.exports = { choose, record, leafChoice, route, trip, drop, dropReason };
+module.exports = { choose, record, leafChoice, leafFitReader, route, trip, drop, dropReason };
