@@ -89,7 +89,7 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
         roles: [...roles], seen: [...(resume?.seen || [])], willing }, pvp, timestamp) : null;
     const episode = { key: event.key, at: resume?.startedAt || timestamp, action: revenge ? 'revenge' : 'contest', npcId: event.npcId,
         conflictUntil: (resume?.startedAt || timestamp) + (pvp?.started ? cooldownMs : disputeCooldownMs), outcome };
-    const wait = { start: timestamp, until: encounter ? timestamp + 1000 : pvp?.started ? Math.max(timestamp, pvp.until) : timestamp + waitMs,
+    const wait = { start: timestamp, until: encounter ? timestamp + EncounterBudget.STEP_MS : pvp?.started ? Math.max(timestamp, pvp.until) : timestamp + waitMs,
         ...(pvp?.started ? { combat: true } : {}) };
     const preparedParties = sides.map((side, index) => {
         if (!side.party) return null;

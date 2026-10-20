@@ -33,6 +33,7 @@ const HotBoardReview = invoke('GameServer/Bot/Economy/HotBoardReviewService');
 const Protocol = require('./ColdSimulationProtocol');
 const { ColdEconomyDecisions, echoHolds } = require('./ColdEconomyDecision');
 const { TTL_MS: COMPETITION_TTL_MS } = require('./ColdCompetitionActions');
+const { STEP_MS: PVP_STEP_MS } = require('./PvpEncounterBudget');
 const ColdStateDelta = require('./ColdStateDelta');
 const { ColdCommitQueue, EARLY_COMMIT_ROW_BUDGET_MS } = require('./ColdCommitQueue');
 const { ColdSnapshotQueue } = require('./ColdSnapshotQueue');
@@ -305,7 +306,7 @@ class ColdSimulationCoordinator {
             LifeState.allStates(2000).forEach(s => encounters.register(s.stats?.pvpEncounter));
             this.pvpEncounterTimer = setInterval(() => {
                 encounters.tick(this.competitionActions)?.catch(error => this.recordError(error));
-            }, 1000);
+            }, PVP_STEP_MS);
             this.reconcileTimer = setInterval(() => {
                 // The hunted bosses' rows: players engaging or the boss dying.
                 RaidEncounterScope.reviewBosses(BackgroundPartyState.raidBossKeys());
@@ -1475,7 +1476,9 @@ class ColdSimulationCoordinator {
         if (proposal.atomicGroup?.raidCommit) {
             if (!invoke('GameServer/Bot/Population/ColdRaidAuthority').prepare(proposal.atomicGroup.raidCommit)) return null;
         }
-        const state = LifeState.cachedState(proposal.characterId) || proposal.baseState;
+        // The proposal's base is its bag, not a state: a bot main does not
+        // hold is refused (prepare_rejected) and the worker requeues it.
+        const state = LifeState.cachedState(proposal.characterId);
         if (!state) return null;
         if (Number(state.stats?.clanId) > 0) proposal[CLAN_BEFORE] = { level: state.level, sp: state.sp, inventory: state.inventory };
         const partyId = String(state.party?.partyId || state.partyId || '');
@@ -1491,24 +1494,16 @@ class ColdSimulationCoordinator {
         const timestamp = Number(proposal.enqueuedAt || Date.now());
         // The worker's fight has already happened: a forced cleanup trip
         // starts from the state after it, so its exp, adena and loot stay.
-        const resolvedState = proposal?.nextState || (proposal.result
-            ? await LifeState.prepareResolve(stepState, proposal.result, { persist: false, timestamp })
-            : null);
+        const resolvedState = proposal.nextState;
         if (!resolvedState) return null;
         // The worker recorded this hunt's income: the main thread's level-band
         // table (the hour value of bots without a sample) learns it here.
         HuntEfficiency.observe(resolvedState);
-        // An atomic group commits all members or none: as before, its cleanup
-        // is decided on the step's base state, so a member its party releases in
-        // this commit does not fail the whole group.
-        const cleanupState = this.population?.prepareInventoryCleanupProposal?.(
-            proposal.atomicGroup ? stepState : resolvedState,
-            timestamp,
-            stepState.simulation,
-            stepState
-        );
+        // The worker decided the forced cleanup on this solo step (cleanupNeed);
+        // main only starts the trip.
+        const cleanupState = proposal.cleanupNeed ? this.population?.prepareInventoryCleanupProposal?.(
+            resolvedState, timestamp, stepState.simulation, stepState, proposal.cleanupNeed) : null;
         if (cleanupState) {
-            if (proposal.atomicGroup) return null;
             proposal.inventoryCleanupForced = true;
             delete cleanupState.cleanup;
             return cleanupState;
@@ -1766,7 +1761,7 @@ class ColdSimulationCoordinator {
             const characterId = Number(result.characterId), proposalId = result.proposal?.proposalId;
             if (!Number.isSafeInteger(characterId) || characterId <= 0
                 || typeof proposalId !== 'string' || !proposalId || proposalId.length > 240) return [];
-            const state = LifeState.cachedState(result.characterId) || result.nextState || result.proposal?.baseState || null;
+            const state = LifeState.cachedState(result.characterId) || result.nextState || null;
             const numbers = result.ok ? this.ackNumbers(result, state) : null;
             if (result.ok) this.ackState[numbers ? 'without' : 'with'] += 1;
             return [{

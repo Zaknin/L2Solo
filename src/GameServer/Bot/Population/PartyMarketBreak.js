@@ -1,10 +1,33 @@
 const SurvivalFloor = require('./SurvivalFloor');
-const cleanupNeed = (member, now) => {
-    const floor = SurvivalFloor.forState(member, now);
-    return floor?.action === 'unload'
-        ? { ...floor, reason: floor.reason === 'no_slot' ? 'inventory_capacity' : 'inventory_overweight' }
-        : invoke('GameServer/Bot/Economy/ItemDisposition').inventoryCleanupNeed(member, { now });
-};
+const BotErrands = require('./BotErrands');
+// The bag's need to go sell, one rule for the clan break, the solo forced
+// cleanup and the cold worker's step: the native slot/weight floor first
+// (its bag part only), else the author's cleanup thresholds. { reason, slots, limit } or null.
+function cleanupNeed(member, now) {
+    const floor = SurvivalFloor.bagFor(member, now);
+    if (floor?.action === 'unload') {
+        return { ...floor, reason: floor.reason === 'no_slot' ? 'inventory_capacity' : 'inventory_overweight' };
+    }
+    // lazy: worker ItemDisposition's own links are not loaded with the worker kernel.
+    return invoke('GameServer/Bot/Economy/ItemDisposition').inventoryCleanupNeed(member, { now });
+}
+const CLEANUP_BUSY_FLAGS = ['marketReturn'];
+const CLEANUP_BUSY_ACTIVITIES = ['traveling', 'shopping', 'merchant', 'crafting', 'dead', 'pk_hunting'];
+// A solo cold bot with no trip or errand under way goes to sell when its bag
+// needs it: the worker attaches this need to the step's proposal, main starts the trip.
+function forcedCleanupNeed(state, now) {
+    if (!state || state.phase !== 'cold' || state.party?.partyId || state.partyId
+        || state.stats?.travel || BotErrands.busyWith(state, CLEANUP_BUSY_FLAGS)
+        || CLEANUP_BUSY_ACTIVITIES.includes(state.activity)) return null;
+    return cleanupNeed(state, now);
+}
+// A forced cleanup decided over a resolve outranks a trip that resolve
+// started (route, karma), as it did when it was decided before the fight;
+// the fight's outcome is kept.
+function withoutStartedTrip(before, resolved) {
+    if (before.activity === 'traveling' || resolved.activity !== 'traveling') return resolved;
+    return { ...resolved, activity: before.activity, stats: { ...(resolved.stats || {}), travel: null } };
+}
 const cleanupGoal = (need) => invoke('GameServer/Bot/Goals/NeedsEvaluator').cleanupGoal(need);
 
 const RESERVATION_MS = 15 * 60 * 1000;
@@ -77,4 +100,5 @@ function ready(state) {
         && !state.stats?.travel && !state.stats?.marketReturn
         && ['hunting', 'party_wait', 'grouped'].includes(state.activity);
 }
-module.exports = { clanDuty, pending, sessionReady, memberNeed, allowed, goal, departure, stats, ready };
+module.exports = { cleanupNeed, forcedCleanupNeed, withoutStartedTrip, clanDuty, pending, sessionReady, memberNeed,
+    allowed, goal, departure, stats, ready };

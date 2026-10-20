@@ -154,7 +154,10 @@ async function criticCases() {
         npcEntries: [{ selfId: reward.selfId, count: 10 }], center: owns[0].loc };
     const Profiles = invoke('GameServer/Bot/Population/SpotProfiles'), oldProfiles = Profiles.ensure(), oldPublished = Shops.publishedStationRecipes;
     Profiles.cache = [...oldProfiles, spot];
-    Shops.publishedStationRecipes = () => ({ recipes: [component], ids: new Set([component.recipeId]), stationByRecipeId: new Map() });
+    // One object until the fixture changes, as the owner publishes it
+    // (ClanPlanningCoordinator.context compares the recipes by identity).
+    const published = { recipes: Object.freeze([component]), ids: new Set([component.recipeId]), stationByRecipeId: new Map() };
+    Shops.publishedStationRecipes = () => published;
     try {
         learningReaderCases();
         const created = await DB.createAutonomousClan({ name: 'PartialEconomic', leaderId: base, memberIds: owns.map(row => row.characterId),
@@ -331,7 +334,10 @@ async function selectedSpoil() {
 
 async function main() {
     DB.init(); await Life.init(); await invoke('GameServer/Bot/Population/BackgroundPartyState').init();
-    Shops.publishedStationRecipes = () => ({ recipes: [], ids: new Set(), stationByRecipeId: new Map() });
+    // One object for the whole run, as the owner publishes it until its
+    // catalogue changes (ClanPlanningCoordinator.context compares by identity).
+    const published = { recipes: Object.freeze([]), ids: new Set(), stationByRecipeId: new Map() };
+    Shops.publishedStationRecipes = () => published;
     // Main-thread options and the worker context must see the same fixture
     // public services, including the component service used by criticCases.
     Shops.publishedRecipeIndex = () => new Map(Shops.publishedStationRecipes().recipes.map(row => [Number(row.recipeId), row]));

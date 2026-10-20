@@ -224,18 +224,41 @@ async function images(ids) {
             purchases.push(['shop', args[3], args[4].expectedPrice]);return receipt;};
         Database.purchaseNpcInventoryItem = async(...args) => {const receipt = await originals.npc.apply(Database, args);
             purchases.push(['npc', args[1].amount, args[1].unitPrice]);return receipt;};
-        // Task 4 B3: reviewDemand plans no purchase on main. The core's root
+        // Task 4 B3: main's shot review plans no purchase. The core's root
         // stock:shots (the same stock rule) is executed by its card: board
         // deals by the economy plan, the NPC remainder by the town visit.
-        // reviewDemand keeps only the crafters' demand index (shotDemand).
         const fighterBefore = await images([fighter.characterId, supplier.characterId]);
-        const stocked = await Shots.reviewDemand(fighter, now + 70000);
-        assert.deepEqual(purchases, [], 'reviewDemand buys nothing, neither the cheaper line nor the NPC');
+        const reviewed = (await Shots.review(fighter, now + 70000)).state;
+        assert.deepEqual(purchases, [], 'the shot review buys nothing, neither the cheaper line nor the NPC');
         const fighterAfter = await images([fighter.characterId, supplier.characterId]);
         assert.deepEqual(fighterAfter.map(row => row.items), fighterBefore.map(row => row.items));
-        assert.equal(stocked.adena, 51000);
-        assert.equal(stocked.stats.shotDemand?.itemId, 1463, 'the missing stack stays visible to crafters');
-        assert(stocked.stats.shotDemand.amount > 0 && stocked.stats.shotDemand.maxSpend > 0);
+        assert.equal(reviewed.adena, 51000);
+        // The crafters' demand row (shotDemand) is the far step's output: the
+        // worker's plan for the step proposes it with the step's stats.
+        const workerPlan = require('./helpers/workerEconomyDecision');
+        const missingStep = (await workerPlan(fighter, { timestamp: now + 70000, townVisit: true })).plan;
+        const demand = missingStep.statsPacket.shotDemand;
+        assert.equal(demand?.itemId, 1463, 'the missing stack stays visible to crafters');
+        assert(demand.amount > 0 && demand.maxSpend > 0);
+        const stockedFighter = await nativeEconomy(await seed([cash(51000), { selfId: 1463, name: 'Soulshot: D-grade', amount: 100000 },
+            { selfId: 129, name: 'Sword of Revolution', amount: 1, equipped: true, slot: 7 }],
+        { classId: 1, name: 'Stocked', town: 'Gludio', loc: GLUDIO }), now);
+        const stockedStep = (await workerPlan({ ...stockedFighter, stats: { ...stockedFighter.stats, shotDemand: demand } },
+            { timestamp: now + 70000, townVisit: true })).plan;
+        assert.equal(stockedStep.statsPacket.shotDemand, null, 'a stocked fighter clears its old demand');
+        // An unchanged demand keeps its row with its old `at`: the crafters'
+        // index drops a row 30 min after `at` (MarketDemandIndex).
+        const heldStep = (await workerPlan({ ...fighter, stats: { ...fighter.stats, shotDemand: demand } },
+            { timestamp: now + 80000, townVisit: true })).plan;
+        assert.deepEqual(heldStep.statsPacket.shotDemand, demand, 'an unchanged demand keeps its row and its age');
+        // A step outside hunting/resting/shopping/grouped leaves the row as it
+        // was: none posted for a missing stack, an old one not cleared.
+        const offStep = (await workerPlan({ ...fighter, activity: 'traveling' },
+            { timestamp: now + 70000, townVisit: true })).plan;
+        assert.equal('shotDemand' in offStep.statsPacket, false, 'a traveling step posts no demand row');
+        const offStocked = (await workerPlan({ ...stockedFighter, activity: 'traveling', stats: { ...stockedFighter.stats, shotDemand: demand } },
+            { timestamp: now + 70000, townVisit: true })).plan;
+        assert.deepEqual(offStocked.statsPacket.shotDemand, demand, 'a traveling step keeps the previous row');
 
         // MVP-1: the money price comes only from wishes with a step now, so a
         // short walk to Gludio pays for the batch; this field is far enough
@@ -244,7 +267,7 @@ async function images(ids) {
         let hunter = await nativeEconomy(await seed(fighterItems, { classId: 1, name: 'Field', town: 'Gludio', loc: fieldLoc }), now);
         hunter = await Life.upsertState({ ...hunter, activity: 'hunting' }, 'native_field_restock');
         const fieldBefore = await images([hunter.characterId]);purchases.length = 0;
-        const traveling = await Shots.reviewDemand(hunter, now + 72000);
+        const traveling = (await Shots.review(hunter, now + 72000)).state;
         assert.deepEqual(purchases, [], 'no remote field inventory purchase');
         const market = invoke('GameServer/Bot/Economy/ColdMarketService');
         const stock = Economy.basics(hunter).stock('shots');

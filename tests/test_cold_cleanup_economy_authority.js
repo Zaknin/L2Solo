@@ -5,7 +5,6 @@ const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
 const Market = invoke('GameServer/Bot/Economy/BotAfkMarketService');
 const Population = invoke('GameServer/Bot/Population/PopulationService');
-const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const Town = invoke('GameServer/Bot/Economy/MarketTownPolicy');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const id = 730062, restores = [];
@@ -38,7 +37,6 @@ function stub(object, key, value) { const original = object[key]; restores.push(
         coordinator.reviewCommittedEconomy = async value => value;
         const refreshes = [];
         coordinator.requestEconomyRefresh = actorId => { refreshes.push(actorId); return true; };
-        stub(Disposition, 'inventoryCleanupNeed', () => ({ reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 }));
         stub(Town, 'saleTown', () => ({ town: 'Oren' }));
         stub(Life, 'enqueueEquipmentGoalAdvanceForState', () => {});
         stub(Life, 'reviewTrainingAfterCommit', async value => value);
@@ -48,6 +46,7 @@ function stub(object, key, value) { const original = object[key]; restores.push(
         stub(utils, 'infoWarn', (...args) => warnings.push(require('node:util').format(...args.slice(1))));
         const proposal = { characterId: id, token: { characterId: id, ...state.simulation }, enqueuedAt: timestamp,
             nextState: state, result: { events: [] },
+            cleanupNeed: { reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 },
             economyPlan: { sell: [], withdraw: [], travel: null,
                 buyAds: [[1458, 10, 1500, 1, 76, 7, 0, 1, .001]] } };
         const prepared = await coordinator.prepareProposal(proposal);

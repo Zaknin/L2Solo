@@ -83,6 +83,19 @@ function forState(state, timestamp = Date.now(), inputs = null) {
         slotLimit: InventoryLimits.forState(state, profile), maxLoad: profile.maxLoad }), state, timestamp);
 }
 
+// The bag part of the floor alone (no slot, overweight; dead first, as in
+// forState): what a sale trip answers, without the cast costs and the mana
+// read forState pays. The author's thresholds, the same evaluate.
+function bagFor(state, timestamp = Date.now()) {
+    if (!state) return null;
+    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile'); // lazy: worker as forState.
+    const items = invoke('GameServer/DataCache').items; // lazy: worker as forState.
+    const profile = Profile.profileFor(state, timestamp);
+    const floor = evaluate({ dead: state.activity === 'dead', hp: state.vitals?.hp, ...stateInventory(state, items),
+        slotLimit: InventoryLimits.forState(state, profile), maxLoad: profile.maxLoad });
+    return saleRetryWaits(floor, state, timestamp);
+}
+
 function actorInventory(actor) {
     const backpack = actor.backpack;
     if (!backpack) return { slots: 0, load: 0 };
@@ -125,4 +138,4 @@ function forActor(actor, state = null, timestamp = Date.now()) {
     state, timestamp);
 }
 
-module.exports = { evaluate, forState, forActor, bagMarks, stateInventory, inventoryLimit, weightPenalty };
+module.exports = { evaluate, forState, bagFor, forActor, bagMarks, stateInventory, inventoryLimit, weightPenalty };

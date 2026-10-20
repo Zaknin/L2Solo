@@ -932,6 +932,14 @@ function withEventVerdict(deps, prepared) {
 function stepCard(card, actionPlan) {
     return actionPlan ? ColdEconomyDecision.cardWithShot(card, actionPlan.shot || null) || card : card;
 }
+// The step's stats packet with the bot's shot demand (EconomyContext.shotDemand),
+// merged into the proposed stats by prepareResolve (the step's packet before
+// its round). A bot with no demand before or now carries no key.
+function stepStatsPacket(state, economy, timestamp) {
+    const previous = state.stats?.shotDemand || null;
+    const demand = EconomyContext.shotDemand(economy, state, timestamp, previous);
+    return demand || previous ? { ...economy.statsPacket, shotDemand: demand } : economy.statsPacket;
+}
 // Two plan-like stats values hold the same data (undefined reads as null).
 function samePlanJson(a, b) {
     return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -1331,7 +1339,9 @@ function startKernel(config = {}) {
         // party (its own members not counted against it).
         partyRoute: ({ leader, party, members, spot, timestamp }) => BotRoute.route(leader, spot, party, members,
             { spots: planningSpots, timestamp, hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, members) }),
-        projectResolve: async (state, result, timestamp, lifecyclePlan = null) => {
+        // writtenAt: the row's write stamp, the real now (timestamp is the
+        // round's time, the bot's due for a step started its lead early).
+        projectResolve: async (state, result, timestamp, lifecyclePlan = null, writtenAt = timestamp) => {
             const owner = kernel.states.get(Number(state.characterId));
             // Room at arrival, before the projection: a full spot's mark rides
             // the patch, its sections join the step's one raise.
@@ -1347,9 +1357,13 @@ function startKernel(config = {}) {
             const base = {
                 persist: false,
                 timestamp,
+                writtenAt,
                 projectClassProgression: true,
                 ...(crowded ? { checkSections: ROOM_SECTIONS } : {}),
                 moneyEscrowFor: ownEscrow,
+                // The step's held leaf: the round's check reads its own trip and
+                // arrival as no event (DecisionSections.events).
+                leaf: stepEconomy?.network?.activity ?? null,
                 // The soft point's inputs (BotLifeState.prepareResolve, every
                 // step): the board mirror (null until ready), the escrow and
                 // the bot's memory rows, read only when its bond is compared.
@@ -1463,6 +1477,7 @@ function startKernel(config = {}) {
             // The bot's record as the kernel handed the step over (its card).
             const record = kernel.states.get(Number(state.characterId));
             const karmaPlan = invoke('GameServer/Bot/Population/ColdKarmaPolicy').plan(state, planningSpots, timestamp);
+            // A karma step carries no stats packet: it keeps the previous shot demand.
             if (karmaPlan) return karmaPlan;
             const previousPlan = state.stats?.equipmentPlan || null;
             // Failure counters and recovery deadlines are live native facts,
@@ -1546,7 +1561,7 @@ function startKernel(config = {}) {
                 rememberWishAdvisory(kernel.states.get(Number(state.characterId)), refreshed.advisory);
                 // economy: worker-local, the step's one decision; the
                 // projection after the round reads it (never posted).
-                return { statsPacket: refreshed.economy.statsPacket, economy: refreshed.economy,
+                return { statsPacket: stepStatsPacket(state, refreshed.economy, timestamp), economy: refreshed.economy,
                     ...(refreshed.economyPlan ? { economyPlan: refreshed.economyPlan } : {}),
                     activityPick: { activity: leaf.activity, spotId: leaf.spotId, npcId: leaf.npcId },
                     economyDecision: refreshed.decision, previousPlan, acquisitionPlan: previousPlan,
@@ -1583,7 +1598,8 @@ function startKernel(config = {}) {
                         hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, [state]) })
                 : null;
             const fallbackSpot = partyFallback?.spot || null;
-            const plannedStats = { ...(state.stats || {}), ...economy.statsPacket, equipmentPlan: acquisitionPlan };
+            const statsPacket = stepStatsPacket(state, economy, timestamp);
+            const plannedStats = { ...(state.stats || {}), ...statsPacket, equipmentPlan: acquisitionPlan };
             if (partyRequest) plannedStats.partyRequest = partyRequest;
             else delete plannedStats.partyRequest;
             // A waiter that is resting finishes its rest first.
@@ -1600,7 +1616,7 @@ function startKernel(config = {}) {
             const routedState = beginHuntingTrip(plannedState, route, timestamp) || plannedState;
             const showcase = routedState.activity === 'shopping'
                 ? await occupationFor(routedState, timestamp, { economy }, 'showcase') : null;
-            const seen = { ...routedState, stats: { ...routedState.stats, ...economy.statsPacket } };
+            const seen = { ...routedState, stats: { ...routedState.stats, ...statsPacket } };
             const heldDecision = nullReuse ? ColdEconomyDecision.compact({ data: refreshed.decision.data.slice(0),
                 updatedAt: Number(seen.updatedAt || 0), echo: ColdEconomyDecision.stateEcho(seen), flags: 0 }) : null;
             const advice = nullReuse ? { ...refreshed.advisory, card: heldDecision }
@@ -1610,7 +1626,7 @@ function startKernel(config = {}) {
             return {
                 ...(showcase?.economyPlan || nullReuse && refreshed?.economyPlan
                     ? { economyPlan: showcase?.economyPlan || refreshed.economyPlan } : {}),
-                statsPacket: economy.statsPacket,
+                statsPacket,
                 economy,
                 activityPick: economy.network.activity ? { activity: economy.network.activity.activity,
                     spotId: economy.network.activity.spotId, npcId: economy.network.activity.npcId } : null,

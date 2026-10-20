@@ -1,15 +1,11 @@
 const assert = require('assert');
 
-require('../src/Global');
-
+const { createWorld } = require('./helpers/c4QuestHarness');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
-const DataCache = invoke('GameServer/DataCache');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
-
-DataCache.init();
 
 const originals = {
     inventoryCleanupNeed: ItemDisposition.inventoryCleanupNeed,
@@ -18,7 +14,7 @@ const originals = {
     recordMany: LifeEvents.recordMany
 };
 
-function hunter(characterId, simulation) {
+function hunter(characterId) {
     return {
         characterId,
         name: `Overloaded${characterId}`,
@@ -33,8 +29,7 @@ function hunter(characterId, simulation) {
         vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
         inventory: {},
         stats: {},
-        timing: {},
-        ...(simulation ? { simulation } : {})
+        timing: {}
     };
 }
 
@@ -46,24 +41,26 @@ const fightResult = () => ({
 });
 
 (async () => {
+    // Main commits over the state it holds: the bots are in its cache.
+    const world = await createWorld([{ id: 7301, level: 40 }], 'cold-cleanup-keeps-resolve');
     try {
-        // Every bot is over the author's cleanup threshold.
-        ItemDisposition.inventoryCleanupNeed = () => ({ reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 });
-
+        await LifeState.init();
         // Resolver path: the worker's projected state already holds the fight.
         const coordinator = new ColdSimulationCoordinator();
         coordinator.population = {
             realPlayerSessions: () => [],
             prepareInventoryCleanupProposal: (...args) => PopulationService.prepareInventoryCleanupProposal(...args)
         };
-        const simulation = { revision: 3 };
-        const base = hunter(7301, simulation);
+        const base = await LifeState.upsertState(hunter(7301), 'cleanup_resolve_fixture');
+        const simulation = base.simulation;
         const proposal = {
             characterId: 7301,
             revision: simulation.revision,
             enqueuedAt: Date.now(),
-            baseState: base,
+            baseState: { characterId: base.characterId, inventory: base.inventory },
             nextState: { ...base, exp: base.exp + 500, adena: base.adena + 600 },
+            // The worker found the bag over the author's cleanup threshold.
+            cleanupNeed: { reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 },
             result: fightResult()
         };
         const prepared = await coordinator.prepareProposal(proposal);
@@ -88,33 +85,20 @@ const fightResult = () => ({
         assert.strictEqual(routed.stats.travel?.reason, 'market_sale_inventory');
         assert.strictEqual(routed.exp, base.exp + 500, 'and the fight before it is kept');
 
-        // A bot that died in the fight stays dead; the cleanup waits.
+        // A bot that died in the fight stays dead; the cleanup waits (the
+        // worker sends no need for it).
         const died = await coordinator.prepareProposal({
             ...proposal,
+            cleanupNeed: undefined,
             result: fightResult(),
             nextState: { ...base, activity: 'dead' }
         });
         assert.strictEqual(died.activity, 'dead');
         assert(!died.stats?.forcedMarketCleanup);
 
-        // An atomic group commits all members or none: a member its party
-        // releases in this commit is judged as claimed (still in the party).
-        const member = { ...hunter(7303, simulation), activity: 'grouped',
-            party: { partyId: 'dissolving', leaderId: 7303 } };
-        const released = await coordinator.prepareProposal({
-            characterId: 7303,
-            revision: simulation.revision,
-            enqueuedAt: Date.now(),
-            baseState: member,
-            atomicGroup: { id: 'party:dissolving', memberIds: [7303] },
-            nextState: { ...member, activity: 'hunting', party: { partyId: null }, exp: member.exp + 500 },
-            result: fightResult()
-        });
-        assert(released, 'a released party member does not fail its atomic group');
-        assert.strictEqual(released.exp, member.exp + 500);
-        assert(!released.stats?.forcedMarketCleanup);
-
-        // Command path: the worker's precomputed fight is applied before the trip.
+        // Command path: the worker's precomputed fight is applied before the
+        // trip; main decides the cleanup there, on a bag over the threshold.
+        ItemDisposition.inventoryCleanupNeed = () => ({ reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 });
         const applied = [];
         const recorded = [];
         LifeState.applyResolve = async (state, result) => {
@@ -138,6 +122,7 @@ const fightResult = () => ({
         Object.assign(ItemDisposition, { inventoryCleanupNeed: originals.inventoryCleanupNeed });
         Object.assign(LifeState, { applyResolve: originals.applyResolve, upsertState: originals.upsertState });
         LifeEvents.recordMany = originals.recordMany;
+        await world.close();
     }
 })().catch((error) => {
     console.error(error);

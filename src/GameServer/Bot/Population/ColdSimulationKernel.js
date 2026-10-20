@@ -8,6 +8,17 @@ const PROPOSAL_PAYLOAD_LIMIT_BYTES = 240 * 1024;
 // A step not answered by a commit ack this long after its start is requeued
 // (a party by its leader); a late ack then misses its proposal and is dropped.
 const STEP_STALL_MS = 30000;
+// Step lead: a far step starts this much before its due so its commit lands
+// by the due (resolved as of the due, max(now, dueAt)). It follows the
+// measured start -> commit ack time as a one-sided average: it rises a
+// quarter of the gap per slower ack (~4 slow acks catch a slowdown) and
+// falls a fiftieth per faster one (~50 acks, a few seconds of traffic, to
+// forget it), so it settles near the slow end of the step times, not the
+// median. Bounded: a stuck commit queue must not start steps whole rounds
+// early.
+const STEP_LEAD_RISE = 0.25;
+const STEP_LEAD_FALL = 0.02;
+const STEP_LEAD_MAX_MS = 5000;
 const BackgroundPartyLifecycle = require('./BackgroundPartyLifecycle');
 const PartyGoalCalculation = require('./PartyGoalCalculation');
 const Protocol = require('./ColdSimulationProtocol');
@@ -22,6 +33,7 @@ const { pressureFor } = require('./PopulationPressure');
 const EconomyDiagnostics = require('../Economy/EconomyDiagnostics');
 const ColdEconomyDecision = require('./ColdEconomyDecision');
 const BotErrands = require('./BotErrands');
+const PartyMarketBreak = require('./PartyMarketBreak');
 const { eligible: eligibleBuyer } = require('../Economy/MarketBuyerWaiters');
 const { SpotOccupancyIndex, stateKey } = require('./SpotOccupancyIndex');
 const C4Unseal = require('../../Items/C4Unseal');
@@ -34,6 +46,7 @@ class DueHeap {
         this.decisionHeads = [];
         this.playerHeads = [];
         this.meetingHeads = [];
+        this.leadHeads = [];
     }
 
     set(index, entry) {
@@ -43,12 +56,14 @@ class DueHeap {
     }
 
     // A derived minimum on the SAME heap nodes; normal heads never hide a
-    // decision deadline when actor admission is full or paused.
+    // decision deadline when actor admission is full or paused, nor a round
+    // that starts its lead early (`lead`) behind an entry held to its due.
     refreshDecision(index) {
         while (index >= 0) {
             let best = this.values[index]?.alarmKind === 'decision' ? this.values[index] : null;
             let player = this.values[index]?.playerWaiting ? this.values[index] : null;
             let meeting = this.values[index]?.meetingTravel ? this.values[index] : null;
+            let lead = this.values[index]?.lead ? this.values[index] : null;
             for (const child of [index * 2 + 1, index * 2 + 2]) {
                 const candidate = child < this.values.length ? this.decisionHeads[child] : null;
                 if (candidate && (!best || this.compare(candidate, best) < 0)) best = candidate;
@@ -56,10 +71,13 @@ class DueHeap {
                 if (waiting && (!player || this.compare(waiting, player) < 0)) player = waiting;
                 const transit = child < this.values.length ? this.meetingHeads[child] : null;
                 if (transit && (!meeting || this.compare(transit, meeting) < 0)) meeting = transit;
+                const early = child < this.values.length ? this.leadHeads[child] : null;
+                if (early && (!lead || this.compare(early, lead) < 0)) lead = early;
             }
             this.decisionHeads[index] = best;
             this.playerHeads[index] = player;
             this.meetingHeads[index] = meeting;
+            this.leadHeads[index] = lead;
             if (!index) break;
             index = Math.floor((index - 1) / 2);
         }
@@ -68,6 +86,7 @@ class DueHeap {
     peekDecision() { return this.decisionHeads[0] || null; }
     peekPlayer() { return this.playerHeads[0] || null; }
     peekMeeting() { return this.meetingHeads[0] || null; }
+    peekLead() { return this.leadHeads[0] || null; }
 
     up(index) {
         const entry = this.values[index];
@@ -116,6 +135,7 @@ class DueHeap {
         this.decisionHeads.length = this.values.length;
         this.playerHeads.length = this.values.length;
         this.meetingHeads.length = this.values.length;
+        this.leadHeads.length = this.values.length;
         if (index < this.values.length) {
             this.set(index, last);
             const parent = Math.floor((index - 1) / 2);
@@ -267,9 +287,10 @@ function fencedPartyChange(run, party) {
         status: party.status, cohesion: party.cohesion, risk: party.risk };
 }
 
-// fence: the group always carries the fenced party row change.
-function partyTransitionProposals(run, memberStates, party, timestamp, event = null, activity = 'party_travel', fence = false) {
-    const nextResolveAt = Number(memberStates[0]?.timing?.nextResolveAt || timestamp + 1000);
+// timestamp: the step's time (as of the leader's due); enqueuedAt: the real
+// now, the proposal's flush age. fence: the group always carries the fenced
+// party row change.
+function partyTransitionProposals(run, memberStates, party, timestamp, enqueuedAt, event = null, activity = 'party_travel', fence = false) {
     const requestedLeaderId = Number(run.party.leaderId || 0);
     const resolutionMemberId = memberStates.some((state) => Number(state.characterId) === requestedLeaderId)
         ? requestedLeaderId
@@ -282,7 +303,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
     // funded help. Fence that party row in the same transaction as every leg.
     if (fence || (CraftMaterialParty.isObjective(run.party.stats?.objective)
         && ['party_travel', 'party_travel_wait', 'party_arrival'].includes(activity))) {
-        party = { ...party, updatedAt: Math.max(timestamp, Number(run.party.updatedAt || 0) + 1) };
+        party = { ...party, updatedAt: Math.max(enqueuedAt, Number(run.party.updatedAt || 0) + 1) };
         atomicGroup.partyChanges = [{ ...fencedPartyChange(run, party), ...(party.spotId ? { spotId: party.spotId } : {}) }];
     }
     return memberStates.map((state) => {
@@ -294,18 +315,12 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
             proposalId: stepProposalId(id, run.startedAt),
             characterId: id,
             priority: 'P1',
-            enqueuedAt: timestamp,
+            enqueuedAt,
             revision: memberRevision(run, id),
-            baseState: run.members.find((member) => Number(member.characterId) === id) || state,
+            baseState: proposalBase(run.members.find((member) => Number(member.characterId) === id) || state),
             nextState: state,
             durable: null,
-            result: {
-                patch: {},
-                events,
-                materialize: { exp: 0, sp: 0, adena: 0, items: [] },
-                nextResolveAt: Number(state.timing?.nextResolveAt || nextResolveAt),
-                debug: { activity, partyId: run.party.partyId, spotId: party.spotId || null }
-            },
+            result: { events, debug: { activity, partyId: run.party.partyId, spotId: party.spotId || null } },
             options: { allowParty: true, allowLifecycle: true },
             atomicGroup,
             partyResolution: id === resolutionMemberId
@@ -317,7 +332,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, event = n
 
 // Resolved on first use, like the other lazy dependencies of the worker:
 // require() inside lifecycleKind ran per inventory item on every row.
-let PartyMarketBreak, ClanPartyDuty, BotCrystallization;
+let ClanPartyDuty, BotCrystallization;
 
 // A near bot's record (hot, nearSeq: its body's last post) against a hot row
 // without a newer post number: a writer's copy of the cached row
@@ -350,7 +365,7 @@ function lifecycleKind(state = {}, facts = NO_FACTS) {
     // any, is selected on the next state after the transition is durable.
     if (state.activity === 'traveling' || state.activity === 'dead'
         || (state.activity === 'resting' && Number(stats.restUntil || 0) > 0)) return 'resolver';
-    if ((PartyMarketBreak ||= require('./PartyMarketBreak')).ready(state)) return 'command';
+    if (PartyMarketBreak.ready(state)) return 'command';
     if (stats.partyMarketReturn && ['shopping', 'merchant'].includes(state.activity)) return 'command';
     // Finish town services before waiting for a clan hunt. The pure shopping
     // resolver only advances its deadline and cannot buy, sell or leave town.
@@ -438,25 +453,21 @@ function groupPayloadBytes(sizes = []) {
     return proposalPayloadBytes(sizes.length, sizes.reduce((sum, size) => sum + size, 0));
 }
 
-function compactProposal(proposal = {}, includeInventory = true) {
-    const baseState = proposal.baseState || null;
-    const result = proposal.result || {};
-    const compactBaseState = baseState
-        ? {
-            characterId: Number(baseState.characterId || proposal.characterId || 0),
-            ...(includeInventory ? { inventory: baseState.inventory || {} } : {})
-        }
-        : null;
+// What main reads of a step's base and result: the base bag (the commit's
+// explicit removals, ColdSimulationOwner) and the result's events, memory
+// events and debug. nextState carries the rest; main commits over its own
+// cached state, so no whole state travels twice.
+function proposalBase(state) {
+    return { characterId: Number(state.characterId), inventory: state.inventory || {} };
+}
+
+function proposalResult(result = {}) {
     return {
-        ...proposal,
-        ...(baseState ? { baseState: compactBaseState } : {}),
-        result: {
-            events: Array.isArray(result.events) ? result.events : [],
-            ...(result.memoryEvents ? { memoryEvents: result.memoryEvents } : {}),
-            debug: result.debug || {},
-            ...(DiagnosticConfig.developerDiagnostics === true && result.consumptionDiagnostics
-                ? { consumptionDiagnostics: result.consumptionDiagnostics } : {})
-        }
+        events: Array.isArray(result.events) ? result.events : [],
+        ...(result.memoryEvents ? { memoryEvents: result.memoryEvents } : {}),
+        debug: result.debug || {},
+        ...(DiagnosticConfig.developerDiagnostics === true && result.consumptionDiagnostics
+            ? { consumptionDiagnostics: result.consumptionDiagnostics } : {})
     };
 }
 
@@ -652,6 +663,9 @@ class ColdSimulationKernel {
         // Steps by bot, in start order (a Map keeps insertion order): the
         // stall check reads only the oldest entries.
         this.inFlight = new Map();
+        // How early a far step starts before its due (STEP_LEAD_*), measured
+        // on this thread's own commit acks (onCommitAck); 0 until the first.
+        this.stepLeadMs = 0;
         this.partyRuns = new Map();
         this.dirty = new Map();
         this.commanding = new Set();
@@ -835,7 +849,7 @@ class ColdSimulationKernel {
         const scheduled = this.scheduleTokens.get(id);
         if (!scheduled) { this.ensureScheduled(id); return; }
         const due = this.dueAt(leader.state);
-        if (scheduled.dueAt !== due) this.schedule(id, leader.version, due);
+        if (scheduled.dueAt !== due) this.schedule(id, leader.version, due, null, true);
     }
 
     // entry.ownOutput: the state is this thread's own output echoed back by
@@ -963,7 +977,8 @@ class ColdSimulationKernel {
     }
 
     // kind: the lifecycleKind of the stored state when the caller has just read it.
-    schedule(characterId, version, dueAt, kind = null) {
+    // lead: a round due from the state itself, which may start its lead early (startAt).
+    schedule(characterId, version, dueAt, kind = null, lead = false) {
         const id = Number(characterId);
         // Replacing a token also removes its actual indexed node; otherwise a
         // long future deadline keeps every superseded token until it is due.
@@ -973,7 +988,7 @@ class ColdSimulationKernel {
         const heapEntry = { characterId: id, version: Number(version),
             dueAt: Number(dueAt || this.now()), scheduleToken: token,
             playerWaiting: playerWaitingTransition(current?.state, kind, this),
-            meetingTravel: meetingTravelTransition(current?.state, kind, this) };
+            meetingTravel: meetingTravelTransition(current?.state, kind, this), lead };
         this.scheduleTokens.set(id, { token, version: Number(version), dueAt: heapEntry.dueAt, heapEntry });
         this.heap.push(heapEntry);
     }
@@ -1076,13 +1091,16 @@ class ColdSimulationKernel {
             const scheduled = this.scheduleTokens.get(id);
             if (scheduled.heapEntry.playerWaiting !== playerWaitingTransition(current.state, kind, this)
                 || scheduled.heapEntry.meetingTravel !== meetingTravelTransition(current.state, kind, this)) {
-                this.schedule(id, current.version, scheduled.dueAt, kind);
+                this.schedule(id, current.version, scheduled.dueAt, kind, scheduled.heapEntry.lead);
             }
             return false;
         }
         kind ??= lifecycleKind(current.state, this);
         if (!isSchedulableKind(kind)) return false;
-        this.schedule(id, current.version, dueAt ?? this.dueAt(current.state), kind);
+        // The state's own due: a round (solo or a party's) may start its lead
+        // early (startAt); a command is main's world action, held to its due.
+        this.schedule(id, current.version, dueAt ?? this.dueAt(current.state), kind,
+            kind === 'resolver' || kind === 'party');
         return true;
     }
 
@@ -1104,15 +1122,27 @@ class ColdSimulationKernel {
         const candidates = [];
         let commandsSelected = 0;
         let meetingSelected = false;
+        // A bot's next round starts its lead before its due (startAt); no
+        // entry starts earlier than that, so the scan ends past now + lead.
+        // An entry held to its due (a decision deadline, a retry, a command)
+        // steps aside until the scan ends, so the rounds behind it still
+        // start early; each entry is looked at once per scan.
+        const startBy = timestamp + this.stepLeadMs;
+        const held = [];
         while (candidates.length + commandsSelected < limit && this.heap.size > 0) {
             const waiting = this.heap.peekPlayer();
             const transit = !meetingSelected && this.heap.peekMeeting();
             // One due paid arrival goes ahead of the ordinary hunt backlog;
             // the rest of this batch keeps its existing deadline order.
-            const head = waiting && waiting.dueAt <= timestamp ? waiting
-                : transit && transit.dueAt <= timestamp ? transit : this.heap.peek();
+            const head = waiting && this.startAt(waiting) <= timestamp ? waiting
+                : transit && this.startAt(transit) <= timestamp ? transit : this.heap.peek();
+            if (Number(head.dueAt || 0) > startBy) break;
+            if (this.startAt(head) > timestamp) {
+                this.heap.remove(head);
+                held.push(head);
+                continue;
+            }
             if (head.kind === 'alarm') {
-                if (head.dueAt > timestamp) break;
                 if (decisionBudget.remaining <= 0) break;
                 DiagnosticConfig.developerDiagnostics && (this.duePicked += 1);
                 this.drainDecisionDeadlines(timestamp, decisionBudget);
@@ -1122,7 +1152,6 @@ class ColdSimulationKernel {
                 this.heap.remove(head);
                 continue;
             }
-            if (Number(head.dueAt || 0) > timestamp) break;
             const entry = head;
             if (entry.meetingTravel) meetingSelected = true;
             this.heap.remove(entry);
@@ -1137,14 +1166,14 @@ class ColdSimulationKernel {
             const current = this.states.get(id);
             const encounter = current.state.stats?.pvpEncounter;
             if (encounter) {
-                this.requeue(id, Math.max(timestamp + 1000, encounter.expiresAt + 1000));
+                this.requeueAtDue(id);
                 continue;
             }
             const kind = this.buyerWakeups.has(id) && eligibleBuyer(current.state)
                 ? 'command' : lifecycleKind(current.state, this);
             if (kind === 'resolver') {
                 // The step starts from the kernel's own copy at once.
-                this.inFlight.set(id, { state: current.state, startedAt: this.now() });
+                this.inFlight.set(id, { state: current.state, startedAt: this.now(), dueAt: Number(entry.dueAt) });
                 candidates.push({ characterId: id, purpose: { kind: 'resolver' } });
             } else if (kind === 'party') {
                 // The party row (the 'parties' table) without its two
@@ -1168,7 +1197,7 @@ class ColdSimulationKernel {
                 // Existing accepted meetings advance through the same atomic
                 // group lifecycle; their finite transitions never enter hunt.
                 if (members.some(member => member.stats?.pvpEncounter)) {
-                    this.requeue(id, timestamp + 1000);
+                    this.requeueAtDue(id);
                     continue;
                 }
                 const reserved = require('./PartyMarketBreak').pending(party, timestamp).length > 0;
@@ -1196,7 +1225,7 @@ class ColdSimulationKernel {
                     if (candidateMemberIds.length <= this.maxAtomicPartySize) {
                         // Let current owners drain so the oldest valid party
                         // gets its bounded atomic turn even under player limits.
-                        this.schedule(id, current.version, entry.dueAt);
+                        this.schedule(id, current.version, entry.dueAt, null, entry.lead);
                         break;
                     }
                     this.schedule(id, current.version, this.now() + 250);
@@ -1212,7 +1241,7 @@ class ColdSimulationKernel {
                     // Keep the original overdue priority. Moving a party to
                     // now+100 on every partially free tick lets an endless
                     // stream of overdue solo work starve the atomic step.
-                    this.schedule(id, current.version, entry.dueAt);
+                    this.schedule(id, current.version, entry.dueAt, null, entry.lead);
                     break;
                 }
                 if (atomicCapacityBurst) DiagnosticConfig.developerDiagnostics && (this.stats.partyCapacityBursts += 1);
@@ -1227,6 +1256,7 @@ class ColdSimulationKernel {
                 this.partyRuns.set(String(party.partyId), {
                     purpose,
                     startedAt,
+                    dueAt: Number(entry.dueAt),
                     requirementRefresh: requirementRefresh === true,
                     raidOwner,
                     party,
@@ -1246,12 +1276,22 @@ class ColdSimulationKernel {
                     candidates.push({ characterId: memberId, purpose });
                 });
             } else if (kind === 'command') {
+                // A command is main's world action, run on main's clock: it
+                // starts at its due, not its lead before.
+                if (entry.dueAt > timestamp) {
+                    this.schedule(id, current.version, entry.dueAt, 'command');
+                    continue;
+                }
                 const attempt = this.beginCommand(id);
                 if (!attempt) continue;
                 commandsSelected += 1;
                 DiagnosticConfig.developerDiagnostics && (this.stats.commands += 1);
                 this.resolveChain = this.resolveChain.then(() => this.resolveCommand(id, attempt));
             }
+        }
+        // Back on the heap unless the scan replaced or cancelled them.
+        for (const entry of held) {
+            if (entry.kind === 'alarm' ? this.alarms.get(entry.alarmKey) === entry : this.validHeapEntry(entry)) this.heap.push(entry);
         }
         return candidates;
     }
@@ -1485,16 +1525,32 @@ class ColdSimulationKernel {
         }
     }
 
-    // The earliest time tick() can find timed work: the heap head (a bot or a
-    // decision deadline, both on the one heap) or the oldest unsent step's
-    // stall (recoverStalled). At or before now: work is due (maybe held by
-    // capacity or a pause). A superseded heap node only makes it earlier.
+    // When a heap entry may start (dueCandidates): a bot's next round, due
+    // from its new state (ensureScheduled), its lead before; anything else
+    // (a decision deadline, a retry or wait the kernel set) at its due.
+    startAt(entry) {
+        const dueAt = Number(entry.dueAt || 0);
+        return entry.lead ? dueAt - this.stepLeadMs : dueAt;
+    }
+
+    // The earliest time tick() can find timed work: the earliest heap start
+    // (nextStartAt: a bot or a decision deadline, both on the one heap) or
+    // the oldest unsent step's stall (recoverStalled). At or before now: work
+    // is due (maybe held by capacity or a pause). A superseded heap node only
+    // makes it earlier.
     nextWakeAt() {
         let stallAt = Infinity;
         for (const active of this.inFlight.values()) {
             if (!active.pendingCommitId) { stallAt = active.startedAt + STEP_STALL_MS; break; }
         }
-        return Math.min(Number(this.heap.peek()?.dueAt ?? Infinity), stallAt);
+        return Math.min(this.nextStartAt(), stallAt);
+    }
+
+    // The earliest heap start: the head (by due) or the earliest round with a
+    // lead, which an entry held to its due at the head would hide.
+    nextStartAt() {
+        const head = this.heap.peek(), lead = this.heap.peekLead();
+        return Math.min(head ? this.startAt(head) : Infinity, lead ? this.startAt(lead) : Infinity);
     }
 
     // Diagnostics only: why a scheduler tick started no step. `no_step`: the tick
@@ -1504,7 +1560,7 @@ class ColdSimulationKernel {
     countEmptyTick(timestamp) {
         if (this.duePicked > 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_step');
         if (this.heap.size === 0) return EconomyDiagnostics.count('worker_tick', 'empty', 'heap_empty');
-        const gap = Number(this.heap.peek().dueAt || 0) - timestamp;
+        const gap = this.nextStartAt() - timestamp;
         if (!(gap > 0)) return EconomyDiagnostics.count('worker_tick', 'empty', 'no_step');
         EconomyDiagnostics.count('worker_tick', 'empty', 'not_due');
         EconomyDiagnostics.count('worker_tick_gap', gap < 20 ? 'lt20ms' : gap < 100 ? 'lt100ms' : gap < 1000 ? 'lt1s' : 'ge1s');
@@ -1574,7 +1630,11 @@ class ColdSimulationKernel {
         const current = () => this.partyRuns.get(String(partyId)) === run
             && sources.every(source => this.resolverSourceCurrent(source));
         if (!current()) return;
-        const startedAt = this.now();
+        // The party's step time (every stamp below): as of the leader's due,
+        // never earlier (resolveStep); its ids keep the real start
+        // (run.startedAt), its rows' write stamp the real now (resolveStartedAt).
+        const resolveStartedAt = this.now();
+        const startedAt = Math.max(resolveStartedAt, run.dueAt || 0);
         let raidStepId = null;
         let published = false, handled = false;
         try {
@@ -1600,6 +1660,7 @@ class ColdSimulationKernel {
                     releasedMembers,
                     dissolvedParty,
                     startedAt,
+                    this.now(),
                     {
                         type: 'party_invalid_size',
                         summary: `Party ${run.party.partyId} dissolved because it has fewer than ${this.partyMinSize} members`,
@@ -1637,7 +1698,7 @@ class ColdSimulationKernel {
                     equipmentBridgeReason: this.equipmentBridgeReason,
                     spot: run.spot
                 });
-                const proposals = partyTransitionProposals(run, review.states, review.party, startedAt, {
+                const proposals = partyTransitionProposals(run, review.states, review.party, startedAt, this.now(), {
                     type: 'party_session_review', summary: `Party ${run.party.partyId} reviewed its shared hunt`, weight: 1,
                     meta: { partyId: run.party.partyId, departed: [...review.leaving.keys()], decisions: review.decisions }
                 }, 'party_session_review');
@@ -1662,6 +1723,7 @@ class ColdSimulationKernel {
                         waitingMembers,
                         waitingParty,
                         startedAt,
+                        this.now(),
                         null,
                         'party_travel_wait'
                     );
@@ -1707,6 +1769,7 @@ class ColdSimulationKernel {
                     arrivedMembers,
                     arrivedParty,
                     startedAt,
+                    this.now(),
                     {
                         type: 'party_travel',
                         summary: `Party ${run.party.partyId} arrived near ${partyTravel.regionName || partyTravel.spotId}`,
@@ -1761,6 +1824,7 @@ class ColdSimulationKernel {
                     travellingMembers,
                     travellingParty,
                     startedAt,
+                    this.now(),
                     null,
                     'party_travel'
                 );
@@ -1835,7 +1899,7 @@ class ColdSimulationKernel {
                 ? { id: `hunt:${stepProposalId(run.party.leaderId, run.startedAt)}`,
                     memberIds: resolution.memberResults.map(({ state }) => Number(state.characterId)) } : null;
             if (atomicParty) {
-                resolvedParty.updatedAt = Math.max(startedAt, Number(run.party.updatedAt) + 1);
+                resolvedParty.updatedAt = Math.max(resolveStartedAt, Number(run.party.updatedAt) + 1);
                 memoryGroup.partyChanges = [fencedPartyChange(run, resolvedParty)];
             }
             if (raid) {
@@ -1875,7 +1939,7 @@ class ColdSimulationKernel {
             for (const { state, result } of resolution.memberResults || []) {
                 const id = Number(state.characterId);
                 const projection = this.projectResolve
-                    ? await this.projectResolve(state, result, startedAt)
+                    ? await this.projectResolve(state, result, startedAt, null, resolveStartedAt)
                     : null;
                 if (!current()) return;
                 let projectedState = projection?.state || projection;
@@ -1913,7 +1977,7 @@ class ColdSimulationKernel {
                     ...(raid ? { raidStepId } : {}),
                     enqueuedAt: this.now(),
                     revision: memberRevision(run, id),
-                    baseState: state,
+                    baseState: proposalBase(state),
                     nextState: projectedState,
                     durable: projection?.durable || null,
                     ...(projection?.market ? { market: projection.market } : {}),
@@ -1924,13 +1988,13 @@ class ColdSimulationKernel {
                     economyEdges: resolvedParty.status === 'dissolved' ? 0 : Number(projection?.economyEdges || 0),
                     ...(projection?.economyPlan && resolvedParty.status !== 'dissolved'
                         ? { economyPlan: projection.economyPlan } : {}),
-                    result: {
+                    result: proposalResult({
                         ...result,
                         events: [
                             ...(result.events || []),
                             ...(resolution.events || []).filter((event) => Number(event.characterId || run.party.leaderId) === id)
                         ]
-                    },
+                    }),
                     options: { allowParty: true, allowLifecycle: true },
                     partyResolution: id === Number(run.party.leaderId) ? leaderResolution : null
                 };
@@ -1957,7 +2021,7 @@ class ColdSimulationKernel {
                 EconomyDiagnostics.count('party_run', 'no_result', resolution.debug?.reason);
                 const waiting = run.members.map(state => ({ ...state,
                     timing: { ...(state.timing || {}), nextResolveAt: resolvedParty.nextResolveAt } }));
-                const group = partyTransitionProposals(run, waiting, resolvedParty, startedAt, null, 'party_no_result', true);
+                const group = partyTransitionProposals(run, waiting, resolvedParty, startedAt, this.now(), null, 'party_no_result', true);
                 group.find(proposal => proposal.partyResolution).partyResolution = {
                     ...leaderResolution, party: { ...resolvedParty, updatedAt: group[0].atomicGroup.partyChanges[0].updatedAt } };
                 proposals.push(...group);
@@ -1983,7 +2047,7 @@ class ColdSimulationKernel {
             if (raidStepId && !published) require('./ColdRaidEncounter').abort(raidStepId);
             if (this.partyRuns.get(String(partyId)) === run) this.partyRuns.delete(String(partyId));
             if (handled) {
-                const elapsed = DiagnosticConfig.developerDiagnostics ? this.now() - startedAt : 0;
+                const elapsed = DiagnosticConfig.developerDiagnostics ? this.now() - resolveStartedAt : 0;
                 DiagnosticConfig.developerDiagnostics && (this.stats.lastResolveMs = elapsed);
                 DiagnosticConfig.developerDiagnostics && (this.stats.maxResolveMs = Math.max(this.stats.maxResolveMs, elapsed));
             }
@@ -1996,7 +2060,10 @@ class ColdSimulationKernel {
         const startedAt = this.now();
         let handled = false;
         try {
-            const timestamp = startedAt;
+            // Resolved as of its due, never earlier: a step started its lead
+            // early lives the same round as one started on time. The row's
+            // write stamp (updatedAt) stays the real start.
+            const timestamp = Math.max(startedAt, active.dueAt || 0);
             const elapsedMs = active.state.timing?.lastResolvedAt
                 ? Math.max(1000, timestamp - Number(active.state.timing.lastResolvedAt))
                 : 60000;
@@ -2022,10 +2089,14 @@ class ColdSimulationKernel {
             // The step's one decision (its economy, worker-local) travels
             // through the round: the projection asks no second one.
             const projection = this.projectResolve
-                ? await this.projectResolve(resolveState, result, timestamp, lifecyclePlan)
+                ? await this.projectResolve(resolveState, result, timestamp, lifecyclePlan, startedAt)
                 : null;
             if (!this.resolverSourceCurrent(source)) return;
             const projectedState = projection?.state || projection;
+            // The forced cleanup on the fight's result, over a trip this step
+            // started (main starts the cleanup trip).
+            const cleanupNeed = projectedState ? PartyMarketBreak.forcedCleanupNeed(
+                PartyMarketBreak.withoutStartedTrip(active.state, projectedState), timestamp) : null;
             const priority = playerWaitingTransition(active.state, null, this) ? 'P0'
                 : projection?.durable ? 'P1' : priorityForResult(active.state, result);
             const proposal = {
@@ -2034,7 +2105,7 @@ class ColdSimulationKernel {
                 priority,
                 enqueuedAt: this.now(),
                 revision: Number(active.state.simulation?.revision || 0),
-                baseState: resolveState,
+                baseState: proposalBase(resolveState),
                 nextState: projectedState,
                 durable: projection?.durable || null,
                 ...(projection?.market ? { market: projection.market } : {}),
@@ -2042,7 +2113,8 @@ class ColdSimulationKernel {
                 economyEdges: Number(projection?.economyEdges || 0),
                 ...(projection?.economyPlan ? { economyPlan: projection.economyPlan } : {}),
                 ...(projection?.buffOffer ? { buffOffer: projection.buffOffer } : {}),
-                result,
+                ...(cleanupNeed ? { cleanupNeed } : {}),
+                result: proposalResult(result),
                 options: { allowLifecycle: true, allowParty: !!active.state.stats?.tradeMeeting }
             };
             handled = true;
@@ -2102,12 +2174,9 @@ class ColdSimulationKernel {
             }
             if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
                 DiagnosticConfig.developerDiagnostics && (this.stats.proposalOversize += group.length);
-                transportGroup = group.map(entry => compactProposal(entry, true));
+                // Without the base bag: main derives no explicit removals.
+                transportGroup = group.map(entry => ({ ...entry, baseState: { characterId: Number(entry.characterId) } }));
                 transportSizes = proposalSizes(transportGroup);
-                if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
-                    transportGroup = group.map(entry => compactProposal(entry, false));
-                    transportSizes = proposalSizes(transportGroup);
-                }
                 if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
                     transportGroup = transportGroup.map(entry => {
                         const base = this.inFlight.get(Number(entry.characterId))?.state;
@@ -2222,7 +2291,7 @@ class ColdSimulationKernel {
     }
 
     onCommitAck(payload = {}) {
-        const accepted = [], requeued = [], reviews = [];
+        const accepted = [], requeued = [], reviews = [], sampledParties = new Set();
         if (this.stopping) return accepted;
         (payload.results || []).forEach((result) => {
             const identity = Protocol.commitAckIdentity(result);
@@ -2236,6 +2305,12 @@ class ColdSimulationKernel {
             if (this.states.get(id)?.state.phase !== 'cold') return;
             if (active.pendingRaidStepId) require('./ColdRaidEncounter').acknowledge(active.pendingRaidStepId, id, result.ok);
             this.inFlight.delete(id);
+            // A committed step's start -> ack time sets the lead; a party's
+            // members share one start, so their acks are one sample.
+            if (result.ok && !(active.partyId && sampledParties.has(active.partyId))) {
+                if (active.partyId) sampledParties.add(active.partyId);
+                this.measureStepLead(this.now() - active.startedAt);
+            }
             // An ok ack without the state carries the commit's numbers: main's
             // cache is the proposal's state with them.
             const committed = result.ok ? result.state || Protocol.committedState(active.proposed, result) : null;
@@ -2283,6 +2358,13 @@ class ColdSimulationKernel {
             }
         }
         return accepted;
+    }
+
+    // One-sided average of the step's start -> commit ack time (STEP_LEAD_*).
+    measureStepLead(sampleMs) {
+        if (!Number.isFinite(sampleMs)) return;
+        const rate = sampleMs > this.stepLeadMs ? STEP_LEAD_RISE : STEP_LEAD_FALL;
+        this.stepLeadMs = Math.max(0, Math.min(STEP_LEAD_MAX_MS, this.stepLeadMs + (sampleMs - this.stepLeadMs) * rate));
     }
 
     // The plan the step stamped as sent (ColdSimulationWorker economyPlanHash)
@@ -2437,6 +2519,7 @@ class ColdSimulationKernel {
             commandingAgeMs: this.commanding.size ? Math.max(0, now - oldestCommandAt) : 0,
             reviewsSkipped: this.reviewsSkipped,
             ackUnbuilt: this.ackUnbuilt,
+            stepLeadMs: Math.round(this.stepLeadMs),
             maxInFlight: this.maxInFlight,
             maxAtomicPartySize: this.maxAtomicPartySize,
             paused: this.paused,

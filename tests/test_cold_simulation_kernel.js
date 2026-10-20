@@ -195,6 +195,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         staleLeaderRun.members,
         { ...staleLeaderRun.party, status: 'dissolved' },
         5000,
+        5000,
         { type: 'party_invalid_size' },
         'party_invalid_size'
     );
@@ -1030,16 +1031,11 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         priority: 'P2',
         enqueuedAt: now,
         revision: 5,
-        baseState: oversizedState,
+        // The shape the kernel builds: the base bag next to the whole next state.
+        baseState: { characterId: 91, inventory: oversizedInventory },
         nextState: oversizedState,
         durable: null,
-        result: {
-            patch: { inventory: oversizedInventory, stats: oversizedState.stats },
-            events: [],
-            materialize: { exp: 0, sp: 0, adena: 0, items: [] },
-            nextResolveAt: now + 30000,
-            debug: { activity: 'hunting' }
-        },
+        result: { events: [], debug: { activity: 'hunting' } },
         options: { allowLifecycle: true }
     };
     oversizedKernel.inFlight.set(91, { state: oversizedState, startedAt: now });
@@ -1052,8 +1048,6 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         'worker',
         { workerEpoch: 'epoch' }
     ).ok, 'compacted proposal batch must stay within the IPC envelope limit');
-    assert.strictEqual(compactedMessage.payload.proposals[0].result.patch, undefined,
-        'compacted proposals must remove duplicate result state when nextState is present');
     assert.strictEqual(oversizedKernel.snapshot().dirty, 0,
         'an oversized first proposal must not remain stuck in the dirty queue');
     assert.strictEqual(oversizedKernel.snapshot().proposalCompactions, 1);
@@ -1065,7 +1059,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         const before = state(id, { stats: { history: 'h'.repeat(40000), removed: 1, list: [1, 2] } });
         const next = { ...before, stats: { history: before.stats.history, list: [3], added: null }, hp: 8 };
         const entry = { ...oversizedProposal, characterId: id, proposalId: `${id}:${now}`,
-            baseState: { ...before, hp: 8 }, nextState: next,
+            baseState: { characterId: id, inventory: before.inventory }, nextState: next,
             atomicGroup: { id: 'large-clan', memberIds: Array.from({ length: 9 }, (_, i) => 200 + i) } };
         oversizedKernel.inFlight.set(id, { state: before, startedAt: now });
         oversizedKernel.dirty.set(id, entry);
@@ -1502,7 +1496,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     const refusedCommits = await emptyRound();
     commitAck(emptyKernel, { results: refusedCommits.map(proposal => ({ ok: false, characterId: proposal.characterId,
         reason: 'party_group_aborted', detail: 'party_revision_stale',
-        state: { ...proposal.baseState, simulation: { revision: 6 } } })) });
+        state: { ...proposal.nextState, simulation: { revision: 6 } } })) });
     assert.strictEqual(emptyKernel.busy(250), false);
     assert(emptyKernel.scheduleTokens.get(250).dueAt >= emptyNow + 1000,
         'a refused commit with no new row waits a second, not the row\'s past due');
