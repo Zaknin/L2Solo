@@ -1880,6 +1880,8 @@ function applySchemaMigrations() {
     }]);
     // The author's account warehouse (his migration 67, numbered after ours).
     migrations.push([73, () => PlayerWarehouse.migrate(connection)]);
+    // A far bot's commit parses its stats once for the party candidate row, not twice.
+    migrations.push([74, () => PartyCandidateProjection.mergeStatsTriggers(connection)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
