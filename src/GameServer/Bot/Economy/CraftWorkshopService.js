@@ -11,6 +11,12 @@ const byRecipe = new Map();
 const owners = new Map();
 const publicDigests = new Map(), publicScopeDigests = new Map();
 const publicCandidates = new (require('./PublicWorkshopIndex').PublicWorkshopIndex)();
+// A live player's manufacture rows stay apart from the bot rows above: the
+// bot digests are what the worker mirrors (publicRows), and a meeting proof
+// compares them with its token. Player rows refresh when the store opens
+// (registerPlayer) and on the hot reads that use them (lookup,
+// publicForRecipe); no single close event exists (quit, stop, death and
+// logout reset the store type apart).
 const playerCandidates = new (require('./PublicWorkshopIndex').PublicWorkshopIndex)();
 const playerShops = new Map();
 function registerPlayer(session) {
@@ -33,7 +39,7 @@ function refreshPlayers() {
             // lazy: worker main-thread player workshops only (see refreshPlayers)
             const town = invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(actor);
             if (!town) {
-                for (const row of owned.rows) { togglePublicDigest(row, -1); playerCandidates.remove(`p:${id}:${row[1]}`); }
+                for (const row of owned.rows) playerCandidates.remove(`p:${id}:${row[1]}`);
                 owned.rows = [];
                 continue;
             }
@@ -46,8 +52,8 @@ function refreshPlayers() {
             }
         }
         if (JSON.stringify(rows) === JSON.stringify(owned.rows)) continue;
-        for (const row of owned.rows) { togglePublicDigest(row, -1); playerCandidates.remove(`p:${id}:${row[1]}`); }
-        for (const row of rows) { togglePublicDigest(row); playerCandidates.put(`p:${id}:${row[1]}`, { ...candidateRow(row), playerWorkshop: true }); }
+        for (const row of owned.rows) playerCandidates.remove(`p:${id}:${row[1]}`);
+        for (const row of rows) playerCandidates.put(`p:${id}:${row[1]}`, { ...candidateRow(row), playerWorkshop: true });
         owned.rows = rows;
         if (session.actor !== actor || !(World.user?.sessions || []).includes(session)) playerShops.delete(id);
     }
@@ -76,12 +82,10 @@ function togglePublicDigest(row, direction = 1) {
     }
 }
 function publicRecipeDigest(productId) {
-    refreshPlayers();
     const value = publicDigests.get(Number(productId));
     return value ? `${value.xor}:${value.sum}:${value.count}` : '0:0:0';
 }
 function publicScopeDigest(scope) {
-    refreshPlayers();
     const value = publicScopeDigests.get(scope);
     return value ? `${value.xor}:${value.sum}:${value.count}` : '0:0:0';
 }
@@ -444,9 +448,10 @@ function buildPublicRecipeRows(ownerId) {
     return result;
 }
 function* publicForRecipe(recipeId, customer = {}) {
-    refreshPlayers();
     yield* publicCandidates.candidates(recipeId, customer.characterId);
-    if (customer.phase === 'hot') yield* playerCandidates.candidates(recipeId, customer.characterId);
+    if (customer.phase !== 'hot') return;
+    refreshPlayers();
+    yield* playerCandidates.candidates(recipeId, customer.characterId);
 }
 function* publicRows() {
     for (const id of owners.keys()) for (const row of publicRecipeRows(id)) yield [`w:${id}:${row[1]}`, ...row];
