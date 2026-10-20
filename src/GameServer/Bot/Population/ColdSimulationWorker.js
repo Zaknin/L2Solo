@@ -1331,7 +1331,9 @@ function startKernel(config = {}) {
         // party (its own members not counted against it).
         partyRoute: ({ leader, party, members, spot, timestamp }) => BotRoute.route(leader, spot, party, members,
             { spots: planningSpots, timestamp, hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, members) }),
-        projectResolve: async (state, result, timestamp, lifecyclePlan = null) => {
+        // writtenAt: the row's write stamp, the real now (timestamp is the
+        // round's time, the bot's due for a step started its lead early).
+        projectResolve: async (state, result, timestamp, lifecyclePlan = null, writtenAt = timestamp) => {
             const owner = kernel.states.get(Number(state.characterId));
             // Room at arrival, before the projection: a full spot's mark rides
             // the patch, its sections join the step's one raise.
@@ -1347,6 +1349,7 @@ function startKernel(config = {}) {
             const base = {
                 persist: false,
                 timestamp,
+                writtenAt,
                 projectClassProgression: true,
                 ...(crowded ? { checkSections: ROOM_SECTIONS } : {}),
                 moneyEscrowFor: ownEscrow,

@@ -2562,6 +2562,10 @@ const BotLifeState = {
             ? { workerAdmission: options.workerAdmission } : null;
 
         const timestamp = Number(options.timestamp || now());
+        // The row's write stamp (updatedAt), a write-order key main compares:
+        // the real now. A far step resolved as of its due, ahead of now
+        // (ColdSimulationKernel stepLeadMs), names the real now here.
+        const writtenAt = Number(options.writtenAt || timestamp);
         const experienceAward = ProgressionCap.applyAward(state.exp, result.materialize?.exp);
         const progressionLevel = ProgressionCap.levelForExperience(experienceAward.totalExp, Number(state.level || 1));
         let progressionState = { ...state, exp: experienceAward.totalExp, level: progressionLevel };
@@ -2803,7 +2807,7 @@ const BotLifeState = {
                 equipment: equipmentSummaryFromInventory(equippedInventory)
             },
             inventory: equippedInventory,
-            updatedAt: timestamp
+            updatedAt: writtenAt
         };
         // ARCH-NOTE: C1 lifecycle packets precede their fight; accept the
         // worker's focus event before classifying actual changed sections.
@@ -2915,7 +2919,7 @@ const BotLifeState = {
                     if (Diagnostics.active()) Diagnostics.count('resolve_plan_reconcile', settled ? 'skipped' : 'rebuilt');
                     return {
                         ...(settled ? profiledState : reconcileFulfilledEquipmentPlan(profiledState)),
-                        updatedAt: timestamp
+                        updatedAt: writtenAt
                     };
                 }
                 const row = rowFromState(profiledState);

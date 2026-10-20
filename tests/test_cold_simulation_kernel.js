@@ -195,6 +195,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         staleLeaderRun.members,
         { ...staleLeaderRun.party, status: 'dissolved' },
         5000,
+        5000,
         { type: 'party_invalid_size' },
         'party_invalid_size'
     );

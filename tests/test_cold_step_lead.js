@@ -40,8 +40,8 @@ function world() {
             return { patch: {}, events: [], nextResolveAt: timestamp + roundMs,
                 materialize: { exp: 0, sp: 0, adena: 0, items: [] }, debug: {} };
         },
-        projectResolve: (state, result, timestamp) => Life.prepareResolve(state, result,
-            { timestamp, persist: false, projectClassProgression: true }),
+        projectResolve: (state, result, timestamp, lifecyclePlan, writtenAt) => Life.prepareResolve(state, result,
+            { timestamp, writtenAt, persist: false, projectClassProgression: true }),
         emit: (type, payload) => {
             if (type === 'proposal_batch') for (const proposal of payload.proposals) proposals.set(proposal.characterId, proposal);
             if (type === 'command_request') commands.push(...payload.requests);
@@ -108,6 +108,7 @@ function world() {
         const row = commit(2, 1500, T - 1000);
         assert.strictEqual(row.timing.lastResolvedAt, T, 'the committed row is stamped at the due, not at the early start');
         assert.strictEqual(row.timing.nextResolveAt, T + PROBE_ROUND_MS, 'the next round counts from the due');
+        assert.strictEqual(row.updatedAt, T - 1000, 'the row write stamp is the real start, never the future due');
         assert.deepStrictEqual(await tickAt(T + 1), [], 'a step started early is not started again at its due');
 
         // Fast commits afterwards: the lead falls back slowly, not at once.
@@ -138,5 +139,20 @@ function world() {
         assert.deepStrictEqual(commands.map(request => request.characterId), [5], 'the command starts at its due');
     }
 
-    console.log('Cold step lead: a step starts its measured lead early, is resolved and committed as of its due; commands keep their due passed');
+    {
+        // A retry held to its due sits at the heap's top: the worker still
+        // wakes at the lead start of the round due behind it.
+        const { clock, kernel, round, gap } = world();
+        kernel.upsert({ state: soloState(1, 10000) });
+        for (let i = 0; i < 20; i++) await round(1, 1500);
+        const T = gap();
+        kernel.upsert({ state: soloState(7, T) });
+        kernel.upsert({ state: soloState(8, T + 60000) });
+        kernel.requeue(8, T - 500);
+        clock.at = T - 3000;
+        assert(kernel.stepLeadMs > 1000, 'slow commits measured a lead');
+        assert.strictEqual(kernel.nextWakeAt(), T - kernel.stepLeadMs, 'a retry at the top does not hide an earlier lead start');
+    }
+
+    console.log('Cold step lead: a step starts its measured lead early, is resolved and committed as of its due; its row keeps the real write stamp; a retry at the top does not hide a lead start; commands keep their due passed');
 })().catch((error) => { console.error(error); process.exitCode = 1; });
