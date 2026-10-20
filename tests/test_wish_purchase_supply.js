@@ -452,3 +452,49 @@ assert.deepEqual(onlyPublished.map(row => row.recipeId), [301],
     'an unavailable first variant cannot hide a later published one');
 recipeVariants = [recipe];
 console.log('PASS public paid service for fighter, no scroll/phantom source, route and capacity gates, indexed usable choice per known town');
+
+// The same purchase quote for every buyer and every repeat: an NPC item with
+// its Giran-only crystal retail view, a board-only item and a fixed-shot item,
+// each asked twice over the shops' frozen per-item lists, under two trips.
+{
+    const tripOf = (table) => {
+        const cost = town => Number.isFinite(table[town]?.[0]) ? table[town][0] : Infinity;
+        cost.details = town => table[town] ? { known: true, hours: table[town][1], fees: table[town][2] } : { known: false, hours: Infinity, fees: Infinity };
+        return cost;
+    };
+    const nearGiran = tripOf({ Giran: [10, 0.1, 5], Dion: [100, 1, 50] });
+    const nearDion = tripOf({ Giran: [200, 2, 100], Dion: [5, 0.05, 2] });
+    const noGiran = tripOf({ Dion: [5, 0.05, 2] });
+    const nearIsland = tripOf({ Giran: [0, 0, 0], 'Talking Island': [0, 0, 0] });
+    const npcRow = (selfId, town, price) => Object.freeze({ selfId, town, price, sourceType: 'npc', sourceId: 30001, repeatable: true });
+    const shops = new Map([
+        [9001, Object.freeze([npcRow(9001, 'Dion', 40), npcRow(9001, 'Giran', 50)])],
+        [9002, Object.freeze([])],
+        [1835, Object.freeze([npcRow(1835, 'Giran', 9)])]]);
+    const book = new BoardIndex();
+    book.put({ id: 1, ownerId: 2, storeType: 1, kind: 'sell_ad', town: 'Giran', lines: [{ lineId: 1, selfId: 9002, count: 3, price: 70 }] });
+    book.put({ id: 2, ownerId: 1, storeType: 1, kind: 'sell_ad', town: 'Giran', lines: [{ lineId: 2, selfId: 9002, count: 9, price: 1 }] });
+    const deps = { board: book, npcOffersFor: id => shops.get(Number(id)) || Object.freeze([]) };
+    const ask = (trip, id, options) => Evidence.reader(state, { board: book, trip }, deps, options)(id);
+    const retail = { npcOnly: true, town: 'Giran' };
+    const sale = (town, price, sourceType, availableUnits, [, tripHours, tripFees]) =>
+        ({ price, unitPrice: price, availableUnits, town, sourceType, quoted: true, tripHours, tripFees });
+    for (let repeat = 0; repeat < 2; repeat++) {
+        assert.deepEqual(ask(nearGiran, 9001, retail), sale('Giran', 50, 'npc', Infinity, [0, 0.1, 5]));
+        assert.deepEqual(ask(nearDion, 9001, retail), sale('Giran', 50, 'npc', Infinity, [0, 2, 100]),
+            'the crystal retail view stays on the Giran NPC whatever the other towns cost');
+        assert.equal(ask(noGiran, 9001, retail), null, 'no Giran route, no Giran retail quote');
+        assert.deepEqual(ask(nearGiran, 9001), sale('Giran', 50, 'npc', Infinity, [0, 0.1, 5]));
+        assert.deepEqual(ask(nearDion, 9001), sale('Dion', 40, 'npc', Infinity, [0, 0.05, 2]),
+            'every town competes on price plus trip');
+        assert.equal(ask(nearGiran, 9002, retail), null, 'the retail view has no board');
+        assert.deepEqual(ask(nearGiran, 9002), sale('Giran', 70, 'afk', 3, [0, 0.1, 5]),
+            'a board-only item quotes another owner\'s line, never the buyer\'s own');
+        assert.equal(ask(noGiran, 9002), null);
+        assert.deepEqual(ask(nearIsland, 1835), sale('Talking Island', 4, 'configured_store', Infinity, [0, 0, 0]),
+            'the fixed shot store joins the NPC offers');
+        assert.deepEqual(ask(nearGiran, 1835), sale('Giran', 9, 'npc', Infinity, [0, 0.1, 5]),
+            'an unreachable fixed store leaves the NPC offer');
+    }
+    console.log('PASS purchase quote: same offers for NPC, board-only and fixed-shot items on repeat and per trip');
+}

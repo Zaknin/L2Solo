@@ -1,6 +1,7 @@
 'use strict';
 const Station = require('../../World/GiranCrystallizationStation');
 const Index = require('../../Item/ItemTemplateIndex');
+const InventoryLimits = require('../../Inventory/InventoryLimits');
 const BATCH_LIMIT = 16;
 let Rules, templates, candidates = new Map();
 function canSelf(state, rank = 'd') {
@@ -51,7 +52,7 @@ function choices(state, purchase, trip, incomePerHour = 0, rank = 'd', quantityI
     const operation = self ? { known: true, hours: 0, fees: 0 } : trip;
     const Data = invoke('GameServer/DataCache');
     const rows = [], seen = new Set(catalog(rank)), bundle = [], readFree = freeReader(state);
-    const capacity = Math.max(0, Math.min(BATCH_LIMIT, require('../../Inventory/InventoryLimits').forState(state)
+    const capacity = Math.max(0, Math.min(BATCH_LIMIT, InventoryLimits.forState(state)
         - invoke('GameServer/Bot/Economy/ItemDisposition').inventorySlotCount(state)));
     let bundleAmount = 0, bundleNet = 0;
     for (const row of Object.values(state.inventory || {})) { const template = Index.find(Data.items, row.selfId); if (template?.etc?.rank === rank && reward(template)) seen.add(Number(row.selfId)); }
