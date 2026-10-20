@@ -299,8 +299,8 @@ function buildProjection(state, ctx, deps) {
     // kept, in EconomyContext's held build entry while no source section is
     // raised. A missing/evicted descriptor is calculated normally; this never
     // limits alternatives.
-    const keptSources = (deps.sourceSections?.nodes || []).filter(row => (!quantityInputs
-        || !(row.inputs.bag || []).some(([id]) => id === -1)) && ctx.nodeInputs?.holds(row.inputs));
+    const reusableSource = row => !quantityInputs || !(row.inputs.bag || []).some(([id]) => id === -1);
+    const keptSources = (deps.sourceSections?.nodes || []).filter(row => reusableSource(row) && ctx.nodeInputs?.holds(row.inputs));
     const descriptors = new Map(keptSources.map(row => [row.node.key, row.node]));
     const descriptorInputs = new Map(keptSources.map(row => [row.node.key, row.inputs]));
     // The read scope of the candidate whose arena built each descriptor;
@@ -1195,7 +1195,7 @@ function buildProjection(state, ctx, deps) {
     // such an input falls back to calculation instead of retaining a caller.
     try {
         const candidate = { nodes: keptNodes.filter(node => node.key.startsWith('item:') && descriptorInputs.has(node.key))
-            .map(node => ({ node, inputs: descriptorInputs.get(node.key) })) };
+            .map(node => ({ node, inputs: descriptorInputs.get(node.key) })).filter(reusableSource) };
         sourceBytes = Buffer.byteLength(JSON.stringify(candidate));
         if (sourceBytes <= 8192) sourceSections = structuredClone(candidate);
     } catch (_) { /* An uncloneable candidate falls back to calculation. */ }
