@@ -4,6 +4,12 @@ const { Worker } = require('node:worker_threads');
 const TableChannel = require('../Bot/Population/ColdTableChannel');
 const { SpotCatalogWriter } = require('./ClanSpotCatalog');
 const BotGear = invoke('GameServer/Bot/AI/BotGear');
+const DataCache = invoke('GameServer/DataCache');
+const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
+const BotMarketPricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
+const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
+const NpcShopBuyLists = invoke('GameServer/World/Generics/NpcShopBuyLists');
+const ProgressionRates = invoke('GameServer/ProgressionRates');
 const EMPTY_SPOTS = [];
 const yieldLoop = () => new Promise((resolve) => setImmediate(resolve));
 // The item-origin catalog (ItemAcquisitionCatalog) reads only which NPCs
@@ -271,29 +277,25 @@ function offerRow(offer) {
 }
 
 async function buildStaticMarket(recipes) {
-    const cache = invoke('GameServer/DataCache');
-    const market = invoke('GameServer/Bot/Economy/MarketOpportunity');
-    const shops = invoke('GameServer/World/Generics/NpcShopBuyLists');
-    const items = BotGear.currentWearableRows(cache.items);
+    const items = BotGear.currentWearableRows(DataCache.items);
     const npcOffers = [];
     const supplyIds = [...new Set([...items.map(item => item.selfId),
         ...recipes.flatMap(recipe => recipe.materials.map(row => row.selfId))])];
     for (let i = 0; i < supplyIds.length; i++) {
-        npcOffers.push(...market.npcOffersAll(supplyIds[i]).map(offerRow));
+        npcOffers.push(...MarketOpportunity.npcOffersAll(supplyIds[i]).map(offerRow));
         if (i % 8 === 7) await yieldLoop();
     }
-    const shopEntries = shops.allEntries().map(({ selfId }) => ({ selfId }));
+    const shopEntries = NpcShopBuyLists.allEntries().map(({ selfId }) => ({ selfId }));
     const wearableIds = new Set(items.map(item => Number(item.selfId)));
-    const pricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
     const npcPriceRows = [];
     // FirstPrice also needs native NPC floors for crafting inputs and
     // consumables. Scalar quotes do not add sources to MarketOpportunity.
     for (const selfId of new Set(shopEntries.map(entry => Number(entry.selfId)))) {
         if (wearableIds.has(selfId)) continue;
-        const price = pricing.npcPrice({ selfId });
+        const price = BotMarketPricing.npcPrice({ selfId });
         if (Number.isFinite(price) && price > 0) npcPriceRows.push({ selfId, price });
     }
-    return { npcOffers, npcPriceRows, towns: market.TOWN_NPC_SELLERS, shopEntries };
+    return { npcOffers, npcPriceRows, towns: MarketOpportunity.TOWN_NPC_SELLERS, shopEntries };
 }
 
 // Callers during a build share it; a failed build is not kept.
@@ -307,21 +309,18 @@ function staticMarketFor(rate, recipes) {
 }
 
 async function context() {
-    const market = invoke('GameServer/Bot/Economy/MarketOpportunity');
-    const craft = invoke('GameServer/Bot/Economy/CraftShopService');
-    const rates = invoke('GameServer/ProgressionRates');
     // The rate or recipes may change during a build: a context is made only
     // from the current ones, so a newer revision never carries older recipes.
     let recipes, rate, built;
     do {
-        recipes = craft.publishedStationRecipes().recipes;
-        rate = rates.profile().multiplier;
+        recipes = CraftShopService.publishedStationRecipes().recipes;
+        rate = ProgressionRates.profile().multiplier;
         built = await staticMarketFor(rate, recipes);
-    } while (recipes !== craft.publishedStationRecipes().recipes || rate !== rates.profile().multiplier);
+    } while (recipes !== CraftShopService.publishedStationRecipes().recipes || rate !== ProgressionRates.profile().multiplier);
     // The board reaches the worker as its 'board' table. The configured
     // stores' rows are frozen per economy rate and store config
     // (FixedShotOffers.offers): the same array until one of them changes.
-    const fixed = market.fixedStoreOffers();
+    const fixed = MarketOpportunity.fixedStoreOffers();
     const general = {};
     for (const key of ['progressionPreset', 'expRate', 'spRate', 'adenaRate', 'dropChanceRate', 'spoilRate', 'maxLevel']) {
         general[key] = global.options.default.General?.[key];
