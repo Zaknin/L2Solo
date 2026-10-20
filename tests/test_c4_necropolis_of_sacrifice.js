@@ -47,7 +47,7 @@ verifyGeodataWhenAvailable(GeodataEngine, [[18, 24]], 'Necropolis of Sacrifice',
     ));
     assert.ok(heightDeltas.every((delta) => delta <= 64), 'every source coordinate must agree with geodata within 64 Z');
     assert.strictEqual(Math.max(...heightDeltas), 56, 'the audited underground source/geodata maximum must remain exact');
-});
+}, { preload: false });
 
 const bat = npcs.find((npc) => npc.selfId === 1139);
 assert.deepStrictEqual(
