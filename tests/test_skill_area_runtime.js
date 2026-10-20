@@ -46,6 +46,8 @@ function actor() {
         },
         state: {
             fetchDead: () => false,
+            fetchCombats() { return !!this.combats; },
+            setCombats(value) { this.combats = value; },
             setCasts() {},
             setHits() {}
         }
