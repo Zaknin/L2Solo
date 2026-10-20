@@ -72,7 +72,7 @@ function verify(recipeId, missing = false, slot = 14, classId = 3, targetId = nu
     const service = { characterId: 990412, recipeId, price: fee, entryPrice: fee,
         capacityBatches: 1, townName: 'Giran', loc: station.loc };
     const context = Economy.forState(state, { timestamp, board, spots: [], npcOffersFor: () => [],
-        workshop: null, knownRecipes: [], withNodes: true, knowledgeEnabled: false,
+        workshop: null, knownRecipes: [], knowledgeEnabled: false,
         routeRows: invoke('GameServer/Bot/Economy/EconomicTrip').towns.map(() => [true, 0, 0]),
         workshops: id => id === recipeId ? [service] : [], rememberContext: false });
     const productNode = context.projection.nodes.find(row => row.key === `item:${recipe.productId}`);
