@@ -123,7 +123,10 @@ class InteractionMemory {
 
     snapshot(ownerId) {
         const snapshot = this.snapshots.get(ownerId);
-        return snapshot ? JSON.parse(JSON.stringify({ ...snapshot.plain(), ...(this.fastLayers.has(ownerId) ? { fast: [...this.fastLayers.get(ownerId)] } : {}) })) : null;
+        if (!snapshot) return null;
+        const copy = snapshot.plain();
+        if (this.fastLayers.has(ownerId)) copy.fast = JSON.parse(JSON.stringify([...this.fastLayers.get(ownerId)]));
+        return copy;
     }
 
     // The accepted snapshot's relation rows and revision, read-only (a row of
