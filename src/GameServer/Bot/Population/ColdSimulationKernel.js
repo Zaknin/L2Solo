@@ -302,7 +302,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, enqueuedA
     // funded help. Fence that party row in the same transaction as every leg.
     if (fence || (CraftMaterialParty.isObjective(run.party.stats?.objective)
         && ['party_travel', 'party_travel_wait', 'party_arrival'].includes(activity))) {
-        party = { ...party, updatedAt: Math.max(timestamp, Number(run.party.updatedAt || 0) + 1) };
+        party = { ...party, updatedAt: Math.max(enqueuedAt, Number(run.party.updatedAt || 0) + 1) };
         atomicGroup.partyChanges = [{ ...fencedPartyChange(run, party), ...(party.spotId ? { spotId: party.spotId } : {}) }];
     }
     return memberStates.map((state) => {
@@ -1898,7 +1898,7 @@ class ColdSimulationKernel {
                 ? { id: `hunt:${stepProposalId(run.party.leaderId, run.startedAt)}`,
                     memberIds: resolution.memberResults.map(({ state }) => Number(state.characterId)) } : null;
             if (atomicParty) {
-                resolvedParty.updatedAt = Math.max(startedAt, Number(run.party.updatedAt) + 1);
+                resolvedParty.updatedAt = Math.max(resolveStartedAt, Number(run.party.updatedAt) + 1);
                 memoryGroup.partyChanges = [fencedPartyChange(run, resolvedParty)];
             }
             if (raid) {
