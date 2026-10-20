@@ -92,11 +92,12 @@ const COMPUTED = Object.freeze({
     // level and kit matchup; its other reads are checked beside it.
     sourceGround: sectionMask(['build']),
     // The crafter's workshop (its best recipe and income per hour, the
-    // occupation planner's answer), kept with the held build: the planner
-    // reads the money packet (stats.money: hour adena, trip value, craft
-    // labour), which the foundation writes every build, and the kept
-    // recipe's market (its watch rows raise money).
-    workshop: FOUNDATION | sectionMask(['money'])
+    // occupation planner's answer), kept with the held build: its section is
+    // the kit (craft level, station, recipe book). Its drifting reads (the
+    // packet's hour, the wallet, the kept recipe's market rows) are compared
+    // against the ask's own record (EconomyContext.askedInputsCrossed), not
+    // through a raised section: a money or supply raise does not ask again.
+    workshop: sectionMask(['build'])
 });
 // The one table of what a moved fact touches, for near and far bots alike
 // (factEvents over factsOf). build: the kit (class, level, gear, hennas,
@@ -520,4 +521,4 @@ function kitMoved(before, after) {
     return (before?.stats?.wishSections?.build ?? null) !== (after?.stats?.wishSections?.build ?? null);
 }
 module.exports = { SECTIONS, COMPUTED, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, kitMoved, moneyChanged, observationChanged, incomeError,
-    MARKET_WATCH, softEvents, carrySectionBaseline, baselineIdentity, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, factsOf, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal, partyIdOf };
+    MARKET_WATCH, marketCrossed, softEvents, carrySectionBaseline, baselineIdentity, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, factsOf, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal, partyIdOf };

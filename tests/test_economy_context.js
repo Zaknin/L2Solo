@@ -430,42 +430,18 @@ async function run() {
         console.log('PASS card verdict handed to the build of its step');
     }
     // The crafter's workshop is kept with its held build: on the same route,
-    // known, with a finite income and no workshop section moved (the
-    // foundation's or money); otherwise it is asked again. The step judges
-    // its held build before the build (heldWorkshop): a valid verdict keeps
-    // the workshop, a refusal keeps it under its sections. A build with a
+    // known, with a finite income, no kit event and none of its ask's reads
+    // crossed (the packet's hour beyond the bot's error, the wallet below the
+    // recipe's cash); otherwise it is asked again. The step judges its held
+    // build before the build (heldWorkshop): a valid verdict keeps the
+    // workshop, a refusal keeps it while its ask's reads hold. A build with a
     // productive workshop watches its product's buyers and its materials'
     // sellers.
     {
         const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
         const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
-        const workshop = { known: true, recipeId: 2, productId: 3, incomePerHour: 1200, cycleHours: 2 };
+        const workshop = { known: true, recipeId: 2, productId: 3, incomePerHour: 1200, cycleHours: 2, cash: 5000 };
         const state = { ...base, characterId: 990031 };
-        const heldOf = (value, routeKey = Trip.key(state)) => ({ plan: { workshop: value, routeKey } });
-        assert.equal(Economy.heldWorkshopOf(heldOf(workshop), 0, state), workshop, 'a held workshop on its route is kept');
-        assert.equal(Economy.heldWorkshopOf(heldOf({ ...workshop, incomePerHour: 0 }), 0, state)?.incomePerHour, 0,
-            'a known zero income is kept');
-        for (const name of ['build', 'combat', 'supply', 'occupation', 'relations', 'money'])
-            assert.equal(Economy.heldWorkshopOf(heldOf(workshop), Sections.sectionBit(name), state), null, `a moved ${name} section asks again`);
-        for (const name of ['benefits', 'sources'])
-            assert.equal(Economy.heldWorkshopOf(heldOf(workshop), Sections.sectionBit(name), state), workshop, `a moved ${name} section keeps it`);
-        assert.equal(Economy.heldWorkshopOf(heldOf(workshop, 'elsewhere'), 0, state), null, 'another route asks again');
-        assert.equal(Economy.heldWorkshopOf(heldOf({ ...workshop, known: false }), 0, state), null, 'an unknown workshop asks again');
-        assert.equal(Economy.heldWorkshopOf(heldOf({ ...workshop, incomePerHour: NaN }), 0, state), null, 'no income asks again');
-        assert.equal(Economy.heldWorkshopOf(null, 0, state), null, 'no held build asks');
-        const diagnosticsBefore = Config.developerDiagnostics;
-        Config.developerDiagnostics = true;
-        try {
-            const counts = () => invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics().counts || {};
-            const unknown = () => counts()['occupation:workshop:unknown'] || 0;
-            let before = unknown();
-            assert.equal(Economy.keptWorkshop(null, 0, state).known, false, 'nothing kept is an unknown workshop');
-            assert.equal(unknown(), before, 'a bot without workshop entries is not counted');
-            const crafter = { ...state, stats: { ...state.stats, workshop: { entries: [{ recipeId: 2 }] } } };
-            before = unknown();
-            Economy.keptWorkshop(heldOf(workshop), Sections.sectionBit('build'), crafter);
-            assert.equal(unknown(), before + 1, 'a crafter without a kept workshop is counted');
-        } finally { Config.developerDiagnostics = diagnosticsBefore; }
         const routeRows = Trip.prepared(state);
         const built = Economy.forState(state, { routeRows, workshop });
         assert.equal(built.plan.workshop, workshop, 'fixture: the build holds its workshop');
@@ -481,9 +457,10 @@ async function run() {
         // valid verdict keeps the workshop (no ask) and the build serves the
         // held decision, unless the held workshop is unknown or of another
         // route (asked); a refusal by its MP alone (sources) keeps it, with
-        // or without the card refused before; a wallet below the decision's
-        // bounds (money) asks.
+        // or without the card refused before; a wallet below the recipe's
+        // cash asks.
         const Card = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+        const diagnosticsBefore = Config.developerDiagnostics;
         const T = Date.now(), crafter = { ...base, characterId: 990032, craftLevel: 1, adena: 1000000 };
         const deps = { timestamp: T, routeRows: Trip.prepared(crafter) };
         const counts = () => invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics().counts || {};
@@ -526,7 +503,27 @@ async function run() {
             assert.equal(afterCard.kept, workshop, 'a refusal by the MP alone keeps it after the card refused');
             assert.deepEqual(afterCard.verdicts, [1, 1], 'one verdict for the card, the step\'s workshop and its build');
             ({ published } = fresh());
-            assert.equal(stepOf({ ...published, adena: 0 }).kept, null, 'a moved wallet asks');
+            assert.equal(stepOf({ ...published, adena: 0 }).kept, null, 'a wallet below the recipe\'s cash asks');
+            // The worker's order: the held workshop, else the planner's
+            // answer (here a stub at the edge with another income). A raised
+            // section other than the kit (a spot event, a quantity refusal's
+            // sources and money) keeps the workshop; a kit event or the hour
+            // value beyond the bot's error takes the planner's answer.
+            const answer = { known: true, recipeId: 2, productId: 3, incomePerHour: 3000, cycleHours: 2, cash: 5000 };
+            const incomeAfter = (dirty, edit = stats => stats) => {
+                ({ published } = fresh());
+                const step = { ...deps }, eventVerdict = {};
+                const moved = { ...published, stats: edit({ ...published.stats, wishDirty: dirty }) };
+                const kept = Economy.heldWorkshop(moved, step, eventVerdict) || answer;
+                return Economy.forState(moved, { ...step, workshop: kept, eventVerdict }).workshop.incomePerHour;
+            };
+            const bit = Sections.sectionBit;
+            assert.equal(incomeAfter(bit('occupation')), 1200, 'a spot event keeps the workshop');
+            assert.equal(incomeAfter(bit('sources') | bit('money')), 1200, 'a quantity refusal keeps the workshop');
+            assert.equal(incomeAfter(bit('supply')), 1200, 'a supply event keeps the workshop');
+            assert.equal(incomeAfter(bit('build')), 3000, 'a kit event asks again');
+            assert.equal(incomeAfter(bit('occupation'), stats => ({ ...stats, money: [stats.money[0] * 2, ...stats.money.slice(1)] })),
+                3000, 'the hour value beyond the bot\'s error asks again');
             const unknownCrafter = { ...crafter, characterId: 990033 };
             const unknownHeld = Economy.forState(unknownCrafter, { ...deps, workshop: { ...workshop, known: false } });
             const unknown = stepOf({ ...unknownCrafter, stats: { ...unknownCrafter.stats, ...unknownHeld.statsPacket } });

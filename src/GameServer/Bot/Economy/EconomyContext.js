@@ -669,6 +669,30 @@ function watchedBoard(board, watch) {
         ...(board.heads ? { heads: (selfId, ...rest) => { watch(selfId); return board.heads(selfId, ...rest); } } : {})
     });
 }
+// One watch row (marketWatchRows): the reference price is the better of the
+// build's price and the board head, the error the bot's own.
+function watchRow(board, exclude, id, storeType, value, errorOf) {
+    if (!(id > 0) || !(value > 0)) return null;
+    const head = board?.first(id, storeType, exclude)?.price;
+    const reference = !(head > 0) ? value : storeType === SELL ? Math.min(value, head) : Math.max(value, head);
+    // Rounded: the baseline is saved with the bot (a few bytes per row).
+    return [id, storeType, Math.round(reference), Math.round(errorOf(id) * 1000) / 1000];
+}
+// The workshop recipe's own watch rows (its product's buyers, its materials'
+// sellers), whole: kept with the ask (plan.workshopAsked) and appended last
+// to the build's watch list (marketWatchRows).
+function recipeWatchRows(recipe, board, ownerId, buyValue, sellValue, errorOf) {
+    if (!recipe) return [];
+    const exclude = { excludeOwner: ownerId }, rows = [];
+    const add = (id, storeType, value) => {
+        if (rows.some(row => row[0] === id && row[1] === storeType)) return;
+        const row = watchRow(board, exclude, id, storeType, value, errorOf);
+        if (row) rows.push(row);
+    };
+    add(Number(recipe.productId), BUY, sellValue(Number(recipe.productId)));
+    for (const row of recipe.materials || []) add(Number(row.selfId), SELL, buyValue(Number(row.selfId)));
+    return rows;
+}
 // The decision's watch list, read by the soft point (DecisionSections
 // .softEvents): the wish roots it would buy (their sell lines, storeType 1)
 // and its sale rows (their buy lines, 3), each [itemId, storeType, reference
@@ -678,27 +702,22 @@ function watchedBoard(board, watch) {
 // saw (excluding the bot's own line): the head is one input of the price
 // belief, so a far cheaper ask stays below the believed price after the
 // rebuild and would cross at every step; the decision already weighed it.
-// Only a newer, clearly better line crosses. recipe: the build's productive
-// workshop recipe (a crafter's); its product's buy lines and its materials'
-// sell lines are watched too, after the wishes and sales, so a crossing
-// raises money and the kept workshop is asked again (Sections.COMPUTED.workshop).
-function marketWatchRows(queue, sales, board, ownerId, buyValue, sellValue, errorOf, recipe = null) {
+// Only a newer, clearly better line crosses. recipeRows: the build's
+// productive workshop recipe's rows (recipeWatchRows, a crafter's), watched
+// after the wishes and sales: a crossing raises money, and the build that
+// follows asks the workshop again (askedInputsCrossed, the same rows).
+function marketWatchRows(queue, sales, board, ownerId, buyValue, sellValue, errorOf, recipeRows = []) {
     const rows = [], exclude = { excludeOwner: ownerId };
+    const fits = (id, storeType) => rows.length < Sections.MARKET_WATCH && !rows.some(row => row[0] === id && row[1] === storeType);
     const add = (id, storeType, value) => {
-        if (rows.length >= Sections.MARKET_WATCH || !(id > 0) || !(value > 0)
-            || rows.some(row => row[0] === id && row[1] === storeType)) return;
-        const head = board?.first(id, storeType, exclude)?.price;
-        const reference = !(head > 0) ? value : storeType === SELL ? Math.min(value, head) : Math.max(value, head);
-        // Rounded: the baseline is saved with the bot (a few bytes per row).
-        rows.push([id, storeType, Math.round(reference), Math.round(errorOf(id) * 1000) / 1000]);
+        if (!fits(id, storeType)) return;
+        const row = watchRow(board, exclude, id, storeType, value, errorOf);
+        if (row) rows.push(row);
     };
     for (const wish of queue) { const id = Number(wish.object?.itemId); if (id > 0) add(id, SELL, buyValue(id)); }
     for (const [id] of sales) add(Number(id), BUY, sellValue(id));
     // Last: the workshop's rows never push a wish or a sale out of the cap.
-    if (recipe) {
-        add(Number(recipe.productId), BUY, sellValue(Number(recipe.productId)));
-        for (const row of recipe.materials || []) add(Number(row.selfId), SELL, buyValue(Number(row.selfId)));
-    }
+    for (const row of recipeRows) if (fits(row[0], row[1])) rows.push(row);
     return rows;
 }
 function defaultProducerSource(state, board) {
@@ -1256,7 +1275,10 @@ function forState(state = {}, deps = {}) {
             keep: kept => { for (const id of kept) read(id); } } };
     // A worker build given no workshop keeps the held build's (keptWorkshop).
     const workshop = Object.hasOwn(deps, 'workshop') ? deps.workshop : isMainThread
-        ? craftIncome(state, { hourAdena: base.hourAdena, worth: price, timestamp }) : keptWorkshop(held, mask, state);
+        ? craftIncome(state, { hourAdena: base.hourAdena, worth: price, timestamp }) : keptWorkshop(held, mask, state, sourceBoard);
+    // The held build's own workshop (heldWorkshop, keptWorkshop) carries the
+    // record of its ask; any other is a fresh answer, recorded below.
+    const keptAsk = workshop && workshop === held?.plan.workshop ? held.plan.workshopAsked || null : null;
     context.workshop = workshop || { recipeId: 0, productId: 0, incomePerHour: NaN, cycleHours: NaN };
     const productive = workshop?.known !== false && workshop?.incomePerHour > 0 && Number.isFinite(workshop.incomePerHour)
         && workshop.cycleHours > 0 && Number.isFinite(workshop.cycleHours);
@@ -1364,11 +1386,21 @@ function forState(state = {}, deps = {}) {
         const known = knowledgeEnabled && (beliefs.get(id) || beliefFor(id));
         return known ? Math.expm1(PriceBelief.sigma(known)) : 0;
     };
+    // || (TradeIntent.project above keeps ??): a zero-usefulness item's
+    // worth is 0, yet its sale is watched at its price.
+    const sellValue = id => context.worth(id) || price(id);
+    // A kept workshop keeps its ask's rows; a fresh one watches its recipe at this build's prices.
+    const recipeRows = keptAsk ? keptAsk.rows : recipeWatchRows(productive ? Recipes.resolveByRecipeId(workshop.recipeId) : null,
+        sourceBoard, Number(state.characterId), price, sellValue, priceError);
     const watchRows = marketWatchRows(network.queue, context.liquidationInputs?.rows || [], sourceBoard,
-        // || (TradeIntent.project above keeps ??): a zero-usefulness item's
-        // worth is 0, yet its sale is watched at its price.
-        Number(state.characterId), price, id => context.worth(id) || price(id), priceError,
-        productive ? Recipes.resolveByRecipeId(workshop.recipeId) : null);
+        Number(state.characterId), price, sellValue, priceError, recipeRows);
+    // The record of the workshop's ask, beside it (never on the workshop
+    // object): the packet hour this build wrote with it (its own income in
+    // it is no later drift), the physical wallet the search read (escrow 0),
+    // the kept recipe's cycle cash and its watch rows. A kept workshop
+    // carries its ask's record over.
+    context.workshopAsked = keptAsk || { hour: positive(context.statsPacket.money?.[0]), wallet: Funding.budget(state, 0),
+        cash: positive(workshop?.cash), rows: recipeRows };
     // The build's facts for its baseline: the request's when they were read
     // over this state itself (no held leaf's field activity in between).
     context.statsPacket.wishSections = Sections.snapshot(state, context, cash.result, moneyError, deps.mode,
@@ -1528,7 +1560,7 @@ function planOf(context, base, { key, tripHour, projection = null, knowledgeEnab
         riskWeight: context.riskWeight, bestSpotId: context.bestSpotId, deathHours: context.deathHours,
         lostGearHours: context.lostGearHours, karmaHours: context.karmaHours, expectedDeathHours: context.expectedDeathHours,
         survivalReserve: context.survivalReserve, kit: base.kit, hourAdena: context.hourAdena, workshop: context.workshop,
-        routeKey: context.routeKey, routeRows: context.routeRows, tripHour,
+        workshopAsked: context.workshopAsked, routeKey: context.routeKey, routeRows: context.routeRows, tripHour,
         network: compactNetwork(context.network), moneyPrice: context.moneyPrice, gapHorizonHours: context.gapHorizonHours,
         watchList: context.watchList, intentPending: context.intentPending, statsPacket: context.statsPacket,
         wallet: context.wallet, horizonHours: context.horizonHours, values: projection?.values, stockRoots, knowledgeEnabled,
@@ -1777,12 +1809,34 @@ function forGroup(group, members, deps = {}) {
     return context;
 }
 // The held build's workshop (the occupation planner's answer it was built
-// with) while none of its sections moved (mask, Sections.COMPUTED.workshop),
-// on the same route and known; else null: the caller asks again.
+// with) while its section did not move (mask, Sections.COMPUTED.workshop: the
+// kit), on the same route and known; else null: the caller asks again.
 function heldWorkshopOf(held, mask, state) {
     const workshop = held?.plan.workshop;
     return workshop && !(Number(mask) & Sections.COMPUTED.workshop) && held.plan.routeKey === Trip.key(state)
         && workshop.known !== false && Number.isFinite(workshop.incomePerHour) ? workshop : null;
+}
+// The ask's own drifting reads crossed since the ask (plan.workshopAsked):
+// the packet's hour beyond the bot's income error, the physical wallet beyond
+// the soft point's money error (none without one, as softEvents) or below the
+// kept recipe's cycle cash, or one of the kept recipe's watch rows crossed on
+// the board. A held build without the record asks. Judged only where a build
+// follows: a served held build keeps its workshop as it is (a re-ask there
+// would renew the card only, not the plan, and repeat every step).
+function askedInputsCrossed(held, state, board) {
+    const asked = held.plan.workshopAsked;
+    if (!asked) return true;
+    const hour = positive(state.stats?.money?.[0]);
+    if (Math.abs(hour - asked.hour) > Sections.incomeError(state, held.plan.persona) * asked.hour) return true;
+    const wallet = Funding.budget(state, 0), moneyError = Number(held.plan.statsPacket.wishSections?.moneyError);
+    if (wallet < asked.cash || moneyError >= 0 && Math.abs(wallet - asked.wallet) > moneyError) return true;
+    return !!board && Sections.marketCrossed(board, asked.rows, Number(state.characterId));
+}
+// The workshop a build keeps: the held one while its section held and its
+// ask's reads did not cross, else null.
+function workshopForBuild(held, mask, state, board) {
+    const workshop = heldWorkshopOf(held, mask, state);
+    return workshop && !askedInputsCrossed(held, state, board) ? workshop : null;
 }
 // A crafter's build that keeps no known workshop. Counts crafters only: a
 // bot without workshop entries has no workshop to know.
@@ -1792,8 +1846,8 @@ function countUnknownWorkshop(state) {
 // A worker build given no workshop (forState: a reader that builds without
 // the step's workshop, e.g. a stock check): the held one, else an unknown
 // one, which the step's next build does not keep (heldWorkshop: it asks).
-function keptWorkshop(held, mask, state) {
-    const workshop = heldWorkshopOf(held, mask, state);
+function keptWorkshop(held, mask, state, board) {
+    const workshop = workshopForBuild(held, mask, state, board);
     if (workshop) return workshop;
     countUnknownWorkshop(state);
     return ColdEconomyDecision.unknownWorkshop();
@@ -1803,8 +1857,9 @@ function keptWorkshop(held, mask, state) {
 // handed to that build (eventVerdict, the step's: `collected`, handedVerdict);
 // the route rows it judged are written back on the step's deps, which the
 // build spreads. The held workshop (heldWorkshopOf) under the mask the build
-// will take (none for a valid verdict, which serves the held build), or null:
-// ask the occupation planner. A valid verdict is handed to the build either
+// will take (none for a valid verdict, which serves the held build; a refusal
+// also judges the ask's reads, askedInputsCrossed), or null: ask the
+// occupation planner. A valid verdict is handed to the build either
 // way: the ask only renews the card's workshop. No held proof: null,
 // nothing judged.
 function heldWorkshop(state, deps, eventVerdict) {
@@ -1814,7 +1869,8 @@ function heldWorkshop(state, deps, eventVerdict) {
     const { reads, verdict } = heldVerdictFor(state, own);
     deps.routeRows = own.routeRows;
     eventVerdict.collected = collectedOf(verdict, state, held.plan.eventProof, heldOptionsOf(held), own, reads);
-    const kept = heldWorkshopOf(held, verdict.valid ? 0 : verdictMask(state, eventVerdict, verdict), state);
+    const kept = verdict.valid ? heldWorkshopOf(held, 0, state)
+        : workshopForBuild(held, verdictMask(state, eventVerdict, verdict), state, own.board);
     // The ask awaits the planner, and memory or recipe rows may land before
     // the build: its reads (the build key among them) are taken fresh then.
     if (!kept) eventVerdict.collected.reads = null;
@@ -1860,5 +1916,5 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, shotDemand, stateForActor, preparedRouteRows, heldWorkshop, heldWorkshopOf, keptWorkshop, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, shotDemand, stateForActor, preparedRouteRows, heldWorkshop, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome };

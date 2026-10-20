@@ -227,17 +227,6 @@ function changeWorkshop(key, row) {
 }
 const EDGE_STEPS = 64;
 const WORK_STAGES = Object.freeze(['stock', 'recipe', 'ingredient', 'owned', 'quote', 'trip', 'exit', 'without', 'success', 'utility', 'candidate', 'funding', 'edge']);
-// Two states feed the same decision: its echo (decisionSeq, activityLeaf,
-// focus), the raised sections, the wallet and the MP, compared as values.
-function sameDecisionInput(left, right) {
-    const a = left.stats || {}, b = right.stats || {};
-    return Number(a.decisionSeq || 0) === Number(b.decisionSeq || 0)
-        && Number(a.activityLeaf || 0) === Number(b.activityLeaf || 0)
-        && (a.wishFocus?.[0] ?? null) === (b.wishFocus?.[0] ?? null)
-        && Number(a.wishDirty || 0) === Number(b.wishDirty || 0)
-        && Number(left.adena ?? left.inventory?.[57]?.amount ?? 0) === Number(right.adena ?? right.inventory?.[57]?.amount ?? 0)
-        && Number(left.vitals?.mp ?? 0) === Number(right.vitals?.mp ?? 0);
-}
 const occupationPlanner = new ColdOccupationPlanner({
     onPublishError: (error, characterId, input) => send('fault', {
         reason: 'occupation_publication_failed', characterId, mode: input.mode,
@@ -250,17 +239,18 @@ const occupationPlanner = new ColdOccupationPlanner({
     sourceScopeToken: scope => OccupationSources.recipeIndex(boardIndex).revision(scope),
     ownCurrent: (id, input) => !shuttingDown && (id >= 0 || routeRequests.get(-id) === input)
         && kernel?.states.get(Math.abs(id))?.state === input.sourceState,
-    sameInput: (left, right) => left.mode === 'wish' || right.mode === 'wish'
-        ? left.mode === right.mode && left.sourceState === right.sourceState && left.routeKey === right.routeKey
-        : left.assetsKey === right.assetsKey && left.state.updatedAt === right.state.updatedAt
-        && sameDecisionInput(left.state, right.state)
-        && left.state.simulation?.revision === right.state.simulation?.revision
-        && left.state.inventory === right.state.inventory
-        && left.state.stats?.workshop?.entries === right.state.stats?.workshop?.entries
-        && left.knownShotRecipes === right.knownShotRecipes && left.recipeBook === right.recipeBook && left.stock === right.stock
-        && left.sourceReady === right.sourceReady
-        && left.routeKey === right.routeKey
-        && left.mode === right.mode && left.buyOrderEscrow === right.buyOrderEscrow,
+    // In-flight de-duplication only, never a keep-or-recompute rule (the
+    // workshop is kept with the held build, EconomyContext.heldWorkshop): one
+    // native state (sourceState; the kernel replaces a state, never edits it),
+    // the same asked state object (a step asks twice on different ones: the
+    // card's craft refresh before its round, the action after it), and the
+    // request's own inputs beside the state (the warehouse and clan supply
+    // versions, whose table writes re-plan a near bot on its same state; a
+    // party goal query passes main's escrow and recipe book).
+    sameInput: (left, right) => left.mode === right.mode && left.sourceState === right.sourceState
+        && left.routeKey === right.routeKey && (left.mode === 'wish' || left.state === right.state
+        && left.assetsKey === right.assetsKey && left.knownShotRecipes === right.knownShotRecipes && left.recipeBook === right.recipeBook && left.stock === right.stock
+        && left.sourceReady === right.sourceReady && left.buyOrderEscrow === right.buyOrderEscrow),
     capture: (id, input, read, readScope) => {
         const book = RecipeBookCodec.unpack(input.recipeBook);
         return { state: input.state, board: boardReady(), timestamp: input.timestamp, read, readScope,
@@ -1402,8 +1392,11 @@ function startKernel(config = {}) {
                             { buyOrderEscrow: ownEscrow(), stockFor: (_state, kind) => (stock ||= prepared.basics = EconomyContext.basics(projected, deps)).stock(kind) });
                         if (refreshed) refreshed = await refreshCraftPacket(projected, timestamp, refreshed);
                         if (refreshed) { if (economyDiagnostics.active()) economyDiagnostics.count('advisory', 'reuse', 'result'); return refreshed.economy; }
-                        deps.workshop = await askWorkshop(projected, timestamp, deps.routeRows,
-                            projected.party?.partyId || projected.partyId ? 'party' : 'karma');
+                        // The lifecycle's order: the held build's verdict on the
+                        // projected state keeps its workshop, else the planner is asked.
+                        deps.workshop = EconomyContext.heldWorkshop(projected, deps, prepared.eventVerdict ||= {})
+                            || await askWorkshop(projected, timestamp, deps.routeRows,
+                                projected.party?.partyId || projected.partyId ? 'party' : 'karma');
                         return EconomyContext.forState(projected, withIncomeRoute(withEventVerdict(deps, prepared), prepared.basics));
                     },
                     onEconomy: (built, seen) => {

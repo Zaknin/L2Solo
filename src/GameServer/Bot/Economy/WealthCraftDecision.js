@@ -166,9 +166,12 @@ function* decisionSearch(state, knownRecipes, context, options, mode) {
 function chooseOpportunity(state, knownRecipes, context = Profit.contextFor(state), options = {}) {
     return Policy.drain(decisionSearch(state, knownRecipes, context, options, 'action'));
 }
+// cash: the chosen cycle's basket (cash cost plus fees), the wallet floor the
+// kept workshop is judged against (EconomyContext.askedInputsCrossed).
 function occupationResult(row) {
     return row && row.incomePerHour > 0 && row.hours > 0 ? { known: true, recipeId: Number(row.recipe.recipeId),
-        productId: Number(row.recipe.productId), incomePerHour: row.incomePerHour, cycleHours: row.hours }
+        productId: Number(row.recipe.productId), incomePerHour: row.incomePerHour, cycleHours: row.hours,
+        cash: row.basket.cashCost + row.basket.actualCashFees }
         : { known: true, recipeId: 0, productId: 0, incomePerHour: 0, cycleHours: 0 };
 }
 function createOccupation(state, knownRecipes, context, options = {}) {
