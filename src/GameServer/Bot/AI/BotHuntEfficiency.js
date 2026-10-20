@@ -191,17 +191,30 @@ function bestIncome(rows, share = 1) {
 // No cohort median: a bot calibrates the common table only with its own
 // samples. This base income is independent from the wish network, so price
 // priors and providers cannot recurse through the common value of an hour.
-function huntIncome(state, timestamp = Date.now(), mode) {
+// fits(spotId): the bot's own fit for a spot, when the caller knows it
+// (EconomyContext.foundation, a solo bot). The hunt then names only spots the
+// bot may hunt: an unfit own row or table pick gives way to the first fitting
+// spot of the shared income ranking, and its numbers come from that row; with
+// no fitting spot the pick stays the table's.
+function huntIncome(state, timestamp = Date.now(), mode, fits = null) {
     const own = bestIncome(sampledRows(state, timestamp, mode), onSpotShare(state));
-    if (own?.perHour > 0) return { ...own, source: 'own' };
+    if (own?.perHour > 0 && (!fits || fits(own.spotId))) return { ...own, source: 'own' };
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const rewardOptions = { spoilSkillLevel: require('../Economy/SpotRewardExpectation').spoilSkillLevel(state) };
     const tableRole = Roles.tableRoleFor(state);
-    const current = state.spotId && Table.value(state.spotId, tableRole, levelOf(state), true, rewardOptions);
-    const progress = current || Table.best(tableRole, levelOf(state), true);
+    const level = levelOf(state);
+    const current = state.spotId && (!fits || fits(state.spotId)) && Table.value(state.spotId, tableRole, level, true, rewardOptions);
     const costs = consumablePrices(state);
-    const row = current && netIncome(current, costs) > 0 ? current : Table.rankedIncome(tableRole, levelOf(state), costs, -7, true, rewardOptions)[0]
-        || Table.rankedIncome(tableRole, levelOf(state), costs, -7, false, rewardOptions)[0];
+    const ranked = shots => Table.rankedIncome(tableRole, level, costs, -7, shots, rewardOptions);
+    let progress = current || Table.best(tableRole, level, true);
+    let row = current && netIncome(current, costs) > 0 ? current : ranked(true)[0] || ranked(false)[0];
+    if (fits) {
+        let fitting;
+        const fitRow = () => fitting !== undefined ? fitting
+            : (fitting = ranked(true).find(entry => fits(entry.spotId)) || ranked(false).find(entry => fits(entry.spotId)) || null);
+        if (row && !fits(row.spotId || state.spotId)) row = fitRow() || row;
+        if (progress && !fits(progress.spotId || state.spotId)) progress = fitRow() || progress;
+    }
     if (!row) return { perHour: 0, perKill: 0, expPerHour: 0, source: 'unavailable' };
     const income = netIncome(row, costs);
     return { perHour: income * onSpotShare(state), perKill: row.kills > 0 ? income / row.kills : 0,

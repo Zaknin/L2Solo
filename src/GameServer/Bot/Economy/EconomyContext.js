@@ -36,6 +36,7 @@ const engine = new WishNetwork();
 const Trip = require('./EconomicTrip');
 const IncomeRoute = require('./EquipmentIncomeRoute');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
+const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
 const ColdTrip = invoke('GameServer/Bot/Population/ColdTrip');
 const TravelRoutes = invoke('GameServer/Bot/Travel/TravelRoutes');
 const GearProgression = invoke('GameServer/Bot/AI/PersonalGearProgression');
@@ -894,21 +895,44 @@ function incomeRouteFor(state, deps, timestamp, price, keep) {
         maxChecks: deps.maxChecks, required, reads, route });
     return route;
 }
+// The bot's own fit for the spot of its hunting leaf (docs/architecture.md §2
+// route): the catalog holds the spot and the route's ground and matchup reader
+// allows it, the test BotRoute.leafChoice applies before a leaf trip. A solo
+// bot only (a party hunts its party's route; mode: the build's, as select
+// reads it); no catalog, no test. One reader per foundation, one verdict per spot.
+function leafFit(state, spots, timestamp, mode) {
+    if (!Array.isArray(spots) || !spots.length || ['party', 'duo'].includes(mode)
+        || LevelingRoutes.modeForState(state) !== 'solo') return null;
+    const allowed = LevelingRoutes.spotAllowedReaderFor(state, { timestamp, mode: 'solo' });
+    const verdicts = new Map();
+    return spotId => {
+        const key = String(spotId);
+        let fit = verdicts.get(key);
+        if (fit === undefined) {
+            const spot = SpotIndex.spotById(spots, spotId);
+            fit = !!spot && allowed(spot);
+            verdicts.set(key, fit);
+        }
+        return fit;
+    };
+}
 function foundation(state, deps, persona, timestamp, price, keepRoute = null) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const tableRole = Roles.tableRoleFor(state);
-    let hunt = Hunt.huntIncome(state, timestamp, deps.mode);
+    const spots = deps.spots || invoke('GameServer/Bot/AI/SpotService').spots;
     const incomeRoute = incomeRouteFor(state, deps, timestamp, price, keepRoute);
+    let hunt;
     if (incomeRoute) {
+        // select already passed this spot through the same ground and matchup reader.
         const row = incomeRoute.row;
         hunt = { perHour: row.income * Hunt.onSpotShare(state), perKill: row.kills > 0 ? row.income / row.kills : 0,
             expPerHour: row.exp * Hunt.onSpotShare(state), source: 'route', spotId: incomeRoute.spot.id,
             progressSpotId: incomeRoute.spot.id, useShots: row.useShots };
-    }
+    } else hunt = Hunt.huntIncome(state, timestamp, deps.mode, leafFit(state, spots, timestamp, deps.mode));
     const lostGearHours = hunt.perHour > 0 ? Valuation.pkDropValue(state, price) / hunt.perHour : 0;
     const bestSpotId = hunt.spotId || state.spotId;
-    const walkBackHours = invoke('GameServer/Bot/Economy/WalkBack').hours(bestSpotId, state, deps.spots || invoke('GameServer/Bot/AI/SpotService').spots);
+    const walkBackHours = invoke('GameServer/Bot/Economy/WalkBack').hours(bestSpotId, state, spots);
     const deathHours = Valuation.deathHours(state, { ...hunt, lostGearHours, walkBackHours });
     const spotTable = bestSpotId ? Table.value(bestSpotId, tableRole, state.level, hunt.useShots !== false) : null;
     const bestTable = spotTable || Table.best(tableRole, state.level, hunt.useShots !== false);
