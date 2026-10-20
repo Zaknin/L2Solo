@@ -1126,7 +1126,7 @@ class ColdSimulationKernel {
             const current = this.states.get(id);
             const encounter = current.state.stats?.pvpEncounter;
             if (encounter) {
-                this.requeue(id, Math.max(timestamp + 1000, encounter.expiresAt + 1000));
+                this.requeueAtDue(id);
                 continue;
             }
             const kind = this.buyerWakeups.has(id) && eligibleBuyer(current.state)
@@ -1157,7 +1157,7 @@ class ColdSimulationKernel {
                 // Existing accepted meetings advance through the same atomic
                 // group lifecycle; their finite transitions never enter hunt.
                 if (members.some(member => member.stats?.pvpEncounter)) {
-                    this.requeue(id, timestamp + 1000);
+                    this.requeueAtDue(id);
                     continue;
                 }
                 const reserved = require('./PartyMarketBreak').pending(party, timestamp).length > 0;

@@ -17,6 +17,7 @@ const BackgroundWorkGovernor = invoke('GameServer/Bot/Population/BackgroundWorkG
 const BackgroundJobRegistry = invoke('GameServer/Bot/Population/BackgroundJobRegistry');
 const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const NpcDecay = invoke('GameServer/World/Generics/NpcDecay');
+const PvpEncounterRuntime = invoke('GameServer/Bot/Population/PvpEncounterRuntime');
 const { heapRecord, heapsLine } = require('./WorkerHeapTelemetry');
 const { performance } = require('node:perf_hooks');
 let mainEluMark = performance.eventLoopUtilization();
@@ -99,13 +100,16 @@ const PopulationStatus = {
 
     // The goal's numbers without diagnostics, in the full line's names: cold queue due now and the oldest wait,
     // worker busy share since the last heartbeat, main busy share since the last goal line (its only caller is
-    // the periodic summary), worker heap after the last major GC / its 10-min maximum.
+    // the periodic summary), worker heap after the last major GC / its 10-min maximum; pvp= cold PvP fights
+    // running / steps and wall ms of the encounter runtime's longest pass since the last line (budget PASS_MS).
     goalText(queue = {}, coordinator) {
         const worker = coordinator?.worker || {}, mb = bytes => bytes ? Math.round(bytes / 1024 / 1024) : '-';
         const mainElu = performance.eventLoopUtilization(mainEluMark);
         mainEluMark = performance.eventLoopUtilization();
+        const pvp = PvpEncounterRuntime.passPeak();
         return `coldDue=${queue.overdue || 0} coldDueAll=${queue.due || 0} coldDueAge=${Math.round((queue.oldestAgeMs || 0) / 1000)}s`
-            + ` workerElu=${Number(worker.eventLoopUtilization || 0).toFixed(2)} mainElu=${mainElu.utilization.toFixed(2)} workerHeapGc=${mb(worker.heapAfterGc)}/${mb(worker.heapAfterGcMax10)}MB`;
+            + ` workerElu=${Number(worker.eventLoopUtilization || 0).toFixed(2)} mainElu=${mainElu.utilization.toFixed(2)} workerHeapGc=${mb(worker.heapAfterGc)}/${mb(worker.heapAfterGcMax10)}MB`
+            + ` pvp=${pvp.live}/${pvp.steps}/${pvp.ms}ms/${pvp.left}`;
     },
 
     summary() {
