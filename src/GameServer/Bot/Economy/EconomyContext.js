@@ -1591,7 +1591,11 @@ function stockTargets(base) {
 // economy and its money packet. Two choices kept on purpose: escrow 0, as the
 // main-thread review read it; worth || price, since a full context values an
 // item off the bot's wish card at 0, not null.
+// Only the activities the main-thread review posted for; any other step
+// keeps the previous row as it is.
+const SHOT_DEMAND_ACTIVITIES = ['hunting', 'resting', 'shopping', 'grouped'];
 function shotDemand(economy, state, timestamp, previous = null) {
+    if (!SHOT_DEMAND_ACTIVITIES.includes(state.activity)) return previous;
     const stock = economy.stock('shots');
     const missing = stock.survivalMissing + stock.missing;
     if (!stock.needed || !missing) return null;
