@@ -116,6 +116,10 @@ class Attack {
             this.bowRepeatTarget = creature;
             return;
         }
+        // A swing is already in flight: its end timer owns the next swing.
+        // Repeated target clicks handled in one network chunk would otherwise
+        // start a second loop that a ground click cannot stop.
+        if (actor.state.fetchHits?.()) return;
         if (!AttackRange.isWithinRange(actor, creature, attackRange)
             || invoke('GameServer/Automation').needsGeodataApproach(session, actor, creature)) {
             actor.state.setHits(false);
