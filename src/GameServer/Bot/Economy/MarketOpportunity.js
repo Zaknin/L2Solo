@@ -143,13 +143,15 @@ function storeOffer(session, store, item, town) {
         sourceId: Number(actor.fetchId?.() || 0),
         sourceName: actorName,
         sellerKind,
-        town: store.town || town || null,
+        town: town || store.town || null,
         selfId: Number(item.selfId),
         itemName: itemName(item.selfId),
         price: sellerKind === 'fixed' && SHOT_IDS.has(Number(item.selfId))
             ? invoke('GameServer/Bot/TradeService').storeItemPrice(store, item, BOT_PRICE_CONTEXT)
             : Number(item.price),
         count: Number(item.count),
+        objectId: Number(item.objectId) || null,
+        enchant: Number(item.enchant || 0),
         available: true,
         session,
         store,
@@ -158,19 +160,23 @@ function storeOffer(session, store, item, town) {
 }
 
 function sellingStore(session) {
-    const store = session?.actor?.fetchPrivateStore?.();
-    return store && Number(store.storeType) === 1 ? store : null;
+    const actor = session?.actor;
+    const store = actor?.fetchPrivateStore?.();
+    return store && Number(store.storeType) === 1 && !store.packageSale
+        && (store.kind !== 'player' || (actor.fetchPrivateStoreType?.() ?? 1) === 1)
+        && actor.fetchIsOnline?.() !== false && !actor.isDead?.() ? store : null;
 }
 
 function privateOffers(selfId, town) {
     return (World.user?.sessions || []).flatMap((session) => {
         const store = sellingStore(session);
         if (!store) return [];
-        if (town && store.town && store.town !== town) return [];
-        const item = (store.items || []).find((entry) => Number(entry.selfId) === Number(selfId) && Number(entry.count) > 0);
-        if (!item || Number(item.price) <= 0) return [];
-        const offer = storeOffer(session, store, item, town);
-        return botCanBuy(offer) ? [offer] : [];
+        const physicalTown = () => invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(session.actor);
+        const actualTown = store.kind === 'player' ? physicalTown() : store.town || physicalTown();
+        if (town && actualTown !== town) return [];
+        return (store.items || []).filter(entry => Number(entry.selfId) === Number(selfId)
+            && Number(entry.count) > 0 && Number(entry.price) > 0)
+            .map(item => storeOffer(session, store, item, actualTown)).filter(botCanBuy);
     });
 }
 
@@ -185,7 +191,10 @@ function hotOffers(selfId, options = {}) {
         ...AfkTrade.offers(selfId, 1, { town, characterId: options.buyerCharacterId }),
         ...privateOffers(selfId, town),
         ...(town ? npcOffers(selfId, town) : [])
-    ].filter((offer) => offer.available && require('../Population/PartyAdmission').personalOfferAllowed(offer,
+    ].filter((offer) => offer.available && Number(offer.sourceId) !== Number(options.buyerCharacterId)
+        && Number(offer.price) <= (options.budget ?? Infinity)
+        && (!options.accept || options.accept(offer))
+        && require('../Population/PartyAdmission').personalOfferAllowed(offer,
         ownState, undefined, ownSession))
         .sort((left, right) => OfferOrder.compareOffers(left, right, options.cost));
 }
@@ -214,6 +223,56 @@ function bestOffer(selfId, options = {}) {
         toOffer: AfkTrade.offerOf,
         others: OfferQuery.othersIn(towns, fixed, npc)
     });
+}
+
+// Keep the indexed board/NPC query for the existing sources; a visible actor
+// may also choose a public live shop in the town it physically visits.
+function bestHotOffer(selfId, options = {}) {
+    const indexed = module.exports.bestOffer(selfId, options);
+    const live = privateOffers(selfId, options.town).filter(offer => offer.store?.kind === 'player'
+        && Number(offer.sourceId) !== Number(options.buyerCharacterId)
+        && (!options.accept || options.accept(offer)));
+    return OfferOrder.best([...(indexed ? [indexed] : []), ...live], options);
+}
+
+// A visible seller weighs ordinary buy shops with the same disposition rule
+// as board bids. This short-lived view publishes executable quotes only; it
+// never adds a live shop to the cold workers' remote settlement index.
+function liveBuyBoard(town, excludeOwner = 0) {
+    const board = AfkTrade.boardIndex(), bids = new Map();
+    for (const session of World.user?.sessions || []) {
+        const actor = session.actor, store = actor?.fetchPrivateStore?.();
+        if (store?.kind !== 'player' || Number(store.storeType) !== 3 || Number(actor.fetchPrivateStoreType?.()) !== 3
+            || Number(actor.fetchId()) === Number(excludeOwner) || actor.isDead?.() || actor.fetchIsOnline?.() === false
+            || invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(actor) !== town) continue;
+        let money = Number(actor.backpack?.fetchTotalAdena?.() || 0);
+        for (const item of store.items || []) {
+            const price = Number(item.price), count = Math.min(Number(item.count), Math.floor(money / price));
+            if (!Number.isSafeInteger(price) || price < 1 || !Number.isSafeInteger(count) || count < 1) continue;
+            money -= count * price;
+            const rows = bids.get(Number(item.selfId)) || [];
+            rows.push({ recordId: `player:${actor.fetchId()}`, lineId: Number(item.selfId), ownerId: Number(actor.fetchId()),
+                selfId: Number(item.selfId), enchant: Number(item.enchant || 0), price, count,
+                storeType: 3, kind: 'shop', custodyPolicy: 0, town, playerPriority: true,
+                liveOffer: { sourceType: 'private_buy_store', sourceId: Number(actor.fetchId()),
+                    sourceName: actor.fetchName(), town, session, store, storeItem: item } });
+            bids.set(Number(item.selfId), rows);
+        }
+    }
+    if (!bids.size) return board;
+    const list = (id, side) => Number(side) !== 3 ? board.list(id, side) : [
+        ...(board.list(id, side) || []), ...(bids.get(Number(id)) || [])
+    ].sort((a, b) => b.price - a.price || Number(b.playerPriority) - Number(a.playerPriority) || a.ownerId - b.ownerId);
+    return new Proxy(board, { get(target, key) {
+        if (key === 'list') return list;
+        if (key === 'first') return (id, side, options = {}) => list(id, side).find(line =>
+            Number(line.ownerId) !== Number(options.excludeOwner)
+            && (options.enchant == null || Number(line.enchant) === Number(options.enchant))
+            && (!options.accept || options.accept(line))) || null;
+        if (key === 'itemRevision') return id => `${board.itemRevision(id)}:${(bids.get(Number(id)) || [])
+            .map(line => [line.ownerId, line.price, line.count, line.enchant].join(':')).join(';')}`;
+        const value = target[key]; return typeof value === 'function' ? value.bind(target) : value;
+    } });
 }
 
 // The buy records of the board (escrow held), best first in the board's own
@@ -332,6 +391,8 @@ function release(offer, qty = 1) {
 module.exports = {
     botCanBuy,
     bestOffer,
+    bestHotOffer,
+    liveBuyBoard,
     bestBuyOffer,
     activeBuyDemandSelfIds,
     bestSupplyOffer,

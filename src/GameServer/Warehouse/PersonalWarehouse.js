@@ -7,6 +7,7 @@ const Item = invoke('GameServer/Item/Item');
 const ItemSlot = invoke('GameServer/Item/ItemSlot');
 const World = invoke('GameServer/World/World');
 const CharacterWriteQueue = invoke('GameServer/Persistence/CharacterWriteQueue');
+const Limits = require('./PersonalWarehouseLimits');
 
 const MAX_LINES = 100;
 const INTERACTION_RADIUS = 300;
@@ -40,9 +41,42 @@ function warehouseItem(row) {
     });
 }
 
-function list(characterId) {
-    return Database.fetchWarehouseItems(characterId)
+function list(owner) {
+    const rows = Limits.isPlayer(owner)
+        ? Database.fetchPlayerWarehouseItems(owner.actor.fetchId(), owner.accountId)
+        : Database.fetchWarehouseItems(typeof owner === 'object' ? owner.actor.fetchId() : owner);
+    return rows
         .then((rows) => rows.map(warehouseItem).filter(Boolean));
+}
+
+async function playerTransfer(session, lines, mode) {
+    const actor = session.actor;
+    const backpack = actor.backpack;
+    await CharacterWriteQueue.flushCharacter(actor.fetchId());
+    const items = mode === 'deposit' ? backpack.fetchItems().filter(canDeposit) : await list(session);
+    if (!validateLines(lines, items)) throw Error(`invalid warehouse ${mode === 'deposit' ? 'deposit' : 'withdrawal'}`);
+    const transfers = lines.map(line => {
+        const source = items.find(item => Number(item.fetchId()) === Number(line.objectId));
+        return { id: Number(source.fetchId()), selfId: Number(source.fetchSelfId()), amount: Number(line.amount),
+            stackable: source.fetchStackable?.() === true };
+    });
+    const results = await Database.transferPlayerWarehouseBatch(actor.fetchId(), session.accountId, transfers, mode);
+    // Publish to the live backpack only after the entire selected batch commits.
+    for (const result of results) {
+        if (mode === 'deposit') {
+            const source = backpack.fetchItems().find(item => Number(item.fetchId()) === result.sourceItemId);
+            if (result.inventoryAmount === 0) backpack.items = backpack.items.filter(item => item !== source);
+            else source.setAmount(result.inventoryAmount);
+        } else {
+            const target = backpack.fetchItems().find(item => Number(item.fetchId()) === result.inventoryId);
+            if (target) target.setAmount(result.inventoryAmount);
+            else {
+                const added = warehouseItem({ ...result, id: result.inventoryId, amount: result.inventoryAmount });
+                if (added) backpack.items.push(added);
+            }
+        }
+    }
+    return list(session);
 }
 
 function validateLines(lines, items) {
@@ -58,6 +92,7 @@ function validateLines(lines, items) {
 
 async function deposit(session, lines) {
     if (!isWarehouseNpc(session)) throw new Error('warehouse NPC is no longer active');
+    if (Limits.isPlayer(session)) return playerTransfer(session, lines, 'deposit');
     const actor = session.actor;
     const backpack = actor.backpack;
     await CharacterWriteQueue.flushCharacter(actor.fetchId());
@@ -97,6 +132,7 @@ async function deposit(session, lines) {
 
 async function withdraw(session, lines) {
     if (!isWarehouseNpc(session)) throw new Error('warehouse NPC is no longer active');
+    if (Limits.isPlayer(session)) return playerTransfer(session, lines, 'withdraw');
     const actor = session.actor;
     const backpack = actor.backpack;
     await CharacterWriteQueue.flushCharacter(actor.fetchId());

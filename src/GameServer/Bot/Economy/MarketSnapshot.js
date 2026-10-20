@@ -190,7 +190,7 @@ function playerStores(sessions, itemsById) {
             ownerName: actor.fetchName?.() || session.name,
             storeType: store.storeType,
             title: store.title,
-            town: store.town,
+            town: store.town || invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(actor),
             loc: {
                 locX: actor.fetchLocX?.(),
                 locY: actor.fetchLocY?.(),

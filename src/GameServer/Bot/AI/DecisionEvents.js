@@ -116,7 +116,8 @@ function nearFields(economy, state) {
     const stock = economy.stock('shots');
     return { statsPacket: economy.statsPacket,
         shotRestock: !!stock.needed && economy.purchaseBudget(stock.itemId) > 0,
-        personalCraft: WishProviders.personalCraftPlan(state, economy) || null,
+        // A near body may also order consumables at a workshop (allowStock).
+        personalCraft: WishProviders.personalCraftPlan(state, economy, { allowStock: true }) || null,
         // The auto-shot verdict (ShotStock.enableAutoShot's inputs): the
         // build's shot stock, itself ShotStock.usePolicy over its tables.
         shots: { itemId: stock.itemId, ownedUsePerHour: stock.ownedUsePerHour,

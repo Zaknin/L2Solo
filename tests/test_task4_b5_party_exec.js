@@ -100,19 +100,22 @@ const ad = (ownerId, selfId, price, custodyPolicy) => {
         // The party bot's own existing ad stayed listed through all of the above.
         assert.deepEqual((await Database.fetchAfkTradeShops(buyer)).map(row => [row.id, row.revision, row.status]), [[ownAd.id, ownAd.revision, 'active']],
             'a party bot keeps its existing ad');
-        // executePlan buyAds has no owner party check (known gap, task4-map-execution.md section 5): the
-        // party buyer's new ad is listed today, but no seller can fill an ad of a party bot.
-        await Market.executePlan(state(), { buyAds: [[1867, 2, 100], [ORE, 2, 237]] });
+        // Retain these requests as meeting adverts: a backed AFK purchase shop
+        // settles without a meeting and does not require the party trade guard.
+        await Market.executePlan(state(), { buyAds: [[1867, 2, 100], [ORE, 2, 237]], buyShop: Afk.SELL });
         const fillable = () => Opportunity.findBuyOffers(ORE, { town: 'Giran', sellerCharacterId: plainSeller }).filter(offer => offer.sourceId === buyer || Number(offer.ownerId) === buyer);
-        const published = (await Database.fetchAfkTradeShops(buyer)).some(row => row.lines.some(line => line.selfId === ORE));
-        if (published) assert.deepEqual(fillable(), [], 'a seller cannot fill a party bot\'s buy ad');
+        const published = (await Database.fetchAfkTradeShops(buyer)).find(row => row.lines.some(line => line.selfId === ORE));
+        assert(published, 'the party buyer publishes the requested meeting advert');
+        assert.equal(published.kind, 'buy_ad');
+        assert.equal(published.custodyPolicy, 1, 'the party guard is exercised on a conditional meeting advert');
+        assert.deepEqual(fillable(), [], 'a seller cannot fill a party bot\'s buy ad');
         // Controls: with no party on either side the same lines are traded, so the refusals above are the party's.
         await setParty(buyer, null);
-        if (published) assert.equal(fillable().length, 1, 'control: the same ad is fillable once the owner leaves the party');
+        assert.equal(fillable().length, 1, 'control: the same ad is fillable once the owner leaves the party');
         assert.deepEqual((await run(() => Market.executePlan(state(), take(plainOre)))).calls, [plainOre], 'control: take buys');
         assert.deepEqual((await run(() => Cold.tryPurchase(state(), gear(120)))).calls, [partyGloves], 'control: gear arrival buys');
         const control = (await run(() => Cold.tryPurchase(state(), material(220)))).calls;
         assert(control.length === 1 && [partyOre, plainOre].includes(control[0]), 'control: material arrival buys a conditional line');
-        console.log(`PASS task4 b5 N11: executePlan take and arrival (gear, material) skip party sellers and party buyers, backed lines bought, own ad kept; party buy ad published=${published}, unfillable`);
+        console.log('PASS task4 b5 N11: executePlan take and arrival (gear, material) skip party sellers and party buyers, backed lines bought, own ad kept; meeting bid fillable only after leaving the party');
     } finally { for (const fn of restore.reverse()) fn(); await world.close(); }
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

@@ -13,7 +13,11 @@ function actorAdena(bot) {
     return Number(bot.backpack?.fetchItemFromSelfId?.(57)?.fetchAmount?.() || 0);
 }
 
-function currentState(session, bot, town) {
+function currentState(session, bot, town, economy = null) {
+    // Autonomous shopping shares the physical actor's route inputs. A
+    // nearby town is a destination until the actor actually reaches it.
+    const physical = session.partyCompanion === true ? null : economy?.state
+        || invoke('GameServer/Bot/Economy/EconomyContext').stateForActor(bot, session);
     const previous = session.coldLifeState || {};
     const inventory = LifeState.inventorySummaryFromItems(bot.backpack?.fetchItems?.() || []);
     return {
@@ -22,13 +26,14 @@ function currentState(session, bot, town) {
         name: bot.fetchName?.() || previous.name,
         level: Number(bot.fetchLevel?.() || previous.level || 1),
         adena: actorAdena(bot),
-        currentRegion: town.name,
-        loc: {
+        currentRegion: physical ? physical.currentRegion : town.name,
+        loc: physical?.loc || {
             locX: Number(bot.fetchLocX()),
             locY: Number(bot.fetchLocY()),
             locZ: Number(bot.fetchLocZ())
         },
         stats: {
+            ...(physical?.stats || {}),
             ...(previous.stats || {}),
             classId: Number(bot.fetchClassId?.() ?? previous.stats?.classId ?? 0),
             role: session.botStatus?.role || previous.stats?.role || null
@@ -41,12 +46,13 @@ function affordableOffers(target, state, town, session) {
     // ARCH-NOTE: Player companion errands use the player's choice; autonomous bots spend only on their funded item.
     const budget = PurchaseFunding.spendable(state, 0, session.partyCompanion === true
         ? { upperBound: true } : { itemId: target.selfId });
-    const offer = MarketOpportunity.bestOffer(target.selfId, {
+    const offer = MarketOpportunity.bestHotOffer(target.selfId, {
         town: town.name,
         buyerCharacterId: state.characterId,
         budget,
         accept: (candidate) => candidate.sourceType === 'npc'
             || ['afk_player_store', 'afk_bot_store'].includes(candidate.sourceType)
+            || candidate.sourceType === 'private_store' && candidate.store?.kind === 'player'
     });
     return offer ? [offer] : [];
 }
@@ -84,9 +90,10 @@ function checkedPlan(session, state, town, options = {}) {
         const funding = ratio > 0 ? { valueRate: ratio } : {};
         const budget = Math.min(PurchaseFunding.spendable(fundedState, 0, PurchaseFunding.goalTerms({ plan: funding }, selfId)) / amount,
             economy.worth(selfId) ?? Infinity);
-        const offer = MarketOpportunity.bestOffer(selfId, { town: town.name, buyerCharacterId: state.characterId, budget,
-            ...(leaf.sourceType ? { accept: row => leaf.sourceType === 'npc' ? row.sourceType === 'npc'
-                : ['afk_player_store', 'afk_bot_store'].includes(row.sourceType) } : {}) });
+        const offer = MarketOpportunity.bestHotOffer(selfId, { town: town.name, buyerCharacterId: state.characterId, budget,
+            accept: row => Number(row.count) >= amount && (row.sourceType === 'private_store' && row.store?.kind === 'player'
+                || !leaf.sourceType || (leaf.sourceType === 'npc' ? row.sourceType === 'npc'
+                    : ['afk_player_store', 'afk_bot_store'].includes(row.sourceType))) });
         return { statsPacket: economy.statsPacket, plan: offer ? { status: 'active', strategy: 'market',
             target: { selfId, name: item?.template?.name, slot: Number(item?.etc?.slot || 0) }, amount,
             market: { sourceType: offer.sourceType }, ...funding } : null, offers: offer ? [offer] : [] };
@@ -139,15 +146,15 @@ function merchantTarget(offer, town) {
     return MarketOpportunity.offerTarget(offer, town.name);
 }
 
-function planErrand(session, bot, town, purchaseCount = 0, excludedSlots = []) {
+function planErrand(session, bot, town, purchaseCount = 0, excludedSlots = [], economy = null) {
     if (!town?.name || purchaseCount >= MAX_PURCHASES_PER_VISIT) return null;
-    const state = currentState(session, bot, town);
+    const state = currentState(session, bot, town, economy);
     const unseal = invoke('GameServer/Bot/AI/BotMammonUnseal').plan(session,bot,town,state);
     if (unseal) return unseal;
     const DualCraft = invoke('GameServer/Bot/AI/CompanionDualSwordCrafting');
     const prepared = DualCraft.plan(session,bot,town,state);
     if (prepared.handled) return prepared.errand;
-    const checked = checkedPlan(session, state, town, { excludedSlots });
+    const checked = checkedPlan(session, state, town, { excludedSlots, economy });
     if (checked.pending) return { pending: true };
     const plan = checked.plan;
     session.coldLifeState = {
@@ -169,6 +176,7 @@ function planErrand(session, bot, town, purchaseCount = 0, excludedSlots = []) {
         sourceType: offer.sourceType,
         sourceId: offer.sourceId,
         lineId: Number(offer.lineId || 0) || null,
+        objectId: offer.objectId || null,
         itemId: Number(plan.target.selfId),
         itemName: offer.itemName || plan.target.name,
         slot: Number(plan.target.slot || 0),

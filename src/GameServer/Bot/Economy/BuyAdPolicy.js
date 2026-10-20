@@ -3,6 +3,7 @@ const DataCache = invoke('GameServer/DataCache');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const { isNativeSource } = require('./TradeIntent');
 const Diagnostics = require('./EconomyDiagnostics');
+const BoardRules = require('../../AfkTrade/BoardRules');
 const nativeGoal = goal => isNativeSource(goal?.plan?.sourceType);
 
 function templateFor(selfId) {
@@ -29,7 +30,7 @@ function retainedLines(state, lines, owned, town) {
     let money = PurchaseFunding.budget(state);
     const result = [];
     for (const line of lines) {
-        const previous = owned.find(row => row.kind === 'buy_ad' && row.storeType === 3 && row.town === town
+        const previous = owned.find(row => ['buy_ad', 'shop'].includes(row.kind) && row.storeType === 3 && row.town === town
             && Number(row.selfId) === Number(line.selfId) && Number(row.enchant || 0) === Number(line.enchant || 0));
         const price = previous && (!Number.isFinite(line.purchaseCap) || Number(previous.price) <= line.purchaseCap)
             ? Number(previous.price) : Number(line.price);
@@ -122,21 +123,22 @@ function linesFor(state, goal, { money = Infinity, watchList, ...options } = {})
     if (!nativeGoal(goal) && !watchList?.some(row => row.key) && goal?.target?.itemId
         && !goals.some(row => row.target.itemId === goal.target.itemId)) goals.unshift(goal);
     const wallet = Number(state.adena || 0);
-    // E303: the buy ads cap of 3 is cut here; the later slices (ColdEconomyPlan.buyBatch, BotAfkMarketService) see at most 3.
+    // E303: the buy ads cap (shop lines + buy ads) is cut here; the later slices (ColdEconomyPlan.buyBatch, BotAfkMarketService) see at most that.
+    const limit = BoardRules.BOT_SHOP_LINES + BoardRules.BOT_RECORDS.buy_ad;
     if (Diagnostics.active()) {
         Diagnostics.count('cap', 'buy_ads', 'check');
-        if (goals.length > 3) {
+        if (goals.length > limit) {
             Diagnostics.count('cap', 'buy_ads', 'cut');
-            Diagnostics.count('cap', 'buy_ads', 'dropped', goals.length - 3);
+            Diagnostics.count('cap', 'buy_ads', 'dropped', goals.length - limit);
         }
     }
     const owned = options.board?.ownerLines?.(Number(state.characterId)) || [];
-    const candidates = goals.slice(0, 3);
+    const candidates = goals.slice(0, limit);
     const townFor = options.townFor || (items => invoke('GameServer/Bot/Economy/MarketTownPolicy').targetTownForItems(state, items));
     let town = townFor(candidates.map(candidate => ({ selfId: Number(candidate.target.itemId) })));
     // Rejected lines can change the grade/town of a mixed order. Price the
     // final town too, before publication; this loop only removes candidates.
-    for (let pass = 0; pass <= 3; pass++) {
+    for (let pass = 0; pass <= limit; pass++) {
         const lines = [];
         for (const candidate of candidates) {
             const bid = bidFor({ ...state, adena: wallet }, candidate, { money: candidate.intent?.key ? Infinity : money, ...options, town });

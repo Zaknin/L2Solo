@@ -27,6 +27,7 @@ function stationForRecipe(recipeId, state = null) {
         // is read here and checked again by the craft after the async reads.
         if (!selected || provider.price != null && Number(selected.entryPrice) !== Number(provider.price)) return null;
         return { id: `workshop_${provider.characterId}`, characterId: provider.characterId,
+            playerWorkshop: selected.playerWorkshop === true,
             loc: selected.state.loc, townName: selected.state.currentRegion, workshop: true,
             recipeId: Number(recipeId), price: selected.price, entryPrice: selected.entryPrice,
             revision: Number(selected.state.simulation?.revision || 0),

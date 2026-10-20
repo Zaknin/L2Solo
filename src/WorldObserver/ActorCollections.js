@@ -59,13 +59,17 @@ function createActorCollections({ subjectFor, execute, itemFor, shopsFor, enemie
                 incidents: incidents.slice(-8).map(row => ({ at: row.at, startedAt: row.startedAt,
                     opponentId: row.opponentId, responsibility: row.responsibility, aggressionRole: row.aggressionRole })) };
         } else {
-            const table = section === 'warehouse' ? 'warehouse_items' : section === 'skills' ? 'skills' : 'items';
+            const sharedWarehouse = section === 'warehouse' && kind === 'player';
+            const table = section === 'warehouse' ? (sharedWarehouse ? 'account_warehouse_items' : 'warehouse_items')
+                : section === 'skills' ? 'skills' : 'items';
+            const owner = sharedWarehouse ? 'accountName = (SELECT username FROM characters WHERE id = ?)'
+                : 'characterId = ?';
             const positive = section === 'skills' ? '' : ' AND amount > 0';
             const columns = section === 'skills' ? 'selfId, name, level, passive'
                 : table === 'items' ? 'id, selfId, name, amount, enchant, equipped, slot' : 'id, selfId, name, amount, enchant';
             const [count, page] = await Promise.all([
-                execute([`SELECT COUNT(*) AS total FROM ${table} WHERE characterId = ?${positive}`, [id]]),
-                execute([`SELECT ${columns} FROM ${table} WHERE characterId = ?${positive} ORDER BY ${section === 'skills' ? 'selfId' : 'id'} LIMIT ? OFFSET ?`, [id, limit, offset]])
+                execute([`SELECT COUNT(*) AS total FROM ${table} WHERE ${owner}${positive}`, [id]]),
+                execute([`SELECT ${columns} FROM ${table} WHERE ${owner}${positive} ORDER BY ${section === 'skills' ? 'selfId' : 'id'} LIMIT ? OFFSET ?`, [id, limit, offset]])
             ]);
             total = Number(count[0]?.total || 0);
             rows = page.map(section === 'skills' ? compactSkill : compactItem);

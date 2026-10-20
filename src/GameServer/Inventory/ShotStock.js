@@ -518,9 +518,16 @@ async function purchaseActorRestock(actor, options = {}) {
         && Number(actor.session.coldLifeState?.characterId) === Number(actor.fetchId());
     const localQuote = botActor && town && options.unitPrice === undefined
         ? invoke('GameServer/Bot/Economy/NpcRestockPlan').quoteFor(plan.selfId, town) : null;
+    const Market = invoke('GameServer/Bot/Economy/MarketOpportunity');
+    const offers = town ? [
+        ...AfkTrade.offers(plan.selfId, AfkTrade.SELL, { characterId: actor.fetchId(), town }),
+        ...Market.privateOffers(plan.selfId, town).filter(offer => offer.store?.kind === 'player'
+            && Number(offer.sourceId) !== Number(actor.fetchId())
+            && invoke('GameServer/PrivateStoreTrade').inRange(actor, offer.session.actor))
+    ] : [];
     const restock = restockPlan(actor, { plan, targetAmount: options.targetAmount,
         unitPrice: options.unitPrice ?? localQuote?.price, potionUnitPrice: options.potionUnitPrice,
-        offers: town ? AfkTrade.offers(plan.selfId, AfkTrade.SELL, { characterId: actor.fetchId(), town }) : [] });
+        offers });
     if (!restock.needed) return { ok: true, changed: false, plan, amount: restock.currentAmount, cost: 0 };
     if (restock.amount <= 0) {
         return { ok: false, reason: 'not_enough_adena', plan, adena: restock.adena,
@@ -531,8 +538,12 @@ async function purchaseActorRestock(actor, options = {}) {
     let cost = 0;
     for (const line of restock.shops) {
         try {
-            const result = await AfkTrade.buyFromShop(actor.fetchId(), line.offer.store, plan.selfId, line.amount,
-                { lineId: line.offer.lineId, expectedPrice: line.price, funding: line.funding });
+            const live = line.offer.sourceType === 'private_store';
+            const result = live
+                ? await invoke('GameServer/Bot/TradeService').buyFromStore(actor, line.offer.store, plan.selfId, line.amount,
+                    { objectId: line.offer.objectId, expectedUnitPrice: line.price, funding: line.funding })
+                : await AfkTrade.buyFromShop(actor.fetchId(), line.offer.store, plan.selfId, line.amount,
+                    { lineId: line.offer.lineId, expectedPrice: line.price, funding: line.funding });
             if (result.pending) return { ok: true, pending: true, meetingId: result.meetingId, changed: delta > 0,
                 plan, amount: shotAmount(actor, plan), delta, cost };
             delta += line.amount;
@@ -600,13 +611,33 @@ function restockTarget(actor, town, excludedIds = []) {
     const excluded = new Set(excludedIds.map(Number));
     const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
     const offers = MarketOpportunity.hotOffers(planForActor(actor).selfId, { town, buyerCharacterId: actor.fetchId() });
+    let fundedLive;
     for (const offer of offers) {
         if (excluded.has(Number(offer.sourceId)) || Number(offer.sourceId) === Number(actor.fetchId())) continue;
-        if (offer.sellerKind !== 'fixed' && !String(offer.sourceType).startsWith('afk_')) continue;
+        if (offer.sellerKind !== 'fixed' && !String(offer.sourceType).startsWith('afk_') && offer.store?.kind !== 'player') continue;
         if (offer.sellerKind === 'fixed' && !offer.session?.actor) continue;
+        if (offer.store?.kind === 'player') {
+            fundedLive ||= new Set(restockPlan(actor, { offers }).shops.map(line => line.offer));
+            if (!fundedLive.has(offer)) continue;
+        }
         return MarketOpportunity.offerTarget(offer, town);
     }
     return null;
+}
+
+// Ordinary shops keep their stock in the owner's bag. Walk to an affordable
+// seller before the restock; an actor in another part of town cannot pay it remotely.
+function liveRestockTarget(actor, town) {
+    if (!town) return null;
+    const Market = invoke('GameServer/Bot/Economy/MarketOpportunity');
+    const plan = planForActor(actor);
+    const offers = Market.hotOffers(plan.selfId, { town, buyerCharacterId: actor.fetchId(),
+        accept: offer => String(offer.sourceType).startsWith('afk_') || offer.store?.kind === 'player' });
+    if (!offers.some(offer => offer.store?.kind === 'player')) return null;
+    const quote = invoke('GameServer/Bot/Economy/NpcRestockPlan').quoteFor(plan.selfId, town);
+    const restock = restockPlan(actor, { plan, offers, unitPrice: quote?.price });
+    const line = restock.shops[0];
+    return line?.offer.store?.kind === 'player' ? Market.offerTarget(line.offer, town) : null;
 }
 
 function describe(plan) {
@@ -615,6 +646,7 @@ function describe(plan) {
 }
 
 module.exports = {
+    liveRestockTarget,
     restockTarget,
     DEFAULT_TARGET_AMOUNT,
     PURCHASE_TARGET_AMOUNT,

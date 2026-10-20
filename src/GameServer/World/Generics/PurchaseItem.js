@@ -1,25 +1,15 @@
 const ServerResponse = invoke('GameServer/Network/Response');
 const DataCache      = invoke('GameServer/DataCache');
 const Database       = invoke('Database');
-const pendingPurchases = new WeakMap();
+const Mutations = require('../../Inventory/InventoryMutationQueue');
 
 function purchaseItem(session, selfId, amount, metadata = {}) {
     const actor = session?.actor;
     if (!actor?.backpack) return false;
-    // Several nearby ground stacks can now be picked up in one turn. Wait
-    // for the previous inventory mutation before reading the next amount.
-    const previous = pendingPurchases.get(actor.backpack);
-    const award = () => awardItem(session, actor, selfId, amount, metadata);
-    const pending = previous ? previous.then(award) : award();
-    const settled = pending.catch((err) => {
+    return Mutations.run(actor.backpack, () => awardItem(session, actor, selfId, amount, metadata)).catch((err) => {
         utils.infoWarn('GameServer', 'Item award failed actor=%s item=%s error=%s',
             actor.fetchId(), selfId, err?.message || String(err));
     });
-    pendingPurchases.set(actor.backpack, settled);
-    settled.then(() => {
-        if (pendingPurchases.get(actor.backpack) === settled) pendingPurchases.delete(actor.backpack);
-    });
-    return settled;
 }
 
 function awardItem(session, actor, selfId, amount, metadata) {

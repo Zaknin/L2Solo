@@ -5,6 +5,13 @@ const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
 const Database       = invoke('Database');
 const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 const NpcSellRules = invoke('GameServer/Items/NpcSellRules');
+const Mutations = require('../../Inventory/InventoryMutationQueue');
+const InventoryLimits = require('../../Inventory/InventoryLimits');
+const Item = invoke('GameServer/Item/Item');
+
+// Invalid or stale client requests are normal refusals; persistence failures
+// still need an error in the server log.
+class NpcSaleRejected extends Error {}
 
 function merchantSellRows(actor, store) {
     TradeService.refreshStorePrices(store, actor);
@@ -26,13 +33,17 @@ function merchantSellRows(actor, store) {
 }
 
 function sell(session, buffer) {
+    const count = buffer.length >= 9 ? buffer.readInt32LE(5) : -1;
+    if (count < 1 || count > InventoryLimits.MAX_CAPACITY || buffer.length !== 9 + count * 12) {
+        session.dataSendToMe(ServerResponse.actionFailed());
+        return;
+    }
     const packet = new ReceivePacket(buffer);
 
     packet
         .readD()  // List Id
         .readD(); // Count
 
-    const count = packet.data[1];
     const list = [];
 
     for (let i = 0; i < count; i++) {
@@ -153,72 +164,69 @@ async function consumeMerchant(session, list, { native = false } = {}) {
     }
 }
 
-async function sellToNpcShop(session, list) {
+function sellToNpcShop(session, list) {
+    const actor = session.actor;
+    const backpack = actor?.backpack;
     const shop = session.activeNpcSellShop;
-    if (!shop) {
+    if (!shop || !backpack) {
         session.dataSendToMe(ServerResponse.actionFailed());
         return;
     }
 
-    try {
-        const sold = [];
-        for (const line of list) {
-            const item = session.actor.backpack.fetchItems().find((ob) => ob.fetchId() === line.objectId);
-            const offered = shop.items.get(line.objectId);
-            const amount = Number(line.amount);
-            if (!NpcSellRules.canSell(item) || !offered ||
-                item.fetchSelfId() !== line.selfId || item.fetchSelfId() !== offered.selfId ||
-                !Number.isSafeInteger(amount) || amount < 1 || amount > item.fetchAmount()) continue;
-
-            const payout = offered.price * amount;
-            if (!Number.isSafeInteger(payout) || payout < 0) continue;
-
-            if (amount === item.fetchAmount()) {
-                await Database.deleteItem(session.actor.fetchId(), item.fetchId());
-                session.actor.backpack.items = session.actor.backpack.items.filter((ob) => ob.fetchId() !== item.fetchId());
-            } else {
-                await Database.updateItemAmount(session.actor.fetchId(), item.fetchId(), item.fetchAmount() - amount);
-                item.setAmount(item.fetchAmount() - amount);
+    return Mutations.run(backpack, async () => {
+        try {
+            const seen = new Set();
+            if (!Array.isArray(list) || !list.length || list.length > InventoryLimits.MAX_CAPACITY) throw new NpcSaleRejected('invalid NPC sale');
+            const requested = list.map(line => {
+                const item = backpack.fetchItems().find(ob => ob.fetchId() === line.objectId);
+                const offered = shop.items.get(line.objectId);
+                const amount = Number(line.amount);
+                if (!NpcSellRules.canSell(item) || !offered || seen.has(line.objectId)
+                    || item.fetchSelfId() !== line.selfId || item.fetchSelfId() !== offered.selfId
+                    || !Number.isSafeInteger(amount) || amount < 1 || amount > item.fetchAmount()
+                    || !Number.isSafeInteger(offered.price) || offered.price < 0) throw new NpcSaleRejected('NPC sale item changed');
+                seen.add(line.objectId);
+                return { objectId: line.objectId, selfId: line.selfId, amount, price: offered.price,
+                    expectedAmount: item.fetchAmount(), item };
+            });
+            const validate = () => {
+                if (session.actor !== actor || session.activeNpcSellShop !== shop) throw new NpcSaleRejected('NPC sale window changed');
+                for (const line of requested) {
+                    if (!backpack.fetchItems().includes(line.item) || !NpcSellRules.canSell(line.item)
+                        || line.item.fetchAmount() !== line.expectedAmount
+                        || shop.items.get(line.objectId)?.price !== line.price) throw new NpcSaleRejected('NPC sale item changed');
+                }
+            };
+            const result = await Database.sellItemsToNpc(actor.fetchId(), requested.map(({ objectId, selfId, amount, price, expectedAmount }) => ({ objectId, selfId, amount, price, expectedAmount })), validate);
+            // The transaction committed the entire batch and its payout. Publish
+            // only those committed amounts, never a pre-await balance plus price.
+            for (const sold of result.sold) {
+                const item = requested.find(line => line.objectId === sold.objectId).item;
+                if (sold.amount) item.setAmount(sold.amount);
+                else backpack.items = backpack.items.filter(candidate => candidate !== item);
+                backpack.onInventoryChange?.(item.fetchSelfId());
             }
-            sold.push({ payout });
+            if (result.adena) {
+                const adena = backpack.fetchItems().find(item => item.fetchId() === Number(result.adena.id));
+                if (adena) adena.setAmount(Number(result.adena.amount));
+                else backpack.insertItem(Number(result.adena.id), 57, { amount: Number(result.adena.amount) });
+            }
+            backpack.inventoryRevision = Number(backpack.inventoryRevision || 0) + 1;
+            Item.bindInventory(backpack);
+        } catch (err) {
+            if (!(err instanceof NpcSaleRejected)) utils.infoWarn('Sell', 'NPC shop sell error: %s', err.message || err);
+            if (session.actor === actor) session.dataSendToMe(ServerResponse.actionFailed());
         }
 
-        const payout = sold.reduce((total, line) => total + line.payout, 0);
-        if (payout > 0) {
-            const backpack = session.actor.backpack;
-            const adena = backpack.fetchItemFromSelfId(57);
-            if (adena) {
-                const total = adena.fetchAmount() + payout;
-                await Database.updateItemAmount(session.actor.fetchId(), adena.fetchId(), total);
-                adena.setAmount(total);
-            } else {
-                const packet = await Database.setItem(session.actor.fetchId(), {
-                    selfId: 57,
-                    name: 'Adena',
-                    amount: payout,
-                    equipped: false,
-                    slot: 0
-                });
-                backpack.insertItem(Number(packet.insertId), 57, { amount: payout });
-            }
-        }
-
-        const rows = NpcSellRules.rows(session.actor);
-        shop.items = new Map(rows.map((row) => [row.item.fetchId(), {
-            selfId: row.item.fetchSelfId(),
-            price: row.price
+        if (session.actor !== actor || session.activeNpcSellShop !== shop) return;
+        const rows = NpcSellRules.rows(actor);
+        shop.items = new Map(rows.map(row => [row.item.fetchId(), {
+            selfId: row.item.fetchSelfId(), price: row.price
         }]));
-
-        session.dataSendToMe(ServerResponse.userInfo(session.actor));
-        session.dataSendToMe(ServerResponse.itemsList(session.actor.backpack.fetchItems()));
-        session.dataSendToMe(ServerResponse.sellList(
-            rows,
-            session.actor.backpack.fetchTotalAdena()
-        ));
-    } catch (err) {
-        utils.infoWarn('Sell', 'NPC shop sell error: %s', err.message || err);
-        session.dataSendToMe(ServerResponse.actionFailed());
-    }
+        session.dataSendToMe(ServerResponse.userInfo(actor));
+        session.dataSendToMe(ServerResponse.itemsList(backpack.fetchItems()));
+        session.dataSendToMe(ServerResponse.sellList(rows, backpack.fetchTotalAdena()));
+    });
 }
 
 module.exports = sell;

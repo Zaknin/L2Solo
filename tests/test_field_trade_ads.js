@@ -21,10 +21,12 @@ const id = 730062;
         await Database.setItem(id, { selfId: 1835, name: 'Soulshot: No Grade', amount: 500, slot: 0 });
         let state = await Life.upsertState({ characterId: id, accountName: 'bot_field_trade_ads', name: 'FieldTrader',
             level: 5, exp: Number(DataCache.experience[4]), phase: 'cold', activity: 'hunting', adena: 100000,
-            loc: { locX: -84700, locY: 244200, locZ: -3730 }, currentRegion: 'Talking Island',
+            loc: { locX: -94448, locY: 240944, locZ: -3300 }, currentRegion: 'Talking Island',
             vitals: { hp: 187, maxHp: 187, mp: 74, maxMp: 74 },
             inventory: Life.inventorySummaryFromItems(await Database.fetchItems(id)),
             stats: { classId: 0, generatedCold: true, money: [1000, .001, 0, 0] }, timing: {} }, 'field_ad_fixture');
+        assert.equal(invoke('GameServer/Bot/Economy/BotImprovementService').inTown(state), false,
+            'the field trader is physically outside town and cannot open an AFK shop');
         assert(Disposition.saleCandidates(state, { unlimited: true }).some(item => item.selfId === 1786),
             'a young generated holder enters the shared sale evaluation');
         Goals.review = async () => null; // This fixture executes an already selected, separately valued plan.

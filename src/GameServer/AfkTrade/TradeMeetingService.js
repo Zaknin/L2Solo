@@ -88,6 +88,7 @@ function unenroll(actor, id) {
     }
 }
 const queue = new Set();
+const resultListeners = new Map();
 let pages = 0, transportPages = 0, transportBytes = 0, draining = false, unsubscribeLife, unsubscribeMarketLife, unsubscribePlayer, unsubscribeBoard;
 const coordinator = () => invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 const db = () => invoke('Database');
@@ -95,6 +96,41 @@ const life = () => invoke('GameServer/Bot/Population/BotLifeState');
 const world = () => invoke('GameServer/World/World');
 const afk = () => invoke('GameServer/AfkTrade/AfkTradeService');
 const sessionFor = id => world().registeredActorById(Number(id))?.session || null;
+function notifyResult(token, actors, result) {
+    const listeners = resultListeners.get(token);
+    if (!listeners) return;
+    for (const listener of [...listeners]) if (actors.includes(listener.actorId)) listener.finish(result);
+}
+function waitForResult(token, characterId, { signal } = {}) {
+    const actorId = Number(characterId);
+    if (!token || signal?.aborted) return Promise.resolve(null);
+    return new Promise(resolve => {
+        let finished = false, retry;
+        const listeners = resultListeners.get(token) || new Set();
+        const cleanup = () => {
+            listeners.delete(listener);
+            if (!listeners.size) resultListeners.delete(token);
+            clearTimeout(retry);
+            signal?.removeEventListener('abort', abort);
+        };
+        const listener = { actorId, finish: result => {
+            if (finished) return;
+            finished = true; cleanup(); resolve(result);
+        } };
+        const abort = () => listener.finish(null);
+        listeners.add(listener); resultListeners.set(token, listeners);
+        signal?.addEventListener('abort', abort, { once: true });
+        // Register before reading: completion may race the pending reply.
+        const read = () => receipt(token, actorId).then(result => {
+            if (!result?.pending) listener.finish(result);
+        }, error => {
+            if (finished) return;
+            if (!retry) utils.infoWarn('AfkTrade', 'meeting result %s waits: %s', token, error.message);
+            retry = setTimeout(read, 1000);
+        });
+        read();
+    });
+}
 function acceptRows(result) {
     trackPlayerWaiting(result?.meeting);
     for (const row of Object.values(result?.coldLifeRows || {})) {
@@ -119,6 +155,12 @@ async function refreshMeetingRecords(row) {
         }
     }
 }
+function setPresenceMarker(session, id, anchor) {
+    session.tradeMeetingPresence = anchor ? { id: anchor.id, actorId: Number(id),
+        locX: anchor.locX, locY: anchor.locY, locZ: anchor.locZ, present: null,
+        otherId: Number(anchor.actorA) === Number(id) ? anchor.actorB : anchor.actorA, town: anchor.town,
+        route: JSON.parse(Number(anchor.actorA) === Number(id) ? anchor.routeB || '{}' : anchor.routeA || '{}') } : undefined;
+}
 async function syncActors(row) {
     for (const id of [row.actorA, row.actorB]) {
         const session = sessionFor(id), actor = session?.actor;
@@ -127,10 +169,17 @@ async function syncActors(row) {
         // The connection may hold another character after the wait: its marker,
         // travel and window stay untouched; the inventory sync is bound to the ID.
         if (session.actor === actor) {
-            session.tradeMeetingPresence = anchor ? { id: anchor.id, actorId: Number(id),
-                locX: anchor.locX, locY: anchor.locY, locZ: anchor.locZ, present: null,
-                otherId: Number(anchor.actorA) === Number(id) ? anchor.actorB : anchor.actorA, town: anchor.town,
-                route: JSON.parse(Number(anchor.actorA) === Number(id) ? anchor.routeB || '{}' : anchor.routeA || '{}') } : undefined;
+            // A cold meeting may finish after materialization, without a hot
+            // shopping continuation. Retire its inherited blocker from the
+            // native lifecycle cache, preserving the rest of the hot snapshot.
+            const current = life().cachedState(id);
+            if (current && session.coldLifeState) {
+                const stats = { ...session.coldLifeState.stats };
+                if (current.stats?.tradeMeeting) stats.tradeMeeting = current.stats.tradeMeeting;
+                else delete stats.tradeMeeting;
+                session.coldLifeState = { ...session.coldLifeState, stats };
+            }
+            setPresenceMarker(session, id, anchor);
             if (!anchor || session.meetingTravel?.id === row.id && row.state !== 'accepted') session.meetingTravel = undefined;
         }
         await afk().syncOnlineInventory(id, await db().fetchItems(id, 'trade_meeting_sync'));
@@ -174,13 +223,14 @@ function canJoinParty(characterId, state = life().cachedState(characterId), sess
     const current = life()?.cachedState?.(characterId) || state;
     return partyTradeAllowed('party', current, session, hasPreparation(characterId), !!enrolled.get(Number(characterId))?.size);
 }
-function discard(id) {
+function discard(id, notify = true) {
     const entry = staged.get(id);
     if (entry) {
         pages -= entry.pages; staged.delete(id);
         for (const actor of entry.actors) if (preparedActors.get(Number(actor)) === id) preparedActors.delete(Number(actor));
         entry.cancelled = true;
         if (entry.ready) coordinator()?.cancelMeetingPreparation?.(id);
+        if (notify && !entry.committed) notifyResult(id, entry.actors, { pending: false, token: id, outcome: 'cancelled' });
     }
 }
 function adjustTransportPages(delta, byteDelta = 0) {
@@ -239,6 +289,7 @@ async function accept(id, characterId = null) {
         return accepted({ meeting: row, pending: row.state === 'accepted' });
     }
     if (characterId && !entry.actors.includes(Number(characterId))) throw Error('trade_meeting_preparation_missing');
+    let committed = false;
     try {
         // DB persists the original token/sequences, so retry never invents
         // fresh consent after an acknowledgement or ordinary bot commit.
@@ -247,8 +298,9 @@ async function accept(id, characterId = null) {
         const result = await db().acceptTradeMeeting(request, entry.proofs ? {
             validatePreparation: () => validatePrepared(entry, request), freshPreparation: true
         } : undefined);
+        committed = entry.committed = true;
         return accepted(result);
-    } finally { discard(id); }
+    } finally { discard(id, !committed); }
 }
 async function accepted(result) {
     acceptRows(result);
@@ -259,6 +311,8 @@ async function accepted(result) {
     await syncActors(row).catch(error => utils.infoWarn('AfkTrade', 'meeting inventory presentation: %s', error.message));
     notifyPlayerTravel(row);
     wake(row.actorA); wake(row.actorB);
+    if (row.state !== 'accepted') notifyResult(row.token, [row.actorA, row.actorB], {
+        pending: false, token: row.token, meetingId: row.id, outcome: row.state });
     return { pending: result.pending, meetingId: row.id, revision: row.revision,
         outcome: row.state, token: row.token, preparationId: row.token,
         purchased: false, sold: false, state: life().cachedState(row.actorA) };
@@ -399,6 +453,8 @@ function reset() {
     unsubscribeLife?.(); unsubscribeMarketLife?.(); unsubscribePlayer?.(); unsubscribeBoard?.();
     unsubscribeLife = unsubscribeMarketLife = unsubscribePlayer = unsubscribeBoard = undefined;
     for (const token of [...staged.keys()]) discard(token);
+    for (const [token, listeners] of [...resultListeners])
+        notifyResult(token, [...listeners].map(listener => listener.actorId), null);
     staged.clear(); preparedActors.clear(); refusedAds.clear(); pages = 0; transportPages = 0; transportBytes = 0; enrolled.clear(); clearWaiters(); travelNotices.clear(); queue.clear();
 }
 function wake(id) {
@@ -419,6 +475,8 @@ async function processMeeting(id, meetingId) {
         await afk().settleOwners([row.actorA, row.actorB]);
         await refreshMeetingRecords(row);
         for (const actor of [row.actorA, row.actorB]) await db().acknowledgeTradeMeeting(row.id, actor);
+        notifyResult(row.token, [row.actorA, row.actorB], {
+            pending: false, token: row.token, meetingId: row.id, outcome: row.state });
         unenroll(row.actorA, row.id); unenroll(row.actorB, row.id);
         return;
     }
@@ -432,6 +490,13 @@ async function processMeeting(id, meetingId) {
             const cancelled = await db().cancelTradeMeeting(row.id, 'player_left'); acceptRows(cancelled); wake(id); return;
         }
     }
+    const marker = session?.tradeMeetingPresence;
+    // Cold acceptance has no session to mark. Restore the anchor when its
+    // actor materializes, before starting a walk that must publish arrival.
+    // Retain a current marker: its waypoint/presence transitions wake this
+    // queue, while ordinary held AI ticks deliberately do not poll it.
+    if (state?.phase === 'hot' && state.stats?.tradeMeeting?.[0] === row.id && Number(session?.actor?.fetchId?.()) === id
+        && (marker?.id !== row.id || marker.actorId !== id)) setPresenceMarker(session, id, row);
     const arrived = await db().arriveTradeMeeting(row.id); acceptRows(arrived);
     if (arrived?.meeting.state !== 'accepted') { await syncActors(arrived.meeting);
         for (const ad of arrived.closed || []) afk().refreshRecord(ad);
@@ -546,6 +611,6 @@ async function init() {
         await new Promise(resolve => setImmediate(resolve));
     }
 }
-module.exports = { stage, discard, hasPreparation, preparationOf, canJoinParty, accept, cancel, receipt, prepareTrade, trade, wake, init, reset, presenceChanged,
+module.exports = { stage, discard, hasPreparation, preparationOf, canJoinParty, accept, cancel, receipt, waitForResult, prepareTrade, trade, wake, init, reset, presenceChanged,
     adjustTransportPages,
     counters: () => ({ preparations: staged.size, pages: pages + transportPages, bytes: transportBytes + [...staged.values()].reduce((total, row) => total + row.bytes, 0), queued: queue.size, participants: enrolled.size }) };

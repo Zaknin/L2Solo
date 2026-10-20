@@ -304,7 +304,8 @@ function findAfkBuyerForActor(actor, town, state = null, options = {}) {
     seller.inventory = { ...LifeState.inventorySummaryFromItems(items),
         ...(seller.inventory['57'] ? { 57: seller.inventory['57'] } : {}) };
     const records = new Map();
-    for (const answer of ListingPolicy.evaluate(seller, { unlimited: true, now: options.now }).answers) {
+    const board = invoke('GameServer/Bot/Economy/MarketOpportunity').liveBuyBoard(town?.name, actor.fetchId());
+    for (const answer of ListingPolicy.evaluate(seller, { unlimited: true, now: options.now, board }).answers) {
         if (answer.line.town !== town?.name) continue;
         const record = records.get(answer.line.recordId) || { line: answer.line, score: 0, sale: {} };
         // Expected receipts: a conditional bid pays only its willing units.
@@ -315,7 +316,7 @@ function findAfkBuyerForActor(actor, town, state = null, options = {}) {
     let best = null;
     for (const record of records.values()) {
         if (best && record.score <= best.score) continue;
-        const offer = AfkTrade.offerOf(record.line, town.name);
+        const offer = record.line.liveOffer || AfkTrade.offerOf(record.line, town.name);
         if (offer) best = { offer, score: record.score, sale: record.sale };
     }
     return best;
@@ -330,17 +331,23 @@ function previewSaleToStore(actor, store, options = {}) {
     let itemCount = 0;
     const lines = [];
 
+    let liveBudget = store.kind === 'player' ? Number(options.buyerActor?.backpack?.fetchTotalAdena?.() || 0) : Infinity;
     sellableActorItems(actor, options.state)
         .forEach((inventoryItem) => {
             const storeItem = store.items.find((item) => item.selfId === inventoryItem.fetchSelfId() && item.count > 0);
             if (!storeItem) return;
+            if (store.kind === 'player' && Number(inventoryItem.fetchEnchantLevel?.() || 0) !== Number(storeItem.enchant || 0)) return;
             if (!acceptsSellerItem(actor, storeItem, inventoryItem)) return;
 
-            const qty = Math.min(inventoryItem.fetchAmount(), storeItem.count);
+            const price = storeItemPrice(store, storeItem, actor);
+            const already = lines.filter(line => line.selfId === inventoryItem.fetchSelfId()).reduce((sum, line) => sum + line.qty, 0);
+            const qty = Math.min(inventoryItem.fetchAmount(), storeItem.count - already,
+                options.sale ? Number(options.sale[storeItem.selfId] || 0) - already : Infinity,
+                Math.floor(liveBudget / price));
             if (qty <= 0) return;
 
-            const price = storeItemPrice(store, storeItem, actor);
             const payout = qty * price;
+            liveBudget -= payout;
             totalAdena += payout;
             itemCount += qty;
             lines.push({
@@ -362,7 +369,11 @@ async function buyFromStore(actor, store, selfId, qty, options = {}) {
         throw new Error("This store is not selling items.");
     }
 
-    return withTradeQueues(store, selfId, [actor], async () => {
+    const liveSeller = store.kind === 'player'
+        ? (invoke('GameServer/World/World').user?.sessions || []).find(session => Number(session.actor?.fetchId?.()) === Number(store.ownerId))
+        : null;
+    return withTradeQueues(store, selfId, [actor, liveSeller?.actor], async () => {
+        if (store.kind === 'player') return invoke('GameServer/PrivateStoreTrade').buy(actor, liveSeller, store, selfId, qty, options);
         store.activePurchases = Math.max(0, Number(store.activePurchases || 0)) + 1;
         try {
             if (store.repricing === true) {
@@ -442,8 +453,11 @@ async function sellToStore(actor, store, selfId, qty, options = {}) {
     if (!store || store.storeType !== 3) {
         throw new Error("This store is not buying items.");
     }
-    const buyerActor = store.budgetBacked === true ? options.buyerActor || null : null;
+    const buyerActor = store.kind === 'player'
+        ? (invoke('GameServer/World/World').user?.sessions || []).find(session => Number(session.actor?.fetchId?.()) === Number(store.ownerId))?.actor
+        : store.budgetBacked === true ? options.buyerActor || null : null;
     return withTradeQueues(store, selfId, [actor, buyerActor], async () => {
+        if (store.kind === 'player') return invoke('GameServer/PrivateStoreTrade').sell(actor, buyerActor?.session, store, selfId, qty, options);
         store.activePurchases = Math.max(0, Number(store.activePurchases || 0)) + 1;
         try {
             if (store.repricing === true) {
@@ -586,7 +600,8 @@ async function sellInventoryToStore(actor, store, options = {}) {
     const sold = [];
 
     for (const line of preview.lines) {
-        const result = await sellToStore(actor, store, line.selfId, line.qty, { ...options, objectId: line.objectId });
+        const result = await sellToStore(actor, store, line.selfId, line.qty,
+            { ...options, objectId: line.objectId, expectedUnitPrice: line.price });
         sold.push(result);
     }
 
