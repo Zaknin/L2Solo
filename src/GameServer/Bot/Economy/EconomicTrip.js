@@ -180,12 +180,14 @@ function* prepare(state) {
 // The same table in one call, for a caller that cannot slice (EconomyContext.forState).
 function prepared(state) { return drain(prepare(state)); }
 // A town's trip in Adena at one hour value, each town priced once per reader:
-// an offer order asks it about three times per offer.
+// an offer order asks it about three times per offer; a reader read only
+// through details allocates nothing.
 function costByTown(row, hourAdena) {
-    const costs = new Float64Array(townOrdinal.size).fill(NaN);
+    let costs = null;
     return town => {
         const index = townOrdinal.get(town);
         if (index === undefined) return Infinity;
+        costs ??= new Array(townOrdinal.size).fill(NaN);
         if (!Number.isNaN(costs[index])) return costs[index];
         const value = row(town);
         return costs[index] = value.known && Number.isFinite(hourAdena) && hourAdena >= 0
