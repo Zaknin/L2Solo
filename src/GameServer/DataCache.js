@@ -1,3 +1,5 @@
+'use strict';
+
 const ItemTemplateIndex = require('./Item/ItemTemplateIndex');
 const validateSchema = require('jsonschema').validate;
 const ClassProgression = invoke('GameServer/ClassProgression');
@@ -291,6 +293,11 @@ const DataCache = {
 
         invoke('GameServer/Npc/NpcSkills').prepareThreats(DataCache.npcs);
         invoke('GameServer/Items/ItemAcquisitionCatalog').prepare();
+        // Last step: spawn definitions borrow these rows instead of cloning
+        // them. The arrays stay open (ItemTemplateIndex and tests swap or
+        // append whole rows); strict-mode writers into a row now throw.
+        DataCache.npcs.forEach(deepFreeze);
+        DataCache.npcSpawns.forEach(deepFreeze);
         utils.infoSuccess('Datapack', 'cached');
     },
 
@@ -319,6 +326,12 @@ const DataCache = {
         item ? callback(item) : utils.infoWarn('Datapack', 'unknown SkillTree ClassId %d', classId);
     }
 };
+
+function deepFreeze(value) {
+    if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return;
+    Object.freeze(value);
+    for (const key of Object.keys(value)) deepFreeze(value[key]);
+}
 
 function applyNpcAiTypes(npcs, aiTypes) {
     return npcs.map((npc) => {
