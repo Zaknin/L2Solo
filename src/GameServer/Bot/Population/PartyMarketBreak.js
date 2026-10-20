@@ -1,16 +1,15 @@
 const SurvivalFloor = require('./SurvivalFloor');
 const BotErrands = require('./BotErrands');
 // The bag's need to go sell, one rule for the clan break, the solo forced
-// cleanup on main and the cold worker's step: the native slot/weight floor
-// first, else the author's cleanup thresholds. { reason, slots, npcOnlySlots, limit } or null.
+// cleanup and the cold worker's step: the native slot/weight floor first
+// (its bag part only), else the author's cleanup thresholds. { reason, slots, limit } or null.
 function cleanupNeed(member, now) {
-    const floor = SurvivalFloor.forState(member, now);
+    const floor = SurvivalFloor.bagFor(member, now);
+    if (floor?.action === 'unload') {
+        return { ...floor, reason: floor.reason === 'no_slot' ? 'inventory_capacity' : 'inventory_overweight' };
+    }
     // lazy: worker ItemDisposition's own links are not loaded with the worker kernel.
-    const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
-    return floor?.action === 'unload'
-        ? { ...floor, npcOnlySlots: Disposition.npcOnlySlotCount(member),
-            reason: floor.reason === 'no_slot' ? 'inventory_capacity' : 'inventory_overweight' }
-        : Disposition.inventoryCleanupNeed(member, { now });
+    return invoke('GameServer/Bot/Economy/ItemDisposition').inventoryCleanupNeed(member, { now });
 }
 const CLEANUP_BUSY_FLAGS = ['marketReturn'];
 const CLEANUP_BUSY_ACTIVITIES = ['traveling', 'shopping', 'merchant', 'crafting', 'dead', 'pk_hunting'];

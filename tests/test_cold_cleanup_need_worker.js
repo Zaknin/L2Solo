@@ -25,14 +25,13 @@ const result = ({ timestamp }) => ({ patch: {}, materialize: { exp: 0, sp: 0, ad
     events: [], nextResolveAt: timestamp + 30000, debug: {} });
 
 // One step of each bot; the proposals the worker sends main, by bot.
-async function step(states, { project = state => state, party = null, resolveParty = null } = {}) {
+async function step(states, { project = state => state } = {}) {
     const sent = new Map();
     const spots = new Map();
     const kernel = new ColdSimulationKernel({
         now: () => 3000,
         spotOf: value => spots.get(Number(value?.characterId)) || null,
         resolveSolo: result,
-        resolveParty,
         projectResolve: state => ({ state: project(state) }),
         emit: (type, payload) => {
             if (type === 'proposal_batch') for (const proposal of payload.proposals) sent.set(proposal.characterId, proposal);
@@ -42,7 +41,6 @@ async function step(states, { project = state => state, party = null, resolvePar
         spots.set(Number(state.characterId), { id: 'bag-spot', rewards: {} });
         kernel.upsert({ state });
     }
-    if (party) kernel.partyPut(party.partyId, party);
     kernel.tick();
     await kernel.resolveChain;
     kernel.flush(null, true);
@@ -73,27 +71,18 @@ async function step(states, { project = state => state, party = null, resolvePar
     assert(traveling, 'the step reaches main');
     assert.strictEqual(traveling.cleanupNeed, undefined, 'a traveling bot keeps its trip');
 
-    // Party members sell from the field: no need, solo or atomic.
-    const partyResolve = (patch) => ({ members, timestamp }) => ({
-        memberResults: members.map(member => ({ state: member, result: result({ timestamp }) })),
-        events: [], partyPatch: patch, nextResolveAt: timestamp + 45000 });
-    const members = [bot(510, { party: { partyId: 'bag-party', leaderId: 510 } }),
-        bot(511, { party: { partyId: 'bag-party', leaderId: 510 } })];
-    const party = { partyId: 'bag-party', status: 'active', leaderId: 510, memberIds: [510, 511], stats: {}, nextResolveAt: 2000 };
-    const grouped = await step(members, { party, resolveParty: partyResolve({}) });
-    assert.strictEqual(grouped.size, 2, 'both members reach main');
-    for (const proposal of grouped.values()) assert.strictEqual(proposal.cleanupNeed, undefined, 'a party member does not go to sell');
-
-    // An atomic group (the party dissolves in this step) judges its member on
-    // the step's base state, still in the party: the released member's full
-    // bag does not fail the whole group.
-    const released = await step(members, { party, resolveParty: partyResolve({ status: 'dissolved' }) });
-    assert.strictEqual(released.size, 2, 'both members reach main');
-    for (const proposal of released.values()) {
-        assert(proposal.atomicGroup, 'a dissolving party commits as one group');
-        assert.strictEqual(proposal.nextState.party?.partyId ?? null, null, 'the member leaves the party');
-        assert.strictEqual(proposal.cleanupNeed, undefined, 'the cleanup is decided on the base state');
-    }
+    // A half-full bag sends the bot to sell, unless the market paused its
+    // selling (marketSellRetryAfter): then it hunts on.
+    const halfFull = Object.fromEntries(Array.from({ length: 40 }, (_, index) => {
+        const selfId = 1864 + index;
+        return [selfId, { selfId, name: `Material ${selfId}`, kind: 'Other.Material', stackable: true, amount: 1 }];
+    }));
+    const selling = (await step([bot(505, { inventory: halfFull })])).get(505);
+    assert.strictEqual(selling.cleanupNeed?.reason, 'inventory_half_full');
+    const paused = (await step([bot(506, { inventory: halfFull,
+        stats: { classId: 0, marketSellRetryAfter: 3000 + 60 * 60 * 1000 } })])).get(506);
+    assert(paused, 'the step reaches main');
+    assert.strictEqual(paused.cleanupNeed, undefined, 'a sell pause holds the half-full trip');
 
     console.log('Cold worker cleanup need checks passed');
 })().catch((error) => {

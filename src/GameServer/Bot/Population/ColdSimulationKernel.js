@@ -1877,10 +1877,6 @@ class ColdSimulationKernel {
                         resolvedParty.stats?.objective
                     );
                 }
-                // The forced cleanup (main starts the trip): an atomic group
-                // judges its member on the step's base state, as main did.
-                const cleanupNeed = projectedState ? PartyMarketBreak.forcedCleanupNeed(memoryGroup ? state
-                    : PartyMarketBreak.withoutStartedTrip(state, projectedState), startedAt) : null;
                 if (projection?.kitMoved) openRequirements('kit');
                 if (requirementProgress && !meetingPending && !materialHunt && this.planPartyRequirement && projectedState
                     && resolvedParty.status !== 'dissolved' && !requirementProgress.has(id)
@@ -1918,7 +1914,6 @@ class ColdSimulationKernel {
                     economyEdges: resolvedParty.status === 'dissolved' ? 0 : Number(projection?.economyEdges || 0),
                     ...(projection?.economyPlan && resolvedParty.status !== 'dissolved'
                         ? { economyPlan: projection.economyPlan } : {}),
-                    ...(cleanupNeed ? { cleanupNeed } : {}),
                     result: proposalResult({
                         ...result,
                         events: [
