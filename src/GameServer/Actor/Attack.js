@@ -68,6 +68,12 @@ class Attack {
         return timer;
     }
 
+    // The own attack loop runs: a swing or cast timer waits, the bow reloads,
+    // or the next swing has a target. Melee chase between swings is not seen.
+    isAttacking() {
+        return this.timers.size > 0 || this.bowReloading || !!this.repeatTarget;
+    }
+
     clearTimers() {
         this.activeCast = null;
         this.timers.forEach((timer) => clearTimeout(timer));

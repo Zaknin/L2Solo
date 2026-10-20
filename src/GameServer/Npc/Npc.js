@@ -15,6 +15,7 @@ const EffectTicker   = invoke('GameServer/Effects/EffectTicker');
 const EffectRestrictions = invoke('GameServer/Effects/EffectRestrictions');
 const TownGuard = invoke('GameServer/Npc/TownGuard');
 const PathfindingWorkerPool = invoke('GameServer/Geodata/PathfindingWorkerPool');
+const enterActorCombatState = require('../Actor/Generics/EnterCombatState');
 const AttackHelper   = new Attack();
 
 // MoveToPawn already tells the client to follow a moving target. Rebuilding
@@ -925,6 +926,8 @@ class Npc extends NpcModel {
             }
             else {
                 ConsoleText.transmit(session, ConsoleText.caption.missedHit);
+                // A miss is an exchange too (C4): the player's stance holds.
+                if (!dst.fetchKind) enterActorCombatState(session, dst);
             }
 
         }, timing.drawMs);

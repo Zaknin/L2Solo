@@ -10,8 +10,14 @@ let now = 0;
 let nextHandle = 1;
 const timers = new Map();
 global.setTimeout = (fn, ms, ...args) => {
-    const handle = { id: nextHandle++, unref() { return this; }, ref() { return this; } };
-    timers.set(handle.id, { at: now + Math.max(0, Number(ms) || 0), fn, args });
+    const delay = Math.max(0, Number(ms) || 0);
+    const handle = {
+        id: nextHandle++,
+        unref() { return this; },
+        ref() { return this; },
+        refresh() { timers.set(this.id, { at: now + delay, fn, args }); return this; }
+    };
+    timers.set(handle.id, { at: now + delay, fn, args });
     return handle;
 };
 global.clearTimeout = (handle) => { if (handle) timers.delete(handle.id); };
@@ -30,6 +36,7 @@ function advanceTo(time) {
 }
 
 const State = invoke('GameServer/Model/State');
+const Attack = invoke('GameServer/Actor/Attack');
 const ServerResponse = invoke('GameServer/Network/Response');
 const Generics = invoke(path.actor);
 
@@ -47,6 +54,7 @@ function player() {
         setHp(value) { this.hp = value; },
         fetchLocX: () => 0, fetchLocY: () => 0, fetchLocZ: () => 0,
         statusUpdateVitals() {},
+        attack: new Attack(),
         automation: { replenishVitals() {}, aborted: 0, abortAll() { this.aborted++; } }
     };
     session.actor = actor;
@@ -122,6 +130,38 @@ function hit(actor, time) {
     victim.session.actor = null; // logged out
     advanceTo(15000);
     assert.strictEqual(stops(victim), 0, 'no stop for an actor that left its session');
+}
+
+{
+    // Stun, sleep, petrify and fake death drop the flag without a packet; the
+    // client still shows the stance until the timer sends the stop.
+    now = 0;
+    const victim = player();
+    hit(victim, 0);
+    victim.state.setCombats(false);
+    advanceTo(15000);
+    assert.strictEqual(stops(victim), 1, 'a silently dropped stance still gets its AutoAttackStop');
+}
+
+{
+    // An archer shoots back every 3 s (1.5 s draw, 1.5 s reload) through the
+    // attack's own timers; the stance holds while the loop runs.
+    now = 0;
+    const victim = player();
+    hit(victim, 0);
+    const lastShot = 31000;
+    const shoot = (at) => {
+        victim.state.setHits(true);
+        victim.attack.queueTimer(() => victim.state.setHits(false), 1500);
+        victim.attack.queueTimer(() => { if (at < lastShot) shoot(at + 3000); }, 3000);
+    };
+    advanceTo(1000);
+    shoot(1000);
+    const loopEnd = lastShot + 3000;
+    advanceTo(loopEnd);
+    assert.strictEqual(stops(victim), 0, 'no stop while the own attack loop runs');
+    advanceTo(loopEnd + 15000);
+    assert.strictEqual(stops(victim), 1, 'the stance ends at most 15 s after the loop ends');
 }
 
 console.log('test_combat_stance: ok');
