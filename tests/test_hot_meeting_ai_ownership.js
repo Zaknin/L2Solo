@@ -63,6 +63,8 @@ function ordinaryTick() { session.plan = 'hunting'; AI.tick(session); }
         stub(invoke('GameServer/World/World'), 'actorPresenceCount', () => 1);
         stub(AI, 'visibleRealPlayers', () => [{}]);
         stub(invoke('GameServer/Bot/AI/BotBuffs'), 'needsNewbieRefresh', () => true);
+        // The meeting spot is far from every start village: place a guide in its town.
+        stub(AI, 'getClosestNewbieGuide', () => ({ locX: 2000, locY: 0, locZ: 0 }));
         await Travel.requestMeeting(session, bot, meeting, 0);
         assert.equal(moves.at(-1).to.locX, 2000, 'actual meeting adapter starts its final walk');
         AI.tick(session); AI.tick(session);

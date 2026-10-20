@@ -38,10 +38,6 @@ const STUCK_SAMPLE_INTERVAL_MS = 750;
 // Aggression transfers threat; it must not consume every combat tick when
 // the native transfer has not yet changed the monster's target.
 const AGGRESSION_RETRY_MS = 5000;
-// Newbie Guides only exist in the starter villages.  A companion should not
-// abandon a player in the field just because its starter buffs have expired.
-const NEWBIE_GUIDE_TOWN_RADIUS = 7500;
-const NEWBIE_GUIDE_RECOVERY_MAX_LEVEL = 20;
 const COMPANION_TOWN_ERRAND_RADIUS = 7500;
 const COMPANION_TOWN_ERRAND_COOLDOWN_MS = 60000;
 const COMPANION_EQUIPMENT_CHECK_COOLDOWN_MS = 5000;
@@ -109,21 +105,6 @@ function distance2d(a, b) {
     const dx = a.locX - b.locX;
     const dy = a.locY - b.locY;
     return Math.sqrt((dx * dx) + (dy * dy));
-}
-
-function isAtNewbieGuideTown(player, BotAI) {
-    const guide = BotAI.getClosestNewbieGuide?.(player.fetchLocX(), player.fetchLocY());
-    if (!guide) return false;
-
-    return distance2d(
-        { locX: player.fetchLocX(), locY: player.fetchLocY() },
-        guide
-    ) <= NEWBIE_GUIDE_TOWN_RADIUS;
-}
-
-function canRecoverAtNewbieGuide(bot, BotAI) {
-    return Number(bot?.fetchLevel?.() || 0) <= NEWBIE_GUIDE_RECOVERY_MAX_LEVEL &&
-        isAtNewbieGuideTown(bot, BotAI);
 }
 
 function beginNewbieGuideVisit(session, bot, playerSession, role, townVisit = null) {
@@ -1326,7 +1307,7 @@ const FollowingState = {
             // available only when the companion is already in a starter town
             // with a Newbie Guide, where characters through level 20 can
             // recover and renew their blessing before returning to the party.
-            if (canRecoverAtNewbieGuide(bot, BotAI)) {
+            if (HotTownRebuff.recoveryGuide(session, bot, BotAI)) {
                 beginNewbieGuideVisit(session, bot, playerSession, role, hotTownRebuffVisit);
                 recordRoleDecision(session, bot, botVitals.hpRatio < 0.30 ? 'recover_hp' : 'save_mp', 'newbie_guide_recovery');
                 BotPartyChat.announce(session, {
@@ -1375,7 +1356,7 @@ const FollowingState = {
                 locZ: player.fetchLocZ()
             });
             const expired = BotBuffs.needsNewbieRefresh(bot, 0);
-            const nearbyGuide = isAtNewbieGuideTown(player, BotAI);
+            const nearbyGuide = !!HotTownRebuff.nearGuide(player, BotAI);
             const canMakeFieldBuffTrip = !inTown && expired && nearbyGuide && !partyHasBuffer(playerSession, bot);
 
             if (unsafeToRefresh) {
@@ -1388,7 +1369,7 @@ const FollowingState = {
                     missingBuffs: BotBuffs.missingNewbieBuffs(bot, BotBuffs.REFRESH_THRESHOLD_MS)
                 });
                 keepRoleDecision = true;
-            } else if (Number(session.newbieGuideRetryAt || 0) > Date.now()) {
+            } else if (!HotTownRebuff.tripGuide(session, bot, BotAI)) {
                 recordRoleDecision(session, bot, 'refresh_buffs', 'wait_for_newbie_guide_route', {
                     retryAt: session.newbieGuideRetryAt
                 });
@@ -1431,7 +1412,7 @@ const FollowingState = {
             && !leaderTargetId
             && !isBusy(bot)
             && HotTownRebuff.needsVisit(session, hotTownRebuffVisit)
-            && Number(session.newbieGuideRetryAt || 0) <= Date.now()) {
+            && HotTownRebuff.tripGuide(session, bot, BotAI)) {
             beginNewbieGuideVisit(session, bot, playerSession, role, hotTownRebuffVisit);
             recordRoleDecision(session, bot, 'refresh_buffs', 'town_visit_rebuff', {
                 town: hotTownRebuffVisit.town

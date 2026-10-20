@@ -1049,7 +1049,7 @@ module.exports = {
             const returningToCompanion = session.partyCompanion === true && companionResume?.followPlayerSession?.actor?.fetchIsOnline?.();
             const townBuffVisit = HotTownRebuff.syncVisit(session, bot, BotAI);
             const rebuffBeforeLeaving = HotTownRebuff.needsVisit(session, townBuffVisit)
-                && Number(session.newbieGuideRetryAt || 0) <= Date.now();
+                && !!HotTownRebuff.tripGuide(session, bot, BotAI);
             session.plan = rebuffBeforeLeaving
                 ? 'getting_buffed'
                 : (returningToCompanion ? 'following' : 'hunting');
