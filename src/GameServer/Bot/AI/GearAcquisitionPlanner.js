@@ -402,7 +402,7 @@ function candidateEffort(candidate, state, options = {}) {
     const item = candidate?.item;
     if (!item) return Infinity;
     const spots = options.spots || [];
-    const offer = marketOfferForTarget(item, state, options);
+    const offer = decisionMarketOffer(item, state, options);
     const marketEffortValue = offer
         ? (PurchaseFunding.spendable(state, options.buyOrderEscrow, { upperBound: true }) >= Number(offer.price || 0)
             ? 4
@@ -412,8 +412,7 @@ function candidateEffort(candidate, state, options = {}) {
     // diagnostics and a pre-route preview). Do not scan every NPC reward and
     // every component tree when no spot atlas is available.
     if (!spots.length) return marketEffortValue;
-    const direct = bestSourceForState(sourceForItem(item.selfId, spots, state, options), state, options);
-    const directEffort = direct ? sourceEffort(direct, state, options) : Infinity;
+    const directEffort = decisionDirectSource(item.selfId, spots, state, options).unitEffort;
     if (!candidate.recipe) return Math.min(directEffort, marketEffortValue);
 
     // Price NPC-bought blacksmith inputs before filtering out recipes whose
@@ -822,9 +821,14 @@ function offerTripCost(state, options) {
     return OfferOrder.tripCost(state, { origin: offerOrigin(state, options) });
 }
 
+// The highest price a market read accepts (options.maxMarketPrice, none if absent).
+function marketMaxPrice(options = {}) {
+    return options.maxMarketPrice === undefined ? Infinity : Math.max(0, Number(options.maxMarketPrice) || 0);
+}
+
 function marketOfferForTarget(target, state = {}, options = {}) {
     if (!target) return null;
-    const maxPrice = options.maxMarketPrice === undefined ? Infinity : Math.max(0, Number(options.maxMarketPrice) || 0);
+    const maxPrice = marketMaxPrice(options);
     const usable = (offer) => offer && offer.available !== false
         && Number(offer.count ?? 1) > 0 && Number(offer.price) > 0 && Number(offer.price) <= maxPrice;
     const origin = offerOrigin(state, options);
@@ -1282,13 +1286,19 @@ function isPlanSourceEligible(plan = {}) {
         && Number(plan.next.raidBossTemplateId || npcId) === npcId;
 }
 
-function sourceWithinVoluntaryHuntBand(state = {}, source = {}) {
+// minGap: the bot's voluntaryMinLevelGap, when the caller judges a list.
+function sourceWithinVoluntaryHuntBand(state = {}, source = {}, minGap = undefined) {
     if (source?.sourceKind === 'raid' || source?.raidBoss === true) return true;
     const botLevel = Number(state.level || 0);
     const sourceLevel = Number(source.npcLevel || source.spotLevel || 0);
     if (!botLevel || !sourceLevel) return true;
+    return sourceLevel - botLevel >= (minGap ?? voluntaryMinLevelGap(state));
+}
+
+// The band floor depends on the bot alone: read once per source list.
+function voluntaryMinLevelGap(state = {}) {
     const economic = state.economicLower || invoke('GameServer/Bot/Economy/EquipmentIncomeRoute').economicHunt(state);
-    return sourceLevel - botLevel >= sourceMinLevelGap(economic);
+    return sourceMinLevelGap(economic);
 }
 
 // The lowest npc-minus-bot level gap a bot hunts voluntarily: an equipment
@@ -1789,9 +1799,11 @@ function sourceIsExcluded(source, options = {}) {
 }
 
 function bestSourceForState(sources = [], state = {}, options = {}) {
+    if (!sources.length) return null;
+    const minGap = voluntaryMinLevelGap(state);
     const allowedSources = sources
         .filter((source) => !sourceIsExcluded(source, options))
-        .filter((source) => sourceWithinVoluntaryHuntBand(state, source));
+        .filter((source) => sourceWithinVoluntaryHuntBand(state, source, minGap));
     const safeSources = allowedSources.filter((source) => soloSafeForSource(state, source));
     // A full source is met at arrival, not skipped here (ARCH-08-b).
     return safeSources[0] || allowedSources[0] || null;
@@ -1988,9 +2000,9 @@ function sourceForItem(itemId, spots = [], state = {}, options = {}) {
     if (Progression.marketOnly(state, catalogItem(itemId))) return [];
     if (Progression.isCGradeHelmet(catalogItem(itemId))) return [];
     const sourceCache = options.sourceCache;
-    const spoilCapable = options.spoilCapable === true || roleFor(state) === 'spoiler';
+    const spoilCapable = spoilCapableFor(state, options);
     const allowRaidSources = options.allowRaidSources === true;
-    const cacheKey = `${Number(itemId)}:${Number(state.level || 0)}:${spoilCapable ? 1 : 0}:${allowRaidSources ? 1 : 0}`;
+    const cacheKey = sourceListKey(itemId, state, options, spoilCapable);
     if (sourceCache?.has(cacheKey)) return sourceCache.get(cacheKey);
     const sourceIndex = sourceIndexFor(spots);
     // The resolved lists below belong to the cached spot list; no spots means none.
@@ -2023,6 +2035,41 @@ function sourceForItem(itemId, spots = [], state = {}, options = {}) {
     sourceIndexCache.resolved.set(resolvedKey, Ordinals.from(ranked, entry => entry.ordinal));
     sourceCache?.set(cacheKey, sources);
     return sources;
+}
+
+// The raw source list's key in a decision's sourceCache (and the stem of the
+// shared resolved rows): item, killer level and which source kinds count.
+function sourceListKey(itemId, state = {}, options = {}, spoilCapable = spoilCapableFor(state, options)) {
+    return `${Number(itemId)}:${Number(state.level || 0)}:${spoilCapable ? 1 : 0}:${options.allowRaidSources === true ? 1 : 0}`;
+}
+
+function spoilCapableFor(state = {}, options = {}) {
+    return options.spoilCapable === true || roleFor(state) === 'spoiler';
+}
+
+// One decision (one sourceCache, one state, one spot list, as the raw list
+// above assumes) prices the same item for several candidates and materials.
+// Its best source and its market offer do not depend on the amount wanted, so
+// each is kept for the decision; the callers scale them by the amount.
+function decisionDirectSource(itemId, spots, state, options = {}) {
+    const sourceCache = options.sourceCache;
+    const key = `direct:${sourceListKey(itemId, state, options)}`;
+    if (sourceCache?.has(key)) return sourceCache.get(key);
+    const direct = bestSourceForState(sourceForItem(itemId, spots, state, options), state, options);
+    const memo = { direct, unitEffort: direct ? sourceEffort(direct, state, options) : Infinity };
+    sourceCache?.set(key, memo);
+    return memo;
+}
+
+function decisionMarketOffer(target, state, options = {}) {
+    const sourceCache = options.sourceCache;
+    if (!target || !sourceCache) return marketOfferForTarget(target, state, options);
+    const maxPrice = marketMaxPrice(options);
+    const key = `market:${Number(target.selfId)}:${maxPrice}`;
+    if (sourceCache.has(key)) return sourceCache.get(key);
+    const offer = marketOfferForTarget(target, state, options);
+    sourceCache.set(key, offer);
+    return offer;
 }
 
 function sourceCacheSize() {
@@ -2672,7 +2719,7 @@ function farmSourceForMaterial(itemId, state, spots, allowedRecipeIds, requiredA
         const supply = crystalSupplyForMaterial(state, requiredAmount, options);
         if (supply) return supply;
     }
-    const purchase = marketOfferForTarget(catalogItem(itemId), state, options);
+    const purchase = decisionMarketOffer(catalogItem(itemId), state, options);
     if (purchase && Number(purchase.price) > 0 && (purchase.sourceType === 'npc'
         || Number(purchase.count ?? purchase.amount) >= requiredAmount)) return {
         kind: 'material_market', itemId: Number(itemId), requiredAmount,
@@ -2680,10 +2727,10 @@ function farmSourceForMaterial(itemId, state, spots, allowedRecipeIds, requiredA
         effort: Number(purchase.price) * requiredAmount <= PurchaseFunding.spendable(state, options.buyOrderEscrow, { upperBound: true })
             ? 4 : marketEffort({ ...purchase, price: Number(purchase.price) * requiredAmount }, state)
     };
-    const direct = bestSourceForState(sourceForItem(itemId, spots, state, options), state, options);
+    const { direct, unitEffort } = decisionDirectSource(itemId, spots, state, options);
     const directRoute = direct ? { ...direct, itemId: Number(itemId), requiredAmount,
         requiredTotal: requiredAmount + Number(state.inventory?.[itemId]?.amount || 0),
-        effort: requiredAmount * sourceEffort(direct, state, options) } : null;
+        effort: requiredAmount * unitEffort } : null;
     const component = options.recipeCatalog?.get(Number(itemId)) || C4RecipeItems.resolveByProductId(itemId);
     if (!component || !allowedRecipeIds.has(Number(component.recipeId))) return directRoute;
     const nextVisited = new Set(visited).add(Number(itemId));
@@ -2919,8 +2966,8 @@ function rawPlanFor(state = {}, options = {}) {
     const materials = target.recipe ? missingMaterials(target.recipe, state.inventory) : [];
     const bladeMarketPlan = combinationBladeMarketPlan(target, materials, state, planningOptions);
     if (bladeMarketPlan) return bladeMarketPlan;
-    const directSources = sourceForItem(target.item.selfId, spots, state, planningOptions);
-    const direct = bestSourceForState(directSources, state, planningOptions);
+    // The shortlist already priced the chosen target in this decision.
+    const { direct, unitEffort: directEffort } = decisionDirectSource(target.item.selfId, spots, state, planningOptions);
     const allowedRecipeIds = planningOptions.allowedRecipeIds;
     const materialPlans = materials.map((material) => ({
         ...material,
@@ -2933,11 +2980,10 @@ function rawPlanFor(state = {}, options = {}) {
         (b.source?.effort ?? Infinity) - (a.source?.effort ?? Infinity)
     ))[0] || null;
     const directKills = direct ? 1 / Math.max(direct.expectedYield, 0.000001) : Infinity;
-    const directEffort = direct ? sourceEffort(direct, state, planningOptions) : Infinity;
     const craftKills = target.recipe
         ? missingMaterialPlans.reduce((sum, material) => sum + (material.source?.effort ?? Infinity), 0)
         : Infinity;
-    const offer = marketOfferForTarget(target.item, state, planningOptions);
+    const offer = decisionMarketOffer(target.item, state, planningOptions);
     const craftFirst = rankIndex(target.item.etc?.rank) >= 3 && target.recipe && Number.isFinite(craftKills);
     const buy = offer && !craftFirst && marketEffort(offer, state) <= Math.min(directEffort, craftKills);
     const directAssessment = direct ? partyNeedAssessmentForSource(state, direct) : null;
@@ -3004,9 +3050,12 @@ function planFor(state = {}, options = {}) {
     if (recovery) return levelingRecoveryPlan(state, recovery);
     const excluded = new Set((options.excludedTargetIds || []).map(Number).filter(Boolean));
     const maxExpectedKills = Number(options.maxExpectedKills);
+    // Attempts differ only in excludedTargetIds, which no sourceCache entry
+    // reads: the attempts are one decision and share its cache.
+    const sourceCache = options.sourceCache || new Map();
     let plan;
     for (let attempt = 0; attempt < 8; attempt++) {
-        plan = rawPlanFor(state, { ...options, excludedTargetIds: [...excluded] });
+        plan = rawPlanFor(state, { ...options, excludedTargetIds: [...excluded], sourceCache });
         if (withinExpectedKillLimit(plan, maxExpectedKills)) break;
         const targetId = Number(plan?.target?.selfId || 0);
         if (!targetId || excluded.has(targetId)) break;
