@@ -3,6 +3,7 @@ require('./helpers/databaseIsolation');
 const { createWorld, Database, DataCache } = require('./helpers/c4QuestHarness');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const id = 730093;
 
 (async () => {
@@ -26,7 +27,12 @@ const id = 730093;
         const nextState = { ...state, inventory: { ...state.inventory,
             1463: { ...state.inventory[1463], amount: 0 } } };
         delete nextState.inventory[1060];
-        const entry = { revision: state.simulation.revision, nextState, proposal: { baseState: state } };
+        // An oversized party group travels without its base bag (the kernel's
+        // flush): the step's emptied stacks still reach the commit.
+        const entry = { revision: state.simulation.revision, nextState, proposal: {
+            baseState: { characterId: id },
+            removedItemIds: InventorySummary.removedItemIds(state.inventory, nextState.inventory)
+        } };
         const [result] = await Owner.commitBatch([entry], { timestamp: timestamp + 1 });
         assert(result.ok);
         assert.equal(await world.amount(id, 1463), 0, 'the last consumed shots must be removed physically');

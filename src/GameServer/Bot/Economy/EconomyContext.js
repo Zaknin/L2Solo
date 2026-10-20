@@ -1589,8 +1589,8 @@ function stockTargets(base) {
 }
 // The bot's missing shot stack as crafters see it (stats.shotDemand, read by
 // MarketDemandIndex and CraftWorkshopService): null when the stock rule wants
-// none, the previous row (its age kept) while item, amount and cap hold. The
-// far step's output (ColdSimulationWorker planLifecycle), over the step's own
+// none or has no shot row (a bot without shots), the previous row (its age
+// kept) while item, amount and cap hold. The far step's output (ColdSimulationWorker planLifecycle), over the step's own
 // economy and its money packet. Escrow 0 and worth ?? price, as the
 // main-thread review read them: a worth of 0 (an item off the bot's wish
 // card) caps the spend at 0, only no worth falls back to the price.
@@ -1600,8 +1600,9 @@ const SHOT_DEMAND_ACTIVITIES = ['hunting', 'resting', 'shopping', 'grouped'];
 function shotDemand(economy, state, timestamp, previous = null) {
     if (!SHOT_DEMAND_ACTIVITIES.includes(state.activity)) return previous;
     const stock = economy.stock('shots');
+    if (!stock?.needed) return null;
     const missing = stock.survivalMissing + stock.missing;
-    if (!stock.needed || !missing) return null;
+    if (!missing) return null;
     const price = stock.unitPrice;
     if (!(price > 0)) return previous;
     const funded = { ...state, stats: { ...state.stats, money: economy.statsPacket.money } };

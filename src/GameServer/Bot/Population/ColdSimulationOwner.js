@@ -193,15 +193,19 @@ function commitBatch(entries = [], options = {}) {
         const canonicalInventory = InventorySummary.canonicalize(nextState.inventory);
         const canonicalState = { ...nextState, inventory: canonicalInventory };
         states.set(Number(nextState.characterId), canonicalState);
+        // The physical writer needs explicit removals even though persisted
+        // summaries omit empty stacks. Only remove items owned by this proposal:
+        // the stacks its step emptied (removedItemIds, InventorySummary).
+        const removedItemIds = entry.proposal?.removedItemIds || [];
+        const physicalInventory = { ...canonicalInventory };
+        removedItemIds.forEach((selfId) => {
+            if (!canonicalInventory[selfId]) physicalInventory[selfId] = { selfId: Number(selfId), amount: 0 };
+        });
+        // The base bag only tells whether the bag changed; a proposal sent
+        // without it (an oversized group) rewrites the physical items.
         const previousInventory = InventorySummary.canonicalize(entry.proposal?.baseState?.inventory);
         const inventorySummary = JSON.stringify(canonicalInventory);
-        const inventoryChanged = JSON.stringify(previousInventory) !== inventorySummary;
-        // The physical writer needs explicit removals even though persisted
-        // summaries omit empty stacks. Only remove items owned by this proposal.
-        const physicalInventory = { ...canonicalInventory };
-        Object.entries(previousInventory).forEach(([key, item]) => {
-            if (!canonicalInventory[key]) physicalInventory[key] = { ...item, amount: 0 };
-        });
+        const inventoryChanged = removedItemIds.length > 0 || JSON.stringify(previousInventory) !== inventorySummary;
         requests.push({
             characterId: Number(nextState.characterId),
             expectedRevision: entry.revision,

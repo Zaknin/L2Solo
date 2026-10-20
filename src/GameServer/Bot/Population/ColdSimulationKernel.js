@@ -23,6 +23,7 @@ const BackgroundPartyLifecycle = require('./BackgroundPartyLifecycle');
 const PartyGoalCalculation = require('./PartyGoalCalculation');
 const Protocol = require('./ColdSimulationProtocol');
 const ColdStateDelta = require('./ColdStateDelta');
+const InventorySummary = require('./InventorySummary');
 const { HUNTING_TRAVEL_MS, beginHuntingTrip } = require('./HuntingTravel');
 const CraftMaterialPartyRoute = require('./CraftMaterialPartyRoute');
 const CraftMaterialParty = require('./CraftMaterialParty');
@@ -311,13 +312,15 @@ function partyTransitionProposals(run, memberStates, party, timestamp, enqueuedA
         const events = event && id === resolutionMemberId
             ? [{ ...event, characterId: id }]
             : [];
+        const base = run.members.find((member) => Number(member.characterId) === id) || state;
         return {
             proposalId: stepProposalId(id, run.startedAt),
             characterId: id,
             priority: 'P1',
             enqueuedAt,
             revision: memberRevision(run, id),
-            baseState: proposalBase(run.members.find((member) => Number(member.characterId) === id) || state),
+            baseState: proposalBase(base),
+            ...proposalRemovals(base, state),
             nextState: state,
             durable: null,
             result: { events, debug: { activity, partyId: run.party.partyId, spotId: party.spotId || null } },
@@ -453,12 +456,19 @@ function groupPayloadBytes(sizes = []) {
     return proposalPayloadBytes(sizes.length, sizes.reduce((sum, size) => sum + size, 0));
 }
 
-// What main reads of a step's base and result: the base bag (the commit's
-// explicit removals, ColdSimulationOwner) and the result's events, memory
-// events and debug. nextState carries the rest; main commits over its own
-// cached state, so no whole state travels twice.
+// What main reads of a step's base and result: the base bag (whether the
+// commit rewrites the physical items, ColdSimulationOwner) and the result's
+// events, memory events and debug. nextState carries the rest; main commits
+// over its own cached state, so no whole state travels twice.
 function proposalBase(state) {
     return { characterId: Number(state.characterId), inventory: state.inventory || {} };
+}
+
+// The stacks the step emptied, built once with the proposal and kept top-level,
+// so no flush stage drops them: the commit deletes their physical rows.
+function proposalRemovals(base, next) {
+    const removedItemIds = InventorySummary.removedItemIds(base?.inventory, next?.inventory);
+    return removedItemIds.length ? { removedItemIds } : {};
 }
 
 function proposalResult(result = {}) {
@@ -1978,6 +1988,7 @@ class ColdSimulationKernel {
                     enqueuedAt: this.now(),
                     revision: memberRevision(run, id),
                     baseState: proposalBase(state),
+                    ...proposalRemovals(state, projectedState),
                     nextState: projectedState,
                     durable: projection?.durable || null,
                     ...(projection?.market ? { market: projection.market } : {}),
@@ -2106,6 +2117,7 @@ class ColdSimulationKernel {
                 enqueuedAt: this.now(),
                 revision: Number(active.state.simulation?.revision || 0),
                 baseState: proposalBase(resolveState),
+                ...proposalRemovals(resolveState, projectedState),
                 nextState: projectedState,
                 durable: projection?.durable || null,
                 ...(projection?.market ? { market: projection.market } : {}),
@@ -2174,7 +2186,8 @@ class ColdSimulationKernel {
             }
             if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
                 DiagnosticConfig.developerDiagnostics && (this.stats.proposalOversize += group.length);
-                // Without the base bag: main derives no explicit removals.
+                // Without the base bag: main rewrites the physical items; the
+                // emptied stacks still ride in removedItemIds.
                 transportGroup = group.map(entry => ({ ...entry, baseState: { characterId: Number(entry.characterId) } }));
                 transportSizes = proposalSizes(transportGroup);
                 if (groupPayloadBytes(transportSizes) > PROPOSAL_PAYLOAD_LIMIT_BYTES) {
