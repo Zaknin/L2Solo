@@ -2813,6 +2813,12 @@ const BotLifeState = {
         // dirty bits after it (seen by the next decision point).
         const beforeResolvePacket = options.statsPacketBeforeResolve === true && options.statsPacket;
         if (beforeResolvePacket) Object.assign(nextState.stats, beforeResolvePacket);
+        // A detour's stand-in pair (BackgroundResolver.resolveTravel) holds only
+        // on the ground it names: any other spot write (a party arrival, the
+        // party-wait fallback, a pull) ends it here, each step on both threads,
+        // so a later return to that ground without the detour is an event.
+        const standIn = nextState.stats.standIn;
+        if (standIn && String(standIn.ground) !== String(nextState.spotId)) nextState.stats.standIn = null;
         let hard = [];
         if (state.activity === 'hunting') {
             // A round records its rewards/resources/sample immediately. It
@@ -2824,7 +2830,10 @@ const BotLifeState = {
                 // lazy: worker the native market owner is main-thread only; workers receive their mirrored escrow.
                 escrow = invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId);
             }
-            hard = DecisionSections.events(state, nextState, escrow);
+            // options.leaf: the step's held leaf (the worker's), whose own trip
+            // and arrival raise nothing; none (main, a step without a plan):
+            // every move is an event.
+            hard = DecisionSections.events(state, nextState, escrow, options.leaf ?? null);
         }
         // The bot's step counter, the clock of its spot marks (SpotRiskPolicy):
         // +1 once per resolved step, whichever thread resolves it (hot actor

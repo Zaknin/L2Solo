@@ -1350,6 +1350,9 @@ function startKernel(config = {}) {
                 projectClassProgression: true,
                 ...(crowded ? { checkSections: ROOM_SECTIONS } : {}),
                 moneyEscrowFor: ownEscrow,
+                // The step's held leaf: the round's check reads its own trip and
+                // arrival as no event (DecisionSections.events).
+                leaf: stepEconomy?.network?.activity ?? null,
                 // The soft point's inputs (BotLifeState.prepareResolve, every
                 // step): the board mirror (null until ready), the escrow and
                 // the bot's memory rows, read only when its bond is compared.

@@ -263,6 +263,14 @@ function resolveTravel(state, timestamp = Date.now()) {
     const arrivalActivity = travel.arrivalActivity || 'shopping';
     const nextStats = { ...(state.stats || {}), travel: arrived ? null : travel };
     if (arrived && travel.clearMarketReturn) nextStats.marketReturn = null;
+    // A detour's stand-in pair (BotRoute.trip, HuntingTravel): the held leaf's
+    // spot and the ground reached, kept until the next arrival;
+    // DecisionSections.occupationPlanned reads it while the bot stands there.
+    // Cleared to null, not deleted: the projection merges the patch over the
+    // state's stats (BotLifeState.applyResolve).
+    if (arrived && (travel.leafSpotId != null || nextStats.standIn != null)) {
+        nextStats.standIn = travel.leafSpotId != null ? { leaf: travel.leafSpotId, ground: travel.spotId ?? null } : null;
+    }
     return {
         patch: {
             activity: arrived ? arrivalActivity : 'traveling',
