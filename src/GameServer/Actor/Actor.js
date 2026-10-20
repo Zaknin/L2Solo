@@ -54,6 +54,8 @@ class Actor extends ActorModel {
 
         this.attack.destructor();
         this.automation.destructor(this);
+        // lazy: cycle the Actor Generics load Actor modules at their top.
+        invoke(path.actor).abortCombatState.cancelStanceEnd(this);
     }
 
     // Request packets

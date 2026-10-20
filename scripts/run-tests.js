@@ -630,6 +630,7 @@ const tests = [
     'tests/test_account_name_sanitization.js',
     'tests/test_character_create_failure.js',
     'tests/test_cast_interrupt.js',
+    'tests/test_combat_stance.js',
     'tests/test_character_write_queue.js',
     'tests/test_database_checkpoint_worker.js',
     'tests/test_database_checkpoint_barrier.js',
