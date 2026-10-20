@@ -200,8 +200,9 @@ function bestIncome(rows, share = 1) {
 // current spot or table pick gives way to a fitting row of the shared income
 // ranking, read in one walk of its first FIT_CHECKS rows (the income: the
 // first fitting row; the progress: the fitting row with the most exp), and
-// the hunt carries that row's numbers. Nothing fitting in the walk: the
-// table's pick stays. Counted as hunt:fit:kept|swap|none.
+// the hunt carries that row's numbers. Nothing fitting in the walk: the hunt
+// is the one without the fit (the bot's own rows, its current spot, the
+// table's pick), not another unfit spot. Counted as hunt:fit:kept|swap|none.
 function huntIncome(state, timestamp = Date.now(), mode, fits = null) {
     const sampled = sampledRows(state, timestamp, mode);
     const own = bestIncome(fits ? sampled.filter(row => fits(row.spotId)) : sampled, onSpotShare(state));
@@ -232,9 +233,13 @@ function huntIncome(state, timestamp = Date.now(), mode, fits = null) {
             if (!leveling || entry.exp > leveling.exp) leveling = entry;
             if (!progressUnfit) break;
         }
-        if (rowUnfit && earning) row = earning;
-        if (progressUnfit && leveling) progress = leveling;
-        Diagnostics.count('hunt', 'fit', earning ? 'swap' : 'none');
+        if (!earning) {
+            Diagnostics.count('hunt', 'fit', 'none');
+            return huntIncome(state, timestamp, mode);
+        }
+        if (rowUnfit) row = earning;
+        if (progressUnfit) progress = leveling;
+        Diagnostics.count('hunt', 'fit', 'swap');
     } else if (fits) Diagnostics.count('hunt', 'fit', currentFits ? 'kept' : 'swap');
     if (!row) return { perHour: 0, perKill: 0, expPerHour: 0, source: 'unavailable' };
     const income = netIncome(row, costs);
