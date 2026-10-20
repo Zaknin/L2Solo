@@ -1,6 +1,7 @@
 const DiagnosticConfig = require('./PopulationConfig');
 const Episode = require('./ColdCompetitionEpisode');
 const RelationshipContext = require('../../Social/RelationshipContext');
+const InventorySummary = require('./InventorySummary');
 const TTL_MS = 10000;
 const COOLDOWN_MS = 2 * 60000;
 const WAIT_MS = 15000;
@@ -196,6 +197,7 @@ class ColdCompetitionActions {
         const results = await this.owner.commitBatch(next.map((state, i) => ({
             revision: Number(states[i].simulation?.revision || 0), nextState: state,
             atomicGroup: group, options: { allowLifecycle: true }, proposal: { baseState: states[i],
+                removedItemIds: InventorySummary.removedItemIds(states[i].inventory, state.inventory),
                 ...(contest && i === 1 ? { result: { memoryEvents: [RelationshipContext.enrich({ key: `${event.key}:contested`,
                     sourceId: state.characterId, targetId: states[0].characterId, kind: 'character',
                     type: 'mob_contested', at: now }, state)] } } : {}) }
