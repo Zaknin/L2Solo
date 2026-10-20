@@ -189,14 +189,15 @@ function evacuationSpot(state, currentId, spots, frame) {
 function leafChoice(state, leaf, { spots, timestamp, frame = null }) {
     if (leaf?.activity !== 'hunting' || !leaf.spotId || !routable(state, null, [])) return null;
     const wished = SpotIndex.spotById(spots, leaf.spotId);
-    if (!wished || wished.raidBoss === true) return null;
+    if (!wished) { EconomyDiagnostics.count('route', 'trip', 'leaf_missing'); return null; }
+    if (wished.raidBoss === true) return null;
     frame = frame || frameFor(state, null, [], timestamp);
     if (frame.excludedSpotIds.has(String(wished.id))) return null;
     const level = Number(state.level || 1);
     const fits = LevelingRoutes.isSpotAllowedForState(wished, state, frame.solo())
         && (SpotService.isSuitable(wished, level, frame.options)
             || EquipmentIncomeRoute.economicHunt(state) && Number(wished.avgLevel || wished.minLevel || 1) >= level - 15);
-    if (!fits) return null;
+    if (!fits) { EconomyDiagnostics.count('route', 'trip', 'leaf_unfit'); return null; }
     const hasRoom = frame.options.hasRoom;
     if (hasRoom && String(wished.id) !== String(state.spotId || '') && !hasRoom(wished.id)) {
         EconomyDiagnostics.count('route', 'trip', 'leaf_full');
