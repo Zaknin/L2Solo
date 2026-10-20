@@ -43,7 +43,7 @@ class ColdCompetitionActions {
         this.spotActivity = new Map();
         this.spotActivityEvicted = 0;
         this.report = { mode: 'cooperation', applied: 0, rejected: 0, avoids: 0, yields: 0, contests: 0, revenges: 0, deescalated: 0, parties: 0, recruits: 0, queued: 0, pvpFights: 0, pvpDeaths: 0, pkKills: 0, budgetSkipped: 0, recent: [] };
-        Object.assign(this.report, { attempted: 0, decisionRefreshes: 0, rejectedReasons: {}, rejectionExamples: [], skippedActions: {}, pvpRejected: {}, pvpSuppressed: {}, pvpCompleted: 0, pvpOutcomes: {}, pvpExtensions: 0, pvpExtendedMs: 0 });
+        Object.assign(this.report, { attempted: 0, decisionRefreshes: 0, decisionRecomputes: 0, rejectedReasons: {}, rejectionExamples: [], skippedActions: {}, pvpRejected: {}, pvpSuppressed: {}, pvpCompleted: 0, pvpOutcomes: {}, pvpExtensions: 0, pvpExtendedMs: 0 });
     }
     submit(forecast, options = {}) {
         if (this.stopping || this.running || !forecast || (!options.framed && forecast.at <= this.lastScanAt) || !this.canRun()) return false;
@@ -122,6 +122,8 @@ class ColdCompetitionActions {
             || (event.action !== 'revenge' && !(event.pressure > 1))) return { ok: false, reason: 'invalid_or_expired' };
         if (event.action === 'contest' || event.action === 'revenge') {
             const current = require('./ColdConflictDecision').refresh(event, this, now);
+            // A participant written since the worker's scan: main decided again.
+            if (current.recomputed) DiagnosticConfig.developerDiagnostics && (this.report.decisionRecomputes++);
             if (!current.event) return { ok: false, reason: current.reason, decision: current.decision };
             event = current.event;
             if (current.refreshed) DiagnosticConfig.developerDiagnostics && (this.report.decisionRefreshes++);

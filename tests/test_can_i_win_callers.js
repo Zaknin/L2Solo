@@ -47,18 +47,34 @@ assert.strictEqual(dispute(solo(40), solo(40), wary).reason, 'outmatched', 'the 
 assert.strictEqual(dispute(solo(40), solo(40), calm, { ready: true, personal: { fear: 6, affinity: 0, trust: 0, hostility: 0 } }).reason,
     'outmatched', 'fear of him: outmatched by an even look');
 
-// The cold refresh re-asks the same question with the saved rolls and the willingness
-// rolled once at the dispute (one decision per encounter, user 2026-10-05).
+// A far pair's contest is decided once, by the worker (ColdCompetitionMonitor): main
+// takes the delivered verdict while the participants are at the revisions the worker
+// read. A participant written since the scan is asked again on the saved rolls and the
+// willingness rolled once at the dispute (one decision per encounter, user 2026-10-05).
 {
     const cold = (id, level) => ({ characterId: id, level, party: null, simulation: { revision: 1 } });
     const states = { 1: cold(1, 40), 2: cold(2, 44) };
     const ctx = { life: { cachedState: id => states[id] }, parties: { find: () => null },
-        memory: { assess: () => neutral }, personaFor: () => calm };
-    const event = willing => ({ contextVersion: 1, action: 'contest', pressure: 3, decisionRolls: [0.99, 0.1, 0.99, 0.99],
-        actor: { id: 1 }, peer: { id: 2 }, key: 'refresh-pin', willing });
-    assert.deepStrictEqual(Refresh.refresh(event([false, true]), ctx, Date.now()), { reason: 'decision_changed', decision: 'avoid' },
-        'cold refresh: the carried unwillingness is outmatched');
-    assert.deepStrictEqual(Refresh.refresh(event([true, true]), ctx, Date.now()), { reason: 'decision_changed', decision: 'yield' },
+        memory: { assess: () => neutral, revision: () => 0 }, personaFor: () => calm };
+    // seen: the state revision the worker read (main holds 1).
+    const event = (willing, seen = 0) => ({ contextVersion: 1, action: 'contest', pvpIntent: true, reason: 'resource_dispute',
+        pressure: 3, decisionRolls: [0.99, 0.1, 0.99, 0.99], key: 'refresh-pin', willing,
+        actor: { id: 1, revision: seen, memoryRevision: 0 }, peer: { id: 2, revision: 1, memoryRevision: 0 } });
+    const decide = Policy.decide;
+    let decides = 0;
+    Policy.decide = input => { decides++; return decide(input); };
+    // These rolls would not contest again (an outmatched retreat): the verdict stands.
+    const kept = Refresh.refresh(event([false, true], 1), ctx, Date.now());
+    assert.deepStrictEqual([kept.event?.action, kept.event?.pvpIntent, decides], ['contest', true, 0],
+        'cold refresh: same revisions, the worker\'s verdict stands and main does not decide');
+    assert.deepStrictEqual(Refresh.refresh(event([false, true]), ctx, Date.now()), { reason: 'decision_changed', decision: 'avoid', recomputed: true },
+        'cold refresh: written since the scan, the carried unwillingness is outmatched');
+    assert.strictEqual(decides, 1, 'cold refresh: only the written pair is decided again');
+    Policy.decide = decide;
+    const unloaded = { ...ctx, memory: { assess: () => ({ ready: false }), revision: () => undefined } };
+    assert.deepStrictEqual(Refresh.refresh(event([false, true], 1), unloaded, Date.now()), { reason: 'memory_unavailable' },
+        'cold refresh: main without the bot\'s memory does not keep the verdict');
+    assert.deepStrictEqual(Refresh.refresh(event([true, true]), ctx, Date.now()), { reason: 'decision_changed', decision: 'yield', recomputed: true },
         'cold refresh: carried willingness, four hidden levels above do not matter');
     const Tendency = require('../src/GameServer/Bot/AI/TendencyRoll');
     let rolls = 0;
