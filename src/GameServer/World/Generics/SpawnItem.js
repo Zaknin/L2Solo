@@ -8,12 +8,11 @@ function spawnItem(session, selfId, amount, coords, onSpawn) {
         item.setAmount(amount);
         this.items.spawns.push(item);
         const packet = ServerResponse.spawnItem(item);
-        // The players who got SpawnItem are the ones whose client keeps the
-        // object until a DeleteObject; PickupItem sends it to them by name.
+        // Per-recipient dataSendToMe: NpcVisibility records each client that
+        // got the item, and PickupItem deletes it from exactly those clients.
         const recipients = this.fetchVisibleRealPlayers(null, item);
         if (session && !this.isBotSession(session) && !recipients.includes(session)) recipients.push(session);
         recipients.forEach(recipient => recipient.dataSendToMe(packet));
-        item.viewers = recipients.length ? recipients : null;
         onSpawn?.(item);
     });
 }

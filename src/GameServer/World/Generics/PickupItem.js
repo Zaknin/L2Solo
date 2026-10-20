@@ -2,6 +2,7 @@ const ServerResponse = invoke('GameServer/Network/Response');
 const ConsoleText    = invoke('GameServer/ConsoleText');
 const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
 const PickupCapacity = require('../../Inventory/PickupCapacity');
+const NpcVisibility  = invoke('GameServer/World/NpcVisibility');
 
 function pickupItem(session, actor, item) {
     if (!actor || session?.actor !== actor || !actor.backpack ||
@@ -49,12 +50,16 @@ function pickupItem(session, actor, item) {
         // Every client that got SpawnItem keeps the object until told, wherever
         // its player stands now; a range broadcast left ghosts to those who walked away.
         const deletePacket = ServerResponse.deleteOb(id);
-        const viewers = claimedItem.viewers || [];
-        viewers.forEach((viewer) => {
-            if (viewer.actor?.fetchIsOnline?.() === true) viewer.dataSendToMe(deletePacket);
+        const recipients = NpcVisibility.recipientsOf(id);
+        if (!this.isBotSession(session) && !recipients.includes(session)) recipients.push(session);
+        recipients.forEach((recipient) => {
+            try {
+                recipient.dataSendToMe(deletePacket);
+            }
+            catch (error) {
+                utils.infoWarn('PickupItem', 'failed to send DeleteObject for item %d: %s', id, error.message);
+            }
         });
-        if (!this.isBotSession(session) && !viewers.includes(session)) session.dataSendToMe(deletePacket);
-        claimedItem.viewers = null;
         allocations.forEach((entry, index) => {
             const award = this.purchaseItem(entry.session, selfId, entry.amount, selfId === 57 ? {} : {
                 enchant: claimedItem.fetchEnchantLevel?.() ?? 0,
