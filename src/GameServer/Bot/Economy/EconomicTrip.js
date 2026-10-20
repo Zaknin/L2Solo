@@ -179,6 +179,19 @@ function* prepare(state) {
 }
 // The same table in one call, for a caller that cannot slice (EconomyContext.forState).
 function prepared(state) { return drain(prepare(state)); }
+// A town's trip in Adena at one hour value, each town priced once per reader:
+// an offer order asks it about three times per offer.
+function costByTown(row, hourAdena) {
+    const costs = new Float64Array(townOrdinal.size).fill(NaN);
+    return town => {
+        const index = townOrdinal.get(town);
+        if (index === undefined) return Infinity;
+        if (!Number.isNaN(costs[index])) return costs[index];
+        const value = row(town);
+        return costs[index] = value.known && Number.isFinite(hourAdena) && hourAdena >= 0
+            ? Math.round(value.hours * hourAdena) + value.fees : Infinity;
+    };
+}
 function preparedReader(rows, { hourAdena } = {}) {
     const row = town => {
         const index = townOrdinal.get(town), value = index === undefined ? null : rows?.[index];
@@ -186,11 +199,7 @@ function preparedReader(rows, { hourAdena } = {}) {
             && Number.isFinite(value[2]) && value[2] >= 0
             ? { known: true, hours: value[1], fees: value[2] } : unknown();
     };
-    const cost = town => {
-        const value = row(town);
-        return value.known && Number.isFinite(hourAdena) && hourAdena >= 0
-            ? Math.round(value.hours * hourAdena) + value.fees : Infinity;
-    };
+    const cost = costByTown(row, hourAdena);
     cost.details = row;
     return cost;
 }
@@ -215,11 +224,7 @@ function reader(state, { hourAdena, origin = null } = {}) {
         }
         return { known: rows[at] === 1, hours: rows[at + 1], fees: rows[at + 2] };
     };
-    const cost = town => {
-        const value = row(town);
-        return value.known && Number.isFinite(hourAdena) && hourAdena >= 0
-            ? Math.round(value.hours * hourAdena) + value.fees : Infinity;
-    };
+    const cost = costByTown(row, hourAdena);
     cost.details = row;
     if (state && typeof state === 'object') readers.set(state, { key, cost });
     return cost;
