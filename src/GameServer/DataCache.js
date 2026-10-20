@@ -301,9 +301,16 @@ const DataCache = {
         utils.infoSuccess('Datapack', 'cached');
     },
 
+    // The shared frozen row; callers that write take fetchNpcFromSelfId's copy.
+    npcRow(selfId) {
+        const row = ItemTemplateIndex.findStrict(DataCache.npcs, selfId);
+        if (!row) utils.infoWarn('Datapack', 'unknown Npc SelfId %d', selfId);
+        return row;
+    },
+
     fetchNpcFromSelfId(selfId, callback) {
-        const item = structuredClone(ItemTemplateIndex.findStrict(DataCache.npcs, selfId));
-        item ? callback(item) : utils.infoWarn('Datapack', 'unknown Npc SelfId %d', selfId);
+        const row = DataCache.npcRow(selfId);
+        if (row) callback(structuredClone(row));
     },
 
     fetchNpcRewardsFromSelfId(selfId, callback) {

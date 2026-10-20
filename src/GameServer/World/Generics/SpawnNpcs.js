@@ -255,11 +255,8 @@ function spawnNpcs() {
 
         item.spawns.forEach((spawn) => {
             if (exclusive.has(Number(spawn.selfId))) return;
-            const npc = ItemTemplateIndex.findStrict(DataCache.npcs, spawn.selfId);
-            if (!npc) {
-                utils.infoWarn('Datapack', 'unknown Npc SelfId %d', spawn.selfId);
-                return;
-            }
+            const npc = DataCache.npcRow(spawn.selfId);
+            if (!npc) return;
             templates.add(npc);
             const definition = { npc, spawn, bounds };
 
