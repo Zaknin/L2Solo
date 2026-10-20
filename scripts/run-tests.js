@@ -798,6 +798,7 @@ const tests = [
     'tests/test_party_client_loot_distribution.js',
     'tests/test_party_combat_loot.js',
     'tests/test_ground_item_pickup_race.js',
+    'tests/test_ground_item_visibility.js',
     'tests/test_pickup_inventory_capacity.js',
     'tests/test_pk_drop_pickup_enchant.js',
     'tests/test_pickup_session_lifecycle.js',
