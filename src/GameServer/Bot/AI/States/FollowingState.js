@@ -1370,7 +1370,7 @@ const FollowingState = {
                 });
                 keepRoleDecision = true;
             } else if (!HotTownRebuff.tripGuide(session, bot, BotAI)) {
-                const reason = HotTownRebuff.nearGuide(bot, BotAI) ? 'wait_for_newbie_guide_route' : 'newbie_guide_out_of_reach';
+                const reason = Number(session.newbieGuideRetryAt || 0) > Date.now() ? 'wait_for_newbie_guide_route' : 'newbie_guide_out_of_reach';
                 recordRoleDecision(session, bot, 'refresh_buffs', reason, {
                     retryAt: session.newbieGuideRetryAt
                 });

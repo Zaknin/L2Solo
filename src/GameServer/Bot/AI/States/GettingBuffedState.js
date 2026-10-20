@@ -99,7 +99,7 @@ function finishVisit(session, bot, Generics) {
     return true;
 }
 
-function abandonUnreachableVisit(session, bot, BotAI) {
+function abandonUnreachableVisit(session, bot, BotAI, reason = 'newbie_guide_route_unreachable') {
     const resume = session.resumeAfterBuff;
     const following = resume?.plan === 'following' && resume.followPlayerSession?.actor?.fetchIsOnline?.();
     session.plan = following ? 'following' : (session.preBuffPlan || 'hunting');
@@ -118,7 +118,7 @@ function abandonUnreachableVisit(session, bot, BotAI) {
     session.roleDecision = {
         ...(session.roleDecision || {}),
         action: 'refresh_buffs',
-        reason: 'newbie_guide_route_unreachable',
+        reason,
         at: Date.now()
     };
     TownNpcApproach.reset(session);
@@ -150,7 +150,7 @@ module.exports = {
         // A guide beyond its town radius has no town path, so its route failures
         // are not counted: a route that leaves that radius ends the trip as unreachable.
         if (!HotTownRebuff.guideInReach(bot, guide)) {
-            abandonUnreachableVisit(session, bot, BotAI);
+            abandonUnreachableVisit(session, bot, BotAI, 'newbie_guide_route_left_town');
             return;
         }
 
