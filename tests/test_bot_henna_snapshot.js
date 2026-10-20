@@ -8,6 +8,7 @@ const Data = invoke('GameServer/DataCache'); Data.init();
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Native = require('./helpers/nativeMarketFixture');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Henna = invoke('GameServer/Henna/HennaRules');
 const Policy = invoke('GameServer/Bot/Economy/BotImprovementPolicy');
@@ -41,7 +42,7 @@ async function run() {
         // moves the revision, so a proposal with older symbols is refused, not merged.
         const committed = await Owner.commitBatch([{ revision: stepped.simulation.revision,
             nextState: { ...stepped, stats: { ...stepped.stats } },
-            proposal: { baseState: stepped }, options: { allowLifecycle: true } }]);
+            proposal: InventorySummary.bagChange(stepped.inventory, stepped.inventory), options: { allowLifecycle: true } }]);
         assert(committed[0].ok);
         state = Life.cachedState(id);
         assert.deepEqual(state.stats.hennas, slots, 'an accepted worker round preserves native symbols');

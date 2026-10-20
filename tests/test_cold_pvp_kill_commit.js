@@ -6,6 +6,7 @@ require('../src/Global');
 
 const Database = invoke('Database');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Karma = invoke('GameServer/Karma');
 const databasePath = path.join(process.cwd(), 'tmp', 'test-cold-pvp-kill-commit.sqlite');
@@ -56,7 +57,7 @@ async function commitKills(state, pvpKills, timestamp) {
     const [result] = await Owner.commitBatch([{
         revision: current.simulation.revision,
         nextState: { ...current, timing: { ...current.timing, lastResolvedAt: timestamp + 500 }, updatedAt: timestamp + 500 },
-        proposal: { baseState: current, durable: { pvpKills } }
+        proposal: { ...InventorySummary.bagChange(current.inventory, current.inventory), durable: { pvpKills } }
     }], { timestamp: timestamp + 500 });
     return result;
 }

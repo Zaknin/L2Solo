@@ -18,6 +18,7 @@ const Henna = invoke('GameServer/Henna/HennaRules');
 const Crystals = invoke('GameServer/Bot/Population/ColdSoulCrystal');
 const NativeCrystals = invoke('GameServer/Items/SoulCrystalProgression');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const location = {locX:83396,locY:147904,locZ:-3400};
 let serial = 0;
 const cash = {selfId:57,name:'Adena',amount:10000000};
@@ -154,7 +155,7 @@ async function main() {
         const step=Crystals.outcome(fighter,mob,0,{at:2200});assert.equal(step.toId,4630);
         const stepped=Life.cachedState(state.characterId);
         const committed=await Owner.commitBatch([{revision:stepped.simulation.revision,nextState:{...stepped,inventory:fighter.state.inventory},
-            proposal:{baseState:stepped,durable:{soulCrystals:[step]}},options:{allowLifecycle:true}}]);
+            proposal:{...InventorySummary.bagChange(stepped.inventory,fighter.state.inventory),durable:{soulCrystals:[step]}},options:{allowLifecycle:true}}]);
         assert.equal(committed[0].ok,true);state=Life.cachedState(state.characterId);
         assert.equal((await DB.fetchItems(state.characterId)).find(row=>row.id===step.objectId).selfId,4630);
         console.log('PASS actual quest, MP/time/HP Drain Soul and fenced accepted Worker physical commit');
@@ -174,7 +175,7 @@ async function main() {
 
         state=await seed([{selfId:1049,name:'Spellbook: Ice Bolt',amount:1}],{classId:10,level:14});
         const current=Life.cachedState(state.characterId);
-        const accepted=await Owner.commitBatch([{revision:current.simulation.revision,nextState:{...current,sp:100000},proposal:{baseState:current,durable:{classId:10}},options:{allowLifecycle:true}}]);
+        const accepted=await Owner.commitBatch([{revision:current.simulation.revision,nextState:{...current,sp:100000},proposal:{...InventorySummary.bagChange(current.inventory,current.inventory),durable:{classId:10}},options:{allowLifecycle:true}}]);
         assert(accepted[0].ok);state=Life.cachedState(state.characterId);
         assert.equal((await DB.fetchSkills(state.characterId)).length,0,'accepted proposal cannot synthesize tree ranks');
         const paid=await Life.reviewTrainingAfterCommit(state);

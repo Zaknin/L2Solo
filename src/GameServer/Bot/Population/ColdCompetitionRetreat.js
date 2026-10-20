@@ -70,8 +70,7 @@ async function apply({ event, life, owner, memory, parties, participantAllowed, 
     // the group whole.
     const results = await owner.commitBatch(next.map((s, i) => ({
         revision: Number(states[i].simulation?.revision || 0), nextState: s, atomicGroup: group,
-        options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: states[i],
-            removedItemIds: InventorySummary.removedItemIds(states[i].inventory, s.inventory) }
+        options: { allowParty: true, allowLifecycle: true }, proposal: InventorySummary.bagChange(states[i].inventory, s.inventory)
     })), { timestamp: now(), journalReason: 'retreat' });
     if (results.length !== states.length || results.some(r => !r.ok)) return { ok: false, reason: 'commit_rejected' };
     // Each side caches its own committed row (Database commitBatch, partyRow).

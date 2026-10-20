@@ -7,6 +7,7 @@ const Database = invoke('Database');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Raid = require('../src/GameServer/Bot/Population/ColdRaidEncounter');
 const Authority = require('../src/GameServer/Bot/Population/ColdRaidAuthority');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
@@ -33,10 +34,13 @@ async function proposed(party, id, snapshot) {
             statsJson: JSON.stringify({ ...party.stats, raidEncounter: snapshot }) }],
         raidCommit: { key: snapshot.key, expectedRevision: 0, revision: 1, snapshot,
             worldDefeat: { npcId: 10484, respawnTime: at + 100000 } } };
-    const entries = members.map(member => ({ revision: member.simulation.revision, atomicGroup,
-        options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: member },
-        nextState: { ...member, exp: member.exp + 100, adena: member.adena + 10,
-            inventory: { ...member.inventory, 57: { selfId: 57, amount: 10 } } } }));
+    const entries = members.map(member => {
+        const nextState = { ...member, exp: member.exp + 100, adena: member.adena + 10,
+            inventory: { ...member.inventory, 57: { selfId: 57, amount: 10 } } };
+        return { revision: member.simulation.revision, atomicGroup, nextState,
+            options: { allowParty: true, allowLifecycle: true },
+            proposal: InventorySummary.bagChange(member.inventory, nextState.inventory) };
+    });
     return { entries };
 }
 async function durable() {

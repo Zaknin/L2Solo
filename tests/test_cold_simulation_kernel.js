@@ -1006,7 +1006,8 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     assert.strictEqual(lastSteps(burstKernel).length, 3,
         'a catch-up tick must honor the smaller in-flight burst even when the protocol batch is larger');
 
-    const oversizedInventory = Object.fromEntries(Array.from({ length: 1200 }, (_, index) => [
+    // ~316 KB of bag: the next state alone is over the 240 KB proposal limit.
+    const oversizedInventory = Object.fromEntries(Array.from({ length: 2400 }, (_, index) => [
         String(index), {
             selfId: index + 1000,
             name: `Oversized item ${index} ${'x'.repeat(42)}`,
@@ -1031,8 +1032,8 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         priority: 'P2',
         enqueuedAt: now,
         revision: 5,
-        // The shape the kernel builds: the base bag next to the whole next state.
-        baseState: { characterId: 91, inventory: oversizedInventory },
+        // The shape the kernel builds: the bag flag next to the whole next state.
+        bagChanged: false,
         nextState: oversizedState,
         durable: null,
         result: { events: [], debug: { activity: 'hunting' } },
@@ -1059,7 +1060,7 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
         const before = state(id, { stats: { history: 'h'.repeat(40000), removed: 1, list: [1, 2] } });
         const next = { ...before, stats: { history: before.stats.history, list: [3], added: null }, hp: 8 };
         const entry = { ...oversizedProposal, characterId: id, proposalId: `${id}:${now}`,
-            baseState: { characterId: id, inventory: before.inventory }, nextState: next,
+            nextState: next,
             atomicGroup: { id: 'large-clan', memberIds: Array.from({ length: 9 }, (_, i) => 200 + i) } };
         oversizedKernel.inFlight.set(id, { state: before, startedAt: now });
         oversizedKernel.dirty.set(id, entry);
@@ -1125,10 +1126,11 @@ const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.inc
     clanMembers.forEach(s => partialKernel.upsert({ state: s }));
     partialKernel.partyPut('nine', { partyId: 'nine', leaderId: 500, memberIds: clanMembers.map(m => m.characterId) });
     for (let id = 600; id < 605; id++) {
+        const base = state(id);
         const pending = { ...oversizedProposal, characterId: id, enqueuedAt: now,
-            proposalId: `${id}:${now}`, revision: 3, baseState: state(id), nextState: state(id), result: { events: [], debug: {} } };
-        partialKernel.upsert({ state: pending.baseState });
-        partialKernel.inFlight.set(id, { state: pending.baseState, startedAt: now });
+            proposalId: `${id}:${now}`, revision: 3, nextState: state(id), result: { events: [], debug: {} } };
+        partialKernel.upsert({ state: base });
+        partialKernel.inFlight.set(id, { state: base, startedAt: now });
         partialKernel.dirty.set(id, pending);
     }
     partialKernel.tick();
