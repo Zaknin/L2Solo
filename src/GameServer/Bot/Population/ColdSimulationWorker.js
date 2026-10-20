@@ -1194,16 +1194,17 @@ function requestPartyGoals(payload, msgId, admitted = false) {
             if (!partyMembersAvailable(members)) throw Error('party_goal_member_busy');
             // The lifecycle's order: the held build's verdict on this state
             // (main's escrow in it) keeps its workshop, else the planner is
-            // asked; a valid verdict serves the held build with its nodes.
-            // Never remembered: a query's own snapshot must not displace the
-            // bot's held build (L133).
+            // asked. A valid verdict serves the held build when its entry kept
+            // the graph nodes (a party member's); a formation candidate's
+            // entry kept none, so it is built (withNodes). Never remembered:
+            // a query's own snapshot must not displace the bot's held build (L133).
             const deps = { timestamp, spots: planningSpots, board: boardReady(), routeRows,
                 buyOrderEscrow: options.buyOrderEscrow, rememberContext: false, caller: 'workerPartyGoal' };
             const verdict = {};
             const workshop = EconomyContext.heldWorkshop(member, deps, verdict)
                 || await askWorkshop(member, timestamp, deps.routeRows, 'party_goal', options);
             if (!partyMembersAvailable(members)) throw Error('party_goal_member_busy');
-            return EconomyContext.forState(member, { ...deps, workshop, eventVerdict: verdict });
+            return EconomyContext.forState(member, { ...deps, workshop, eventVerdict: verdict, withNodes: true });
         }, payload.timestamp, () => !shuttingDown && !kernel.stopping && Date.now() < payload.replyBy
             && partyMembersAvailable(members), { spots: planningSpots });
         if (!shuttingDown && !kernel.stopping && Date.now() < payload.replyBy)

@@ -32,6 +32,7 @@ const PartyComposition = invoke('GameServer/Bot/Population/BackgroundPartyCompos
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const GearPlanSelection = invoke('GameServer/Bot/AI/GearPlanSelection');
 const DecisionEvents = require('../AI/DecisionEvents');
+const DecisionSections = require('../Economy/DecisionSections');
 const PartyWaitFallback = invoke('GameServer/Bot/Population/PartyWaitFallback');
 const ColdCraftingService = invoke('GameServer/Bot/Economy/ColdCraftingService');
 const ColdWealthCraftService = invoke('GameServer/Bot/Economy/ColdWealthCraftService');
@@ -73,23 +74,27 @@ const SurvivalFloor = require('./SurvivalFloor');
 const CombinedErrands = require('./CombinedErrandPolicy');
 const TradeMeetingService = invoke('GameServer/AfkTrade/TradeMeetingService');
 const ClanRaidRoster = require('../../Clan/ClanRaidRoster');
-const activationFailureLogAt = new Map();
+const partyFailureLogAt = new Map();
 // The completion key a far bot already waited on in town since its last
 // buy or improvement this visit (main only; the visit's end clears it).
 const exchangeWaits = new Map();
 // Returned by a resolveColdState branch method that did not take its branch.
 const COLD_RESOLVE_NEXT = Symbol('cold_resolve_next');
 
-function logPartyActivationFailure(state, result, timestamp = Date.now()) {
-    const partyId = state?.party?.partyId;
+// A party step's refusal (step: 'activation', 'goal' for the worker's party
+// goal query), one line per party, step and reason in 30 s: the live read
+// with diagnostics off.
+function logPartyFailure(partyId, step, result, timestamp = Date.now()) {
     if (!partyId || result?.ok !== false) return;
     const reason = String(result.reason || 'unknown');
     const detail = String(result.detail || '');
-    const key = `${partyId}:${reason}:${detail}`;
-    if (timestamp - Number(activationFailureLogAt.get(key) || 0) < 30000) return;
-    activationFailureLogAt.set(key, timestamp);
-    utils.infoWarn('BotPopulation', 'party activation deferred %s reason=%s%s',
-        partyId, reason, detail ? ` detail=${detail}` : '');
+    const key = `${partyId}:${step}:${reason}:${detail}`;
+    if (timestamp - Number(partyFailureLogAt.get(key) || 0) < 30000) return;
+    // A forming party's id is new per attempt: lapsed keys go once the map grows.
+    if (partyFailureLogAt.size >= 256) for (const [old, loggedAt] of partyFailureLogAt) if (timestamp - loggedAt >= 30000) partyFailureLogAt.delete(old);
+    partyFailureLogAt.set(key, timestamp);
+    utils.infoWarn('BotPopulation', 'party %s deferred %s reason=%s%s',
+        step, partyId, reason, detail ? ` detail=${detail}` : '');
 }
 
 function hasFiniteCoordinate(value) {
@@ -426,6 +431,7 @@ async function jointPartyGoals(party, members, timestamp, options = {}) {
     // Two other parties hold the worker's goal slots: keep the current
     // objective now; the next party resolve reviews the goals again.
     if (result.reason === 'party_goal_busy') return Policy.pending(party, members);
+    logPartyFailure(party.partyId, 'goal', result);
     return result.ok && PartyGoalCalculation.matches(members, result.sources) ? result.joint : null;
 }
 
@@ -438,7 +444,7 @@ async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
     if (party.status !== 'active') return { party, reviewed: 0, departed: null };
     const members = (party.memberIds || [])
         .map((characterId) => LifeState.cachedState(characterId))
-        .filter((member) => member && String(member.party?.partyId || member.partyId || '') === String(party.partyId));
+        .filter((member) => member && DecisionSections.partyIdOf(member) === String(party.partyId));
     if (!members.length) return { party, reviewed: 0, departed: null };
 
     const spot = SpotProfiles.findById(party.spotId) || null;
@@ -469,7 +475,7 @@ async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
         // ownership revision immediately before the atomic transition so the
         // handoff fences that live token instead of an older cached snapshot.
         const currentMember = LifeState.cachedState(member.characterId) || member;
-        if (String(currentMember.party?.partyId || currentMember.partyId || '') !== String(party.partyId)) continue;
+        if (DecisionSections.partyIdOf(currentMember) !== String(party.partyId)) continue;
         const need = currentMember === current ? cleanupNeeded : PartyMarketBreak.memberNeed(party, currentMember, timestamp);
         if (!canTakePartyMarketBreak(party, members, currentMember, timestamp, need, goalSnapshot?.current)) continue;
         const travel = GoalExecutor.beginMarketTravel(currentMember,
@@ -491,7 +497,7 @@ async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
         if (incomeDeparture && !PartyMarketBreak.pending(party).length && !party.stats?.pveEncounter
             && !currentMembers.some(member => member.stats?.tradeMeeting || member.activity === 'traveling' || member.activity === 'dead')) {
             const member = LifeState.cachedState(incomeDeparture.characterId);
-            if (member && String(member.party?.partyId || member.partyId || '') === String(party.partyId)) {
+            if (member && DecisionSections.partyIdOf(member) === String(party.partyId)) {
                 const detached = await LifeState.leaveParty({ ...member, stats: { ...member.stats,
                     partyIncomeDecision: incomeDeparture } }, 'better_solo_income', { ownerHandoff: true });
                 if (detached) {
@@ -1922,7 +1928,7 @@ const PopulationService = {
                                     keepStoreLocation: state.activity === 'crafting' && !!state.stats?.craftShop,
                                     playerLoc: loc
                                 }).then((result) => {
-                                    logPartyActivationFailure(state, result);
+                                    logPartyFailure(state?.party?.partyId, 'activation', result);
                                     return result;
                                 });
                             }).then((result) => {

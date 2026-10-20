@@ -350,7 +350,8 @@ function relationTargetIds(state, memory = null) {
 // decision (factEvents). The raw values are read from a state (stateView):
 // the saved one of a far bot, the posted row of a near one. view: the kit
 // fields (kitView), recipes (the sorted
-// known recipe ids, null: none read), party (null: none), clanId,
+// known recipe ids, null: none read), party (null: none; its partyId and
+// role are the fact, its leaderId is not), clanId,
 // relationTargets ([friend, enemy] ids; null: read here from memory), activity,
 // spotId, stats.travel (occupationPlanned's shape) and stats.relations (the
 // fallback rows without memory), dead, riskDeaths, supply ([id, present] per
@@ -358,7 +359,7 @@ function relationTargetIds(state, memory = null) {
 // memory: the bot's interaction memory rows, null when the caller read none.
 function factsOf(view, memory = null) {
     return { build: kitFact(view), recipes: view.recipes ? hash(view.recipes) : null,
-        relations: hash([view.party, view.clanId, ...(view.relationTargets || relationTargetIds(view, memory))]),
+        relations: hash([view.party?.partyId, view.party?.role, view.clanId, ...(view.relationTargets || relationTargetIds(view, memory))]),
         occupation: hash([view.spotId, view.activity === 'resting' ? 'hunting' : view.activity]),
         dead: view.dead, riskDeaths: view.riskDeaths, supply: hash(view.supply), stores: hash(view.stores),
         bag: hash([view.bagFull, view.weight]) };
@@ -368,10 +369,11 @@ function factsOf(view, memory = null) {
 function stockIds(shotPlan, potion) {
     return [736, shotPlan.selfId, potion.selfId];
 }
-// The bot's party id, 0 when it has none (the relations fact's party, the
-// held build's kept projection: EconomyContext).
+// The bot's party id as a string (`bgp_<ts36>_<leaderId>`, `bgp_hot_<uuid>`),
+// '' when it has none (the relations fact's party, the held build's kept
+// projection: EconomyContext).
 function partyIdOf(state) {
-    return Number(state.party?.partyId || state.partyId || 0);
+    return String(state.party?.partyId || state.partyId || '');
 }
 // The far reader: the raw values of a saved state. recipes: the known recipe
 // ids the build reads (WishProviders.recipeIds), null when the caller holds
