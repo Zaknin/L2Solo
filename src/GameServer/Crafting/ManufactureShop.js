@@ -6,6 +6,9 @@ const CharacterWriteQueue = invoke('GameServer/Persistence/CharacterWriteQueue')
 const DataCache = invoke('GameServer/DataCache');
 const Item = invoke('GameServer/Item/Item');
 const { materialPlan } = invoke('GameServer/Crafting/CraftMaterials');
+const CraftWorkshopService = invoke('GameServer/Bot/Economy/CraftWorkshopService');
+const World = invoke('GameServer/World/World');
+const PrivateStoreTrade = invoke('GameServer/PrivateStoreTrade');
 
 const MANUFACTURE = 5;
 const MANUFACTURE_MANAGE = 6;
@@ -75,15 +78,14 @@ function distanceAllows(customer, crafter) {
 
 function findSession(id) {
     const BotManager = invoke('GameServer/Bot/BotManager');
-    const World = invoke('GameServer/World/World');
     return BotManager.findSessionById?.(id) || (World.user?.sessions || []).find((session) => (
         Number(session.actor?.fetchId?.()) === Number(id)
     )) || null;
 }
 
 function broadcastState(session, actor) {
-    session.dataSendToMeAndOthers?.(ServerResponse.userInfo(actor), actor);
-    session.dataSendToMeAndOthers?.(ServerResponse.charInfo(actor), actor);
+    session.dataSendToMe?.(ServerResponse.userInfo(actor));
+    session.dataSendToOthers?.(ServerResponse.charInfo(actor), actor);
 }
 
 function open(session, type = 'dwarven') {
@@ -120,6 +122,7 @@ function publish(session, entries) {
     session.dataSendToMeAndOthers?.(ServerResponse.sitAndStand(actor), actor);
     broadcastState(session, actor);
     session.dataSendToMeAndOthers?.(ServerResponse.recipeShopMsg(actor), actor);
+    CraftWorkshopService.registerPlayer(session);
     return true;
 }
 
@@ -147,7 +150,7 @@ function previous(session) {
     return true;
 }
 
-async function craft(session, crafterId, recipeId, random = Math.random) {
+async function craft(session, crafterId, recipeId, random = Math.random, order = {}) {
     const customer = session?.actor;
     const crafterSession = findSession(crafterId);
     const crafter = crafterSession?.actor;
@@ -168,46 +171,75 @@ async function craft(session, crafterId, recipeId, random = Math.random) {
         (!publicStation && Number(crafter.fetchMp?.() || 0) < recipe.mpCost) || !distanceAllows(customer, crafter) ||
         !Number.isSafeInteger(customerId) || !Number.isSafeInteger(actorId) || activeCrafters.has(actorId)) return fail();
 
-    const consumed = materialPlan(customer.backpack, recipe.materials);
+    const batches = order.batches ?? 1;
+    if (!Number.isSafeInteger(batches) || batches < 1 || batches > 64) return fail();
+    if (order.botOrder && recipe.successRate < 100 && batches !== 1) return fail();
+    const consumed = materialPlan(customer.backpack, recipe.materials.map(row => ({ ...row, amount: row.amount * batches })));
     const template = productTemplate(recipe);
     if (!consumed || !template) return fail();
-    const price = Number(entry.price);
+    const unitPrice = Number(entry.price), price = unitPrice * batches;
     if (!Number.isSafeInteger(price) || price < 0 || Number(customer.backpack.fetchTotalAdena?.() || 0) < price) return fail();
 
     const product = {
         selfId: recipe.productId,
         name: template.template?.name || '',
-        amount: recipe.productCount,
+        amount: recipe.productCount * batches,
         stackable: !!template.etc?.stackable,
         slot: template.etc?.slot || 0
     };
-    const crafterMp = publicStation ? Number(crafter.fetchMp()) : Number(crafter.fetchMp()) - recipe.mpCost;
+    const crafterMp = publicStation ? Number(crafter.fetchMp()) : Number(crafter.fetchMp()) - recipe.mpCost * batches;
+    const validate = () => {
+        if (session.actor !== customer || crafterSession.actor !== crafter || findSession(actorId) !== crafterSession
+            || order.botOrder && !(World.user?.sessions || []).includes(session)
+            || customer.isDead?.() || crafter.isDead?.() || customer.fetchIsOnline?.() === false || crafter.fetchIsOnline?.() === false
+            || Number(crafter.fetchPrivateStoreType?.()) !== MANUFACTURE || Number(customer.fetchPrivateStoreType?.() || 0) !== 0
+            || !shop(crafter).entries.includes(entry) || Number(entry.price) !== unitPrice
+            || order.expectedPrice != null && Number(order.expectedPrice) !== unitPrice
+            || !knownRecipe(crafter, recipe.recipeId, recipe.type) || craftLevel(crafter, recipe.type) < recipe.level
+            || !distanceAllows(customer, crafter) || !publicStation && Number(crafter.fetchMp()) < recipe.mpCost * batches)
+            throw Error('player_workshop_changed');
+        return { crafterMp: Number(crafter.fetchMp()) - (publicStation ? 0 : recipe.mpCost * batches) };
+    };
+    let committed;
     activeCrafters.add(actorId);
     try {
         await Promise.all([CharacterWriteQueue.flushCharacter(actorId), CharacterWriteQueue.flushCharacter(customerId)]);
-        const success = recipe.successRate >= 100 || (Number(random()) * 100) < recipe.successRate;
+        validate();
+        const success = order.botOrder || recipe.successRate >= 100 || (Number(random()) * 100) < recipe.successRate;
         const result = await Database.craftForCustomer(actorId, customerId, {
             materials: consumed.map(({ item, amount }) => ({ id: item.fetchId(), selfId: item.fetchSelfId(), amount })),
             product: success ? product : null,
             crafterMp,
             price,
-            adena: { name: 'Adena' }
+            adena: { name: 'Adena' }, validate,
+            economyCommand: order.economyCommand, funding: order.funding,
+            liveWorkshop: order.botOrder ? { recipeId: recipe.recipeId, batches, unitPrice, publicStation } : null,
+            fundingPacket: order.botOrder ? () => session.coldLifeState?.stats?.money : null, random
         });
+        committed = { ...result, committed: true, success: result.success ?? success };
+        crafter.setMp?.(result.crafterMp ?? crafterMp);
         applyMaterials(customer, consumed, result.sources);
-        if (success) applyItem(customer, result.product.id, result.product.amount, {
+        if (committed.success) applyItem(customer, result.product.id, result.product.amount, {
             ...utils.crushOb(template), amount: product.amount, equipped: false, slot: product.slot
         });
         applyAdena(customer, result.customerAdena);
         applyAdena(crafter, result.crafterAdena);
-        crafter.setMp?.(crafterMp);
         customer.statusUpdateVitals?.(customer);
         crafter.statusUpdateVitals?.(crafter);
         crafter.automation?.replenishVitals?.(crafter);
         session.dataSendToMe?.(ServerResponse.itemsList(customer.backpack.fetchItems()));
         crafterSession?.dataSendToMe?.(ServerResponse.itemsList(crafter.backpack.fetchItems()));
-        session.dataSendToMe?.(ServerResponse.recipeShopItemInfo(crafter, recipe.recipeId, success ? 1 : 0));
-        return success;
+        session.dataSendToMe?.(ServerResponse.recipeShopItemInfo(crafter, recipe.recipeId, committed.success ? 1 : 0));
+        if (order.botOrder && session.coldLifeState) {
+            PrivateStoreTrade.syncInventory(session, customer, await Database.fetchItems(customerId), price,
+                { ...order.funding, itemId: recipe.productId });
+        }
+        return order.botOrder ? committed : committed.success;
     } catch (error) {
+        if (committed) {
+            utils.infoWarn('Crafting', 'presentation after committed manufacture: %s', error.message);
+            return order.botOrder ? committed : committed.success;
+        }
         utils.infoWarn('Crafting', 'manufacture rejected: %s', error.message || error);
         return fail();
     } finally {

@@ -204,7 +204,8 @@ class ColdCompetitionMonitor {
             // An unloaded view is not evidence of neutral relations.
             if (!ab.ready || !ba.ready) { this.report.skipped.memory++; continue; }
             const key = `competition:${interval}:${group.key}:${[actor.id, peer.id].sort((a, b) => a - b).join(':')}`;
-            // Main replays these four in call order (ColdConflictDecision.refresh).
+            // Main reuses this verdict; it replays these four in call order only for a
+            // participant written since this scan (ColdConflictDecision.refresh).
             const decisionRolls = Array.from({ length: 4 }, (_, i) => TendencyRoll.roll('competition_decision', key, i));
             let decisionIndex = 0;
             const look = unit => ({ ...unit, own: this.ownSide(unit.members, timestamp), seen: Visible.stateSide(unit.members, timestamp) });

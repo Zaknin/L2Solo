@@ -387,6 +387,18 @@ CREATE TABLE IF NOT EXISTS warehouse_items (
 CREATE INDEX IF NOT EXISTS warehouse_items_characterId ON warehouse_items(characterId);
 CREATE INDEX IF NOT EXISTS warehouse_items_characterId_selfId ON warehouse_items(characterId, selfId);
 
+CREATE TABLE IF NOT EXISTS account_warehouse_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    accountName TEXT NOT NULL COLLATE NOCASE REFERENCES accounts(username) ON DELETE CASCADE,
+    selfId INTEGER NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    amount INTEGER NOT NULL DEFAULT 1 CHECK(amount > 0),
+    enchant INTEGER NOT NULL DEFAULT 0 CHECK(enchant >= 0),
+    petData TEXT
+);
+CREATE INDEX IF NOT EXISTS account_warehouse_items_owner_item
+    ON account_warehouse_items(accountName, selfId, enchant);
+
 CREATE TABLE IF NOT EXISTS skills (
     selfId INTEGER NOT NULL,
     name TEXT NOT NULL,

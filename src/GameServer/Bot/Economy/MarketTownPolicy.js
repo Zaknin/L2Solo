@@ -80,7 +80,7 @@ function targetTownForItems(state, items = [], options = {}) {
 function buyAdTown(state, items, owned = []) {
     let standing = null;
     for (const line of owned) {
-        if (line.kind !== 'buy_ad' || line.storeType !== 3 || !(line.count > 0)
+        if (!['buy_ad', 'shop'].includes(line.kind) || line.storeType !== 3 || !(line.count > 0)
             || !items.some(item => Number(item.selfId) === Number(line.selfId))) continue;
         if (!standing || line.recordId < standing.recordId) standing = line;
     }

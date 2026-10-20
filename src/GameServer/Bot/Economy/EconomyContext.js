@@ -29,6 +29,7 @@ const Recipes = require('../../Items/C4RecipeItems');
 const CraftInputReservations = require('./CraftInputReservations');
 const Bytes = require('./CompactBytes');
 const { SELL, BUY } = require('../../AfkTrade/BoardIndex');
+const BoardRules = require('../../AfkTrade/BoardRules');
 const Diagnostics = require('./EconomyDiagnostics');
 const PriceBelief = require('./PriceBelief');
 const { fnv1a32 } = require('../Fnv1a');
@@ -36,9 +37,13 @@ const engine = new WishNetwork();
 const Trip = require('./EconomicTrip');
 const IncomeRoute = require('./EquipmentIncomeRoute');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
+const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
+const SpotService = invoke('GameServer/Bot/AI/SpotService');
+const WalkBack = invoke('GameServer/Bot/Economy/WalkBack');
 const ColdTrip = invoke('GameServer/Bot/Population/ColdTrip');
 const TravelRoutes = invoke('GameServer/Bot/Travel/TravelRoutes');
 const GearProgression = invoke('GameServer/Bot/AI/PersonalGearProgression');
+const TradeIntent = require('./TradeIntent');
 // The bound of an event proof's packed and wire forms.
 const PROOF_RAW_BYTES = 65536;
 // The cold worker holds one plan per bot (~1,700), apart from the planner's in-flight builds: a
@@ -894,21 +899,49 @@ function incomeRouteFor(state, deps, timestamp, price, keep) {
         maxChecks: deps.maxChecks, required, reads, route });
     return route;
 }
+// The bot's own fit for the spot of its hunting leaf (docs/architecture.md §2
+// route): the route's one test, BotRoute.leafFitReader, as a yes or no per
+// spot. Only in a worker build (the worker owns the leaf and its planning
+// catalog; main's basics keep the table's pick, it reads them only for
+// execution caps), for a solo bot (a party hunts its party's route; mode:
+// the build's, as select reads it), with a catalog. The reader and its
+// verdicts are kept per state object, catalog and timestamp (the frame and
+// matchup profiles read only those): the basics and the build of one step
+// share them. An entry dies with its state object.
+const leafFits = new WeakMap();
+function leafFit(state, deps, timestamp) {
+    if (isMainThread || !Array.isArray(deps.spots) || !deps.spots.length
+        || ['party', 'duo'].includes(deps.mode) || LevelingRoutes.modeForState(state) !== 'solo') return null;
+    const kept = leafFits.get(state);
+    if (kept && kept.spots === deps.spots && kept.timestamp === timestamp) return kept.fits;
+    // lazy: cycle BotRoute > SpotProfiles > BotLifeState > DecisionEvents > EconomyContext
+    const verdict = invoke('GameServer/Bot/Population/BotRoute').leafFitReader(state, { spots: deps.spots, timestamp });
+    const verdicts = new Map();
+    const fits = spotId => {
+        const key = String(spotId);
+        let fit = verdicts.get(key);
+        if (fit === undefined) verdicts.set(key, fit = verdict(spotId) === 'fit');
+        return fit;
+    };
+    leafFits.set(state, { spots: deps.spots, timestamp, fits });
+    return fits;
+}
 function foundation(state, deps, persona, timestamp, price, keepRoute = null) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
     const tableRole = Roles.tableRoleFor(state);
-    let hunt = Hunt.huntIncome(state, timestamp, deps.mode);
     const incomeRoute = incomeRouteFor(state, deps, timestamp, price, keepRoute);
+    let hunt;
     if (incomeRoute) {
+        // select already passed this spot through the same ground and matchup reader.
         const row = incomeRoute.row;
         hunt = { perHour: row.income * Hunt.onSpotShare(state), perKill: row.kills > 0 ? row.income / row.kills : 0,
             expPerHour: row.exp * Hunt.onSpotShare(state), source: 'route', spotId: incomeRoute.spot.id,
             progressSpotId: incomeRoute.spot.id, useShots: row.useShots };
-    }
+    } else hunt = Hunt.huntIncome(state, timestamp, deps.mode, leafFit(state, deps, timestamp));
     const lostGearHours = hunt.perHour > 0 ? Valuation.pkDropValue(state, price) / hunt.perHour : 0;
     const bestSpotId = hunt.spotId || state.spotId;
-    const walkBackHours = invoke('GameServer/Bot/Economy/WalkBack').hours(bestSpotId, state, deps.spots || invoke('GameServer/Bot/AI/SpotService').spots);
+    const walkBackHours = WalkBack.hours(bestSpotId, state, deps.spots || SpotService.spots);
     const deathHours = Valuation.deathHours(state, { ...hunt, lostGearHours, walkBackHours });
     const spotTable = bestSpotId ? Table.value(bestSpotId, tableRole, state.level, hunt.useShots !== false) : null;
     const bestTable = spotTable || Table.best(tableRole, state.level, hunt.useShots !== false);
@@ -1309,7 +1342,8 @@ function forState(state = {}, deps = {}) {
         : urgent.key === 'stock:potions' ? base.stock('potions').targetHours : projection.horizon;
     Object.assign(context, valueReaders(state, network, projection.values, persona, knowledgeEnabled,
         base.kitCost, () => context.statsPacket.money));
-    context.watchList = invoke('GameServer/Bot/Economy/TradeIntent').project(state, network, projection, id => context.worth(id) ?? price(id));
+    context.watchList = TradeIntent.project(state, network, projection, id => context.worth(id) ?? price(id),
+        BoardRules.BOT_SHOP_LINES + BoardRules.BOT_RECORDS.buy_ad);
     context.intentPending = context.watchList === null;
     context.watchList ||= [];
     context.statsPacket = { wishFocus: network.focus, dormantWishes: network.dormant,

@@ -19,6 +19,7 @@ const ConsoleText = {
         earnedAmountOf    :  53,
         earnedItem        :  54,
         earnedExpAndSp    :  95,
+        inventoryFull     : 129,
         levelUp           :  96,
         incorrectDest     : 144,
         magicResisted     : 159,

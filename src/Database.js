@@ -1,5 +1,6 @@
 const ItemTemplateIndex = require('./GameServer/Item/ItemTemplateIndex');
 const BeginnerShots = require('./GameServer/Items/C4BeginnerShots');
+const InventoryLimits = require('./GameServer/Inventory/InventoryLimits');
 const fs = require('fs');
 const DiagnosticConfig = require('./GameServer/Bot/Population/PopulationConfig');
 const path = require('path');
@@ -29,6 +30,11 @@ const Diagnostics = require('./GameServer/Bot/Economy/EconomyDiagnostics');
 const ColdCombatProfile = require('./GameServer/Bot/Population/ColdCombatProfile');
 const SavedStats = require('./GameServer/Bot/SavedStats');
 const PartyCandidateProjection = require('./DatabasePartyCandidateProjection');
+const PlayerWarehouse = require('./DatabasePlayerWarehouse');
+const DataCache = invoke('GameServer/DataCache');
+const C4Recipes = require('./GameServer/Items/C4RecipeItems');
+const TradeIntent = require('./GameServer/Bot/Economy/TradeIntent');
+const PurchaseFunding = require('./GameServer/Bot/Economy/PurchaseFunding');
 let nativeDiagnosticFacts = null;
 let nativeDiagnosticCounts = null;
 let nativeDiagnosticOverflow = 0;
@@ -460,7 +466,14 @@ function reportTransactionSqliteFailure(operation, phase, error) {
 // without changing either rejection identity or the existing failure counters.
 function reportBotLifeSaveFailure(phase, error, statement = null) {
     try {
+        const checkpoint = NativeWriteCheckpoint.refusalDiagnostic(error);
         if (!DiagnosticConfig.developerDiagnostics) {
+            if (checkpoint) {
+                console.warn('DB          :: bot life save failure %s', JSON.stringify({
+                    operation: 'bot-life:save', phase, admissionRefusalReason: error.message, ...checkpoint
+                }));
+                return;
+            }
             console.warn('DB          :: bot life save failure %s %s', phase, error?.message || 'unknown');
             return;
         }
@@ -477,7 +490,7 @@ function reportBotLifeSaveFailure(phase, error, statement = null) {
             characterId: Array.isArray(statement?.[1]) && Number.isSafeInteger(statement[1][0]) ? statement[1][0] : null,
             checkpointDrift: error instanceof WorkerCommandAdmissionRefusal && Array.isArray(error.checkpointDrift)
                 ? error.checkpointDrift : null,
-            configuredWriterBusyTimeoutMs: 5000, frames
+            configuredWriterBusyTimeoutMs: 5000, frames, ...(checkpoint || {})
         }));
     } catch (_) { /* Diagnostics must preserve the original save rejection. */ }
 }
@@ -1862,6 +1875,8 @@ function applySchemaMigrations() {
             PartyCandidateProjection.refreshCandidates(connection);
         }
     }]);
+    // The author's account warehouse (his migration 67, numbered after ours).
+    migrations.push([73, () => PlayerWarehouse.migrate(connection)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -2382,7 +2397,7 @@ function completeEconomyStepUnsafe(characterId, step, result, changedIds, mp = n
 // Only physical flags move; no predicted cold items are materialized here.
 function equipColdPurchaseUnsafe(characterId, step, itemId, autoEquip, heldItemIds = []) {
     if (!step || step.row.phase !== 'cold' || autoEquip === false) return null;
-    const template = require('./GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(itemId));
+    const template = ItemTemplateIndex.find(DataCache.items, Number(itemId));
     if (template?.etc?.stackable || !(Number(template?.etc?.slot) > 0)) return null;
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
     const physical = all('SELECT * FROM items WHERE characterId=? AND amount>0', [characterId]);
@@ -2421,7 +2436,7 @@ function checkEconomyFundingUnsafe(characterId, step, amount, funding = {}, wall
     const wallet = walletOverride === null ? Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=57', [characterId]).amount) : walletOverride;
     const { r, itemId, valueHours, survivalCost, clanPart } = funding;
     const fundingCapture = Diagnostics.active() && Diagnostics.enabled(characterId) ? {} : null;
-    const budget = require('./GameServer/Bot/Economy/PurchaseFunding').spendable({
+    const budget = PurchaseFunding.spendable({
         adena: wallet, stats: { money: packet }
     }, 0, { r, itemId, valueHours, survivalCost, clanPart, free: funding.free === true }, fundingCapture);
     if (Diagnostics.active()) stageNativeDiagnostic(characterId, step, 'native_funding', amount <= budget ? 'allowed' : 'funding_changed',
@@ -2900,7 +2915,7 @@ function applySoulCrystalStepsUnsafe(characterId, steps, guard = () => {}) {
         const outcome = Native.outcomeFor(rule, crystal.stage, step.npcId, step.roll);
         const targetId = outcome === 'success' ? crystal.nextId : outcome === 'broken' ? crystal.brokenId : null;
         if (!targetId || targetId !== step.toId) throw Error('cold_soul_crystal_outcome_changed');
-        const target = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, targetId);
+        const target = ItemTemplateIndex.findStrictRequired(DataCache.items, targetId);
         if (!target) throw Error('cold_soul_crystal_template_missing');
         guard();
         write('UPDATE items SET selfId = ?, name = ? WHERE id = ? AND characterId = ?', [targetId,target.template.name,item.id,characterId]);
@@ -2969,10 +2984,9 @@ function dropPkDeathItemsUnsafe(characterId) {
     const life = one('SELECT deathCount,statsJson FROM bot_life_state WHERE characterId=?', [characterId]);
     const stats = jsonObject(life?.statsJson), death = Number(life?.deathCount || stats.deaths || 0);
     if (!life || death <= Number(stats.pkDropDeathSequence || 0)) return { drops: [] };
-    const Data = invoke('GameServer/DataCache');
     const Templates = require('./GameServer/Item/ItemTemplateIndex');
     const inventory = all('SELECT * FROM items WHERE characterId=? ORDER BY id', [characterId]).map(item => {
-        const template = Templates.find(Data.items, item.selfId);
+        const template = Templates.find(DataCache.items, item.selfId);
         return { ...template?.template, ...template?.etc, ...item };
     });
     const drops = require('./GameServer/PkDropPolicy').rollPlan({ karma: current?.karma, pk: current?.pk, inventory });
@@ -3295,7 +3309,7 @@ function ensureBoardCounterCountsUnsafe() {
     if (boardCounterCountsReady) return;
     if (one("SELECT value FROM world_meta WHERE key = 'boardCounterCountsReady'")) { boardCounterCountsReady = true; return; }
     const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
-    if (!invoke('GameServer/DataCache').items?.length) throw new Error('board_market_data_not_ready');
+    if (!DataCache.items?.length) throw new Error('board_market_data_not_ready');
     const totals = new Map();
     for (const { key, value } of all('SELECT key, value FROM world_meta WHERE key LIKE ?', [`${BOARD_DEAL_COUNT_PREFIX}%`])) {
         const counter = MarketCounters.counterOf(Number(key.slice(BOARD_DEAL_COUNT_PREFIX.length)));
@@ -3689,7 +3703,7 @@ function validBoardRecord(kind, storeType, rows) {
 // and one per item. `expectedRevision` names the shop it replaces. No kind
 // has a deadline (expiresAt 0): records close by events (user, 2026-10-05).
 // Returns { shop, changedIds }.
-function openBoardRecordUnsafe(characterId, config, rows, { prepaid = false } = {}) {
+function openBoardRecordUnsafe(characterId, config, rows, { prepaid = false, bidWallet = null } = {}) {
     const kind = config.kind;
     const storeType = BoardRules.storeTypeFor(kind, config.storeType);
     if (rows.some(line => BeginnerShots.isRestricted(line.selfId))) throw Error('beginner_shot_not_tradable');
@@ -3850,10 +3864,10 @@ function openBoardRecordUnsafe(characterId, config, rows, { prepaid = false } = 
         ]);
     });
     if (conditional && storeType === BoardRules.BUY) {
-        checkConditionalBidUnsafe(characterId, rows[0]);
+        checkConditionalBidUnsafe(characterId, rows[0], Number(rows[0].price), bidWallet);
         const revision = Number(one('SELECT simulationRevision FROM bot_life_state WHERE characterId=?', [characterId])?.simulationRevision || 0);
         if (rows[0].intent) {
-            const intent = require('./GameServer/Bot/Economy/TradeIntent').encode(rows[0].intent);
+            const intent = TradeIntent.encode(rows[0].intent);
             write('UPDATE afk_trade_lines SET intentJson=?,intentRevision=? WHERE shopId=?', [JSON.stringify(intent), revision, shopId]);
         }
     }
@@ -3864,20 +3878,75 @@ function openBoardRecordUnsafe(characterId, config, rows, { prepaid = false } = 
 // identities and pricing cursors; money moves once by the net remaining
 // reserve, including additions/removals. The caller already checked the
 // complete expected set inside this same transaction.
-function checkConditionalBidUnsafe(characterId, line, price = Number(line.price)) {
+function checkConditionalBidUnsafe(characterId, line, price = Number(line.price), walletOverride = null) {
     const total = Number(line.count) * price;
     if (!Number.isSafeInteger(total) || total < 1) throw Error('invalid_afk_trade_budget');
-    const wallet = Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=57', [characterId]).amount);
+    const wallet = walletOverride ?? Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=57', [characterId]).amount);
     if (total > wallet) throw Error('not_enough_adena');
     const row = one('SELECT * FROM bot_life_state WHERE characterId=?', [characterId]);
     // survivalCost: the line's kit cost (in memory from executePlan), the
     // survival tranche every other restock may spend.
     const survivalCost = Math.max(0, Number(line.survivalCost) || 0);
     if (row) checkEconomyFundingUnsafe(characterId, { row }, total,
-        { ...(line.intent ? { r: line.intent.valueRate } : { itemId: Number(line.selfId) }), ...(survivalCost ? { survivalCost } : {}) });
+        { ...(line.intent ? { r: line.intent.valueRate } : { itemId: Number(line.selfId) }), ...(survivalCost ? { survivalCost } : {}) }, wallet);
 }
 
-function reconcileBotBuyAdsUnsafe(characterId, held, configs, timestamp) {
+// A purchase changes custody only here: reserve the shop's complete budget,
+// retire promoted ads, and return a displaced sale shop in one transaction.
+function reconcileBotPurchasesUnsafe(characterId, held, configs, purchase, timestamp) {
+    const currentRow = one("SELECT id FROM afk_trade_shops WHERE ownerId=? AND kind='shop' AND status='active'", [characterId]);
+    const current = currentRow ? afkTradeShopUnsafe(currentRow.id) : null;
+    if ((current?.id || null) !== (purchase?.expected?.id || null)
+        || current && current.revision !== purchase.expected.revision) throw Error('afk_trade_shop_changed');
+    const config = purchase.config;
+    if (config && (!validBoardRecord('shop', config.storeType, config.lines) || config.storeType !== BoardRules.BUY))
+        throw Error('invalid_afk_trade_shop');
+    const rows = config?.lines || [];
+    const keys = new Set(rows.map(line => `${line.selfId}:${Number(line.enchant || 0)}`));
+    const roots = rows.filter(line => line.intent?.key).map(line => line.intent.key);
+    if (new Set(roots).size !== roots.length) throw Error('economy_plan_duplicate_root');
+    if (keys.size !== rows.length || configs.some(ad => keys.has(`${ad.lines[0].selfId}:${Number(ad.lines[0].enchant || 0)}`)))
+        throw Error('board_ad_exists');
+    const same = current?.storeType === BoardRules.BUY && config && current.town === config.town
+        && current.lines.filter(line => line.count > 0).length === rows.length
+        && rows.every(line => current.lines.some(old => old.selfId === line.selfId && old.enchant === Number(line.enchant || 0)
+            && old.count === line.count && old.price === line.price));
+    // A kept shop's escrow stays locked; a closing one refunds it to the bag
+    // first (closeBoardRecordUnsafe), so only then does it back the bids.
+    const wallet = Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=57', [characterId]).amount)
+        + (!same && current?.storeType === BoardRules.BUY ? current.escrowAdena : 0);
+    const closed = [], changedIds = [];
+    if (current && !same && (config || current.storeType === BoardRules.BUY)) {
+        changedIds.push(...closeBoardRecordUnsafe(current, { at: timestamp }), 57);
+        closed.push(closedRecord(current, 'closed'));
+    }
+    const ads = reconcileBotBuyAdsUnsafe(characterId, held, configs, timestamp, { bidWallet: wallet });
+    let shop = same ? current : null;
+    if (config && !same) {
+        checkBotCapsUnsafe(characterId, 'shop', rows.length);
+        let total = 0;
+        for (const line of rows) {
+            if (line.intent) TradeIntent.encode(line.intent);
+            checkConditionalBidUnsafe(characterId, line);
+            total += Number(line.count) * Number(line.price);
+        }
+        const life = one('SELECT statsJson, mindJson FROM bot_life_state WHERE characterId=?', [characterId]);
+        if (life) {
+            const allowance = PurchaseFunding.spendable({ adena: wallet, stats: SavedStats.merge(life.statsJson, life.mindJson) }, 0,
+                { upperBound: true, survivalCost: rows.reduce((sum, line) => sum + Math.max(0, Number(line.survivalCost) || 0), 0) });
+            if (!Number.isSafeInteger(total) || total > allowance) throw Error('economy_funding_changed');
+        }
+        const opened = openBoardRecordUnsafe(characterId, { ...config, kind: 'shop' }, rows);
+        shop = opened.shop;
+        changedIds.push(...opened.changedIds);
+    }
+    return { ...ads, shop, closed: [...closed, ...ads.closed],
+        changed: [...ads.changed, ...(shop && !same ? [shop] : [])],
+        ownerInventory: changedIds.length ? afkTradeInventoryUnsafe(characterId) : ads.ownerInventory,
+        coldLifeRows: changedIds.length ? fenceAfkTradePartiesUnsafe([characterId], changedIds) : ads.coldLifeRows };
+}
+
+function reconcileBotBuyAdsUnsafe(characterId, held, configs, timestamp, { bidWallet = null } = {}) {
     if (configs.length > BoardRules.BOT_RECORDS.buy_ad) throw Error('board_cap_reached');
     const key = (town, line) => `${town || ''}:${Number(line.selfId)}:${Number(line.enchant || 0)}`;
     const current = new Map(held.map(shop => [key(shop.town, shop.lines[0]), shop]));
@@ -3899,7 +3968,7 @@ function reconcileBotBuyAdsUnsafe(characterId, held, configs, timestamp) {
         return { config, line, previous, count, price, reserve };
     });
     if (isBotOwnerUnsafe(characterId)) {
-        for (const row of wanted) if (!row.previous || row.count > Number(row.previous.lines[0].count)) checkConditionalBidUnsafe(characterId, row.line, row.price);
+        for (const row of wanted) if (!row.previous || row.count > Number(row.previous.lines[0].count)) checkConditionalBidUnsafe(characterId, row.line, row.price, bidWallet);
         const revision = Number(one('SELECT simulationRevision FROM bot_life_state WHERE characterId=?', [characterId])?.simulationRevision || 0);
         const keep = new Set(wanted.filter(row => row.previous).map(row => row.previous.id));
         const removed = held.filter(shop => !keep.has(shop.id));
@@ -3907,9 +3976,9 @@ function reconcileBotBuyAdsUnsafe(characterId, held, configs, timestamp) {
         for (const shop of removed) changedIds.push(...closeBoardRecordUnsafe(shop));
         const retained = [], opened = [], changed = [];
         for (const row of wanted) {
-            const intent = row.line.intent ? require('./GameServer/Bot/Economy/TradeIntent').encode(row.line.intent) : null;
+            const intent = row.line.intent ? TradeIntent.encode(row.line.intent) : null;
             if (!row.previous) {
-                const record = openBoardRecordUnsafe(characterId, { ...row.config, kind: 'buy_ad' }, row.config.lines).shop;
+                const record = openBoardRecordUnsafe(characterId, { ...row.config, kind: 'buy_ad' }, row.config.lines, { bidWallet }).shop;
                 opened.push(record); changed.push(record); continue;
             }
             const previous = row.previous, line = previous.lines[0];
@@ -3941,9 +4010,8 @@ function reconcileBotBuyAdsUnsafe(characterId, held, configs, timestamp) {
         if (life && (!Array.isArray(stats.money) || stats.money.length < 4)) throw Error('economy_funding_missing');
         if (Array.isArray(stats.money)) {
             const wallet = Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=57', [characterId]).amount);
-            const Funding = require('./GameServer/Bot/Economy/PurchaseFunding');
             for (const row of additions) {
-                if (newReserve > Funding.spendable({ adena: wallet, stats }, oldReserve, { itemId: Number(row.line.selfId) })) {
+                if (newReserve > PurchaseFunding.spendable({ adena: wallet, stats }, oldReserve, { itemId: Number(row.line.selfId) })) {
                     throw Error('economy_funding_changed');
                 }
             }
@@ -4236,6 +4304,7 @@ const Database = {
     // BotLifeState.save builds its upsert with it.
     MOVE_FAR_REVISION,
 
+    ...PlayerWarehouse.create({ one, all, write, inTransaction, withCharacterFlush }),
     openClanRaidPartyAtImpact(request) {
         // The offensive callback cannot await our queue: its registered roster
         // could change meanwhile. Abort this native action when another write
@@ -4605,7 +4674,7 @@ const Database = {
             const marker = one("SELECT value FROM world_meta WHERE key = 'botMarketTradesInitialized'");
             if (marker) return { skipped: true, mode: marker.value, rows: [] };
             const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
-            if (!invoke('GameServer/DataCache').items?.length) throw new Error('board_market_data_not_ready');
+            if (!DataCache.items?.length) throw new Error('board_market_data_not_ready');
             const totals = new Map();
             if (mode === 'history') {
                 const pending = all("SELECT payload FROM history_outbox WHERE kind = 'market_trade' ORDER BY id")
@@ -4806,7 +4875,7 @@ const Database = {
     // new ones take it. A bot's buy ads follow its goal this way. `expected`
     // maps every record of that kind the caller saw to its revision (the
     // move's idempotency key): any other state refuses the move.
-    replaceBoardRecords(ownerId, kind, configs = [], { expected = null, expectedAuthority = null } = {}) {
+    replaceBoardRecords(ownerId, kind, configs = [], { expected = null, expectedAuthority = null, buyShop = undefined } = {}) {
         const characterId = Number(ownerId);
         const list = Array.isArray(configs) ? configs : [];
         if (!characterId || kind === 'shop' || !BoardRules.isKind(kind)
@@ -4834,6 +4903,7 @@ const Database = {
             }
             if (kind === 'buy_ad' && isBotOwnerUnsafe(characterId)) {
                 if (!expected) throw Error('afk_trade_shop_changed');
+                if (buyShop !== undefined) return reconcileBotPurchasesUnsafe(characterId, closed, list, buyShop, timestamp);
                 return reconcileBotBuyAdsUnsafe(characterId, closed, list, timestamp);
             }
             const changedIds = [57];
@@ -6597,6 +6667,46 @@ const Database = {
         }, { operation: 'maintenance:reclaim-unused-space', read: false });
     },
 
+    buyFromLivePrivateStore(buyerId, details) {
+        const sellerId = Number(details.sellerId), quantity = Number(details.amount), price = Number(details.price);
+        const total = quantity * price;
+        if (!Number.isSafeInteger(buyerId) || buyerId < 1 || !Number.isSafeInteger(sellerId) || sellerId < 1
+            || !Number.isSafeInteger(quantity) || quantity < 1 || !Number.isSafeInteger(price) || price < 1
+            || !Number.isSafeInteger(total) || buyerId === sellerId || BeginnerShots.isRestricted(details.selfId)) {
+            return Promise.reject(Error('invalid_private_store_purchase'));
+        }
+        return withCharacterFlushes([buyerId, sellerId], () => inTransaction(() => {
+            details.validate();
+            const source = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [details.objectId, sellerId]);
+            if (!source || Number(source.selfId) !== Number(details.selfId) || Number(source.amount) < quantity
+                || Number(source.equipped) !== 0 || Number(source.selfId) === 57) throw Error('private_store_stock_changed');
+            const template = ItemTemplateIndex.findStrict(DataCache.items, Number(source.selfId));
+            if (!template) throw Error('private_store_item_unavailable');
+            const sellerAdena = afkTradeAdenaRowsUnsafe(sellerId).reduce((sum, row) => sum + Number(row.amount), 0);
+            if (!Number.isSafeInteger(sellerAdena + total)) throw Error('private_store_adena_overflow');
+            if (details.fundingPacket) {
+                const packet = details.fundingPacket();
+                if (!Array.isArray(packet) || packet.length < 4) throw Error('economy_funding_missing');
+                checkEconomyFundingUnsafe(buyerId, { row: { statsJson: '{}' } }, total, details.funding, null, packet);
+            }
+            afkTradeDebitAdenaUnsafe(buyerId, total);
+            const remaining = Number(source.amount) - quantity;
+            if (remaining) write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [remaining, source.id, sellerId]);
+            else write('DELETE FROM items WHERE id = ? AND characterId = ?', [source.id, sellerId]);
+            afkTradeCreditItemUnsafe(buyerId, { ...source, stackable: !!template.etc?.stackable }, quantity);
+            afkTradeCreditAdenaUnsafe(sellerId, total);
+            const seller = one('SELECT name FROM characters WHERE id = ?', [sellerId]);
+            const buyer = one('SELECT name FROM characters WHERE id = ?', [buyerId]);
+            recordMarketTradeUnsafe({ eventKey: `private:${require('node:crypto').randomUUID()}`, occurredAt: now(),
+                channel: details.buyOrder ? 'player_wtb' : 'player_wts', sourceType: details.buyOrder ? 'private_buy_store' : 'private_store',
+                selfId: Number(source.selfId), itemName: source.name,
+                quantity, unitPrice: price, totalPrice: total, town: details.town,
+                sellerCharacterId: sellerId, sellerName: seller?.name, buyerCharacterId: buyerId, buyerName: buyer?.name });
+            return { totalAdena: total, name: source.name,
+                sellerInventory: afkTradeInventoryUnsafe(sellerId), buyerInventory: afkTradeInventoryUnsafe(buyerId) };
+        }, 'private-store:purchase'));
+    },
+
     transferInventoryBetweenCharacters(transfers = []) {
         const entries = (transfers || []).map((transfer) => ({
             fromCharacterId: Number(transfer.fromCharacterId),
@@ -6769,7 +6879,7 @@ const Database = {
             if (Number(known?.level || 0) >= Number(skillLevel)) return { learned: false, reason: 'already_known' };
             const Catalog = invoke('GameServer/Skills/SkillBookCatalog');
             const training = Catalog.nextTraining(character.classId, character.level, skillSelfId, known?.level || 0);
-            const definition = ItemTemplateIndex.findRequired(invoke('GameServer/DataCache').skills, skillSelfId);
+            const definition = ItemTemplateIndex.findRequired(DataCache.skills, skillSelfId);
             if (!training || training.level !== Number(skillLevel)
                 || definition?.levels == null || !require('./GameServer/Skills/SkillRankIndex').has(definition.levels, training.level)) {
                 return { learned: false, reason: 'ineligible_rank' };
@@ -6822,6 +6932,42 @@ const Database = {
     },
     deleteItems(characterId) {
         return withCharacterFlush(characterId, () => remove('items', 'characterId = ?', [characterId], 'item:delete-all'));
+    },
+    sellItemsToNpc(characterId, lines, validate) {
+        const seen = new Set();
+        const entries = Array.isArray(lines) ? lines.map(line => ({ ...line })) : [];
+        if (!Number.isSafeInteger(characterId) || characterId < 1 || !entries.length || entries.length > InventoryLimits.MAX_CAPACITY
+            || typeof validate !== 'function'
+            || entries.some(line => !Number.isSafeInteger(line.objectId) || line.objectId < 1
+                || seen.has(line.objectId) || !seen.add(line.objectId)
+                || !Number.isSafeInteger(line.amount) || line.amount < 1
+                || !Number.isSafeInteger(line.price) || line.price < 0)) {
+            return Promise.reject(Error('invalid_npc_sale'));
+        }
+        return withCharacterFlush(characterId, () => inTransaction(() => {
+            validate();
+            let payout = 0;
+            const sold = entries.map(line => {
+                const row = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [line.objectId, characterId]);
+                if (!row || Number(row.selfId) !== line.selfId || row.equipped
+                    || Number(row.selfId) === 57 || Number(row.amount) < line.amount
+                    || Number(row.amount) !== line.expectedAmount) throw Error('npc_sale_item_changed');
+                payout += line.price * line.amount;
+                if (!Number.isSafeInteger(payout) || payout < 0) throw Error('npc_sale_payout_overflow');
+                return { objectId: line.objectId, amount: Number(row.amount) - line.amount };
+            });
+            const balance = afkTradeAdenaRowsUnsafe(characterId).reduce((sum, row) => sum + Number(row.amount), 0);
+            if (!Number.isSafeInteger(balance + payout) || balance + payout > 0x7fffffff) throw Error('npc_sale_adena_overflow');
+            for (const item of sold) {
+                const changed = item.amount
+                    ? write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [item.amount, item.objectId, characterId])
+                    : write('DELETE FROM items WHERE id = ? AND characterId = ?', [item.objectId, characterId]);
+                if (changed.affectedRows !== 1) throw Error('npc_sale_item_changed');
+            }
+            const adenaId = afkTradeCreditAdenaUnsafe(characterId, payout);
+            const adena = adenaId ? one('SELECT id, amount FROM items WHERE id = ? AND characterId = ?', [adenaId, characterId]) : null;
+            return { sold, adena };
+        }, 'npc-shop:sell'));
     },
     fetchWarehouseItems(characterId) {
         return select('warehouse_items', ['*'], 'characterId = ? AND amount > 0', [characterId], 'warehouse:list');
@@ -7132,7 +7278,7 @@ const Database = {
             if (!recipe) throw new Error('Invalid dimensional diamond exchange');
             const diamonds = all('SELECT id, amount FROM items WHERE characterId = ? AND selfId = 7562 AND equipped = 0 ORDER BY id', [characterId]);
             if (diamonds.reduce((sum, item) => sum + item.amount, 0) < recipe.cost) throw new Error('Not enough dimensional diamonds');
-            const template = ItemTemplateIndex.findStrictRequired(require('./GameServer/DataCache').items, itemId);
+            const template = ItemTemplateIndex.findStrictRequired(DataCache.items, itemId);
             if (!template?.etc.stackable) throw new Error('Missing teleport scroll template');
             const changed = new Set();
             let remaining = recipe.cost;
@@ -7342,7 +7488,7 @@ const Database = {
             const learned = [];
             for (const recipe of recipes) {
                 if (step) {
-                    const native = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(recipe.recipeId);
+                    const native = C4Recipes.resolveByRecipeId(recipe.recipeId);
                     const skill = one('SELECT level FROM skills WHERE characterId=? AND selfId=?',
                         [Number(characterId), native?.type === 'dwarven' ? 172 : 132]);
                     if (!native || Number(native.recipeItemId) !== Number(recipe.recipeItemId)
@@ -7398,7 +7544,6 @@ const Database = {
             if (!captured.length || captured.length > 12) throw Error('invalid npc basket');
             const Shop = invoke('GameServer/World/Generics/NpcShopBuyLists');
             const Index = require('./GameServer/Item/ItemTemplateIndex');
-            const Data = invoke('GameServer/DataCache');
             if (seller) {
                 const found = invoke('GameServer/Bot/Economy/TownNpcCatalog').rowsForTown(seller.town).some(row =>
                     Number(row.npcSelfId) === Number(seller.sourceId) && ['locX', 'locY', 'locZ'].every(key =>
@@ -7426,7 +7571,7 @@ const Database = {
                 if (!Number.isSafeInteger(count * price))
                     throw invalidNpcPurchase(characterId, step, line, lines.length, 'invalid_line_total', 'total', count * price, details);
                 seen.add(itemId);
-                const template = Index.find(Data.items, itemId);
+                const template = Index.find(DataCache.items, itemId);
                 if (seller) {
                     const quote = Shop.rowForNpc(Number(seller.sourceId), itemId);
                     if (!quote || Number(quote.price) !== price
@@ -7467,7 +7612,6 @@ const Database = {
                 { requested: units, planned: units, cost: total, npcId: seller ? Number(seller.sourceId) : undefined, town: seller?.town });
             const wallet = one('SELECT id, amount FROM items WHERE characterId=? AND selfId=57 ORDER BY id LIMIT 1', [characterId]);
             let remainingWallet = Number(wallet?.amount || 0);
-            const Funding = require('./GameServer/Bot/Economy/PurchaseFunding');
             let remainingPacket = step ? SavedStats.merge(step.row.statsJson, step.row.mindJson).money : null;
             const parts = [];
             for (const [index, line] of lines.entries()) {
@@ -7487,7 +7631,7 @@ const Database = {
                 const spent = part.amount * part.unitPrice, funding = { ...part.funding, itemId: part.selfId };
                 checkEconomyFundingUnsafe(characterId, step, spent, funding, remainingWallet, remainingPacket);
                 remainingWallet -= spent;
-                remainingPacket = Funding.packetAfterPurchase(remainingPacket, spent, funding);
+                remainingPacket = PurchaseFunding.packetAfterPurchase(remainingPacket, spent, funding);
             }
             if (!wallet || remainingWallet < 0) {
                 if (Diagnostics.active()) stageNativeDiagnostic(characterId, step, 'npc_basket', 'insufficient_adena',
@@ -7581,7 +7725,7 @@ const Database = {
             validate?.();
             let success = !!product;
             if (step) {
-                const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(recipeId);
+                const recipe = C4Recipes.resolveByRecipeId(recipeId);
                 if (!recipe || !Number.isSafeInteger(batches) || batches < 1 || batches > 64
                     || !one('SELECT recipeId FROM character_recipes WHERE characterId=? AND recipeId=?', [characterId, recipeId])) throw Error('craft_recipe_changed');
                 const skill = one('SELECT level FROM skills WHERE characterId=? AND selfId=?',
@@ -7599,7 +7743,7 @@ const Database = {
                 for (const [id, amount] of required) checkEconomyMaterialProtectionUnsafe(characterId, step, id, amount);
                 if (!product || Number(product.selfId) !== Number(recipe.productId)
                     || Number(product.amount) !== Number(recipe.productCount) * batches) throw Error('craft_product_changed');
-                const template = require('./GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(recipe.productId));
+                const template = ItemTemplateIndex.find(DataCache.items, Number(recipe.productId));
                 if (!template || !!product.stackable !== !!template.etc?.stackable || Number(product.slot || 0) !== Number(template.etc?.slot || 0)) throw Error('craft_product_template_changed');
                 mp = currentMp - recipe.mpCost * batches;
                 success = recipe.successRate >= 100 || Number(random()) * 100 < recipe.successRate;
@@ -7647,7 +7791,7 @@ const Database = {
             validate();
             const catalog = invoke('GameServer/Items/C4WeaponSAExchange');
             const recipe = catalog.resolve(npcId, recipeId);
-            const target = recipe && ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
+            const target = recipe && ItemTemplateIndex.findStrictRequired(DataCache.items, recipe.productId);
             const weapon = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [sourceObjectId, characterId]);
             if (!recipe || !target || !weapon || weapon.selfId !== expectedSelfId || weapon.selfId !== recipe.sourceId
                 || weapon.enchant !== expectedEnchant || weapon.amount !== 1 || weapon.equipped) throw Error('weapon_sa_source_changed');
@@ -7681,7 +7825,7 @@ const Database = {
             validate?.();
             const row = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [sourceId, characterId]);
             const recipe = row && invoke('GameServer/Items/C4Unseal').resolve(row.selfId, productId);
-            const item = recipe && ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
+            const item = recipe && ItemTemplateIndex.findStrictRequired(DataCache.items, recipe.productId);
             if (!item || Number(row.amount) !== 1 || Number(row.equipped) !== 0) throw Error('unseal_source_changed');
             // Update in place: enchant and all other instance metadata survive.
             write('UPDATE items SET selfId = ?, name = ?, slot = ? WHERE id = ? AND characterId = ?',
@@ -7693,7 +7837,7 @@ const Database = {
     exchangeLuxuryItems(characterId, { listId, entryId, amount, validate }) {
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const recipe = invoke('GameServer/World/Generics/NpcExchangeShopLists').resolve(listId, entryId);
-            const product = recipe && require('./GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, recipe.result.selfId);
+            const product = recipe && ItemTemplateIndex.find(DataCache.items, recipe.result.selfId);
             if (!product || !Number.isInteger(amount) || amount < 1 || amount > 5000) throw Error('invalid_multisell_selection');
             validate?.();
             const count = amount * recipe.result.amount;
@@ -7906,7 +8050,7 @@ const Database = {
                     throw Error('improvement_source_changed');
                 const claimed = new Set(), selected = []; let total = 0, crystalId = null;
                 for (const input of inputs) {
-                    const id = Number(input.selfId), count = Number(input.amount), template = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, id);
+                    const id = Number(input.selfId), count = Number(input.amount), template = ItemTemplateIndex.findStrictRequired(DataCache.items, id);
                     const reward = Crystals.reward(template);
                     if (claimed.has(id) || !Number.isSafeInteger(count) || count < 1 || !reward
                         || crystalId && crystalId !== reward.crystalId
@@ -7925,7 +8069,7 @@ const Database = {
                 for (const item of selected) mutate('DELETE FROM items WHERE characterId=? AND id=?', [characterId, item.id]);
                 if (target) mutate('UPDATE items SET amount=? WHERE characterId=? AND id=?', [amount, characterId, target.id]);
                 else mutate('INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(?,?,?,0,0,?)',
-                    [crystalId, ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, crystalId).template.name, amount, characterId]);
+                    [crystalId, ItemTemplateIndex.findStrictRequired(DataCache.items, crystalId).template.name, amount, characterId]);
                 changedIds.push(...claimed, crystalId); result = 'crystallize';
             } else if (proposal.kind === 'luxury_exchange') {
                 const Luxury = invoke('GameServer/Bot/Economy/BotLuxuryExchange');
@@ -7954,7 +8098,7 @@ const Database = {
                         throw Error('improvement_missing_materials');
                     consume(cost.selfId, cost.amount); changedIds.push(cost.selfId);
                 }
-                const product = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.itemId);
+                const product = ItemTemplateIndex.findStrictRequired(DataCache.items, recipe.itemId);
                 for (let count = 0; count < recipe.amount; count++) mutate(
                     'INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(?,?,1,0,?,?)',
                     [product.selfId, product.template.name, Number(product.etc.slot), characterId]);
@@ -7968,7 +8112,7 @@ const Database = {
                 if (recipe?.station !== 'blacksmith' || recipe.operation !== 'install' || !item || item.amount !== 1
                     || recipe.sourceId !== item.selfId || item.selfId !== proposal.itemId
                     || item.enchant !== proposal.from) throw Error('improvement_source_changed');
-                const product = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
+                const product = ItemTemplateIndex.findStrictRequired(DataCache.items, recipe.productId);
                 if (!product) throw Error('improvement_missing_template');
                 for (const cost of SA.costs(recipe)) { consume(cost.selfId, cost.amount); changedIds.push(cost.selfId); }
                 mutate('UPDATE items SET selfId = ?, name = ?, slot = ? WHERE id = ? AND characterId = ?',
@@ -7985,7 +8129,7 @@ const Database = {
                     ON CONFLICT(characterId,questId) DO UPDATE SET state='started',variables=excluded.variables`, [characterId]);
                 if (!held.length || [4662,4663,4664].includes(held[0].selfId)) {
                     if (held[0]) { consume(held[0].selfId, 1); changedIds.push(held[0].selfId); }
-                    const source = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, proposal.starterId);
+                    const source = ItemTemplateIndex.findStrictRequired(DataCache.items, proposal.starterId);
                     mutate('INSERT INTO items(selfId,name,amount,characterId) VALUES(?,?,1,?)', [source.selfId,source.template.name,characterId]);
                     changedIds.push(proposal.starterId);
                 }
@@ -8135,19 +8279,48 @@ const Database = {
     },
 
     craftForCustomer(crafterId, customerId, { materials, product, crafterMp, price, adena, clanCraft = null, clanOrder = null, workshop = null,
-        economyCommand = null, funding = {}, random = Math.random }) {
+        economyCommand = null, funding = {}, random = Math.random, liveWorkshop = null, validate = null, fundingPacket = null }) {
         return withCharacterFlushes([crafterId, customerId], () => inTransaction(() => {
             const step = economyStepUnsafe(customerId, economyCommand, EconomyCommit.KINDS.craft);
             if (step?.replay) return { ...step.replay, customerState: step.replay.coldLifeRow,
                 crafterState: normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId=?', [crafterId])) };
-            if (step && (!workshop || clanCraft || clanOrder)) throw Error('craft_executor_changed');
+            if (step && (!(workshop || liveWorkshop) || clanCraft || clanOrder)) throw Error('craft_executor_changed');
+            const live = validate?.();
+            if (live?.crafterMp != null) crafterMp = live.crafterMp;
+            if (liveWorkshop) {
+                const recipe = C4Recipes.resolveByRecipeId(liveWorkshop.recipeId);
+                const batches = Number(liveWorkshop.batches), unitPrice = Number(liveWorkshop.unitPrice);
+                if (!recipe || !step || workshop || clanCraft || clanOrder || crafterId === customerId
+                    || !Number.isSafeInteger(batches) || batches < 1 || batches > 64
+                    || recipe.successRate < 100 && batches !== 1
+                    || !Number.isSafeInteger(unitPrice) || unitPrice < 0 || !Number.isSafeInteger(price)
+                    || price !== unitPrice * batches || !Number.isFinite(crafterMp) || crafterMp < 0
+                    || !one('SELECT recipeId FROM character_recipes WHERE characterId=? AND recipeId=?', [crafterId, recipe.recipeId]))
+                    throw Error('invalid_live_workshop');
+                const required = new Map();
+                for (const row of recipe.materials) required.set(Number(row.selfId),
+                    (required.get(Number(row.selfId)) || 0) + Number(row.amount) * batches);
+                const supplied = new Map();
+                if (new Set((materials || []).map(row => Number(row.id))).size !== materials?.length)
+                    throw Error('invalid_live_workshop_material');
+                for (const row of materials || []) {
+                    if (!Number.isSafeInteger(row.amount) || row.amount < 1) throw Error('invalid_live_workshop_material');
+                    supplied.set(Number(row.selfId), (supplied.get(Number(row.selfId)) || 0) + row.amount);
+                }
+                if (required.size !== supplied.size || [...required].some(([id, amount]) => supplied.get(id) !== amount)
+                    || !product || Number(product.selfId) !== recipe.productId || Number(product.amount) !== recipe.productCount * batches)
+                    throw Error('live_workshop_recipe_changed');
+                for (const [id, amount] of required) checkEconomyMaterialProtectionUnsafe(customerId, step, id, amount);
+                const packet = fundingPacket?.();
+                if (!Array.isArray(packet) || packet.length < 4) throw Error('economy_funding_missing');
+                checkEconomyFundingUnsafe(customerId, step, price, { ...funding, itemId: recipe.productId }, null, packet);
+            }
             let success = !!product;
             let clanCrafter = null;
             let workshopCrafter = null;
             if (workshop) {
-                const recipes = invoke('GameServer/Items/C4RecipeItems');
                 const rules = invoke('GameServer/Bot/Economy/CraftShopService');
-                const recipe = recipes.resolveByRecipeId(workshop.recipeId);
+                const recipe = C4Recipes.resolveByRecipeId(workshop.recipeId);
                 const batches = Number(workshop.batches);
                 if (clanCraft || clanOrder || Number(crafterId) === Number(customerId) || !recipe
                     || !Number.isSafeInteger(batches) || batches <= 0 || batches > 64) throw new Error('invalid workshop craft');
@@ -8202,7 +8375,7 @@ const Database = {
                     prepareCraftReservationsUnsafe(step, recipe);
                     for (const [id, amount] of required) checkEconomyMaterialProtectionUnsafe(customerId, step, id, amount);
                     checkEconomyFundingUnsafe(customerId, step, Number(price), { ...funding, itemId: Number(recipe.productId) });
-                    const template = require('./GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(recipe.productId));
+                    const template = ItemTemplateIndex.find(DataCache.items, Number(recipe.productId));
                     if (!product || !template || !!product.stackable !== !!template.etc?.stackable
                         || Number(product.slot || 0) !== Number(template.etc?.slot || 0)) throw Error('craft_product_template_changed');
                 }
@@ -8216,7 +8389,7 @@ const Database = {
                 if (!clanCraft || !manualOrder) {
                     throw new Error('clan craft order changed');
                 }
-                const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(clanCraft.recipeId);
+                const recipe = C4Recipes.resolveByRecipeId(clanCraft.recipeId);
                 if (clanOrder.final && Number(recipe?.productId) !== Number(manualOrder.itemId)) throw new Error('clan craft target changed');
                 if (clanOrder.final) {
                     const stock = Number(one('SELECT COALESCE(SUM(amount), 0) AS amount FROM clan_warehouse_items WHERE clanId = ? AND selfId = ?',
@@ -8228,8 +8401,7 @@ const Database = {
                 }
             }
             if (clanCraft) {
-                const recipes = invoke('GameServer/Items/C4RecipeItems');
-                const recipe = recipes.resolveByRecipeId(clanCraft.recipeId);
+                const recipe = C4Recipes.resolveByRecipeId(clanCraft.recipeId);
                 const craftRules = invoke('GameServer/Bot/Economy/CraftShopService');
                 const rows = all(`SELECT life.*, members.clanId, members.classId, members.level AS characterLevel
                     FROM bot_life_state life JOIN characters members ON members.id = life.characterId
@@ -8261,7 +8433,7 @@ const Database = {
             const sources = [];
             for (const material of [...materials].sort((left, right) => Number(left.id) - Number(right.id))) {
                 const source = one('SELECT id, selfId, amount, equipped FROM items WHERE id = ? AND characterId = ?', [material.id, customerId]);
-                if (!source || workshop && source.equipped || Number(source.selfId) !== Number(material.selfId) || Number(source.amount) < Number(material.amount)) throw new Error('customer craft material changed');
+                if (!source || (workshop || liveWorkshop) && source.equipped || Number(source.selfId) !== Number(material.selfId) || Number(source.amount) < Number(material.amount)) throw new Error('customer craft material changed');
                 sources.push({ id: Number(source.id), amount: Number(source.amount) - Number(material.amount) });
                 if (Diagnostics.active()) stageNativeDiagnostic(customerId, null, 'craft_material', 'validated',
                     { item: Number(material.selfId), nativeId: Number(source.id), recipeId: Number(clanCraft?.recipeId || 0), owned: Number(source.amount), requested: Number(material.amount) });
@@ -8273,7 +8445,7 @@ const Database = {
             // One native roll after validated physical inputs and fees;
             // the saved completion returns before every mutable quote check.
             if (step) {
-                const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(workshop.recipeId);
+                const recipe = C4Recipes.resolveByRecipeId((workshop || liveWorkshop).recipeId);
                 success = recipe.successRate >= 100 || Number(random()) * 100 < recipe.successRate;
                 if (!success) product = null;
             }
@@ -8372,7 +8544,7 @@ const Database = {
                 };
             }
             const receipt = step ? { committed: true, success, units: Number(product?.amount || 0), spent: fee,
-                nativeId: Number(workshop.recipeId), mp: crafterMp } : {};
+                nativeId: Number((workshop || liveWorkshop).recipeId), mp: crafterMp } : {};
             if (step) {
                 // Earlier workshop accounting also fences the customer. Complete
                 // against that current row, without restoring its older bag.
@@ -8381,7 +8553,7 @@ const Database = {
                     [...materials.map(row => Number(row.selfId)), ...(product ? [Number(product.selfId)] : [])]);
                 receipt.economyCommit = jsonObject(clanStates.customerState.statsJson).economyCommit;
             }
-            return { ...clanStates, ...receipt, sources, product: product ? { id: productId, amount: productAmount } : null, customerAdena: fee > 0 ? { id: Number(customerAdena.id), amount: Number(customerAdena.amount) - fee } : null, crafterAdena: fee > 0 ? { id: Number(crafterAdena.id), amount: nextCrafterAdena } : null };
+            return { ...clanStates, ...receipt, crafterMp, sources, product: product ? { id: productId, amount: productAmount } : null, customerAdena: fee > 0 ? { id: Number(customerAdena.id), amount: Number(customerAdena.amount) - fee } : null, crafterAdena: fee > 0 ? { id: Number(crafterAdena.id), amount: nextCrafterAdena } : null };
         }, 'craft:customer'));
     },
 
@@ -9826,7 +9998,7 @@ const Database = {
                     return { ok: false, code: 'clan_supplies_filled' };
             }
             if (reward > 0) {
-                const template = invoke('GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, selfId);
+                const template = ItemTemplateIndex.find(DataCache.items, selfId);
                 const nativePrice = invoke('GameServer/Items/NpcSellRules').npcBuyPrice(template?.template?.price);
                 if (!Number.isSafeInteger(reward) || Number(rewardUnitPrice) !== nativePrice)
                     return { ok: false, code: 'clan_reward_invalid' };
