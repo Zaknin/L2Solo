@@ -425,7 +425,7 @@ function isEmptyWishPlan(plan) {
         && plan.next == null && plan.reason === 'wish_focus'
         && Object.keys(plan).every(key => ['status', 'strategy', 'next', 'reason'].includes(key));
 }
-function events(before, after, escrow = 0) {
+function events(before, after, escrow = 0, leaf = null) {
     // Main may replay a validated worker packet that already describes this
     // same round. Compare its actual baselines, not sequence alone; a packet
     // preceding a new death/level/resource event still raises that event.
@@ -439,42 +439,52 @@ function events(before, after, escrow = 0) {
     // No memory and no recipe book here: the relations and the recipes the
     // decision kept stand until the next verdict, which reads both.
     const current = { ...semanticFacts(after), relations: previousFact('relations'), recipes: previousFact('recipes') };
-    // The round's callers (a hunting round, a rest) hold no leaf to tell an
-    // ordered trip from a flight: a trip begun inside a round is an event.
+    // leaf: the step's held leaf (the worker's round check): the move it
+    // ordered is no event (occupationPlanned). None (main, a step without a
+    // plan): every move is an event.
     return factEvents(previousFact, current, moneyChanged(after, represented || before.stats?.wishSections, escrow, false)
-        || !previous.funding && fundingMark(before) !== fundingMark(after));
+        || !previous.funding && fundingMark(before) !== fundingMark(after), null, occupationPlanned(after, leaf));
 }
 // The one reading of an occupation against the held leaf (Recompute: own
 // outputs are not inputs): the trip the leaf ordered under way (to its
 // hunting spot arriving to hunt, or to its town), or the arrival where it
 // led (its hunting spot, hunting or resting there; else its own activity).
-// The route's stand-in for a hunting spot that was no trip (leafSpotId on
-// the trip, then on the ground it reached: BotRoute.trip) is the leaf's own
-// trip and arrival too, unless the leaf hunts a material at its monster.
+// The route's detour around the leaf's full hunting spot (BotRoute.trip)
+// stands in for it, unless the leaf hunts a material at its monster: the
+// trip names the leaf's spot (travel.leafSpotId), the arrival keeps the pair
+// leaf spot + ground reached (stats.standIn, BackgroundResolver.resolveTravel),
+// the leaf's own arrival while the bot stands on that ground.
 // Death, recall, a party pull, a flight or a yield are none of these and
-// stay events. The held build's verdict reads it (factEvents' planned); its
-// field-trip clause is EconomyContext.fieldActivity's.
+// stay events. Read by the held build's verdict and by the far step's round
+// check (factEvents' planned); its field-trip clause is
+// EconomyContext.fieldActivity's.
 function occupationPlanned(state, leaf) {
     if (!leaf?.activity) return false;
     const hunt = leaf.activity === 'hunting';
     if (state.activity === 'traveling') {
         const travel = state.stats?.travel;
         if (!travel) return false;
-        return hunt && leaf.spotId != null ? (ownSpot(travel.spotId, leaf) || standIn(travel.leafSpotId, leaf))
+        return hunt && leaf.spotId != null ? (ownSpot(travel.spotId, leaf) || detourFor(travel.leafSpotId, leaf))
             && travel.arrivalActivity === 'hunting' && travel.townName == null
             : leaf.town != null && travel.townName != null && String(travel.townName) === String(leaf.town);
     }
     // A hunting leaf without a spot names no arrival: any spot is an event.
     if (hunt) return leaf.spotId != null && (state.activity === 'hunting' || state.activity === 'resting')
-        && (ownSpot(state.spotId, leaf) || standIn(state.stats?.leafSpotId, leaf));
+        && (ownSpot(state.spotId, leaf) || standsIn(state, leaf));
     return state.activity === leaf.activity;
 }
 function ownSpot(spotId, leaf) {
     return spotId != null && String(spotId) === String(leaf.spotId);
 }
-function standIn(spotId, leaf) {
+// A detour named for the leaf's spot (the trip's mark, the pair's leaf).
+function detourFor(spotId, leaf) {
     // lazy: cycle ColdEconomyDecision requires this module at its top.
     return ownSpot(spotId, leaf) && !invoke('GameServer/Bot/Population/ColdEconomyDecision').materialHunt(leaf);
+}
+// The bot stands on the ground its detour reached.
+function standsIn(state, leaf) {
+    const pair = state.stats?.standIn;
+    return pair?.ground != null && String(pair.ground) === String(state.spotId) && detourFor(pair.leaf, leaf);
 }
 // One semantic comparison for state publication and the diagnostic event gate.
 // A reader supplies the baseline facts; money keeps its own soft verdict.

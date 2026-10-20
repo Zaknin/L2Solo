@@ -181,26 +181,28 @@ function evacuationSpot(state, currentId, spots, frame) {
 // The spot a solo bot's own hunting leaf names, as a choice for record, when
 // the bot may hunt there: not a raid profile, not excluded, allowed for its
 // kit, and fitting its level (or an economic hunt within 15 levels). With
-// the worker's room filter (frame.options.hasRoom, ROUTE-ROOM-2) a spot other
-// than the bot's own with no room for it is no leaf trip either (counted as
-// route:trip:leaf_full); the room is checked again at arrival. Null: the
-// kept route decides.
+// the worker's room filter (frame.options.hasRoom, ROUTE-ROOM-2) a fitting
+// spot other than the bot's own with no room for it is no leaf trip either:
+// returned with full: true (counted as route:trip:leaf_full), the kept route
+// decides and its trip stands in for it (trip); the room is checked again at
+// arrival. Null: the kept route decides.
 function leafChoice(state, leaf, { spots, timestamp, frame = null }) {
     if (leaf?.activity !== 'hunting' || !leaf.spotId || !routable(state, null, [])) return null;
     const wished = SpotIndex.spotById(spots, leaf.spotId);
     if (!wished || wished.raidBoss === true) return null;
     frame = frame || frameFor(state, null, [], timestamp);
     if (frame.excludedSpotIds.has(String(wished.id))) return null;
-    const hasRoom = frame.options.hasRoom;
-    if (hasRoom && String(wished.id) !== String(state.spotId || '') && !hasRoom(wished.id)) {
-        EconomyDiagnostics.count('route', 'trip', 'leaf_full');
-        return null;
-    }
     const level = Number(state.level || 1);
     const fits = LevelingRoutes.isSpotAllowedForState(wished, state, frame.solo())
         && (SpotService.isSuitable(wished, level, frame.options)
             || EquipmentIncomeRoute.economicHunt(state) && Number(wished.avgLevel || wished.minLevel || 1) >= level - 15);
-    return fits ? { spotId: wished.id } : null;
+    if (!fits) return null;
+    const hasRoom = frame.options.hasRoom;
+    if (hasRoom && String(wished.id) !== String(state.spotId || '') && !hasRoom(wished.id)) {
+        EconomyDiagnostics.count('route', 'trip', 'leaf_full');
+        return { spotId: wished.id, full: true };
+    }
+    return { spotId: wished.id };
 }
 
 // The trip to a chosen spot from where the bot stands now, in the shape
@@ -280,16 +282,17 @@ function route(state, currentSpot, party, partyMembers = [], { spots, timestamp,
 // room filter, ROUTE-ROOM-3) refuses is dropped first (route:drop:full): the
 // room-filtered search decides, as it does for a leaf trip. The trip is
 // built from where the bot stands now; null: no trip. Counted as
-// route:trip:leaf|kept|search. When the leaf's hunting spot is no trip now
-// (full, or not allowed), a kept or searched level / gear trip stands in for
-// it and names it (leafSpotId, read by DecisionSections.occupationPlanned);
-// a flight (death pressure, unsafe ground) names none: it stays an event.
+// route:trip:leaf|kept|search. When the leaf's hunting spot is full now
+// (leafChoice), a kept or searched level / gear trip stands in for it and
+// names it (leafSpotId, read by DecisionSections.occupationPlanned; counted
+// as route:trip:detour); a flight (death pressure, unsafe ground) names none:
+// it stays an event, as does a trip away from a spot the bot may not hunt.
 const DETOUR_REASONS = new Set(['level_replan', 'equipment_source_replan']);
 function trip(owner, state, leaf, { spots, currentSpot = null, timestamp, hasRoom = null }) {
     if (!routable(state, null, [])) return null;
     const frame = frameFor(state, null, [], timestamp, hasRoom);
     const wished = leafChoice(state, leaf, { spots, timestamp, frame });
-    if (wished) {
+    if (wished && !wished.full) {
         EconomyDiagnostics.count('route', 'trip', 'leaf');
         const started = record(state, wished, null, [], { spots, currentSpot, timestamp, frame });
         if (started) drop(owner, 'leaf');
@@ -303,8 +306,9 @@ function trip(owner, state, leaf, { spots, currentSpot = null, timestamp, hasRoo
     const chosen = owner?.route || choose(state, currentSpot, null, [], { spots, timestamp, frame });
     if (owner && !owner.route) owner.route = chosen;
     const started = record(state, chosen, null, [], { spots, currentSpot, timestamp, frame });
-    return started && leaf?.activity === 'hunting' && leaf.spotId != null && DETOUR_REASONS.has(started.reason)
-        ? { ...started, leafSpotId: leaf.spotId } : started;
+    if (!started || !wished?.full || !DETOUR_REASONS.has(started.reason)) return started;
+    EconomyDiagnostics.count('route', 'trip', 'detour');
+    return { ...started, leafSpotId: wished.spotId };
 }
 
 // The kept route goes; the next trip start searches again. Counted as

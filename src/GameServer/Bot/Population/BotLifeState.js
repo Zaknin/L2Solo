@@ -2824,7 +2824,10 @@ const BotLifeState = {
                 // lazy: worker the native market owner is main-thread only; workers receive their mirrored escrow.
                 escrow = invoke('GameServer/Bot/Economy/BotAfkMarketService').buyOrderEscrow(state.characterId);
             }
-            hard = DecisionSections.events(state, nextState, escrow);
+            // options.leaf: the step's held leaf (the worker's), whose own trip
+            // and arrival raise nothing; none (main, a step without a plan):
+            // every move is an event.
+            hard = DecisionSections.events(state, nextState, escrow, options.leaf ?? null);
         }
         // The bot's step counter, the clock of its spot marks (SpotRiskPolicy):
         // +1 once per resolved step, whichever thread resolves it (hot actor
