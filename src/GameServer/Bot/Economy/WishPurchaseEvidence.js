@@ -21,20 +21,17 @@ function npcShape(npcOnly, town) {
     if (!shapes.has(key)) shapes.set(key, { npcOnly, town, held: new WeakMap() });
     return shapes.get(key);
 }
+function derive(shape, offers) {
+    if (!shape.npcOnly && !shape.town) return offers.slice(0, NPC_LIMIT);
+    return offers.filter(offer => (!shape.npcOnly || offer.sourceType === 'npc')
+        && (!shape.town || offer.town === shape.town)).slice(0, NPC_LIMIT);
+}
 function npcCandidates(shape, offers) {
     // The common case: every offer of the list, at most one per town.
     if (!shape.npcOnly && !shape.town && offers.length <= NPC_LIMIT) return offers;
-    const derive = () => {
-        if (!shape.npcOnly && !shape.town) return offers.slice(0, NPC_LIMIT);
-        const kept = offers.filter(offer => (!shape.npcOnly || offer.sourceType === 'npc')
-            && (!shape.town || offer.town === shape.town)).slice(0, NPC_LIMIT);
-        // Without the board and the fixed shots these are the only offers:
-        // the offer's half of the accept test is settled here.
-        return shape.npcOnly ? kept.filter(offerAccepted) : kept;
-    };
-    if (!Object.isFrozen(offers)) return derive();
+    if (!Object.isFrozen(offers)) return derive(shape, offers);
     let candidates = shape.held.get(offers);
-    if (!candidates) shape.held.set(offers, candidates = Object.freeze(derive()));
+    if (!candidates) shape.held.set(offers, candidates = Object.freeze(derive(shape, offers)));
     return candidates;
 }
 function quote(offer, cost) {
@@ -52,20 +49,24 @@ function reader(state, ctx, deps, { npcOnly = false, town = null } = {}) {
     if (typeof cost !== 'function' || typeof cost.details !== 'function') return () => null;
     const shape = npcShape(npcOnly, town);
     const accept = row => offerAccepted(row) && Number.isFinite(cost(row.town));
-    const options = { ...(town ? { towns: [town] } : {}), excludeOwner: state.characterId, maxInspected: 20, cost, accept, others: null };
+    const options = { ...(town ? { towns: [town] } : {}), excludeOwner: state.characterId, maxInspected: 20, cost, accept };
     return id => {
         const npc = Production.allowsNpcShot(id) ? npcCandidates(shape, deps.npcOffersFor?.(id) || []) : [];
         if (npcOnly && town) {
             // One town, no board, no fixed shots: the trip is the same for
-            // every candidate, the one order picks among them.
-            if (!npc.length || !Number.isFinite(cost(town))) return null;
-            return quote(npc.length === 1 ? npc[0] : Query.bestSellOffer(null, id, { cost, others: npc }), cost);
+            // every candidate, the one order picks among the accepted ones.
+            // The offer's half is tested per call, so a row is never trusted
+            // for being in a frozen list.
+            const kept = npc.length === 1 ? (offerAccepted(npc[0]) ? npc : []) : npc.filter(offerAccepted);
+            if (!kept.length || !Number.isFinite(cost(town))) return null;
+            return quote(kept.length === 1 ? kept[0] : Query.bestSellOffer(null, id, { cost, others: kept }), cost);
         }
         // The context's watched board records an absent item as an input too.
         const board = npcOnly ? null : ctx.board || deps.board;
-        // Never push onto the shared frozen list.
-        options.others = !npcOnly && Production.allowsFixedShot(id) ? [...npc, ...FixedShots.offers(id)] : npc;
-        return quote(Query.bestSellOffer(board?.heads ? board : null, id, options), cost);
+        // Never push onto the shared frozen list; one options object per
+        // call, so a nested read cannot swap the list under this one.
+        const others = !npcOnly && Production.allowsFixedShot(id) ? [...npc, ...FixedShots.offers(id)] : npc;
+        return quote(Query.bestSellOffer(board?.heads ? board : null, id, { ...options, others }), cost);
     };
 }
 module.exports = { reader };
