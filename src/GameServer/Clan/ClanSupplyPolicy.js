@@ -3,7 +3,6 @@ const { isMainThread } = require('node:worker_threads');
 const { createHash } = require('node:crypto');
 const ClanCraftingPolicy = require('./ClanCraftingPolicy');
 const ClanHallPolicy = require('../ClanHall/Policy');
-const ColdTableChannel = require('../Bot/Population/ColdTableChannel');
 const CONTENT_IDENTITY = Symbol('clan_supply_content_identity');
 const NO_CLAN_IDENTITY = createHash('sha256').update('[0,[]]').digest('hex');
 const records = new Map();
@@ -69,7 +68,8 @@ function publish(clan, warehouse) {
     row.push(++revision);
     prepareRow(row);
     records.set(row[0], row);
-    ColdTableChannel.shared.changed('clan_supplies', row);
+    // lazy: worker only the main clan projection publishes readiness.
+    require('../Bot/Population/ColdTableChannel').shared.changed('clan_supplies', row);
 }
 function reservedAmounts(state = {}) {
     const id = Number(state.clanId ?? state.stats?.clanId);
@@ -86,7 +86,8 @@ async function init() {
     const rows = await invoke('Database').execute(['SELECT id, level FROM clans', []], 'clan-supplies:levels');
     for (const row of rows) publish({ ...row, state: {} });
 }
-if (isMainThread) ColdTableChannel.shared.register('clan_supplies', {
+// lazy: worker only the main clan projection publishes readiness.
+if (isMainThread) require('../Bot/Population/ColdTableChannel').shared.register('clan_supplies', {
     key: row => row[0], allRows: () => records.values(), eventDriven: true, ready: () => initialized
 });
 module.exports = { requirements, publish, reservedAmounts, hasWarehouse, init, prepareRow,
@@ -94,7 +95,8 @@ module.exports = { requirements, publish, reservedAmounts, hasWarehouse, init, p
     projectionReady() {
         if (!isMainThread || initialized) return;
         initialized = true;
-        ColdTableChannel.shared.flush();
+        // lazy: worker only the main clan projection publishes readiness.
+        require('../Bot/Population/ColdTableChannel').shared.flush();
     },
     contentIdentity(state = {}) {
         const id = Number(state.clanId ?? state.stats?.clanId);
