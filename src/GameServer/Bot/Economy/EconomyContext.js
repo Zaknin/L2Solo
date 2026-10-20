@@ -49,8 +49,8 @@ const TradeIntent = require('./TradeIntent');
 const PROOF_RAW_BYTES = 65536;
 // The cold worker holds one plan per bot (~1,700), apart from the planner's in-flight builds: a
 // 64-slot cache shrunk by them dropped a plan within ~2.5 s under a long cold queue, so every
-// same-key rebuild found nothing held (L133). A worker entry is the plan only (perf C1); the main
-// thread keeps the graph nodes too and stays at 64.
+// same-key rebuild found nothing held (L133). An entry is the plan only (perf C1), a party
+// member's with its graph nodes on both threads; the main thread stays at 64.
 const RETAIN_LIMIT = isMainThread ? 64 : 2048;
 let routeAnchors = new WeakMap();
 let runtime = {};
@@ -1107,10 +1107,9 @@ function forState(state = {}, deps = {}) {
     // Read once: the hand-off ends here, served or not.
     if (deps.eventVerdict?.collected) deps.eventVerdict.collected = null;
     if (diagnostic && handed) Diagnostics.count('context', 'held_verdict', 'reused');
-    // A valid held build is served. A caller that needs the member's graph
-    // nodes (a worker group solve) builds unless the held entry kept them
-    // (the main thread keeps them).
-    if (eventVerdict.valid && !(deps.withNodes && !held.projection)) {
+    // A valid held build is served, a party member's with its graph nodes
+    // (the entry keeps them, remember below).
+    if (eventVerdict.valid) {
         if (deps.onSourceRead) for (const id of held.readIds) deps.onSourceRead(id);
         if (diagnostic) {
             Diagnostics.count('context', 'hit', held.key === key ? 'same_inputs' : 'own_result');
@@ -1152,7 +1151,7 @@ function forState(state = {}, deps = {}) {
     // which historical event caused it.
     const diagnosticReason = !diagnostic ? null : !held ? deps.rememberContext === false ? 'unkept_caller' : 'not_retained'
         : held.key !== key ? 'input_dependency_changed'
-        : !eventVerdict.valid ? 'held_refused' : 'nodes_needed';
+        : 'held_refused';
     if (diagnostic) Diagnostics.count('context', 'miss', diagnosticReason);
     // A held refusal split by the verdict's first reason and by whether the
     // caller keeps the build: it picks which refusal to make cheaper.
@@ -1414,10 +1413,10 @@ function forState(state = {}, deps = {}) {
     projection.sourceSections = projection.sourceGround = null;
     if (deps.rememberContext !== false) {
         if (diagnostic && !cache.has(actorKey) && cache.size >= RETAIN_LIMIT) Diagnostics.count('context', 'eviction', 'capacity');
-        // The main thread keeps the graph nodes as before (its group solve
-        // reads them on a hit); the worker keeps the plan only (perf C1).
-        // Its own activity: the later reuse verdict reads the held build
-        // with it.
+        // A party member's entry keeps the graph nodes on both threads (its
+        // group solve reads them on a hit); a solo bot's keeps the plan only
+        // (perf C1). Its own activity: the later reuse verdict reads the held
+        // build with it.
         plan.eventProof = captureEventProof(state, deps, { plan });
         // What the card stamps on its leaf, read once for the held verdict: the
         // own item's bag+incoming at the decision (heldAtDecision) and a
@@ -1429,7 +1428,7 @@ function forState(state = {}, deps = {}) {
             readIds: Int32Array.from(readIds), plan, stateRef: new WeakRef(state), gearThreat,
             activity: state.activity,
             sourceSections: retainedSourceMemo, sourceGround: retainedGround, mp: Number(state.vitals?.mp),
-            projection: isMainThread ? projection : null }, RETAIN_LIMIT);
+            projection: Sections.partyIdOf(state) > 0 ? projection : null }, RETAIN_LIMIT);
     }
     readIds = null;
     const built = view(state, plan, deps, { price, kit: base, board, read, spotValue: context.spotValue, trip: context.trip, projection });
@@ -1607,8 +1606,8 @@ function view(state, plan, deps, built = {}) {
     }
     context.wallet = Funding.budget(state, deps.buyOrderEscrow);
     context.stockFor = stockReader(state, rootKey => plan.stockRoots.get(rootKey));
-    // A later view has the usefulness values only; a group solve that needs
-    // the members' nodes rebuilds them (forGroup).
+    // A later view of a solo bot's plan has the usefulness values only; a
+    // party member's held entry keeps its nodes for the group solve.
     context.projection = built.projection || { values: plan.values };
     context.horizonHours = plan.horizonHours;
     Object.assign(context, valueReaders(state, network, plan.values, plan.persona, plan.knowledgeEnabled,
@@ -1677,10 +1676,12 @@ function forGroup(group, members, deps = {}) {
     if (diagnostic) Diagnostics.count('context_group', 'request');
     const selected = (members || []).slice(0, 9);
     const prepared = deps.memberContexts;
-    if (prepared !== undefined && (!Array.isArray(prepared) || prepared.length !== selected.length
-        || prepared.some((context, i) => !context?.projection?.nodes || context.state !== selected[i])))
+    const contexts = prepared !== undefined ? prepared : selected.map(state => forState(state, { ...deps, caller: 'groupContext' }));
+    // Every member's context carries its graph nodes (a party member's held
+    // entry keeps them): a missing one is a named error, never a rebuild.
+    if (!Array.isArray(contexts) || contexts.length !== selected.length
+        || contexts.some((context, i) => !context?.projection?.nodes || context.state !== selected[i]))
         throw new Error('party_member_context_mismatch');
-    const contexts = prepared || selected.map(state => forState(state, { ...deps, caller: 'groupContext' }));
     const first = contexts[0];
     if (!first) {
         if (diagnostic) Diagnostics.count('context_group', 'miss', 'empty_group');
@@ -1708,12 +1709,8 @@ function forGroup(group, members, deps = {}) {
     const nodes = [], roots = [];
     // Each member keeps its actual wishes/effects. Namespaced dependencies
     // enter the group's one purse and one engine, never a second evaluator.
-    // A worker member's later view keeps only its usefulness values: the
-    // same call that made it builds again asking for the nodes (perf C1).
-    const sources = contexts.map((context, i) => context.projection?.nodes ? context.projection
-        : forState(selected[i], { ...deps, caller: 'groupContext', withNodes: true }).projection);
     for (let i = 0; i < contexts.length; i++) {
-        const source = sources[i];
+        const source = contexts[i].projection;
         const prefix = `${i}:`;
         // The group solve has no stock reader: a member's path with gross
         // inputs only (Task 2 readers) orders what the member does not hold
@@ -1753,7 +1750,7 @@ function forGroup(group, members, deps = {}) {
         wallet, playedHours: positive(group.playedHours), persona: group.persona || first.persona,
         previous: { focus: group.wishFocus, dormant: group.dormantWishes },
         hourAdena: contexts.reduce((sum, context) => sum + context.hunt.perHour, 0),
-        moneyPaths: sources[0].moneyPaths, riskWeight: first.riskWeight });
+        moneyPaths: first.projection.moneyPaths, riskWeight: first.riskWeight });
     const groupHunt = { ...first.hunt, perHour: contexts.reduce((sum, member) => sum + member.hunt.perHour, 0),
         expPerHour: contexts.reduce((sum, member) => sum + member.hunt.expPerHour, 0) };
     const context = { ...first, actorKey, inputKey: key, network, hunt: groupHunt, groupIncomePerHour: groupHunt.perHour,

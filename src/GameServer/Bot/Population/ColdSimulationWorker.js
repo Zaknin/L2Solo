@@ -1187,20 +1187,23 @@ function requestPartyGoals(payload, msgId, admitted = false) {
         if (!partyMembersAvailable(members)) throw Error('party_goal_member_busy');
         const joint = await Calculation.calculate(payload.party, members, async (member, timestamp) => {
             const at = members.indexOf(member);
-            // Recipe authority belongs to this main query, not the worker's
-            // 'recipes' table. Public workshop entries remain the fallback.
+            // Main's recipe book feeds only a refusal's ask (askWorkshop); the
+            // build and its verdict read the worker's recipes mirror.
             const options = { buyOrderEscrow: payload.escrows[at], recipeKnowledge: payload.recipeKnowledge?.[at] || {} };
             const routeRows = await occupationFor(member, timestamp, options, 'wish');
             if (!partyMembersAvailable(members)) throw Error('party_goal_member_busy');
-            const workshop = await askWorkshop(member, timestamp, routeRows, 'party_goal', options);
+            // The lifecycle's order: the held build's verdict on this state
+            // (main's escrow in it) keeps its workshop, else the planner is
+            // asked; a valid verdict serves the held build with its nodes.
+            // Never remembered: a query's own snapshot must not displace the
+            // bot's held build (L133).
+            const deps = { timestamp, spots: planningSpots, board: boardReady(), routeRows,
+                buyOrderEscrow: options.buyOrderEscrow, rememberContext: false, caller: 'workerPartyGoal' };
+            const verdict = {};
+            const workshop = EconomyContext.heldWorkshop(member, deps, verdict)
+                || await askWorkshop(member, timestamp, deps.routeRows, 'party_goal', options);
             if (!partyMembersAvailable(members)) throw Error('party_goal_member_busy');
-            return invoke('GameServer/Bot/Economy/EconomyContext').forState(member, {
-                timestamp, spots: planningSpots, board: boardReady(),
-                workshop, routeRows,
-                // Never held: its occupation card moves the key off the bot's own plan and the
-                // worker entry keeps no graph nodes for withNodes, so it would only displace it (L133).
-                rememberContext: false,
-                buyOrderEscrow: options.buyOrderEscrow, caller: 'workerPartyGoal', withNodes: true });
+            return EconomyContext.forState(member, { ...deps, workshop, eventVerdict: verdict });
         }, payload.timestamp, () => !shuttingDown && !kernel.stopping && Date.now() < payload.replyBy
             && partyMembersAvailable(members), { spots: planningSpots });
         if (!shuttingDown && !kernel.stopping && Date.now() < payload.replyBy)

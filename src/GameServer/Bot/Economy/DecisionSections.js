@@ -368,13 +368,18 @@ function factsOf(view, memory = null) {
 function stockIds(shotPlan, potion) {
     return [736, shotPlan.selfId, potion.selfId];
 }
+// The bot's party id, 0 when it has none (the relations fact's party, the
+// held build's kept projection: EconomyContext).
+function partyIdOf(state) {
+    return Number(state.party?.partyId || state.partyId || 0);
+}
 // The far reader: the raw values of a saved state. recipes: the known recipe
 // ids the build reads (WishProviders.recipeIds), null when the caller holds
 // no recipe book. One bag scan gives the bag full and the load.
 function stateView(state, recipes = null) {
     const stats = state.stats || {};
     const view = kitView(state);
-    const partyId = Number(state.party?.partyId || state.partyId || 0);
+    const partyId = partyIdOf(state);
     const bag = Floor.stateInventory(state, DataCache.items);
     view.recipes = recipes;
     view.party = partyId ? state.party : null;
@@ -513,4 +518,4 @@ function kitMoved(before, after) {
     return (before?.stats?.wishSections?.build ?? null) !== (after?.stats?.wishSections?.build ?? null);
 }
 module.exports = { SECTIONS, COMPUTED, FACT_SECTIONS, sectionBit, sectionMask, sectionNames, kit, kitMoved, moneyChanged, observationChanged, incomeError,
-    MARKET_WATCH, softEvents, carrySectionBaseline, baselineIdentity, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, factsOf, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal };
+    MARKET_WATCH, softEvents, carrySectionBaseline, baselineIdentity, sample, sampleRows, packSample, observationBaselineValid, bounds, snapshot, semanticFacts, factsOf, relationTargetIds, events, factEvents, occupationPlanned, hash, isEmptyWishPlan, decisionRefusal, partyIdOf };
