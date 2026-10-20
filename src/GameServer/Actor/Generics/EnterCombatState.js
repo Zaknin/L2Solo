@@ -15,16 +15,18 @@ function armStanceEnd(actor) {
     actor.combatStanceTimer.unref?.();
 }
 
-function ownExchange(actor) {
-    return actor.attack?.isAttacking?.() || actor.state.fetchHits() || actor.state.fetchCasts();
+// The actor's own swing or offensive cast start is an exchange too (L2J
+// doAttack/doCast): a running stance restarts its 15 s, none is started.
+function holdStance(actor) {
+    actor.combatStanceTimer?.refresh();
 }
 
-// No combat-flag guard: stun, sleep, petrify, fake death and clearTargetState
-// drop inCombat on a player without a packet, so a timer that fires always
-// owes the client its AutoAttackStop.
+// No combat-flag or own-action check: stun, sleep, petrify, fake death and
+// clearTargetState drop inCombat on a player without a packet, and every own
+// swing or cast start already refreshed the timer, so a timer that fires
+// always owes the client its AutoAttackStop.
 function stanceTimeout(actor) {
     actor.combatStanceTimer = undefined;
-    if (ownExchange(actor)) return armStanceEnd(actor); // own attack loop or cast is an exchange
     const session = actor.session;
     if (session?.actor !== actor) return; // logged out or gone cold
     AbortCombatState.endStance(session, actor);
@@ -41,3 +43,4 @@ function enterCombatState(session, actor) {
 }
 
 module.exports = enterCombatState;
+module.exports.holdStance = holdStance;

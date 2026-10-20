@@ -14,6 +14,7 @@ const RaidCurse = invoke('GameServer/RaidBoss/RaidCurse');
 const ChargeLifecycle = invoke('GameServer/Skills/ChargeLifecycle');
 const AttackRange = invoke('GameServer/Actor/AttackRange');
 const HotPartyCastTracker = invoke('GameServer/Bot/AI/HotPartyCastTracker');
+const { holdStance } = require('./Generics/EnterCombatState');
 
 const { weaponMaskFor } = invoke('GameServer/Skills/WeaponMask');
 
@@ -66,12 +67,6 @@ class Attack {
         }, delay);
         this.timers.add(timer);
         return timer;
-    }
-
-    // The own attack loop runs: a swing or cast timer waits, the bow reloads,
-    // or the next swing has a target. Melee chase between swings is not seen.
-    isAttacking() {
-        return this.timers.size > 0 || this.bowReloading || !!this.repeatTarget;
     }
 
     clearTimers() {
@@ -204,6 +199,7 @@ class Attack {
             }))
         }), actor);
         actor.state.setHits(true);
+        holdStance(actor);
 
         this.queueTimer(() => {
             const releaseBowMovement = () => {
@@ -332,6 +328,7 @@ class Attack {
         }
 
         const magicSkill = this.beginRemoteCast(session, actor, creature, skill);
+        if (skill.fetchTargetKind?.() === 'enemy') holdStance(actor);
 
         const castWeapon = WeaponSA.equipped(actor);
         const castTime = skill.fetchCalculatedHitTime();
