@@ -35,6 +35,9 @@ const DataCache = invoke('GameServer/DataCache');
 const C4Recipes = require('./GameServer/Items/C4RecipeItems');
 const TradeIntent = require('./GameServer/Bot/Economy/TradeIntent');
 const PurchaseFunding = require('./GameServer/Bot/Economy/PurchaseFunding');
+const ClanSocialPolicy = require('./GameServer/Clan/ClanSocialPolicy');
+const ClanSocialEvidence = require('./GameServer/Clan/ClanSocialEvidence');
+const PkDropPolicy = require('./GameServer/PkDropPolicy');
 let nativeDiagnosticFacts = null;
 let nativeDiagnosticCounts = null;
 let nativeDiagnosticOverflow = 0;
@@ -2980,16 +2983,15 @@ function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) 
 // the resolve's save before its inventory sync; nobody read the number between.
 function dropPkDeathItemsUnsafe(characterId) {
     const current = one('SELECT hp,karma,pk FROM characters WHERE id=?', [characterId]);
-    if (!current || Number(current.hp) > 0 || !require('./GameServer/PkDropPolicy').enabled(current)) return { drops: [] };
+    if (!current || Number(current.hp) > 0 || !PkDropPolicy.enabled(current)) return { drops: [] };
     const life = one('SELECT deathCount,statsJson FROM bot_life_state WHERE characterId=?', [characterId]);
     const stats = jsonObject(life?.statsJson), death = Number(life?.deathCount || stats.deaths || 0);
     if (!life || death <= Number(stats.pkDropDeathSequence || 0)) return { drops: [] };
-    const Templates = require('./GameServer/Item/ItemTemplateIndex');
     const inventory = all('SELECT * FROM items WHERE characterId=? ORDER BY id', [characterId]).map(item => {
-        const template = Templates.find(DataCache.items, item.selfId);
+        const template = ItemTemplateIndex.find(DataCache.items, item.selfId);
         return { ...template?.template, ...template?.etc, ...item };
     });
-    const drops = require('./GameServer/PkDropPolicy').rollPlan({ karma: current?.karma, pk: current?.pk, inventory });
+    const drops = PkDropPolicy.rollPlan({ karma: current?.karma, pk: current?.pk, inventory });
     for (const item of drops) write('DELETE FROM items WHERE id=? AND characterId=?', [item.id, characterId]);
     const summary = invoke('GameServer/Bot/Population/BotLifeState').inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId=? ORDER BY id', [characterId]));
     const written = one(`UPDATE bot_life_state SET inventorySummary=?, statsJson=json_set(statsJson,'$.pkDropDeathSequence',?)
@@ -4112,7 +4114,6 @@ function commitInteractionMemoryUnsafe(batch, timestamp) {
 }
 
 function commitClanSocialUnsafe(batch, timestamp) {
-    const ClanSocial = require('./GameServer/Clan/ClanSocialPolicy');
     const clanSnapshots = new Map(), clanContexts = new Map(), changedClans = new Set();
     for (let i = 0; i < batch.length; i++) {
         const event = batch[i];
@@ -4127,13 +4128,13 @@ function commitClanSocialUnsafe(batch, timestamp) {
             if (!clan) continue;
             if (!clanSnapshots.has(clanId)) {
                 const row = one('SELECT snapshotJson FROM clan_social_memory WHERE clanId = ?', [clanId]);
-                clanSnapshots.set(clanId, row ? JSON.parse(row.snapshotJson) : ClanSocial.empty(clanId));
+                clanSnapshots.set(clanId, row ? JSON.parse(row.snapshotJson) : ClanSocialPolicy.empty(clanId));
             }
             const targetLeader = one('SELECT leaderId FROM clans WHERE id = ?', [event.clan.targetClanId]);
             const currentMember = one('SELECT clanId FROM characters WHERE id = ?', [event.targetId]);
             const previous = clanSnapshots.get(clanId);
             const previousRevision = previous.revision;
-            const next = ClanSocial.apply(previous, event, timestamp, {
+            const next = ClanSocialPolicy.apply(previous, event, timestamp, {
                 leaderTraits: jsonObject(clan.traitsJson), targetLeaderId: targetLeader?.leaderId,
                 currentTargetClanId: Number(currentMember?.clanId || 0), mutable: true
             });
@@ -4152,7 +4153,7 @@ function commitClanSocialUnsafe(batch, timestamp) {
 
 function rememberClanContributionUnsafe(clanId, contributor, leaderId, ledgerId, requested, sourceBefore, at) {
     if (!leaderId || leaderId === contributor || requested < Math.max(1000, sourceBefore * 0.01)) return;
-    const event = require('./GameServer/Clan/ClanSocialEvidence').attach({
+    const event = ClanSocialEvidence.attach({
         key: `clan-contribution:${ledgerId}`, sourceId: leaderId, targetId: contributor, kind: 'character', type: 'resources_received', at
     }, { clanId }, { clanId }, `clan-contribution:${ledgerId}`, 'cooperation', true);
     commitClanSocialUnsafe([event], at);
@@ -9208,7 +9209,7 @@ const Database = {
             const socialRow = one('SELECT snapshotJson FROM clan_social_memory WHERE clanId = ?', [clan]);
             const snapshot = socialRow && JSON.parse(socialRow.snapshotJson);
             const relation = snapshot?.relations.find(r => r.kind === 'character' && r.targetId === id);
-            const d = relation?.discipline && require('./GameServer/Clan/ClanSocialPolicy').discipline(relation.discipline, 0, now());
+            const d = relation?.discipline && ClanSocialPolicy.discipline(relation.discipline, 0, now());
             if (snapshot?.revision !== expectedRevision || d?.stage !== 'expulsion_pending'
                 || !d.warningAt || !d.probationAt || d.lastOffenseAt <= d.probationAt) return { ok: false, reason: 'discipline_changed' };
             const simulated = one("SELECT s.stateJson, c.leaderId FROM clan_simulation_clans s JOIN clans c ON c.id = s.clanId WHERE s.clanId = ? AND s.mode = 'autonomous'", [clan]);
@@ -9413,7 +9414,7 @@ const Database = {
             }
             const social = one('SELECT snapshotJson FROM clan_social_memory WHERE clanId = ?', [targetClanId]);
             const reputation = social && JSON.parse(social.snapshotJson).relations.find(r => r.kind === 'character' && r.targetId === id);
-            const feeling = require('./GameServer/Clan/ClanSocialPolicy').relation(reputation, now());
+            const feeling = ClanSocialPolicy.relation(reputation, now());
             if (Number(reputation?.discipline?.banUntil || 0) > now() || (feeling && (feeling.trust < -3 || feeling.hostility >= 10))) {
                 return { ok: false, code: 'clan_distrust' };
             }

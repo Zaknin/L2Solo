@@ -21,6 +21,9 @@ const DataCache = invoke('GameServer/DataCache');
 const { planForMember } = require('./ClanEquipmentPlanner');
 const PlanningWorker = require('./ClanPlanningCoordinator');
 const RosterDemand = require('./ClanRosterDemand');
+const RaidEncounterScope = require('../RaidBoss/RaidEncounterScope');
+const ClanMembershipPolicy = require('./ClanMembershipPolicy');
+const ClanEquipmentPartyPolicy = require('../Bot/Population/ClanEquipmentPartyPolicy');
 
 const metrics = {
     resolves: 0,
@@ -126,7 +129,6 @@ function memberId(member) {
 function activeRaidPartyForClan(clanId) {
     const id = number(clanId);
     if (!id) return null;
-    const partyPolicy = require('../Bot/Population/ClanEquipmentPartyPolicy');
     return BackgroundPartyState.activeByObjectiveClan(id, 'clan_raid_party').find((party) => {
         const objective = party?.stats?.objective;
         const started = ['preparing', 'ready'].includes(party?.stats?.raidPreparation?.status)
@@ -138,7 +140,7 @@ function activeRaidPartyForClan(clanId) {
             && (objective?.sourceKind === 'raid' || objective?.raidBoss === true)
             && started
             && viableRoster
-            && !partyPolicy.abandonedRaid(party)
+            && !ClanEquipmentPartyPolicy.abandonedRaid(party)
             && !['defeated', 'failed'].includes(party?.stats?.raidEncounter?.status);
     }) || null;
 }
@@ -166,9 +168,8 @@ function equipmentRoster(clan, beneficiary, previousGoal = null, plan = null) {
         const profile = invoke('GameServer/RaidBoss/RaidBossSourceCatalog').findById(plan.next.spotId);
         return profile ? ClanRaidPolicy.roster(clan, profile, beneficiary, previousGoal) : [];
     }
-    const safety = require('../Bot/Population/ClanEquipmentPartyPolicy');
     const objective = { ...plan?.next, clanOperation: 'equipment', clanId: clan.id };
-    const eligible = (clan?.members || []).filter(member => safety.allowed(member, objective));
+    const eligible = (clan?.members || []).filter(member => ClanEquipmentPartyPolicy.allowed(member, objective));
     const memberIds = new Set(eligible.map(memberId).filter(Boolean));
     const previousBeneficiaryId = number(previousGoal?.target?.memberId);
     const retained = (previousGoal?.assignedMemberIds || []).map(number)
@@ -262,7 +263,7 @@ function sameRosterRequirement(left, right) {
         && JSON.stringify(fullRosterIdentity(left?.fullRoster)) === JSON.stringify(fullRosterIdentity(right?.fullRoster));
 }
 function startedRaidParty(party) {
-    return !!party && require('./ClanMembershipPolicy').activeRaidGoalKeys([party]).size > 0;
+    return !!party && ClanMembershipPolicy.activeRaidGoalKeys([party]).size > 0;
 }
 function stateHasSameClanObjective(state, objective) {
     return String(state?.stats?.clanPartyObjective?.clanGoalKey || '') === String(objective?.clanGoalKey || '')
@@ -342,7 +343,6 @@ async function releaseConflictingRosterParties(assignedMemberIds, goal, expected
 }
 
 async function suspendWaitingAssignments(clan, goal, previousGoal) {
-    const Policy = require('./ClanMembershipPolicy');
     const key = String(goal.goalKey);
     const priorKey = String(previousGoal?.goalKey || key);
     const ownedKeys = new Set([key, priorKey]);
@@ -350,7 +350,7 @@ async function suspendWaitingAssignments(clan, goal, previousGoal) {
         && ownedKeys.has(String(party.stats?.objective?.clanGoalKey || '')));
     const ids = [...new Set([...(clan.members || []).map(memberId), ...(previousGoal?.assignedMemberIds || [])])].slice(0, 40);
     const reformed = await releaseConflictingRosterParties(ids, goal, null, { partyIds: oldParties.map(party => party.partyId) });
-    const protectedKeys = Policy.activeRaidGoalKeys(BackgroundPartyState.admitted());
+    const protectedKeys = ClanMembershipPolicy.activeRaidGoalKeys(BackgroundPartyState.admitted());
     let cleared = 0;
     // The character row owns membership; cached life JSON may still precede
     // an accepted join. Rehydrate only these bounded owner IDs before repair.
@@ -360,7 +360,7 @@ async function suspendWaitingAssignments(clan, goal, previousGoal) {
         const keys = new Set([stats.equipmentPlan?.clanGoal?.goalKey, stats.clanPartyObjective?.clanGoalKey,
             stats.partyRequest?.clanGoalKey].filter(value => value && !ownedKeys.has(String(value))));
         for (const value of protectedKeys) keys.add(value);
-        const repaired = Policy.reconcileGoals(current, keys);
+        const repaired = ClanMembershipPolicy.reconcileGoals(current, keys);
         if (repaired === current) continue;
         repaired.stats.clanGoalInvalidationVersion = Math.max(Date.now(), number(stats.clanGoalInvalidationVersion) + 1);
         repaired.stats.lastReason = 'clan_equipment_goal';
@@ -743,7 +743,7 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
             return profiles.flatMap((profile) => {
                 if (profile.raidBoss !== true) return [profile];
                 if (!liveRaidIds.has(number(profile.raidBossTemplateId))) return [];
-                if (clan.state?.mode === 'autonomous') return [require('../RaidBoss/RaidEncounterScope').projectSource(profile)];
+                if (clan.state?.mode === 'autonomous') return [RaidEncounterScope.projectSource(profile)];
                 const assessment = ClanRaidPolicy.assessment(
                     clan,
                     profile,

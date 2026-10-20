@@ -1,3 +1,5 @@
+const util = require('util');
+
 // Override `require` for more convenient referrals. A loaded module is
 // remembered by name: hot paths call invoke() per decision, and a plain
 // require() resolves the path on disk each time. The remembered entry is
@@ -38,15 +40,15 @@ const PEACE_ZONES = Object.freeze([
 
 global.utils = {
     infoSuccess(prefix, ...params) {
-        console.info('\x1b[32m' + prefix.slice(0, 10) + ' '.repeat(10 - Math.min(prefix.length, 10)) + ' :: ' + require('util').format(...params) + '\x1b[0m');
+        console.info('\x1b[32m' + prefix.slice(0, 10) + ' '.repeat(10 - Math.min(prefix.length, 10)) + ' :: ' + util.format(...params) + '\x1b[0m');
     },
 
     infoWarn(prefix, ...params) {
-        console.info('\x1b[33m' + prefix.slice(0, 10) + ' '.repeat(10 - Math.min(prefix.length, 10)) + ' :: ' + require('util').format(...params) + '\x1b[0m');
+        console.info('\x1b[33m' + prefix.slice(0, 10) + ' '.repeat(10 - Math.min(prefix.length, 10)) + ' :: ' + util.format(...params) + '\x1b[0m');
     },
 
     infoFail(prefix, ...params) {
-        console.info('\x1b[31m' + prefix.slice(0, 10) + ' '.repeat(10 - Math.min(prefix.length, 10)) + ' :: ' + require('util').format(...params) + '\x1b[0m');
+        console.info('\x1b[31m' + prefix.slice(0, 10) + ' '.repeat(10 - Math.min(prefix.length, 10)) + ' :: ' + util.format(...params) + '\x1b[0m');
         process.exit();
     },
 

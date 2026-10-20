@@ -75,7 +75,7 @@ adapters['GameServer/Bot/AI/GearAcquisitionPlanner'].sourceFacts = function* (st
     })())).filter(fact => !(options.readyOnly || options.counts) || fact.status === 'ready');
 };
 const invokeAdapter = name => { assert(name in adapters, name); return adapters[name]; };
-const valuation = load('EconomicValuation.js', () => { throw Error('unexpected require'); }, invokeAdapter);
+const valuation = load('EconomicValuation.js', name => require(path.resolve(root, name)), invokeAdapter);
 const tendency = { MIN: 0.02, roll: () => 0.5 };
 const network = load('WishNetwork.js', name => {
     // WishNetwork reads the thread kind (c3a6771d); this fixture is the main thread.

@@ -20,6 +20,14 @@ const { marketStoreTitle, marketBuyStoreTitle } = invoke('GameServer/Bot/Economy
 
 const BoardRules = require('../../AfkTrade/BoardRules');
 const BotBuyShopService = require('./BotBuyShopService');
+const BidPurchaseAlternative = require('./BidPurchaseAlternative');
+const EconomicTrip = require('./EconomicTrip');
+const ColdEconomyDecision = require('../Population/ColdEconomyDecision');
+const ReadyTradeChoice = require('./ReadyTradeChoice');
+const ShotCraftPolicy = require('./ShotCraftPolicy');
+const ColdShotEconomyService = require('./ColdShotEconomyService');
+const TradeMeetingService = require('../../AfkTrade/TradeMeetingService');
+const BuyAdPolicy = require('./BuyAdPolicy');
 const MAX_LINES = BoardRules.BOT_SHOP_LINES;
 const reviewedInventory = new Map();
 const pending = new Map();
@@ -87,7 +95,7 @@ function canTradeRemotely(state, goal) {
         });
         if (isNativeSource(offer?.sourceType) && goal.plan?.priceSource !== 'offer') return false;
         if (reserved && existing.some((line) => Number(line.selfId) === Number(goal.target?.itemId))) return true;
-        return !!BuyStoreService.bidFor(budgetState, goal, { money: require('./BuyAdPolicy').goalMoney(state, goal, reserved) });
+        return !!BuyStoreService.bidFor(budgetState, goal, { money: BuyAdPolicy.goalMoney(state, goal, reserved) });
     }
     // Opening a shop needs the seller in its town (user, 2026-10-05): only a
     // bot that has its shop sells from afar.
@@ -277,7 +285,7 @@ function sellLines(state, stock, inventory, evaluateOptions = {}) {
 function decide(state, stock, existing, options = {}) {
     const own = AfkTrade.boardIndex().ownerLines(Number(state.characterId)).filter(line => line.storeType === AfkTrade.SELL);
     return ListingPolicy.evaluate(stateWithEscrow(state, stock), {
-        ...options, economy: options.economy || require('../Population/ColdEconomyDecision').economyFor(state),
+        ...options, economy: options.economy || ColdEconomyDecision.economyFor(state),
         stockQuotes: true, slots: ListingPolicy.BOARD_SLOTS,
         kept: new Map([...own, ...existing].map((line) => [lineKey(line), line.price])),
         conditionalKept: new Set(own.filter(line => line.custodyPolicy === 1).map(lineKey))
@@ -382,8 +390,7 @@ async function reduceStandingBids(state, ads, { beforeWrite } = {}) {
     // Native lifecycle transitions can have no worker plan. Compare only the
     // owner's five bids against reserved stock/NPCs and known routes, using the
     // existing money packet; this does not build or value a wish graph.
-    const Alternative = require('./BidPurchaseAlternative');
-    const trip = require('./EconomicTrip').reader(state, { hourAdena: hour });
+    const trip = EconomicTrip.reader(state, { hourAdena: hour });
     const ctx = { state, characterId: Number(state.characterId), adena: Number(state.adena), hour,
         board: AfkTrade.boardIndex(), travelDetails: trip.details,
         npcOffersFor: selfId => MarketOpportunity.npcOffersAll(selfId) };
@@ -391,7 +398,7 @@ async function reduceStandingBids(state, ads, { beforeWrite } = {}) {
     for (const ad of ads) for (const line of ad.lines || []) {
         if (!line.pricing || !(line.count > 0)) continue;
         const owned = { ...line, town: ad.town, custodyPolicy: ad.custodyPolicy };
-        const ceiling = Math.min(Alternative.forLine(owned, ctx), Alternative.cashCap(owned, ctx));
+        const ceiling = Math.min(BidPurchaseAlternative.forLine(owned, ctx), BidPurchaseAlternative.cashCap(owned, ctx));
         if (!Number.isSafeInteger(ceiling) || ceiling < 0 || ceiling >= line.price) continue;
         const move = { lineId: line.id, recordId: ad.id, selfId: line.selfId,
             expectedRevision: ad.revision, previousPricing: { ...line.pricing } };
@@ -442,7 +449,7 @@ async function reconcileBuyAds(state, goal, candidates) {
     // Keep the raw wallet for the item check: a precomputed cap must not subtract R twice.
     const escrow = buyOrderEscrow(ownerId);
     const wanted = buyLines({ ...state, adena: PurchaseFunding.budget(state, escrow) }, goal,
-        { money: require('./BuyAdPolicy').goalMoney(state, goal, escrow) });
+        { money: BuyAdPolicy.goalMoney(state, goal, escrow) });
     const town = buyAdTown(state, ads, wanted);
     if (!wanted.length) return ads.length ? withdrawBuyAds(ownerId, null, state) : { state, changed: false };
     let published;
@@ -465,7 +472,7 @@ async function publishBuyAds(ownerId, ads, lines, town, expectedAuthority = null
     for (const ad of ads) if (ad.town === town) for (const line of ad.lines || []) {
         const wanted = lines.find(row => Number(row.selfId) === Number(line.selfId)
             && Number(row.enchant || 0) === Number(line.enchant || 0));
-        if (require('./BuyAdPolicy').withinCap(line.price, wanted?.purchaseCap) || !line.pricing) continue;
+        if (BuyAdPolicy.withinCap(line.price, wanted?.purchaseCap) || !line.pricing) continue;
         reprices.push({ recordId: ad.id, lineId: line.id, selfId: line.selfId, expectedRevision: ad.revision,
             previousPricing: { ...line.pricing }, price: wanted.price, pricing: { ...line.pricing, price: wanted.price } });
     }
@@ -497,7 +504,7 @@ async function openBuyAd(state, goal) {
     // Keep the raw wallet for the item check: a precomputed cap must not subtract R twice.
     const escrow = buyOrderEscrow(ownerId);
     const wanted = buyLines({ ...state, adena: PurchaseFunding.budget(state, escrow) }, goal,
-        { money: require('./BuyAdPolicy').goalMoney(state, goal, escrow) });
+        { money: BuyAdPolicy.goalMoney(state, goal, escrow) });
     if (!wanted.length) return { state, opened: false, reason: 'insufficient_budget' };
     const town = buyAdTown(state, ads, wanted);
     let store;
@@ -755,12 +762,11 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
     // No native writer reads accepted incoming. Units that reached the bag or
     // an obligation accepted since the decision may already fill a purchase:
     // it waits for the worker's new card (buyPending) instead of buying twice.
-    const Decision = require('../Population/ColdEconomyDecision');
     const card = preparedState.phase === 'cold' ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator')
         .economyDecisions?.decided?.(preparedState)?.activity : null;
     const heldAtDecision = itemId => Number(card?.itemId) === Number(itemId) && Number.isFinite(Number(card.heldAtDecision))
-        ? Number(card.heldAtDecision) : Decision.heldFor(preparedState, itemId);
-    const filledSince = itemId => Decision.heldFor(LifeState.cachedState(ownerId) || state, itemId) > heldAtDecision(itemId);
+        ? Number(card.heldAtDecision) : ColdEconomyDecision.heldFor(preparedState, itemId);
+    const filledSince = itemId => ColdEconomyDecision.heldFor(LifeState.cachedState(ownerId) || state, itemId) > heldAtDecision(itemId);
     if (plan.bidLimits?.length) await run(async () => {
         if (!stillPrepared()) throw Error('economy_plan_need_changed');
         if (!Array.isArray(plan.bidLimits) || plan.bidLimits.length > MAX_LINES + BoardRules.BOT_RECORDS.buy_ad) throw Error('economy_plan_bid_cap');
@@ -789,8 +795,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         if (!stillPrepared()) return { state, tradeDeferred: true };
         const buying = plan.take[0] === AfkTrade.SELL;
         if (buying && filledSince(plan.take[1])) return { state, buyPending: true };
-        const Ready = require('./ReadyTradeChoice');
-        const line = Ready.resolve(plan.take, AfkTrade.boardIndex(), ownerId);
+        const line = ReadyTradeChoice.resolve(plan.take, AfkTrade.boardIndex(), ownerId);
         // The tuple's item passed source admission where it was made: a wish
         // network item node (purchase) or the sale classification (answer).
         if (!line) return { state, tradeDeferred: true };
@@ -819,7 +824,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
     // step waits for the worker's new card.
     const crafted = plan.shot ? await run(async () => {
         if (!stillPrepared()) return { state, stale: true };
-        const shot = require('./ShotCraftPolicy').unpackStep(plan.shot);
+        const shot = ShotCraftPolicy.unpackStep(plan.shot);
         if (shot.wealth) {
             const Wealth = invoke('GameServer/Bot/Economy/ColdWealthCraftService');
             if (!Wealth.eligible(state)) return { state };
@@ -828,10 +833,10 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
             return opportunity ? Wealth.execute(state, opportunity, { stillPrepared })
                 : { state: await Wealth.rejectAccepted(state, state, refusal) };
         }
-        return { state: await require('./ColdShotEconomyService').execute(state, shot) };
+        return { state: await ColdShotEconomyService.execute(state, shot) };
     }) : null;
     if (crafted?.stale) return { state, buyPending: true };
-    if (require('../../AfkTrade/TradeMeetingService').hasPreparation(ownerId)) return { state, pending: true };
+    if (TradeMeetingService.hasPreparation(ownerId)) return { state, pending: true };
     if (plan.withdraw?.length) await run(async () => {
         const own = new Map(AfkTrade.boardIndex().ownerLines(ownerId).map(line => [line.lineId, line]));
         const withdrawals = [];
@@ -950,7 +955,7 @@ async function executePlan(state, plan, { step = work => work(), beforeWrite = (
         const owned = AfkTrade.boardIndex().ownerLines(ownerId);
         let town = buyAdTown(state, ads, wanted);
         for (let pass = 0; pass <= MAX_LINES + BoardRules.BOT_RECORDS.buy_ad; pass++) {
-            wanted = require('./BuyAdPolicy').retainedLines(budgetState, wanted, owned, town);
+            wanted = BuyAdPolicy.retainedLines(budgetState, wanted, owned, town);
             const nextTown = buyAdTown(state, ads, wanted);
             if (!wanted.length || nextTown === town) break;
             town = nextTown;

@@ -3,6 +3,7 @@
 const GearLifecycle = require('./GearLifecycle');
 const Data = invoke('GameServer/DataCache');
 const Index = invoke('GameServer/Item/ItemTemplateIndex');
+const StarterItemCatalog = require('../../Knowledge/StarterItemCatalog');
 const RANKS = ['none', 'd', 'c', 'b', 'a', 's'];
 function adventurer(state = {}) {
     return !state.stats?.craftStationId
@@ -25,7 +26,7 @@ function assess(state = {}, minimumRank = null) {
     const classId = Number(state.stats?.classId ?? state.classId ?? 0), role = Planner.roleFor(state);
     const level = Math.max(1, Number(state.level) || 1);
     const baseline = Gear.planFor({ classId, level: minimumRank === 3 ? 52 : level < 20 ? 10 : level < 40 ? 20 : 40 });
-    const starters = require('../../Knowledge/StarterItemCatalog').ids(Data.newbieItems, true);
+    const starters = StarterItemCatalog.ids(Data.newbieItems, true);
     const equipped = new Map();
     for (const row of Object.values(state.inventory || {})) {
         const item = Index.find(Data.items, row.selfId);

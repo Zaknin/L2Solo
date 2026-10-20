@@ -1,16 +1,17 @@
 const InteractionMemory = require('./InteractionMemory');
 const Repository = invoke('GameServer/Social/InteractionMemoryRepository');
+const RelationshipContext = require('./RelationshipContext');
 const TableChannel = require('../Bot/Population/ColdTableChannel').shared;
 
 // The main-process instance. Cold workers create repository-free instances.
 const memory = new InteractionMemory(Repository);
 memory.playingHours = id => {
     const record = invoke('GameServer/World/World').registeredActorById(id);
-    return require('./RelationshipContext').playedHours(record?.session || id);
+    return RelationshipContext.playedHours(record?.session || id);
 };
 memory.enrichEvent = event => {
     const World = invoke('GameServer/World/World');
-    return require('./RelationshipContext').enrich(event, World.registeredActorById(event.sourceId)?.session || event.sourceId,
+    return RelationshipContext.enrich(event, World.registeredActorById(event.sourceId)?.session || event.sourceId,
         World.registeredActorById(event.targetId)?.actor);
 };
 memory.clanSocial = invoke('GameServer/Clan/ClanSocialRuntime').view;

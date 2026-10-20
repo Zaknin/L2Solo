@@ -1,5 +1,8 @@
 'use strict';
 
+const WalkBack = require('./WalkBack');
+const PkDropPolicy = require('../../PkDropPolicy');
+
 const positive = value => Math.max(0, Number(value) || 0);
 const trait = (persona, key) => Math.max(0, Math.min(1, Number(persona?.traits?.[key] ?? 0.5)));
 
@@ -113,7 +116,7 @@ function decisionHorizon(state, context) {
 function deathHours(state, { expPerHour = 0, walkBackHours, returnHours, lostGearHours = 0, spotId } = {}) {
     const Death = invoke('GameServer/Progression/DeathExperience');
     const loss = Death.calculateLoss({ ...state, exp: state.stats?.exp ?? state.exp ?? 0 });
-    const downtime = walkBackHours ?? returnHours ?? require('./WalkBack').hours(spotId || state.spotId, state);
+    const downtime = walkBackHours ?? returnHours ?? WalkBack.hours(spotId || state.spotId, state);
     return (expPerHour > 0 ? loss.expLost / expPerHour : 0) + 90 / 3600 + positive(downtime) + positive(lostGearHours);
 }
 function karmaHours(state, { expPerHour = 0, lostGearHours = 0, exposureHours = 0, deathsPerHour = 0 } = {}) {
@@ -123,7 +126,7 @@ function karmaHours(state, { expPerHour = 0, lostGearHours = 0, exposureHours = 
     return wash + positive(lostGearHours) * positive(deathsPerHour) * Math.max(wash, positive(exposureHours));
 }
 function pkDropValue(state, priceOf) {
-    return require('../../PkDropPolicy').expectedValue(state.physicalInventory
+    return PkDropPolicy.expectedValue(state.physicalInventory
         ? { ...state, inventory: state.physicalInventory } : state, priceOf);
 }
 function resale(price, { trend = 0, hours = 0, understanding = 0.3, assertiveness = 0.5,

@@ -3,6 +3,7 @@ const { seeded } = require('../AI/TendencyRoll');
 const { STEP_MS, PASS_MS } = require('./PvpEncounterBudget');
 const Database = invoke('Database');
 const ColdPartyConflict = require('./ColdPartyConflict');
+const PvpJournal = require('../../../PvpJournal');
 // Only active encounters are indexed. No per-tick scan of the population.
 const encounters = new Map();
 const pending = new Set();
@@ -44,7 +45,7 @@ async function finish(e, actions, reason = 'pvp_interrupted') {
     // The fight's journal row: it ends here without a losing side or a kill
     // (a kill ends it in a step), at its deadline or earlier.
     const at = Date.now();
-    require('../../../PvpJournal').coldConflict({ key: e.key, revenge: e.reason === 'revenge',
+    PvpJournal.coldConflict({ key: e.key, revenge: e.reason === 'revenge',
         reason: e.reason === 'revenge' ? 'revenge' : 'contest', spotId: e.spotId, npcId: e.npcId,
         partyIds: e.sides.map(s => s.partyId), sideSizes: e.sides.map(s => s.memberIds.length),
         outcome: reason, fought: true, principals: e.sides.map(s => actions.life.cachedState(s.principalId) || { characterId: s.principalId }),
