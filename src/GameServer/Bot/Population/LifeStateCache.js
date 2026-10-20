@@ -4,6 +4,7 @@ const ShopPlaces = require('../Economy/ShopPlaces');
 const Diagnostics = require('../Economy/EconomyDiagnostics');
 const CharacterLocationIndex = require('../../World/CharacterLocationIndex');
 const CharacterStateSources = require('../../World/CharacterStateSources');
+const SparseNumericStorage = require('./SparseNumericStorage');
 const { stateLocation, spatialState } = CharacterStateSources;
 
 function* stateValues(records) {
@@ -197,6 +198,13 @@ class LifeStateCache extends Map {
         if (run) this.walkers.set(id, run);
         else this.walkers.delete(id);
         this.revision++;
+        // Compact numeric storage after admission; normalization and structured clone
+        // can recreate holey backing arrays. Values and publication stay unchanged.
+        try { SparseNumericStorage.compactState(state); }
+        catch (error) {
+            try { global.utils?.infoWarn?.('BotLife', 'numeric storage hint skipped: %s', error?.message || error); }
+            catch (_) { /* Storage hints never reject an admitted state. */ }
+        }
         this.publish({ characterId: id, state, previousState: previous || null, kind: 'put' });
         return this;
     }
