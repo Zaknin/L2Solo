@@ -178,6 +178,7 @@ function includedInBuffCount(effect) {
 
 function orderedEffects(actor) {
     const effects = Object.values(prune(actor));
+    if (effects.length === 0) return effects;
     const bySequence = (a, b) => Number(a.sequence || 0) - Number(b.sequence || 0);
     const commonBuffs = effects.filter((effect) => (
         effect.type !== 'debuff' && effect.toggle !== true && !(effect.id > 4360 && effect.id < 4367)
@@ -237,7 +238,9 @@ function remainingMs(actor, key) {
 function list(actor, options = {}) {
     const includeBuffs = options.includeBuffs !== false;
     const includeDebuffs = options.includeDebuffs !== false;
-    return orderedEffects(actor)
+    const effects = orderedEffects(actor);
+    if (effects.length === 0) return effects;
+    return effects
         .filter((effect) => (
             (effect.type === 'debuff' && includeDebuffs) ||
             (effect.type !== 'debuff' && includeBuffs)
