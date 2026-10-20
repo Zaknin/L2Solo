@@ -1718,8 +1718,6 @@ function startKernel(config = {}) {
         npcOffersFor: OccupationSources.npcOffersFor,
         buyOrderEscrow: escrowFor,
         spots: () => planningSpots,
-        // The hunting leaf's spot passes the bot's own fit (EconomyContext leafFit).
-        leafFit: true,
         // The bot's memory rows for its relations fact, bond and threat (read
         // only), without the deep copy snapshot() makes; as main passes them.
         memory: characterId => kernel.interactionMemory.relationRows(Number(characterId)),

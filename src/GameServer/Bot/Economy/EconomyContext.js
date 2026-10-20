@@ -899,22 +899,30 @@ function incomeRouteFor(state, deps, timestamp, price, keep) {
 }
 // The bot's own fit for the spot of its hunting leaf (docs/architecture.md §2
 // route): the route's one test, BotRoute.leafFitReader, as a yes or no per
-// spot. Only in a build that asks for it (deps.leafFit: the worker, which
-// owns the leaf and its catalog; main's readers keep the table's pick), for
-// a solo bot (a party hunts its party's route; mode: the build's, as select
-// reads it), with a catalog. One reader per foundation, one verdict per spot.
+// spot. Only in a worker build (the worker owns the leaf and its planning
+// catalog; main's basics keep the table's pick, it reads them only for
+// execution caps), for a solo bot (a party hunts its party's route; mode:
+// the build's, as select reads it), with a catalog. The reader and its
+// verdicts are kept per state object, catalog and timestamp (the frame and
+// matchup profiles read only those): the basics and the build of one step
+// share them. An entry dies with its state object.
+const leafFits = new WeakMap();
 function leafFit(state, deps, timestamp) {
-    if (deps.leafFit !== true || !Array.isArray(deps.spots) || !deps.spots.length
+    if (isMainThread || !Array.isArray(deps.spots) || !deps.spots.length
         || ['party', 'duo'].includes(deps.mode) || LevelingRoutes.modeForState(state) !== 'solo') return null;
+    const kept = leafFits.get(state);
+    if (kept && kept.spots === deps.spots && kept.timestamp === timestamp) return kept.fits;
     // lazy: cycle BotRoute > SpotProfiles > BotLifeState > DecisionEvents > EconomyContext
     const verdict = invoke('GameServer/Bot/Population/BotRoute').leafFitReader(state, { spots: deps.spots, timestamp });
     const verdicts = new Map();
-    return spotId => {
+    const fits = spotId => {
         const key = String(spotId);
         let fit = verdicts.get(key);
         if (fit === undefined) verdicts.set(key, fit = verdict(spotId) === 'fit');
         return fit;
     };
+    leafFits.set(state, { spots: deps.spots, timestamp, fits });
+    return fits;
 }
 function foundation(state, deps, persona, timestamp, price, keepRoute = null) {
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
