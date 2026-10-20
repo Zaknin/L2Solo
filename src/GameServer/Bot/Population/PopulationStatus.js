@@ -109,7 +109,7 @@ const PopulationStatus = {
         const pvp = PvpEncounterRuntime.passPeak();
         return `coldDue=${queue.overdue || 0} coldDueAll=${queue.due || 0} coldDueAge=${Math.round((queue.oldestAgeMs || 0) / 1000)}s`
             + ` workerElu=${Number(worker.eventLoopUtilization || 0).toFixed(2)} mainElu=${mainElu.utilization.toFixed(2)} workerHeapGc=${mb(worker.heapAfterGc)}/${mb(worker.heapAfterGcMax10)}MB`
-            + ` pvp=${pvp.live}/${pvp.steps}/${pvp.ms}ms`;
+            + ` pvp=${pvp.live}/${pvp.steps}/${pvp.ms}ms/${pvp.left}`;
     },
 
     summary() {

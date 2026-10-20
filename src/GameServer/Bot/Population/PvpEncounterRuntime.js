@@ -8,7 +8,7 @@ const encounters = new Map();
 const pending = new Set();
 let running = null;
 // The longest pass since the status line last read it (passPeak).
-let peak = { steps: 0, ms: 0 };
+let peak = { steps: 0, ms: 0, left: 0 };
 function register(encounter) {
     if (encounter?.key) encounters.set(encounter.key, encounter);
 }
@@ -78,9 +78,14 @@ function tick(actions) {
 }
 async function pass(actions) {
     const life = actions.life, startedAt = Date.now();
-    let steps = 0;
-    for (const e of [...encounters.values()].sort((a, b) => dueAt(a) - dueAt(b))) {
-        if (actions.stopping || !actions.canRun() || Date.now() - startedAt >= PASS_MS) break;
+    let steps = 0, left = 0;
+    const order = [...encounters.values()].sort((a, b) => dueAt(a) - dueAt(b));
+    for (const [i, e] of order.entries()) {
+        if (actions.stopping || !actions.canRun() || Date.now() - startedAt >= PASS_MS) {
+            const now = Date.now();
+            left = order.slice(i).filter(o => now - o.stepAt >= STEP_MS / 2).length;
+            break;
+        }
         if (pending.has(e.key) || encounters.get(e.key) !== e) continue;
         if (e.expiresAt <= Date.now()) { steps++; await finish(e, actions, 'pvp_expired'); continue; }
         const states = ids(e).map(id => life.cachedState(id));
@@ -115,15 +120,15 @@ async function pass(actions) {
         } finally { pending.delete(e.key); }
     }
     const ms = Date.now() - startedAt;
-    if (ms > peak.ms) peak = { steps, ms };
+    if (ms > peak.ms) peak = { steps, ms, left };
 }
 async function stop() { if (running) await running; }
-// The status line's numbers: the fights running now, and the steps and wall
-// ms of the longest pass since the last read (its only caller is the periodic
+// The status line's numbers: the fights running now, and the steps, wall ms
+// and due fights it left for the next tick of the longest pass since the last read (its only caller is the periodic
 // goal line, so a read starts the next window).
 function passPeak() {
     const read = { live: encounters.size, ...peak };
-    peak = { steps: 0, ms: 0 };
+    peak = { steps: 0, ms: 0, left: 0 };
     return read;
 }
 module.exports = { encounters, pending, register, snapshot, active, ids, sessions, restoreTargets, tick, stop, passPeak };
