@@ -58,6 +58,7 @@ const tests = [
     'tests/test_bot_acquisition_recovery.js',
     'tests/test_bot_leveling_recovery.js',
     'tests/test_npc_passive_retaliation.js',
+    'tests/test_npc_wander.js',
     'tests/test_town_npc_immortality.js',
     'tests/test_player_transition_recovery.js',
     'tests/test_trade_meeting_scheduling.js',

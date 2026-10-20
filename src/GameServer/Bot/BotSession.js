@@ -50,6 +50,7 @@ class BotSession {
                     user.recordOutboundPacket(data);
                 }
                 user.socket.write(packet);
+                NpcVisibility.sendNpcMotionAfterInfo(user, data);
             }
         });
         HotActorLodPolicy.recordPacketBroadcast(recipients.length, packet.length);

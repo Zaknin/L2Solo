@@ -217,6 +217,7 @@ class Session {
         this.recordOutboundPacket(data);
         const packet = this.packData(data);
         this.socket.write(packet);
+        NpcVisibility.sendNpcMotionAfterInfo(this, data);
     }
 
     dataSendToOthers(data, creature) {
@@ -230,6 +231,7 @@ class Session {
                 user.recordOutboundPacket(data);
             }
             user.socket.write(packet);
+            NpcVisibility.sendNpcMotionAfterInfo(user, data);
         });
     }
 
