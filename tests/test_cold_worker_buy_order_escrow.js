@@ -187,8 +187,10 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
         const compact = require('../src/GameServer/Bot/Population/ColdEconomyDecision').compact;
         const fundedDecision = compact(proposals.get(7).economyDecision), unfundedDecision = compact(proposals.get(8).economyDecision);
         assert(fundedDecision.activity, 'worker supplies its new native wish after the fight');
+        assert.strictEqual(proposals.get(7).nextState.stats.wishFocus?.[0], `power:${posting.target.selfId}:${posting.target.slot}`,
+            'the worker keeps the target funded by the bot\'s own buy-order escrow as its focused wish');
         assert(fundedIds(proposals.get(7).nextState.stats.money).includes(posting.target.selfId),
-            'the worker keeps the target funded by the bot\'s own buy-order escrow');
+            'the target carries a funded spending ratio');
         assert(Funding.spendable(proposals.get(7).nextState, price, { itemId: posting.target.selfId }) >= price,
             'current native funded ratio plus own escrow can pay the actual NPC offer');
         assert(Funding.spendable(proposals.get(8).nextState, 0, { itemId: posting.target.selfId }) < price,

@@ -44,6 +44,7 @@ async function lifeRow() {
 
         assert.equal(acks.length, 1, 'the worker gets one ack for the proposal');
         assert.equal(acks[0].ok, false, 'a compact base cannot stand in for the state main does not hold');
+        assert.equal(acks[0].reason, 'prepare_rejected');
         assert.deepEqual(await lifeRow(), before, 'no row is written');
         console.log('Cold proposal for an uncached bot is refused without a write');
     } finally { await world.close(); }
