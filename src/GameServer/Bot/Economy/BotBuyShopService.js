@@ -9,6 +9,15 @@ const BotImprovementService = invoke('GameServer/Bot/Economy/BotImprovementServi
 const ColdMarketListingService = invoke('GameServer/Bot/Economy/ColdMarketListingService');
 const key = line => `${Number(line.selfId)}:${Number(line.enchant || 0)}`;
 
+// The held bids ask for the same items and counts: their prices are the
+// bot's own look's (MarketPricing.look), kept while within the prepared cap;
+// a prepared cheaper price is a limit, not a reprice.
+function sameBuyOrder(held, lines) {
+    return held.length === lines.length && held.every(line => lines.some(wanted => key(wanted) === key(line)
+        && Number(line.count) === Number(wanted.count)
+        && (!Number.isFinite(wanted.purchaseCap) || Number(line.price) <= wanted.purchaseCap)));
+}
+
 // The wish queue already ordered and priced these bids. Allocate custody;
 // never choose another price, need, or town on the main thread.
 async function publish(state, wanted, town, { priority = 0, expectedAuthority = null, appearance } = {}) {
@@ -43,6 +52,14 @@ async function publish(state, wanted, town, { priority = 0, expectedAuthority = 
     }
     const center = ColdMarketListingService.townCenter(town) || { locX: 0, locY: 0, locZ: 0 };
     try {
+        // Unchanged order: no write. A side flip never matches: a sale shop is
+        // no BUY shop, and a BUY shop the split left without lines closes.
+        const held = current?.storeType === Rules.BUY ? current.lines.filter(line => Number(line.count) > 0) : null;
+        const shopSame = shopLines.length ? !!held && current.town === town && sameBuyOrder(held, shopLines) : !held;
+        if (shopSame && ads.every(ad => ad.town === town) && sameBuyOrder(ads.flatMap(ad => ad.lines), meetings)) {
+            return { shop: shopLines.length ? current : ads.find(ad => meetings.length && key(ad.lines[0]) === key(meetings[0])) || null,
+                changed: false };
+        }
         const look = shopLines.length ? current?.appearance || await appearance() : null;
         const result = await AfkTradeService.replaceBotRecords(ownerId, 'buy_ad', meetings.map(line => ({
             storeType: Rules.BUY, title: marketBuyStoreTitle([line]), town, ...center, lines: [line]

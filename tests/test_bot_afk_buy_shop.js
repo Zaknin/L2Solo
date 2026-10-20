@@ -8,6 +8,7 @@ fixture.assertConfigured(options.default);
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
 const Market = invoke('GameServer/Bot/Economy/BotAfkMarketService');
+const BuyShop = invoke('GameServer/Bot/Economy/BotBuyShopService');
 const Places = invoke('GameServer/Bot/Economy/ShopPlaces');
 const Native = require('./helpers/nativeMarketFixture');
 const Plan = require('../src/GameServer/Bot/Population/ColdEconomyPlan');
@@ -191,6 +192,23 @@ async function run() {
     assert.equal(shop(9106).id, kept.id);
     assert.equal(shop(9106).escrowAdena, kept.escrowAdena);
     assert.equal(records(9106).length, 1);
+
+    // An unchanged order keeps its records as they stand: a cheaper quote
+    // within the prepared cap keeps the held bids, no record is rewritten.
+    await bot(9107);
+    await apply(9107);
+    const standing = shop(9107);
+    const standingAds = records(9107).filter(row => row.kind === 'buy_ad').map(row => [row.id, row.revision]);
+    const quoted = REQUESTS.map(([selfId, count, price]) => ({ selfId, count, price: price - 50, purchaseCap: price,
+        enchant: 0, name: `Item ${selfId}` }));
+    const published = await BuyShop.publish(Life.snapshot(9107), quoted, 'Giran', { priority: Afk.BUY, appearance: async () => ({}) });
+    assert.equal(published.changed, false);
+    assert.equal(published.shop?.id, standing.id);
+    assert.equal(shop(9107).id, standing.id, 'the standing purchase shop is kept');
+    assert.equal(shop(9107).revision, standing.revision);
+    assert.deepEqual(shop(9107).lines.map(line => line.price), standing.lines.map(line => line.price), 'held bids keep their price');
+    assert.deepEqual(records(9107).filter(row => row.kind === 'buy_ad').map(row => [row.id, row.revision]), standingAds);
+    assert.equal(await wallet(9107) + Market.buyOrderEscrow(9107), 1000000);
 
     const batch = Plan.buyBatch(REQUESTS.map(([selfId, count, price]) => ({ selfId, count, price })));
     assert.equal(batch.buyAds.length, 8, 'worker transport carries the shop and meeting slots');
