@@ -150,8 +150,8 @@ class ColdCompetitionActions {
             if (states.some(s => Number(s.stats?.coldCompetition?.conflictUntil || 0) > now)) return { ok: false, reason: 'conflict_cooldown' };
         }
         if (!states.every((s, i) => {
-            const view = this.memory.snapshot(s.characterId);
-            return view && view.revision === participants[i].memoryRevision;
+            const memoryRevision = this.memory.revision(s.characterId);
+            return memoryRevision !== undefined && memoryRevision === participants[i].memoryRevision;
         })) return { ok: false, reason: 'memory_changed' };
         const next = states.map((s, i) => ({ ...s, stats: { ...s.stats, coldCompetition: Episode.begin(s.stats?.coldCompetition, {
             outcome: event.action, key: event.key, at: now, action: event.action, peerId: participants[1 - i].id,
