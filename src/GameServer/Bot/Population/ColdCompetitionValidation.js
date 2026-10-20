@@ -19,8 +19,8 @@ function principal(state, participant, memory) {
     if (partyIdOf(state) !== (participant.partyId || null)) return fail('principal_party_changed', { actual: partyIdOf(state) });
     const revision = Number(state.simulation?.revision || 0);
     if (revision !== participant.revision) return fail('principal_revision_changed', { expected: participant.revision, actual: revision });
-    const view = memory.snapshot(participant.id);
-    if (!view || view.revision !== participant.memoryRevision) return fail('principal_memory_changed', { expected: participant.memoryRevision, actual: view?.revision ?? null });
+    const memoryRevision = memory.revision(participant.id);
+    if (memoryRevision === undefined || memoryRevision !== participant.memoryRevision) return fail('principal_memory_changed', { expected: participant.memoryRevision, actual: memoryRevision ?? null });
     return null;
 }
 
@@ -63,7 +63,7 @@ function member(state, characterId, participant, event, { party: group, resume =
     if (busy) return fail(BUSY_DETAILS[busy]);
     if (!participantAllowed(state.characterId)) return fail('member_handoff_fenced');
     if (!resume && !contestContextAllowed(state, event)) return fail('member_contest_context_changed');
-    if (!memory.snapshot(state.characterId)) return fail('member_memory_unavailable');
+    if (memory.revision(state.characterId) === undefined) return fail('member_memory_unavailable');
     const lastAt = Number(state.stats?.coldCompetition?.at || 0);
     if (!resume && at - lastAt < 120000) return fail('member_decision_cooldown', { until: lastAt + 120000 });
     if (resume && (state.stats?.pvpEncounter?.key !== resume.key || state.stats.pvpEncounter.sequence !== resume.sequence)) return fail('member_encounter_changed');

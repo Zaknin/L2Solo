@@ -169,7 +169,7 @@ async function run() {
     await createParty([34, 35]);
     assert.strictEqual((await apply(34, 36, { participantAllowed: id => id !== 35 })).ok, false, 'a hot handoff on a nonprincipal member fences the group');
     assert.strictEqual((await apply(34, 36, { contestContextAllowed: s => s.characterId !== 35 })).ok, false, 'every member must physically occupy the spot');
-    assert.strictEqual((await apply(34, 36, { memory: { ...Memory, snapshot: id => id === 35 ? null : Memory.snapshot(id) } })).ok, false);
+    assert.strictEqual((await apply(34, 36, { memory: { revision: id => id === 35 ? undefined : Memory.revision(id) } })).ok, false);
     assert.strictEqual((await apply(34, 36, { event: { ...event(34, 36), actor: { ...event(34, 36).actor, size: 1 } } })).reason, 'party_changed');
     for (const [detail, patch] of [
         ['member_supply_errand', { stats: { ...state(35).stats, supplyErrand: { reason: 'potions' } } }],
