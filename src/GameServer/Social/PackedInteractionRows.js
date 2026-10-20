@@ -151,8 +151,17 @@ class PackedInteractionRows {
     }
 
     plain() {
-        return { version: this.version, ownerId: this.ownerId, revision: this.revision,
-            replayFloor: this.replayFloor, readOnly: true, relations: this.mapRows(row => row), recent: [] };
+        // Decoding already creates ordinary rows and reasons. Only exceptional
+        // rows and nested extra fields still borrow private stored objects.
+        const relations = this.mapRows((row, ordinal) => {
+            if (this.fallback?.has(ordinal)) return JSON.parse(JSON.stringify(row));
+            const extra = this.extras?.get(ordinal);
+            if (extra) Object.assign(row, JSON.parse(JSON.stringify(extra)));
+            return row;
+        });
+        // Preserve JSON export's normalization of accepted negative zero.
+        return { version: this.version, ownerId: this.ownerId, revision: this.revision + 0,
+            replayFloor: this.replayFloor + 0, readOnly: true, relations, recent: [] };
     }
 }
 
