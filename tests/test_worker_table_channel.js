@@ -457,7 +457,8 @@ async function clanWorkerRestart() {
     const channel = new ColdTableChannel();
     const rows = new Map([[1, { id: 1, price: 10 }], [2, { id: 2, price: 20 }]]);
     channel.register('test', source(rows));
-    const coordinator = new ClanPlanningCoordinator({ tableChannel: channel, restartDelayMs: 0 });
+    const coordinator = new ClanPlanningCoordinator({ tableChannel: channel, restartDelayMs: 0,
+        planningContext: async () => ({ revision: 1 }) });
     const summary = () => coordinator.send('table_summary', {});
     try {
         await coordinator.ready({});
@@ -466,7 +467,7 @@ async function clanWorkerRestart() {
         // Changes go out before each plan, ahead of the plan message.
         rows.set(3, { id: 3, price: 30 });
         channel.changed('test', rows.get(3));
-        await assert.rejects(coordinator.plan({ member: null, context: {} }, {}));
+        await assert.rejects(coordinator.plan({ member: null }, {}));
         assert.deepStrictEqual((await summary()).test, { version: 1, rows: 3, waiting: false, loading: false });
 
         // A restarted worker starts empty and gets the table in full.
