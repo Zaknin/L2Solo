@@ -280,7 +280,11 @@ function route(state, currentSpot, party, partyMembers = [], { spots, timestamp,
 // room filter, ROUTE-ROOM-3) refuses is dropped first (route:drop:full): the
 // room-filtered search decides, as it does for a leaf trip. The trip is
 // built from where the bot stands now; null: no trip. Counted as
-// route:trip:leaf|kept|search.
+// route:trip:leaf|kept|search. When the leaf's hunting spot is no trip now
+// (full, or not allowed), a kept or searched level / gear trip stands in for
+// it and names it (leafSpotId, read by DecisionSections.occupationPlanned);
+// a flight (death pressure, unsafe ground) names none: it stays an event.
+const DETOUR_REASONS = new Set(['level_replan', 'equipment_source_replan']);
 function trip(owner, state, leaf, { spots, currentSpot = null, timestamp, hasRoom = null }) {
     if (!routable(state, null, [])) return null;
     const frame = frameFor(state, null, [], timestamp, hasRoom);
@@ -298,7 +302,9 @@ function trip(owner, state, leaf, { spots, currentSpot = null, timestamp, hasRoo
     EconomyDiagnostics.count('route', 'trip', owner?.route ? 'kept' : 'search');
     const chosen = owner?.route || choose(state, currentSpot, null, [], { spots, timestamp, frame });
     if (owner && !owner.route) owner.route = chosen;
-    return record(state, chosen, null, [], { spots, currentSpot, timestamp, frame });
+    const started = record(state, chosen, null, [], { spots, currentSpot, timestamp, frame });
+    return started && leaf?.activity === 'hunting' && leaf.spotId != null && DETOUR_REASONS.has(started.reason)
+        ? { ...started, leafSpotId: leaf.spotId } : started;
 }
 
 // The kept route goes; the next trip start searches again. Counted as

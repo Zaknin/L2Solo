@@ -448,6 +448,9 @@ function events(before, after, escrow = 0) {
 // outputs are not inputs): the trip the leaf ordered under way (to its
 // hunting spot arriving to hunt, or to its town), or the arrival where it
 // led (its hunting spot, hunting or resting there; else its own activity).
+// The route's stand-in for a hunting spot that was no trip (leafSpotId on
+// the trip, then on the ground it reached: BotRoute.trip) is the leaf's own
+// trip and arrival too, unless the leaf hunts a material at its monster.
 // Death, recall, a party pull, a flight or a yield are none of these and
 // stay events. The held build's verdict reads it (factEvents' planned); its
 // field-trip clause is EconomyContext.fieldActivity's.
@@ -457,14 +460,21 @@ function occupationPlanned(state, leaf) {
     if (state.activity === 'traveling') {
         const travel = state.stats?.travel;
         if (!travel) return false;
-        return hunt && leaf.spotId != null ? travel.spotId != null && String(travel.spotId) === String(leaf.spotId)
+        return hunt && leaf.spotId != null ? (ownSpot(travel.spotId, leaf) || standIn(travel.leafSpotId, leaf))
             && travel.arrivalActivity === 'hunting' && travel.townName == null
             : leaf.town != null && travel.townName != null && String(travel.townName) === String(leaf.town);
     }
     // A hunting leaf without a spot names no arrival: any spot is an event.
     if (hunt) return leaf.spotId != null && (state.activity === 'hunting' || state.activity === 'resting')
-        && String(state.spotId) === String(leaf.spotId);
+        && (ownSpot(state.spotId, leaf) || standIn(state.stats?.leafSpotId, leaf));
     return state.activity === leaf.activity;
+}
+function ownSpot(spotId, leaf) {
+    return spotId != null && String(spotId) === String(leaf.spotId);
+}
+function standIn(spotId, leaf) {
+    // lazy: cycle ColdEconomyDecision requires this module at its top.
+    return ownSpot(spotId, leaf) && !invoke('GameServer/Bot/Population/ColdEconomyDecision').materialHunt(leaf);
 }
 // One semantic comparison for state publication and the diagnostic event gate.
 // A reader supplies the baseline facts; money keeps its own soft verdict.

@@ -263,6 +263,11 @@ function resolveTravel(state, timestamp = Date.now()) {
     const arrivalActivity = travel.arrivalActivity || 'shopping';
     const nextStats = { ...(state.stats || {}), travel: arrived ? null : travel };
     if (arrived && travel.clearMarketReturn) nextStats.marketReturn = null;
+    // The held leaf's spot this ground stands in for (HuntingTravel), kept
+    // until the next arrival; DecisionSections.occupationPlanned reads it.
+    // Cleared to null, not deleted: the projection merges the patch over the
+    // state's stats (BotLifeState.applyResolve).
+    if (arrived && (travel.leafSpotId != null || nextStats.leafSpotId != null)) nextStats.leafSpotId = travel.leafSpotId ?? null;
     return {
         patch: {
             activity: arrived ? arrivalActivity : 'traveling',
