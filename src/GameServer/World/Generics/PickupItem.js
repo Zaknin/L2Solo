@@ -49,9 +49,10 @@ function pickupItem(session, actor, item) {
     try {
         // Every client that got SpawnItem keeps the object until told, wherever
         // its player stands now; a range broadcast left ghosts to those who walked away.
+        // The picker is added as well; a bot session's dataSendToMe drops the packet.
         const deletePacket = ServerResponse.deleteOb(id);
         const recipients = NpcVisibility.recipientsOf(id);
-        if (!this.isBotSession(session) && !recipients.includes(session)) recipients.push(session);
+        if (!recipients.includes(session)) recipients.push(session);
         recipients.forEach((recipient) => {
             try {
                 recipient.dataSendToMe(deletePacket);

@@ -50,7 +50,7 @@ try {
     }, dataSendToMe: packet => packets.push(packet), dataSendToMeAndOthers: packet => packets.push(packet) };
     const world = { npc: { spawns: [], nextId: 1000000, periodMode: 'day' },
         user: { sessions: [session] }, items: { spawns: [], nextId: 5000000 },
-        addNpcToGrid() {}, spawnItem: SpawnItem };
+        addNpcToGrid() {}, fetchVisibleRealPlayers: () => [session], spawnItem: SpawnItem };
     const template = Data.npcs.find(npc => npc.selfId === 558);
     assert(template, 'the incident fixture uses the real Rotting Tree template');
     const definition = { npc: template, bounds: [

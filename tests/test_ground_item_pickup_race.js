@@ -38,7 +38,6 @@ try {
     };
     const world = {
         items: { spawns: [groundAdena] },
-        isBotSession: World.isBotSession,
         purchaseItem(session, selfId, amount) { purchases.push({ session, selfId, amount }); }
     };
 

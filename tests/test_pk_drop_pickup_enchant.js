@@ -42,7 +42,7 @@ async function session(id) {
         await Database.setItem(9402, { selfId: 123, name: 'Saber', amount: 1 });
         const owner = await session(9401), collector = await session(9402);
         const awards = [], ground = { items: { nextId: 700001, spawns: [] },
-            fetchVisibleUsers: (...args) => World.fetchVisibleUsers(...args),
+            fetchVisibleRealPlayers: (...args) => World.fetchVisibleRealPlayers(...args),
             purchaseItem(...args) { const award = Purchase(...args); awards.push(award); return award; } };
         World.spawnItem = (...args) => Spawn.call(ground, ...args);
         World.user = { sessions: [], revision: 0 };

@@ -127,7 +127,7 @@ vm.runInNewContext(fs.readFileSync(worldFile, 'utf8'), {
     path: { world: 'GameServer/World/' },
     invoke(name) {
         if (name === 'GameServer/World/WorldConstants') return require('../src/GameServer/World/WorldConstants');
-        return { invalidate() {}, broadcastMemberPresence() {} };
+        return { invalidate() {}, broadcastMemberPresence() {}, forgetSession() {} };
     }
 }, { filename: worldFile });
 const World = isolatedModule.exports;
