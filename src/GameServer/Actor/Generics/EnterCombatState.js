@@ -11,7 +11,7 @@ function armStanceEnd(actor) {
         actor.combatStanceTimer.refresh();
         return;
     }
-    actor.combatStanceTimer = setTimeout(stanceTimeout, STANCE_MS, actor);
+    actor.combatStanceTimer = setTimeout(() => stanceTimeout(actor), STANCE_MS);
     actor.combatStanceTimer.unref?.();
 }
 
