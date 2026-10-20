@@ -5,6 +5,7 @@ const fixture = require('./helpers/isolatedSocialDatabase')('worker-shot-plan');
 const path = require('node:path');
 const fs = require('node:fs');
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 fixture.assertConfigured(options.default);
 const { DatabaseSync } = require('node:sqlite');
 const { Worker } = require('node:worker_threads');
@@ -114,7 +115,7 @@ parentPort.on('message', message => {
                 adena: 100, exp: 10, kills: 1, timestamp: now }) } };
         state = await Life.upsertState(state, 'shot_plan_measured_income');
         const epoch = 'native:shot-plan', messages = []; let fault;
-        worker = new Worker(wrapper, { eval: true, workerData: { workerEpoch: epoch,
+        worker = new Worker(wrapper, { eval: true, workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: epoch,
             workerPath: root + '/src/GameServer/Bot/Population/ColdSimulationWorker.js', observer } });
         const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
         const diagnosticCoordinator = new ColdSimulationCoordinator(); diagnosticCoordinator.worker = worker; diagnosticCoordinator.workerEpoch = epoch;

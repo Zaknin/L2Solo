@@ -49,6 +49,7 @@ const RecomputeGeneration = require('./RecomputeGeneration');
 
 const ClanRaidRoster = require('../../Clan/ClanRaidRoster');
 const BotRoute = require('./BotRoute');
+const GeodataEngine = require('../../Geodata/GeodataEngine');
 // Private main-thread provenance survives the queue's shallow clone but is
 // excluded from JSON/wire sizing and cannot be supplied by a Worker message.
 const PROPOSAL_SOURCE = Symbol('cold-proposal-source');
@@ -344,7 +345,8 @@ class ColdSimulationCoordinator {
         this.snapshotsLoaded = false;
         this.lastHeartbeatAt = Date.now();
         const worker = new this.WorkerClass(this.workerPath, {
-            workerData: { workerEpoch: this.workerEpoch, developerDiagnostics: Config.developerDiagnostics === true },
+            workerData: { workerEpoch: this.workerEpoch, developerDiagnostics: Config.developerDiagnostics === true,
+                sharedGeodata: GeodataEngine.sharedDescriptor() },
             name: 'l2node-cold-simulation',
             resourceLimits: { maxOldGenerationSizeMb: Math.max(128, Number(Config.coldWorkerHeapMb) || 512) }
         });

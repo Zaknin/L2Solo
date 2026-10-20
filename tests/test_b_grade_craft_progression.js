@@ -6,6 +6,7 @@ require('./helpers/databaseIsolation');
 const fixture = isMainThread ? require('./helpers/isolatedSocialDatabase')('b-grade-craft-progression') : null;
 if (isMainThread) require('../src/Global');
 else require(workerData.workerPath);
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 const Data = invoke('GameServer/DataCache');
 if (isMainThread) Data.init();
 const Recipes = invoke('GameServer/Items/C4RecipeItems');
@@ -389,7 +390,7 @@ if (isMainThread) {
     const workerCheck = new Promise((resolve, reject) => {
         const worker = new Worker(__filename, { workerData: {
             workerPath: path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js'),
-            workerEpoch: 'b-grade-craft-test' } });
+            sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: 'b-grade-craft-test' } });
         const timer = setTimeout(() => { worker.terminate(); reject(Error('B craft worker timed out')); }, 60000);
         worker.on('message', message => {
             if (message.type !== 'b_grade_craft_result') return;

@@ -3,6 +3,7 @@ const path = require('path');
 const { Worker } = require('worker_threads');
 
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 
 const DataCache = invoke('GameServer/DataCache');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
@@ -57,7 +58,7 @@ parentPort.postMessage({ type: 'probe_result', result });
 `;
 const worker = new Worker(probeSource, {
     eval: true,
-    workerData: { workerPath, probes, workerEpoch: 'craft-route-test' },
+    workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerPath, probes, workerEpoch: 'craft-route-test' },
     resourceLimits: { maxOldGenerationSizeMb: 512 }
 });
 const timeout = setTimeout(() => {

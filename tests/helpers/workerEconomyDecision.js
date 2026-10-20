@@ -5,6 +5,7 @@ const path = require('node:path');
 const { Worker } = require('node:worker_threads');
 const root = path.resolve(__dirname, '../..');
 const Protocol = require('../../src/GameServer/Bot/Population/ColdSimulationProtocol');
+const Geodata = require('../../src/GameServer/Geodata/GeodataEngine');
 
 // A test-only observer of the actual cold worker's native economy and capture.
 // No supplied activity/wish/material leaf and no main-thread full model.
@@ -72,7 +73,7 @@ module.exports = async function workerEconomyDecision(state, { recipes = null, t
     boardRows = [], extraStates = [], tablePages = [], tables = [], recipeEarning = false, refreshEconomy = false, nativeRoutes = false, townVisit = false, meetingRequest = null } = {}) {
     const epoch = `native:economy-decision:${state.characterId}`;
     const messages = [];
-    const worker = new Worker(wrapper, { eval: true, workerData: { workerEpoch: epoch,
+    const worker = new Worker(wrapper, { eval: true, workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: epoch,
         workerPath: path.join(root, 'src/GameServer/Bot/Population/ColdSimulationWorker.js'), observer } });
     let fault;
     worker.on('message', message => messages.push(message)); worker.on('error', error => { fault = error; });

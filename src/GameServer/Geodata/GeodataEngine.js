@@ -1,10 +1,20 @@
-const fs = require('fs');
 const path = require('path');
+const { isMainThread } = require('worker_threads');
+const SharedGeodata = require('./SharedGeodata');
 const VirtualObstacles = invoke('GameServer/Geodata/VirtualObstacles/index');
 
 const REGION_OFFSET_X = 20;
 const REGION_OFFSET_Y = 18;
 const MAX_LAYER_STEP = 64;
+let sharedGeodata = null;
+
+function getSharedGeodata(directory) {
+    if (!sharedGeodata) {
+        if (!isMainThread) throw new Error('Worker geodata requires a shared descriptor before use');
+        sharedGeodata = SharedGeodata.create(directory);
+    }
+    return sharedGeodata;
+}
 
 class BinaryMinHeap {
     constructor(compare) {
@@ -120,36 +130,59 @@ const GeodataEngine = {
         return process.env.L2NODE_GEODATA_DIR || path.join(__dirname, '../../../data/Geodata');
     },
 
+    sharedDescriptor() {
+        return getSharedGeodata(this.getGeodataDir()).descriptor;
+    },
+
+    attachShared(descriptor) {
+        if (sharedGeodata) {
+            if (sharedGeodata.descriptor.arena !== descriptor?.arena) {
+                throw new Error('Cannot replace the shared geodata arena before restart');
+            }
+            return;
+        }
+        sharedGeodata = SharedGeodata.attach(descriptor);
+    },
+
+    storageStats() {
+        let attachedBytes = 0;
+        const entries = Object.entries(this.regions);
+        for (const [key, buffer] of entries) {
+            attachedBytes += buffer.byteLength + (this[`index_${key}`]?.byteLength || 0);
+        }
+        return { ...(sharedGeodata?.stats() || { reservedBytes: 0, loadedBytes: 0, loadedRegions: 0 }),
+            attachedBytes, attachedRegions: entries.length };
+    },
+
     getRegionKey(x, y) {
         return `${getRegionX(x)}_${getRegionY(y)}`;
     },
 
     loadRegion(regionX, regionY) {
         const key = `${regionX}_${regionY}`;
+        if (this.regions[key]) return true;
         if (this.missing[key]) {
             return false;
         }
-        
-        const filePath = path.join(this.getGeodataDir(), `${key}.l2j`);
-        
-        if (fs.existsSync(filePath)) {
-            try {
-                const buffer = fs.readFileSync(filePath);
-                this.regions[key] = buffer;
-                
-                // Build block offset index table
-                const offsetIndex = this.buildOffsetIndex(buffer);
-                this[`index_${key}`] = offsetIndex;
-
-                if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) utils.infoSuccess("GeodataEngine", "Loaded region geodata: %s (Size: %s MB)", key, (buffer.length / (1024 * 1024)).toFixed(2));
+        const store = getSharedGeodata(this.getGeodataDir());
+        try {
+            const loaded = store.load(key, (buffer, index) => this.buildOffsetIndex(buffer, index));
+            if (loaded) {
+                this.regions[key] = loaded.buffer;
+                this[`index_${key}`] = loaded.index;
+                if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) utils.infoSuccess("GeodataEngine", "Loaded region geodata: %s (Size: %s MB)", key, (loaded.buffer.length / (1024 * 1024)).toFixed(2));
                 return true;
-            } catch (err) {
-                console.error(`GeodataEngine :: Failed to load region ${key}:`, err);
             }
-        } else {
-            this.missing[key] = true;
-            utils.infoWarn("GeodataEngine", "Geodata file not found: %s", filePath);
+        } catch (err) {
+            if (err.code !== 'ENOENT') {
+                // Files are immutable until restart; do not retry a corrupt region on every query.
+                this.missing[key] = true;
+                console.error(`GeodataEngine :: Failed to load region ${key}:`, err);
+                return false;
+            }
         }
+        this.missing[key] = true;
+        utils.infoWarn("GeodataEngine", "Geodata file not found: %s", path.join(store.descriptor.directory, `${key}.l2j`));
         return false;
     },
 
@@ -636,8 +669,7 @@ const GeodataEngine = {
         return smoothedPath;
     },
 
-    buildOffsetIndex(buffer) {
-        const index = new Int32Array(256 * 256);
+    buildOffsetIndex(buffer, index = new Int32Array(256 * 256)) {
         let offset = 0;
         let blockCount = 0;
         const totalBlocks = 256 * 256;

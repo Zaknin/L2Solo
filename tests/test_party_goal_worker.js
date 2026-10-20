@@ -2,6 +2,8 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
+require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const Calculation = require('../src/GameServer/Bot/Population/PartyGoalCalculation');
 const timestamp = Date.now();
@@ -43,7 +45,7 @@ const loaded=new Module(workerData.workerPath,module);loaded.filename=workerData
 loaded.paths=Module._nodeModulePaths(path.dirname(workerData.workerPath));
 loaded._compile(fs.readFileSync(workerData.workerPath,'utf8')+workerData.observer,workerData.workerPath);`;
 const worker = new Worker(wrapper, { eval: true,
-    workerData: { workerEpoch: epoch, observer, workerPath: path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js') },
+    workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: epoch, observer, workerPath: path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js') },
     resourceLimits: { maxOldGenerationSizeMb: 256 } });
 const messages = []; let fault;
 worker.on('message', message => messages.push(message)); worker.on('error', error => { fault = error; });

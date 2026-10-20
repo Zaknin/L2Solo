@@ -10,6 +10,8 @@ let heapTelemetry = null;
 
 const srcRoot = path.resolve(__dirname, '../../..');
 require(path.join(srcRoot, 'Global'));
+const GeodataEngine = invoke('GameServer/Geodata/GeodataEngine');
+if (workerData?.sharedGeodata) GeodataEngine.attachShared(workerData.sharedGeodata);
 
 const DataCache = invoke('GameServer/DataCache');
 // Main checked these files against their schemas at startup; that check was ~3/4 of this boot (L71).
@@ -1802,6 +1804,7 @@ function startKernel(config = {}) {
         const heartbeat = {
             ...kernel.heartbeatSnapshot(),
             ...heapTelemetry.snapshot(),
+            geodata: GeodataEngine.storageStats(),
             eventLoopUtilization: elu.utilization,
             ...(Config.developerDiagnostics ? { occupationPlanning: occupationPlanner.snapshot() } : {}),
             safety: safetyTotals(),
