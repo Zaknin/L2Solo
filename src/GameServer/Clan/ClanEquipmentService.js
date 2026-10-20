@@ -32,6 +32,8 @@ const metrics = {
     partyAssignments: 0,
     assignmentFailures: 0,
     noDebt: 0,
+    conditionalMembers: 0,
+    preConditionalBaseCalls: 0,
     reasonCounts: new DiagnosticMetricMap()
 };
 
@@ -821,42 +823,50 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
             clanShare,
             excludedTargetIds: options.excludedTargetIds || []
         };
+        let completedBaseCalls = 0;
         const nativePlan = async extra => {
             const requestOptions = { ...memberOptions, ...extra };
-            if (workerFingerprint) return PlanningWorker.plan({ member, spots: memberSpots, warehouseRows, options: requestOptions,
-                deadlineAt: planningDeadline, jobKey: options.jobKey });
-            return requestOptions.economicMode ? RosterDemand.economicPlan(planForMember, {
-                clan: recruitment.clan, prospects: recruitment.prospects, prepared: recruitment }, member, memberSpots, warehouseRows, requestOptions)
-                : planForMember(member, memberSpots, warehouseRows, requestOptions);
-        };
-        let plan;
-        if (workerFingerprint) {
-            try {
-                plan = await nativePlan();
-                if (Date.now() >= planningDeadline) throw planningDeferred('clan planning deadline');
-            } catch (error) {
-                recordReason('clan_planning_worker_unavailable');
-                throw planningDeferred(error.message);
+            let result;
+            if (workerFingerprint) {
+                try {
+                    result = await PlanningWorker.plan({ member, spots: memberSpots, warehouseRows, options: requestOptions,
+                        deadlineAt: planningDeadline, jobKey: options.jobKey });
+                } catch (error) {
+                    recordReason('clan_planning_worker_unavailable');
+                    throw planningDeferred(error.message);
+                }
+                if (Date.now() >= planningDeadline) {
+                    recordReason('clan_planning_worker_unavailable');
+                    throw planningDeferred('clan planning deadline');
+                }
+            } else {
+                // Synchronous harnesses use the identical pure planner. Runtime enables
+                // the worker at startup and never falls back here after a worker failure.
+                result = requestOptions.economicMode ? RosterDemand.economicPlan(planForMember, {
+                    clan: recruitment.clan, prospects: recruitment.prospects, prepared: recruitment }, member, memberSpots, warehouseRows, requestOptions)
+                    : planForMember(member, memberSpots, warehouseRows, requestOptions);
             }
-        } else {
-            // Synchronous harnesses use the identical pure planner. Runtime enables
-            // the worker at startup and never falls back here after a worker failure.
-            plan = await nativePlan();
-        }
+            if (!requestOptions.economicMode) completedBaseCalls++;
+            return result;
+        };
         const economicEnabled = recruitment && !economicAttempted
             && require('./ClanRules').memberLimit(clan.level) > Number(clan.physicalMemberCount ?? clan.members.length);
-        if (economicEnabled) {
-            const discovered = await nativePlan({ economicMode: 'discovery' });
-            const requirements = discovered.economicRequirements;
-            if (requirements?.length) {
-                economicAttempted = true;
-                const recipeKnowledge = await prepareEconomic(recruitment, requirements, options);
-                plan = await nativePlan({ economicMode: 'conditional', economicRequirements: requirements, recipeKnowledge });
-                if (plan.economicTeam) {
-                    recruitment.scan.prospects = [...new Set([...plan.economicTeam.retainedProspects, ...recruitment.scan.prospects])].slice(0, 9);
-                    recruitment.continuation = false;
-                }
+        const requirements = economicEnabled ? (await nativePlan({ economicMode: 'discovery' })).economicRequirements : null;
+        let plan;
+        if (requirements?.length) {
+            economicAttempted = true;
+            const recipeKnowledge = await prepareEconomic(recruitment, requirements, options);
+            plan = await nativePlan({ economicMode: 'conditional', economicRequirements: requirements, recipeKnowledge });
+            metrics.conditionalMembers++;
+            metrics.preConditionalBaseCalls += completedBaseCalls;
+            if (plan.economicTeam) {
+                recruitment.scan.prospects = [...new Set([...plan.economicTeam.retainedProspects, ...recruitment.scan.prospects])].slice(0, 9);
+                recruitment.continuation = false;
             }
+        } else {
+            // Only an ordinary member needs this result; conditional planning
+            // owns its existing native fallback when no real team can be formed.
+            plan = await nativePlan();
         }
         plans.set(id, plan);
         // Equipment planning is CPU-only and may inspect several nearby item
@@ -1176,8 +1186,10 @@ const ClanEquipmentService = {
     recordRaidFailure,
     releaseConflictingRosterParties,
     metrics() {
-        if (!DiagnosticConfig.developerDiagnostics) return { enabled: false };
+        const conditional = { conditionalMembers: metrics.conditionalMembers, preConditionalBaseCalls: metrics.preConditionalBaseCalls };
+        if (!DiagnosticConfig.developerDiagnostics) return { enabled: false, ...conditional };
         return {
+            ...conditional,
             resolves: metrics.resolves,
             plans: metrics.plans,
             assignments: metrics.assignments,
