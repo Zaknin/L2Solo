@@ -18,8 +18,9 @@ const { personalOfferAllowed } = require('../Population/PartyAdmission');
 const Price = require('./PriceDecision');
 const OfferQuery = require('./OfferQuery');
 const DecisionEvents = require('../AI/DecisionEvents');
-// Lazy: the shared producer catalogue reads the wealth modules while it loads.
-const Sources = () => { const sources = require('../Population/ColdOccupationSources'); sources.initialise(); return sources; };
+const ProductionPolicy = require('./ProductionPolicy');
+const ColdOccupationSources = require('../Population/ColdOccupationSources');
+const Sources = () => { ColdOccupationSources.initialise(); return ColdOccupationSources; };
 
 const inFlight = new Set();
 
@@ -122,7 +123,7 @@ function recheck(state, step = {}, knownRecipes = Workshops.cachedRecipes(state.
         }
         const best = OfferQuery.cheapestTown(board, id, { amount, cost: trip, excludeOwner: state.characterId,
             quoteDepth: Price.QUOTE_DEPTH, sampleWhole: true, accept: line => !Number(line.enchant || 0) && personalOfferAllowed(line, state),
-            npcOffers: require('./ProductionPolicy').allowsNpcShot(id) ? Sources().npcOffersFor(id) : [] });
+            npcOffers: ProductionPolicy.allowsNpcShot(id) ? Sources().npcOffersFor(id) : [] });
         return best?.whole ? { ...best, tripDetails: trip.details?.(best.town), quoteDepth: Price.QUOTE_DEPTH } : null;
     };
     if (learning) context.recipeStock = ownedFor(Number(recipe.recipeItemId));

@@ -22,6 +22,7 @@ const { personalOfferAllowed } = require('../Population/PartyAdmission');
 const ColdMarket = () => invoke('GameServer/Bot/Economy/ColdMarketService');
 
 const Policy = require('./ShotCraftPolicy');
+const ShotMarketIndex = require('./ShotMarketIndex');
 const { SHOT_RECIPE_IDS, SHOT_PRODUCT_IDS, SHOT_RECIPE_ITEM_IDS, CRYSTAL_BY_RANK,
     availableMaterial, fundedDemand, recipeTarget, scrapCraftRoutes, craftCandidate } = Policy;
 const CRYSTAL_SKILL_LEVEL = { d: 1, c: 2, b: 3, a: 4, s: 5 };
@@ -160,11 +161,11 @@ function recheck(state, selected) {
 
 function marketSnapshot(now = Date.now(), ownState = null) {
     Workshops.init();
-    const index = require('./ShotMarketIndex').native();
+    const index = ShotMarketIndex.native();
     return { ...index.marketSnapshot(now, ownState), offersFor: (...args) => index.offersFor(...args) };
 }
 
-function noteBuyer(state) { require('./ShotMarketIndex').native().update(state); }
+function noteBuyer(state) { ShotMarketIndex.native().update(state); }
 
 function hasShotSurplus(state) {
     if (!state?.stats?.shotCraft) return false;

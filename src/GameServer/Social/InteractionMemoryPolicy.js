@@ -118,7 +118,8 @@ function event(input) {
         ...(input.playedHours !== undefined ? { playedHours: input.playedHours } : {}),
         ...(input.player === true ? { player: true } : {}),
         ...(input.traits ? { traits: { loyalty: Number(input.traits.loyalty ?? 0.5), resilience: Number(input.traits.resilience ?? 0.5) } } : {}),
-        ...(input.clan ? { clan: require('../Clan/ClanSocialPolicy').evidence(input.clan) } : {}) };
+        // lazy: cycle ClanSocialPolicy loads InteractionMemoryPolicy at its top.
+        ...(input.clan ? { clan: invoke('GameServer/Clan/ClanSocialPolicy').evidence(input.clan) } : {}) };
 }
 
 // The share of a feeling left after `elapsed` ms; nothing grows before its time.

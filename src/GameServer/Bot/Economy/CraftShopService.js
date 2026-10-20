@@ -7,6 +7,7 @@ const { isServiceCrafter, craftLevelFor, canCraft } = require('./CraftEligibilit
 const ProgressionCap = invoke('GameServer/Progression/ProgressionCap');
 
 const ShopPlaces = invoke('GameServer/Bot/Economy/ShopPlaces');
+const GameDataCatalogue = require('../../Knowledge/GameDataCatalogue');
 
 const MAX_PUBLIC_RECIPES = 16;
 const EMPTY_RECIPES = Object.freeze([]);
@@ -176,7 +177,7 @@ function recipeCatalog() {
     // This entry point historically loads native recipe scrolls. Public
     // optional catalogue queries themselves remain read-only/non-loading.
     C4RecipeItems.loadRecipeItems();
-    const dwarven = require('../../Knowledge/GameDataCatalogue').native().dwarvenRecipesForItems() || EMPTY_RECIPES;
+    const dwarven = GameDataCatalogue.native().dwarvenRecipesForItems() || EMPTY_RECIPES;
     if (catalog?.dwarven === dwarven) return catalog;
     // Eligibility and station publication remain this policy's owned views;
     // the static recipe/product relation belongs to RecipeCatalog.

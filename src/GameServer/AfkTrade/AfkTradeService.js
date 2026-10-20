@@ -26,6 +26,9 @@ const projectionsByCell = new Map();
 const entriesById = new Map();
 const entriesByOwner = new Map();
 const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
+const ColdOccupationSources = require('../Bot/Population/ColdOccupationSources');
+const EconomyDiagnostics = require('../Bot/Economy/EconomyDiagnostics');
+const PartyAdmission = require('../Bot/Population/PartyAdmission');
 const board = new BoardIndex({ groupOf: MarketCounters.counterOf });
 MarketCounters.publish(TableChannel.shared);
 // The board goes to the planning workers as the 'board' table (ColdTableChannel):
@@ -57,7 +60,7 @@ const changedItemIds = new Set();
 function notifyBoardChange(change) {
     // Main and worker economic consumers use the same item->recipe source.
     // Membership changes follow board events, never a per-actor catalogue scan.
-    const production = require('../Bot/Population/ColdOccupationSources').recipeIndex(board);
+    const production = ColdOccupationSources.recipeIndex(board);
     if (change.reset) production.reset();
     else for (const id of change.selfIds || []) production.update(id);
     for (const listener of boardChangeListeners) {
@@ -715,15 +718,14 @@ function syncOwnerAfterMove(ownerId, result) {
 // follow its goal). `expected` maps the records it saw to their revisions.
 async function replaceBotRecords(ownerId, kind, configs, options = {}) {
     const characterId = Number(ownerId);
-    const diagnostics = require('../Bot/Economy/EconomyDiagnostics');
-    const observed = kind === 'buy_ad' && diagnostics.enabled(characterId);
+    const observed = kind === 'buy_ad' && EconomyDiagnostics.enabled(characterId);
     const reserve = observed ? () => board.ownerLines(characterId).filter(line => line.kind === 'buy_ad' && line.custodyPolicy !== 1)
         .reduce((sum, line) => sum + line.count * line.price, 0) : null;
     const oldReserve = observed ? reserve() : 0;
     let result;
     try { result = await Database.replaceBoardRecords(characterId, kind, configs, options); }
     catch (error) {
-        if (observed) diagnostics.push({ owner: characterId, phase: 'buy_ad_reconcile', trigger: 'goal_review',
+        if (observed) EconomyDiagnostics.push({ owner: characterId, phase: 'buy_ad_reconcile', trigger: 'goal_review',
             reason: /^(economy_[a-z_]+|shop_changed|board_[a-z_]+|not_enough_adena)$/.test(error.message) ? error.message : 'native_refused',
             reserveDelta: 0 });
         throw error;
@@ -731,7 +733,7 @@ async function replaceBotRecords(ownerId, kind, configs, options = {}) {
     result.closed.forEach(refreshRecord);
     (result.changed || result.opened).forEach(refreshRecord);
     if (result.ownerInventory) syncOwnerAfterMove(characterId, result);
-    if (observed) diagnostics.push({ owner: characterId, phase: 'buy_ad_reconcile', trigger: 'goal_review',
+    if (observed) EconomyDiagnostics.push({ owner: characterId, phase: 'buy_ad_reconcile', trigger: 'goal_review',
         reason: result.closed.length || result.opened.length || result.changed?.length ? 'changed' : 'unchanged',
         reserveDelta: reserve() - oldReserve, recordId: result.retained?.[0]?.id || result.opened?.[0]?.id,
         revision: result.retained?.[0]?.revision || result.opened?.[0]?.revision });
@@ -1006,7 +1008,7 @@ function offerOf(line, town = null) {
     const projection = entry.actor ? entry : null;
     return {
         ...offerFields(line, town),
-        available: require('../Bot/Population/PartyAdmission').personalOfferAllowed(line, null,
+        available: PartyAdmission.personalOfferAllowed(line, null,
             invoke('GameServer/Bot/Population/BotLifeState').cachedState?.(line.ownerId), null,
             World.registeredActorById?.(line.ownerId)?.session),
         sourceName: projection ? projection.actor.fetchName() : (entry.shop.ownerName || `Trader ${store.ownerId}`),
@@ -1037,7 +1039,7 @@ function offers(selfId, storeType, options = {}) {
         if (enchant !== null && line.enchant !== enchant) continue;
         const offer = offerOf(line, options.town || null);
         if (!offer || !offer.available
-            || !require('../Bot/Population/PartyAdmission').personalOfferAllowed(offer, ownState, undefined, ownSession)
+            || !PartyAdmission.personalOfferAllowed(offer, ownState, undefined, ownSession)
             || (options.accept && !options.accept(offer))) continue;
         result.push(offer);
         if (result.length >= limit) break;

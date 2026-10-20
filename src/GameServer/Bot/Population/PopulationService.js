@@ -51,6 +51,7 @@ const PartyRequestPlanner = invoke('GameServer/Bot/Population/PartyRequestPlanne
 const PartyGoalCalculation = invoke('GameServer/Bot/Population/PartyGoalCalculation');
 const PartyGoalPolicy = invoke('GameServer/Bot/Population/PartyGoalPolicy');
 const CraftMaterialParty = invoke('GameServer/Bot/Population/CraftMaterialParty');
+const PartyAgreement = invoke('GameServer/Bot/Population/PartyAgreement');
 const RequiredPartyFormation = invoke('GameServer/Bot/Population/RequiredPartyFormation');
 const BotErrands = invoke('GameServer/Bot/Population/BotErrands');
 const ACTIVATION_BUSY_FLAGS = ['supplyErrand'];
@@ -71,6 +72,7 @@ const { beginHuntingTrip } = require('./HuntingTravel');
 const SurvivalFloor = require('./SurvivalFloor');
 const CombinedErrands = require('./CombinedErrandPolicy');
 const TradeMeetingService = invoke('GameServer/AfkTrade/TradeMeetingService');
+const ClanRaidRoster = require('../../Clan/ClanRaidRoster');
 const activationFailureLogAt = new Map();
 // The completion key a far bot already waited on in town since its last
 // buy or improvement this visit (main only; the visit's end clears it).
@@ -267,7 +269,7 @@ function expirePartyRequestForState(state, timestamp = Date.now()) {
 }
 
 function partyObjectiveGroupingKey(objective) {
-    if (require('./CraftMaterialParty').isObjective(objective)) return `craft-material:${objective.spotId}`;
+    if (CraftMaterialParty.isObjective(objective)) return `craft-material:${objective.spotId}`;
     const clanGoalKey = String(objective?.clanGoalKey || '');
     return clanGoalKey ? `clan-goal:${clanGoalKey}` : objective?.objectiveKey;
 }
@@ -415,7 +417,7 @@ function requiresClanEquipmentParty(state) {
 
 async function jointPartyGoals(party, members, timestamp, options = {}) {
     const Policy = invoke('GameServer/Bot/Population/PartyGoalPolicy');
-    if (!members.some(member => member.phase === 'cold') && require('./CraftMaterialParty').isObjective(party.stats?.objective))
+    if (!members.some(member => member.phase === 'cold') && CraftMaterialParty.isObjective(party.stats?.objective))
         return Policy.joint(party, members, { timestamp, spots: SpotProfiles.ensure() });
     if (!members.some(member => member.phase === 'cold'))
         return Policy.joint(party, members, { context: Policy.groupContext(party, members, { timestamp }), timestamp });
@@ -444,7 +446,7 @@ async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
     let departed = null;
     for (const member of members) {
         const plan = member.stats?.equipmentPlan;
-        const costedPlan = !require('./CraftMaterialParty').isObjective(party.stats?.objective)
+        const costedPlan = !CraftMaterialParty.isObjective(party.stats?.objective)
             && plan?.status === 'active' && plan.strategy === 'craft'
             && (plan.materials || []).some((material) => !Object.hasOwn(material, 'farmEffort'))
             ? GearAcquisitionPlanner.withMaterialFarmEffort(plan, member, SpotProfiles.ensure())
@@ -847,7 +849,7 @@ async function releaseForClanHelp(state) {
 async function createAndCommitBackgroundParty(members = [], objectiveOverride = null, options = {}) {
     const objective = objectiveOverride || members.map(partyObjectiveForState).find(ClanPartyCapacity.required);
     if (objective?.fullRoster) {
-        members = require('../../Clan/ClanRaidRoster').selectMembers(members, objective, partyLimitsForObjective(objective));
+        members = ClanRaidRoster.selectMembers(members, objective, partyLimitsForObjective(objective));
         if (members.length !== 9) return null;
     }
     if (ClanEquipmentPartyPolicy.applies(objective)) {
@@ -857,7 +859,7 @@ async function createAndCommitBackgroundParty(members = [], objectiveOverride = 
     let release = partyAdmission.reserve(BackgroundPartyState.admitted(), Config);
     if (!release && ClanPartyCapacity.required(objective)) {
         const limits = partyLimitsForObjective(objective);
-        if (require('../../Clan/ClanRaidRoster').selectMembers(members, objective, limits).length < limits.minSize) return null;
+        if (ClanRaidRoster.selectMembers(members, objective, limits).length < limits.minSize) return null;
         const reclaimed = await ClanPartyCapacity.reclaim(objective, {
             parties: BackgroundPartyState, life: LifeState, database: Database, metrics: Metrics
         });
@@ -871,7 +873,7 @@ async function createAndCommitBackgroundParty(members = [], objectiveOverride = 
 async function createBackgroundParty(members = [], objectiveOverride = null, options = {}) {
     const requested = objectiveOverride || members.map(partyObjectiveForState).find(objective => objective?.priority === 'required');
     if (members.length < Config.partyMinSize) return null;
-    const workerMaterialFormation = require('./CraftMaterialParty').isObjective(requested) && members.some(member => member.phase === 'cold');
+    const workerMaterialFormation = CraftMaterialParty.isObjective(requested) && members.some(member => member.phase === 'cold');
     if (!workerMaterialFormation && !requested?.clanGoalKey && requested?.sourceKind !== 'raid') {
         members = invoke('GameServer/Bot/Population/PartyGoalPolicy').formingMembers(members, requested);
         if (members.length < Config.partyMinSize) return Promise.resolve(null);
@@ -914,7 +916,7 @@ async function createBackgroundParty(members = [], objectiveOverride = null, opt
                 : null
         }
     };
-    if (require('./CraftMaterialParty').isObjective(objective)) party.stats.agreement = invoke('GameServer/Bot/Population/PartyAgreement')
+    if (CraftMaterialParty.isObjective(objective)) party.stats.agreement = PartyAgreement
         .propose(leader, members, objective, { persona: BotPersona.of(leader) });
     const joint = await jointPartyGoals(party, members, timestamp, options);
     if (!joint) return null;
@@ -936,12 +938,12 @@ async function createBackgroundParty(members = [], objectiveOverride = null, opt
         delete party.stats.materialFormation;
     }
     party.stats = { ...party.stats, ...joint,
-        agreement: invoke('GameServer/Bot/Population/PartyAgreement').propose(leader, members, objective,
+        agreement: PartyAgreement.propose(leader, members, objective,
             { persona: BotPersona.of(leader), rng: invoke('GameServer/Bot/AI/TendencyRoll').seeded(`agreement:${partyId}`) }) };
     const partyEvent = {
         characterId: leader.characterId,
         eventType: 'party',
-        summary: invoke('GameServer/Bot/Population/PartyAgreement').formationText(leader.name, party.spotId, party.stats.objective, party.stats.agreement),
+        summary: PartyAgreement.formationText(leader.name, party.spotId, party.stats.objective, party.stats.agreement),
         meta: {
             partyId,
             spotId: party.spotId,
@@ -1618,7 +1620,7 @@ const PopulationService = {
             ? await this.formProtectedRequiredParty(timestamp, eligible)
             : await this.formBackgroundParties(eligible);
         return { deferred: this.partyFormationPending || eligible.length < candidates.length
-                || !result.length && eligible.some(state => require('./CraftMaterialParty').isObjective(state.stats?.partyRequest)),
+                || !result.length && eligible.some(state => CraftMaterialParty.isObjective(state.stats?.partyRequest)),
             continuation: result.length > 0,
             retryAt: protectedActivity ? this.nextProtectedPartyFormationAt : 0 };
     },
@@ -2101,8 +2103,8 @@ const PopulationService = {
                     return objective && RequiredPartyFormation.spotFor(state, objective) === String(proposal.spotId || '')
                         || proposal.materialParty && !!PartyComposition.supportRole(state, objective);
                 });
-                const select = proposal.materialParty ? require('./CraftMaterialParty').selectMembers
-                    : (rows, options) => require('../../Clan/ClanRaidRoster').selectMembers(rows, { fullRoster: proposal.fullRoster }, options);
+                const select = proposal.materialParty ? CraftMaterialParty.selectMembers
+                    : (rows, options) => ClanRaidRoster.selectMembers(rows, { fullRoster: proposal.fullRoster }, options);
                 const selected = select(required, {
                     minSize: proposal.minSize,
                     maxSize: proposal.maxSize,
@@ -2206,10 +2208,10 @@ const PopulationService = {
                     requiredPartyRequestCount: states.filter(openRequired).length
                 })))
             .then(({ states, partyRequestBacklog, requiredPartyRequestCount }) => {
-                const materialRequested = states.some(state => require('./CraftMaterialParty').isObjective(partyObjectiveForState(state)));
+                const materialRequested = states.some(state => CraftMaterialParty.isObjective(partyObjectiveForState(state)));
                 const willingStates = states.filter((state) => (
                     requiresClanEquipmentParty(state)
-                    || require('./CraftMaterialParty').isObjective(partyObjectiveForState(state))
+                    || CraftMaterialParty.isObjective(partyObjectiveForState(state))
                     || materialRequested && !!PartyComposition.supportRole(state, partyObjectiveForState(state))
                     || PersonaPartyPolicy.backgroundIntent(state).accept
                 ));
@@ -2254,9 +2256,9 @@ const PopulationService = {
                     const partyLimits = partyLimitsForObjective(requestedObjective);
                     if (group.length < partyLimits.minSize) return null;
 
-                    const select = require('./CraftMaterialParty').isObjective(requestedObjective)
-                        ? require('./CraftMaterialParty').selectMembers
-                        : (rows, options) => require('../../Clan/ClanRaidRoster').selectMembers(rows, requestedObjective, options);
+                    const select = CraftMaterialParty.isObjective(requestedObjective)
+                        ? CraftMaterialParty.selectMembers
+                        : (rows, options) => ClanRaidRoster.selectMembers(rows, requestedObjective, options);
                     const selectedMembers = select(group, {
                         minSize: partyLimits.minSize,
                         maxSize: partyLimits.maxSize,
@@ -2381,7 +2383,7 @@ const PopulationService = {
         });
         // The addressed event page supplies a bounded support shortlist. A
         // helper's own hunting spot need not equal the material rendezvous.
-        for (const group of grouped.values()) if (require('./CraftMaterialParty').isObjective(partyObjectiveForState(group[0]))) {
+        for (const group of grouped.values()) if (CraftMaterialParty.isObjective(partyObjectiveForState(group[0]))) {
             const anchor = group[0];
             const helpers = [];
             for (let gap = 0; gap <= PartyComposition.DEFAULT_LEVEL_RANGE && helpers.length < 12; gap++)
@@ -2418,7 +2420,7 @@ const PopulationService = {
     async applyWorkerPartyRequirements(party, resolution) {
         // Material completion is checked against the physical bag by the
         // native resolver. A generic gear refresh must not evict its core.
-        if (require('./CraftMaterialParty').isObjective(party.stats?.objective)) {
+        if (CraftMaterialParty.isObjective(party.stats?.objective)) {
             this.clearPartyRequirementDue(party.partyId);
             return [];
         }
@@ -2604,10 +2606,9 @@ const PopulationService = {
                     });
                 }
                 const partyObjective = party.stats?.objective || null;
-                const Material = require('./CraftMaterialParty');
                 const nearby = matched.get(party).filter((state) => (
                     !claimed.has(Number(state.characterId))
-                    && (Material.isObjective(partyObjective) || !Material.requestOf(state))
+                    && (CraftMaterialParty.isObjective(partyObjective) || !CraftMaterialParty.requestOf(state))
                     && ClanEquipmentPartyPolicy.allowed(state, partyObjective)
                 ));
                 const recruits = PartyComposition.selectRecruits(members, nearby, {
@@ -3423,7 +3424,7 @@ const PopulationService = {
 
     async formCompetitionParty(members, event, options = {}) {
         if (!Config.backgroundPartyEnabled || members.length !== 2) return { rejected: 'party_disabled_or_invalid' };
-        if (members.some(state => require('./CraftMaterialParty').requestOf(state)))
+        if (members.some(state => CraftMaterialParty.requestOf(state)))
             return { rejected: 'material_party_requires_review' };
         if (members.some(s => s.party?.partyId || s.partyId)) {
             const result = await invoke('GameServer/Bot/Population/ColdCompetitionRecruitment').recruit({ participants: members, event,
