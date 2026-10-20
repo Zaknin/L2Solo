@@ -100,8 +100,9 @@ const PopulationStatus = {
 
     // The goal's numbers without diagnostics, in the full line's names: cold queue due now and the oldest wait,
     // worker busy share since the last heartbeat, main busy share since the last goal line (its only caller is
-    // the periodic summary), worker heap after the last major GC / its 10-min maximum; pvp= cold PvP fights
-    // running / steps and wall ms of the encounter runtime's longest pass since the last line (budget PASS_MS).
+    // the periodic summary), worker heap after the last major GC / its 10-min maximum, how early a far step
+    // starts before its due (ColdSimulationKernel stepLeadMs); pvp= cold PvP fights running / steps, wall ms
+    // and due fights left of the encounter runtime's longest pass since the last line (budget PASS_MS).
     goalText(queue = {}, coordinator) {
         const worker = coordinator?.worker || {}, mb = bytes => bytes ? Math.round(bytes / 1024 / 1024) : '-';
         const mainElu = performance.eventLoopUtilization(mainEluMark);
@@ -109,7 +110,7 @@ const PopulationStatus = {
         const pvp = PvpEncounterRuntime.passPeak();
         return `coldDue=${queue.overdue || 0} coldDueAll=${queue.due || 0} coldDueAge=${Math.round((queue.oldestAgeMs || 0) / 1000)}s`
             + ` workerElu=${Number(worker.eventLoopUtilization || 0).toFixed(2)} mainElu=${mainElu.utilization.toFixed(2)} workerHeapGc=${mb(worker.heapAfterGc)}/${mb(worker.heapAfterGcMax10)}MB`
-            + ` pvp=${pvp.live}/${pvp.steps}/${pvp.ms}ms/${pvp.left}`;
+            + ` stepLead=${worker.stepLeadMs || 0}ms pvp=${pvp.live}/${pvp.steps}/${pvp.ms}ms/${pvp.left}`;
     },
 
     summary() {
