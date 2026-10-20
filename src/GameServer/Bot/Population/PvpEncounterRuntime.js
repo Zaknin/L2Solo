@@ -1,5 +1,6 @@
 const refreshPartyMemberships = require('../../World/PartyMembershipPublication');
 const { seeded } = require('../AI/TendencyRoll');
+const { STEP_MS } = require('./PvpEncounterBudget');
 // Only active encounters are indexed. No per-tick scan of the population.
 const encounters = new Map();
 const pending = new Set();
@@ -55,22 +56,27 @@ async function finish(e, actions, reason = 'pvp_interrupted') {
     }
     refreshPartyMemberships(changedSessions, invoke);
 }
+// The time a fight's row names for its next turn: the step after the last
+// one, or its end.
+const dueAt = e => Math.min(e.expiresAt, e.stepAt + STEP_MS);
+// One pass per timer tick (STEP_MS) steps every fight whose turn has come,
+// the longest-waiting first, while main has room (canRun). A fight is due
+// from half a step before its stamp: the tick nearest the stamp steps it, as
+// the interval timer drifts by a few ms against the step times.
 function tick(actions) {
     if (running || actions.stopping || actions.running || !actions.canRun()) return running;
     running = (async () => {
         const life = actions.life;
-        let budget = 4;
-        for (const e of encounters.values()) {
-            if (!budget || actions.stopping || !actions.canRun()) break;
-            if (pending.has(e.key)) continue;
-            if (e.expiresAt <= Date.now()) { budget--; await finish(e, actions, 'pvp_expired'); continue; }
+        for (const e of [...encounters.values()].sort((a, b) => dueAt(a) - dueAt(b))) {
+            if (actions.stopping || !actions.canRun()) break;
+            if (pending.has(e.key) || encounters.get(e.key) !== e) continue;
+            if (e.expiresAt <= Date.now()) { await finish(e, actions, 'pvp_expired'); continue; }
             const states = ids(e).map(id => life.cachedState(id));
             if (states.some(s => snapshot(s)?.key !== e.key || !(s.vitals?.hp > 0))) {
-                budget--; await finish(e, actions); continue;
+                await finish(e, actions); continue;
             }
             if (states.every(s => s.phase === 'hot')) continue;
-            if (states.some(s => s.phase !== 'cold') || Date.now() - e.stepAt < 1000) continue;
-            budget--;
+            if (states.some(s => s.phase !== 'cold') || Date.now() - e.stepAt < STEP_MS / 2) continue;
             pending.add(e.key);
             try {
                 const at = Date.now();
@@ -99,4 +105,4 @@ function tick(actions) {
     return running;
 }
 async function stop() { if (running) await running; }
-module.exports = { encounters, pending, register, snapshot, active, ids, sessions, restoreTargets, tick, stop };
+module.exports = { encounters, pending, register, snapshot, active, ids, sessions, restoreTargets, tick, stop, STEP_MS };

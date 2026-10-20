@@ -3,6 +3,9 @@ const EXTENSION_MS = 15000;
 const MAX_MS = 60000;
 const MAX_ACTIONS = 256;
 const REVIEW_WINDOW_MS = 5000;
+// The encounter runtime's cadence: one step of a cold fight per second; a
+// step's row names the next one (nextResolveAt = step time + STEP_MS).
+const STEP_MS = 1000;
 
 // Extend an unfinished cold skirmish only on a newly resolved attack near its
 // deadline. Idle timers and lifecycle handoffs cannot renew the encounter.
@@ -15,4 +18,4 @@ function extend(encounter, combat, timestamp) {
     return { ...encounter, expiresAt, extensions: Number(encounter.extensions || 0) + 1 };
 }
 
-module.exports = { INITIAL_MS, MAX_ACTIONS, MAX_MS, extend };
+module.exports = { INITIAL_MS, MAX_ACTIONS, MAX_MS, STEP_MS, extend };

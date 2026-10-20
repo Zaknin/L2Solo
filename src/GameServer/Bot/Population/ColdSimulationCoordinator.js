@@ -305,7 +305,7 @@ class ColdSimulationCoordinator {
             LifeState.allStates(2000).forEach(s => encounters.register(s.stats?.pvpEncounter));
             this.pvpEncounterTimer = setInterval(() => {
                 encounters.tick(this.competitionActions)?.catch(error => this.recordError(error));
-            }, 1000);
+            }, encounters.STEP_MS);
             this.reconcileTimer = setInterval(() => {
                 // The hunted bosses' rows: players engaging or the boss dying.
                 RaidEncounterScope.reviewBosses(BackgroundPartyState.raidBossKeys());
