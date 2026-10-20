@@ -10,7 +10,9 @@ const timestamp = Date.now();
 const epoch = 'party-goal-native';
 const members = [701, 702].map(characterId => ({ characterId, phase: 'cold', updatedAt: timestamp,
     level: 20, activity: 'resting', adena: 10000, inventory: {},
-    spotId: 'execution-ground', stats: { classId: 0 }, timing: { nextResolveAt: timestamp + 3600000 },
+    // Crafters (a learned Create Item level): their goal query asks the
+    // occupation planner with the query's own recipe knowledge.
+    spotId: 'execution-ground', stats: { classId: 0, dwarvenCraftLevel: 1 }, timing: { nextResolveAt: timestamp + 3600000 },
     simulation: { revision: 2 },
     vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 } }));
 const party = { partyId: 'goal-worker', memberIds: [701, 702], leaderId: 701,

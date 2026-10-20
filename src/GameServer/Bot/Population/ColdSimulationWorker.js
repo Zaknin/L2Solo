@@ -1198,11 +1198,15 @@ function requestPartyGoals(payload, msgId, admitted = false) {
             // the graph nodes (a party member's); a formation candidate's
             // entry kept none, so it is built (withNodes). Never remembered:
             // a query's own snapshot must not displace the bot's held build (L133).
+            // A bot that is no service crafter is not asked: the planner
+            // answers it with no workshop (its occupation branch), and the
+            // feasibility mask that answer carries is not read by the goal.
             const deps = { timestamp, spots: planningSpots, board: boardReady(), routeRows,
                 buyOrderEscrow: options.buyOrderEscrow, rememberContext: false, caller: 'workerPartyGoal' };
             const verdict = {};
             const workshop = EconomyContext.heldWorkshop(member, deps, verdict)
-                || await askWorkshop(member, timestamp, deps.routeRows, 'party_goal', options);
+                || (CraftEligibility.isServiceCrafter(member)
+                    ? await askWorkshop(member, timestamp, deps.routeRows, 'party_goal', options) : noWorkshop());
             if (!partyMembersAvailable(members)) throw Error('party_goal_member_busy');
             return EconomyContext.forState(member, { ...deps, workshop, eventVerdict: verdict, withNodes: true });
         }, payload.timestamp, () => !shuttingDown && !kernel.stopping && Date.now() < payload.replyBy

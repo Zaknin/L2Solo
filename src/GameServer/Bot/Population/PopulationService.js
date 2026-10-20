@@ -431,7 +431,9 @@ async function jointPartyGoals(party, members, timestamp, options = {}) {
     // Two other parties hold the worker's goal slots: keep the current
     // objective now; the next party resolve reviews the goals again.
     if (result.reason === 'party_goal_busy') return Policy.pending(party, members);
-    logPartyFailure(party.partyId, 'goal', result);
+    // A member mid native step (party_goal_member_busy) is a designed race,
+    // not a failure: no log; the next party resolve asks again.
+    if (result.reason !== 'party_goal_member_busy') logPartyFailure(party.partyId, 'goal', result);
     return result.ok && PartyGoalCalculation.matches(members, result.sources) ? result.joint : null;
 }
 

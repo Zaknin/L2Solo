@@ -1,11 +1,12 @@
 'use strict';
+const Sections = require('../Economy/DecisionSections');
 
 // Complete group inputs are process-local. Only source versions and the joint
 // policy's small stats packet cross back to the main thread.
 function source(state) {
     return { characterId: Number(state.characterId),
         updatedAt: Number(state.updatedAt || 0), phase: state.phase,
-        partyId: String(state.party?.partyId || state.partyId || ''),
+        partyId: Sections.partyIdOf(state),
         revision: Number(state.simulation?.revision || 0) };
 }
 
