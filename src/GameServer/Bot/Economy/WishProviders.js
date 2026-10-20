@@ -12,6 +12,7 @@ const SoulCrystals = require('../../Items/SoulCrystalProgression');
 const DualSwords = require('../../Items/C4DualSwordCombinations');
 const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+const DataCache = invoke('GameServer/DataCache');
 // A module read inside a hot function: require() walks the module path on
 // every call, so each path is resolved once here. The relative require keeps
 // the module's dependency boundary (tests pass their own require).
@@ -435,7 +436,11 @@ function buildProjection(state, ctx, deps) {
         if (!Sources.allowsRecipe(recipe)) return null;
         const dual = recipe?.kind === 'dual_sword_combine';
         const ownCapable = recipe && (dual || invoke('GameServer/Bot/Economy/CraftShopService').canCraft(state, recipe));
-        if (!ownCapable && state.level < 40 && Progression.personal(state) && !preparation) return null;
+        const earlyCustomer = !ownCapable && state.level < 40 && Progression.personal(state) && !preparation;
+        // A visible early buyer can order consumables without changing the
+        // authored equipment progression or the cold executor's admission.
+        if (earlyCustomer && (state.phase !== 'hot'
+            || Number(need('../../Item/ItemTemplateIndex').find(DataCache.items, Number(id))?.etc?.slot) > 0)) return null;
         const own = ownCapable ? Profit.craftFacts(recipe, { batches: 1, ...craftLabour() }) : null;
         let workshop = !ownOnly && recipe && deps.workshops ? knownWorkshop(recipe, state, ctx, deps) : null;
         if (workshop && own?.status === 'ready' && knownRecipes.has(Number(recipe.recipeId))
@@ -1222,9 +1227,9 @@ function knownWorkshop(recipe, state, ctx, deps) {
     }
     return best;
 }
-// Translate the chosen shared wish into the existing personal equipment craft
-// owner. This runs in the worker on the already built graph, not a second plan.
-function personalCraftPlan(state, context) {
+// Translate the chosen shared wish into the existing equipment craft owner
+// or an opt-in hot stock visit, using the already built graph.
+function personalCraftPlan(state, context, { allowStock = false } = {}) {
     const leaf = context?.network?.activity;
     const paidInputs = state.stats?.equipmentPlan?.crystalPreparation && need('./BotCrystallization').preparation(state);
     if (paidInputs && leaf?.rootKey === paidInputs.key) return paidInputs.plan;
@@ -1233,7 +1238,9 @@ function personalCraftPlan(state, context) {
         || { object: context.projection?.nodes?.find(row => row.key === leaf.rootKey)?.object,
             plan: context.network.plans.get(leaf.rootKey) };
     const targetId = Number(wish?.object?.itemId || leaf.rootKey.split(':')[1]);
-    if (!targetId || !leaf.rootKey.startsWith('power:')) return null;
+    const stock = allowStock && state.phase === 'hot' && /^stock:(shots|potions|scrolls)$/.test(leaf.rootKey);
+    if (!targetId || !leaf.rootKey.startsWith('power:') && !stock) return null;
+    if (stock && (leaf.activity !== 'crafting' || leaf.funding || !wish?.funded)) return null;
     // Ready blacksmith exchanges cost no money, so their root need not be in
     // the spending queue. Route the native selected leaf to the equipment
     // owner; it cannot be executed by the dwarf workshop/production owner.
@@ -1287,16 +1294,18 @@ function personalCraftPlan(state, context) {
         valueRate: Number(wish.ratio || 0), source: 'wish_network' };
     if (!finalRecipe && !unseal) return null;
     return { strategy: 'craft', status: 'active',
-        target: { selfId: targetId, slot: Number(wish.object?.slot || leaf.rootKey.split(':')[2]) },
+        target: { selfId: targetId, slot: stock ? 0 : Number(wish.object?.slot || leaf.rootKey.split(':')[2]) },
         ...(leaf.activity === 'hunting' ? { next: { spotId: leaf.spotId, npcId: leaf.npcId,
             selfId: Number(leaf.itemId || leaf.object), sourceKind: leaf.kind } } : {}),
-        recipeId: Number(finalRecipe?.recipeId) || null, outputAmount: Number(wish.object?.amount || 1),
+        recipeId: Number(finalRecipe?.recipeId) || null,
+        outputAmount: Number(wish.object?.amount || 1) + (stock ? Math.max(0, Number(state.inventory?.[targetId]?.amount) || 0) : 0),
         materials: finalRecipe ? finalRecipe.materials.map(row => ({ ...row })) : [{ selfId: unseal.sourceId, amount: 1 }],
         ...(unseal ? { unseal: { ...unseal } } : {}), craftProviders: providers,
         ...(crystalInputs.size ? { crystalPreparation: { exchange: crystalExchange,
             materials: [...(crystalExchange?.materials || []).map(row => ({ ...row })),
                 ...[...crystalInputs].map(([selfId, amount]) => ({ selfId, amount }))] } } : {}),
-        componentRecipes: components, valueRate: Number(wish.ratio || 0), source: 'wish_network' };
+        componentRecipes: components, valueRate: Number(wish.ratio || 0), source: 'wish_network',
+        ...(stock ? { purpose: 'stock', wishKey: leaf.rootKey } : {}) };
 }
 function liquidationCandidates(state, ctx) {
     const saleState = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').saleState(state);

@@ -10,6 +10,7 @@ const Database = invoke('Database');
 const Data = invoke('GameServer/DataCache');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Seeder = invoke('GameServer/Bot/Population/GeneratedColdSeeder');
+const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const Native = require('./helpers/nativeMarketFixture');
 Data.init();
 
@@ -28,6 +29,13 @@ async function run() {
         }
         assert.equal(physical.filter(row => row.equipped && [7, 14].includes(row.slot)).length, 1,
             `class ${classId}: exactly one starter weapon may be equipped`);
+        const created = { characterId: id, level: 1, exp: 0, activity: 'hunting',
+            inventory: Life.inventorySummaryFromItems(physical), stats: { classId, generatedCold: true } };
+        for (const phase of ['cold', 'hot']) assert.equal(Disposition.inventoryCleanupNeed({ ...created, phase }), null,
+            `class ${classId}: a fresh ${phase} bot must not leave hunting to sell its spare starter gear`);
+        if (classId === 53) assert.equal(Disposition.npcLiquidationCandidates(created)
+            .find(item => item.selfId === 2369)?.count, 1,
+        'the spare starter sword remains sellable during a necessary town visit');
         await Seeder.awardBaseGear(id, classId);
         assert.deepEqual(await Database.fetchItems(id), physical, 'retry must neither duplicate nor re-equip existing gear');
     }

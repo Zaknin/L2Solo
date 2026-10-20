@@ -39,6 +39,7 @@ const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const SurvivalFloor = invoke('GameServer/Bot/Population/SurvivalFloor');
 const DecisionEvents = require('../DecisionEvents');
 const MarketListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy');
+const ShoppingState = invoke('GameServer/Bot/AI/States/ShoppingState');
 const { SPOT_CELL_SIZE } = invoke('GameServer/World/WorldConstants');
 
 const TARGET_STALL_TICKS = 5;
@@ -143,6 +144,23 @@ function startShopping(session, bot, BotAI, reason, townName = null) {
     return BotTownTravel.request(session, bot, BotAI, reason, destination ? {
         destinationTown: { name: destination.name, x: destination.locX, y: destination.locY, z: destination.locZ }
     } : {});
+}
+
+function startWorkshopOrder(session, bot, BotAI, economy) {
+    const leaf = economy?.network?.activity;
+    if (!isSoloHunter(session) || leaf?.activity !== 'crafting' || leaf.kind !== 'craft'
+        || !/^stock:(shots|potions|scrolls)$/.test(String(leaf.rootKey))
+        || BotTownTravel.hasCombatThreat(session, bot) || bot.state?.fetchCasts?.()) return false;
+    // The held decision carries the worker's stock plan (the selected dwarf,
+    // fee, quantities and funding) through the physical visit.
+    const target = ShoppingState.stockWorkshopTarget(session, bot, economy);
+    if (!target) return false;
+    const trip = startShopping(session, bot, BotAI, 'Heading to town for my planned craft order.', target.town);
+    if (trip === 'deferred' || trip === false) return false;
+    session.shoppingTarget = target;
+    session.shoppingServicePhase = 'workshop';
+    session.shoppingDoneAnnounced = false;
+    return true;
 }
 
 // The targets other live solo hunters hold. No index owns session.currentTargetId
@@ -562,6 +580,7 @@ function targetProgressing(session, bot, target) {
 
 module.exports = {
     leaveShop,
+    startWorkshopOrder,
     sellTripDue,
     pauseSelling,
     findPreferredMonster,
@@ -624,6 +643,7 @@ module.exports = {
                     .catch(error => utils.infoWarn('BotWealth', '%s', error.message));
                 return;
             }
+            if (startWorkshopOrder(session, bot, BotAI, economy)) return;
             if (economy.network.activity?.activity === 'improving') {
                 const state = MarketListingPolicy.actorState(session);
                 const improvementService = invoke('GameServer/Bot/Economy/BotImprovementService');

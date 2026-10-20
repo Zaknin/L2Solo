@@ -78,13 +78,18 @@ const sellSession = {
     },
     dataSendToMe(packet) { sellPackets.push(packet); }
 };
-const originalUpdate = Database.updateItemAmount;
-const originalDelete = Database.deleteItem;
+const originalSell = Database.sellItemsToNpc;
 const originalUserInfo = ServerResponse.userInfo;
 const originalItemsList = ServerResponse.itemsList;
 const writes = [];
-Database.updateItemAmount = async (...args) => { writes.push(['update', ...args]); };
-Database.deleteItem = async (...args) => { writes.push(['delete', ...args]); };
+Database.sellItemsToNpc = async (characterId, lines, validate) => {
+    validate();
+    writes.push([characterId, lines]);
+    return {
+        sold: lines.map(line => ({ objectId: line.objectId, amount: line.expectedAmount - line.amount })),
+        adena: { id: mutableAdena.fetchId(), amount: adenaAmount.value + lines.reduce((sum, line) => sum + line.price * line.amount, 0) }
+    };
+};
 ServerResponse.userInfo = () => Buffer.from([0x04]);
 ServerResponse.itemsList = () => Buffer.from([0x1b]);
 const request = Buffer.alloc(21);
@@ -119,8 +124,7 @@ Sell(sellSession, request).then(async () => {
     console.error(error);
     process.exitCode = 1;
 }).finally(() => {
-    Database.updateItemAmount = originalUpdate;
-    Database.deleteItem = originalDelete;
+    Database.sellItemsToNpc = originalSell;
     ServerResponse.userInfo = originalUserInfo;
     ServerResponse.itemsList = originalItemsList;
 });

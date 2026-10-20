@@ -26,12 +26,12 @@ function store(actor, type) {
 }
 
 function broadcast(session, actor, titlePacket) {
-    // C4 handles the owner's sit/stand locally. The native private-store
-    // transition only refreshes CharInfo and the shop title for observers;
-    // sending CharInfo/UserInfo back to the owner after both Sell and Buy
-    // transitions corrupts the old client-side status panel.
+    // Match Lisvus broadcastUserInfo: UserInfo updates the owner's store
+    // mode, while CharInfo updates observers. Broadcasting UserInfo to others
+    // or sending the owner's CharInfo back to itself corrupts C4 client state.
+    session.dataSendToMe?.(ServerResponse.userInfo(actor));
     session.dataSendToOthers?.(ServerResponse.charInfo(actor), actor);
-    if (titlePacket) session.dataSendToOthers?.(titlePacket, actor);
+    if (titlePacket) session.dataSendToMeAndOthers?.(titlePacket, actor);
 }
 
 function sendSitState(session, actor) {
@@ -83,7 +83,8 @@ function publishSell(session, packageSale, rows) {
         const item = actor.backpack.fetchItemRaw(row.objectId);
         if (!item || item.fetchPetLocked?.() || item.fetchEquipped() || item.fetchSelfId() === 57 || !Number.isSafeInteger(row.count) || row.count < 1 || row.count > item.fetchAmount() || !Number.isSafeInteger(row.price) || row.price < 0 || ids.has(item.fetchId())) return null;
         ids.add(item.fetchId());
-        return { objectId: item.fetchId(), selfId: item.fetchSelfId(), count: row.count, price: row.price };
+        return { objectId: item.fetchId(), selfId: item.fetchSelfId(), count: row.count, price: row.price,
+            enchant: Number(item.fetchEnchantLevel?.() || 0) };
     });
     if (items.some((row) => !row)) return false;
     const current = store(actor, SELL); current.items = items; current.packageSale = !!packageSale;

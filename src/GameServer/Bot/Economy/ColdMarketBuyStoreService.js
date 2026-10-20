@@ -1,19 +1,14 @@
 const ServerResponse = invoke('GameServer/Network/Response');
-const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
-const DataCache = invoke('GameServer/DataCache');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const { BUY } = require('../../AfkTrade/BoardIndex');
 
 const { bidFor } = require('./BuyAdPolicy');
 
-// A bot in a market town asks for the item it could not find: a buy ad on
-// the board (step 3.3) whose escrow leaves its wallet, in a town chosen by
-// the same roll as shops. The author's budget-backed stall (money left in
-// the wallet, the bot waiting in town) is gone; the bot goes back to its hunt and its next save
-// brings what the ad bought.
+// A bot visiting its market opens a budget-backed AFK purchase shop for its
+// primary needs. Requests beyond the available shop/city places remain
+// conditional meeting adverts. The bot can then return to its hunt.
 function open(state, goal) {
     if (!state || state.phase === 'hot' || state.activity !== 'shopping') {
         return Promise.resolve({ state, opened: false, reason: 'not_shopping' });

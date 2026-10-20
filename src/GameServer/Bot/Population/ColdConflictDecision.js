@@ -1,5 +1,6 @@
 const Policy = require('../../Social/ResourceCompetitionPolicy');
 const Visible = require('../../Social/VisibleStrength');
+const Pvp = require('./ColdPvpResolver');
 
 // A forecast lives for a few seconds. Reassess it against current participants
 // before taking leases; never turn ordinary state writes into cancelled meetings.
@@ -49,7 +50,7 @@ function refresh(event, { life, parties, memory, personaFor }, timestamp) {
         // Carried willingness replaces can-I-win, so the sides' strength is not read.
         const carried = Array.isArray(event.willing);
         const look = side => carried ? side.participant : { ...side.participant,
-            own: require('./ColdPvpResolver').ownSide(side.members, timestamp), seen: Visible.stateSide(side.members, timestamp) };
+            own: Pvp.ownSide(side.members, timestamp), seen: Visible.stateSide(side.members, timestamp) };
         decision = Policy.decide({ pressure: event.pressure, actor: look(a), peer: look(b),
             actorPersona: personaFor(a.state), peerPersona: personaFor(b.state),
             towardPeer: ab, towardActor: ba, rng: () => rolls[index++], key: event.key, willing: event.willing });

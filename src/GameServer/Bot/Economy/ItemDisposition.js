@@ -263,12 +263,11 @@ function inventoryCleanupNeed(state = {}, options = {}) {
     const candidates = saleCandidates(state, { unlimited: true });
     const npcOnlySlots = npcOnlySlotCount(state, candidates);
     const skillBookSlots = skillBookSlotCount(state, candidates);
-    // Replaced creation gear goes to the NPC without waiting for a full bag.
-    // The shared sale candidates already protect worn and reserved copies.
-    const unusedStarterGear = candidates.some(item => isStarterEquipment(item));
+    // Spare creation gear is sold during a town visit, but one unequipped
+    // starter weapon must not send a newly spawned hunter straight to town.
     const limit = InventoryLimits.forState(state);
     const overCapacity = slots > limit;
-    const accumulatedNpcOnly = unusedStarterGear || skillBookSlots > 0 || npcOnlySlots >= NPC_ONLY_CLEANUP_MIN_SLOTS;
+    const accumulatedNpcOnly = skillBookSlots > 0 || npcOnlySlots >= NPC_ONLY_CLEANUP_MIN_SLOTS;
     const surplusGearSlots = slots >= NPC_SURPLUS_GEAR_MIN_SLOTS
         ? candidates.reduce((total, item) => {
             const lowGradeGear = (String(item.kind || '').startsWith('Weapon.')
