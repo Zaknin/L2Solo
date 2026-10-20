@@ -52,20 +52,25 @@ const indexOffers = (rows = []) => {
 };
 // The static planning context, once per worker and revision
 // (ClanPlanningCoordinator.ensureContext); each request names its revision.
+// Revisions only grow: an older one arriving late is not taken back.
 function useContext(next) {
+    if (next.revision < context.revision) return;
+    // Indexes first: a throw keeps the old revision with its own indexes.
+    const nextFixed = indexOffers(next.fixedOffers);
+    const nextNpc = indexOffers(next.npcOffers);
+    BotMarketPricing.useNpcOfferSnapshot([...(next.npcOffers || []), ...(next.npcPriceRows || [])]);
+    global.options.default.General = next.general;
+    global.options.default.Progression = next.progression;
+    if (next.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
+    else process.env.L2NODE_PROGRESSION_RATE = next.progressionRate;
+    fixedOffers = nextFixed;
+    npcOffers = nextNpc;
     context = next;
-    global.options.default.General = context.general;
-    global.options.default.Progression = context.progression;
-    if (context.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = context.progressionRate;
-    fixedOffers = indexOffers(context.fixedOffers);
-    npcOffers = indexOffers(context.npcOffers);
-    BotMarketPricing.useNpcOfferSnapshot([
-        ...(context.npcOffers || []), ...(context.npcPriceRows || [])
-    ]);
 }
+// Static data: a request made under an older revision plans with the newer
+// one the worker holds (two plans in flight across a revision change).
 function restore(payload) {
-    if (payload.contextRevision !== context.revision) throw new Error('stale clan planning context');
+    if (!(context.revision >= payload.contextRevision)) throw new Error('stale clan planning context');
     return spotCatalog.restore(payload);
 }
 const market = {

@@ -29,7 +29,9 @@ class ClanPlanningCoordinator {
         // The static planning context (context() below) and the worker it
         // was published to; plan and prepare_raids carry only its revision.
         this.planningContext = planningContext;
-        this.contextPublication = null;
+        // What the current worker holds, per kind ('spots', 'context'):
+        // { worker, key, promise } (publishOnce).
+        this.publications = new Map();
         // A new worker is a new epoch for the table channel.
         this.epoch = 0;
         this.timeoutMs = timeoutMs;
@@ -40,28 +42,30 @@ class ClanPlanningCoordinator {
         this.sequence = 0;
         this.initializing = null;
         this.spotInitializing = null;
-        this.spotWriter = null;
-        this.spotPublishedWorker = null;
         this.spotGeneration = 0;
         this.retryAt = 0;
         this.closed = false;
         this.stats = { completed: 0, failures: 0, timeouts: 0, rejected: 0, restarts: 0, maxRunMs: 0, contextPublishes: 0 };
     }
 
-    fail(worker, error) {
-        if (this.worker !== worker) return;
+    // The worker is gone (failed or stopped): nothing published to it
+    // counts any more and every request in flight gets the error.
+    release(error) {
         this.worker = null;
-        this.spotWriter = null;
-        this.spotPublishedWorker = null;
-        this.contextPublication = null;
+        this.publications.clear();
         this.tableChannel.detach(this);
-        this.retryAt = Date.now() + this.restartDelayMs;
-        DiagnosticConfig.developerDiagnostics && (this.stats.failures++);
         for (const entry of this.pending.values()) {
             clearTimeout(entry.timer);
             entry.reject(error);
         }
         this.pending.clear();
+    }
+
+    fail(worker, error) {
+        if (this.worker !== worker) return;
+        this.release(error);
+        this.retryAt = Date.now() + this.restartDelayMs;
+        DiagnosticConfig.developerDiagnostics && (this.stats.failures++);
         void worker.terminate();
     }
 
@@ -150,42 +154,52 @@ class ClanPlanningCoordinator {
         }
     }
 
-    async ensureSpotCatalog(rows) {
-        // A refresh and startup share one ordered publication. A failed or
-        // incomplete generation cannot become a planning input.
-        while (this.spotInitializing) await this.spotInitializing;
-        if (this.spotWriter?.rows === rows && this.spotPublishedWorker === this.worker) return this.spotWriter;
+    // Static data crosses once per worker and key: callers with the same
+    // key share one publication; a new key, a failed publication or a new
+    // worker (release()) publishes again.
+    publishOnce(kind, key, publish) {
+        const held = this.publications.get(kind);
+        if (held?.worker === this.worker && held.key === key) return held.promise;
         const worker = this.worker;
-        const writer = new SpotCatalogWriter(++this.spotGeneration, rows);
-        const publication = (async () => {
+        const promise = (async () => {
+            const value = await publish();
+            if (this.worker !== worker) throw new Error('clan planning worker unavailable');
+            return value;
+        })();
+        const publication = { worker, key, promise };
+        this.publications.set(kind, publication);
+        promise.catch(() => { if (this.publications.get(kind) === publication) this.publications.delete(kind); });
+        return promise;
+    }
+
+    async ensureSpotCatalog(rows) {
+        // A refresh and startup share one ordered publication: pages of two
+        // generations must not interleave (SpotCatalogReader.apply). A
+        // failed or incomplete generation cannot become a planning input.
+        while (this.spotInitializing) await this.spotInitializing;
+        const publication = this.publishOnce('spots', rows, async () => {
+            const writer = new SpotCatalogWriter(++this.spotGeneration, rows);
             for (const page of writer.pages()) {
                 await this.send('spot_catalog', { page });
                 await yieldLoop();
             }
-            if (this.worker !== worker) throw new Error('clan planning worker unavailable');
-            this.spotWriter = writer;
-            this.spotPublishedWorker = worker;
             return writer;
-        })();
+        });
         this.spotInitializing = publication;
         try { return await publication; }
         finally { if (this.spotInitializing === publication) this.spotInitializing = null; }
     }
 
     // The static context crosses once per worker and context revision: a
-    // restarted worker (fail() clears the publication) or a new revision
-    // (rate, recipes, configured stores) publishes it before the request.
+    // restarted worker or a new revision (rate, recipes, configured stores)
+    // publishes it before the request. One message, so no wait: revisions
+    // only grow and the worker plans with the newest it holds.
     async ensureContext() {
         const current = await this.planningContext();
-        const worker = this.worker;
-        const held = this.contextPublication;
-        if (held?.worker === worker && held.revision === current.revision) return held.promise;
-        const promise = this.send('planning_context', { context: current }).then(() => current.revision);
-        const publication = { worker, revision: current.revision, promise };
-        this.contextPublication = publication;
-        promise.catch(() => { if (this.contextPublication === publication) this.contextPublication = null; });
-        DiagnosticConfig.developerDiagnostics && (this.stats.contextPublishes++);
-        return promise;
+        return this.publishOnce('context', current.revision, () => {
+            DiagnosticConfig.developerDiagnostics && (this.stats.contextPublishes++);
+            return this.send('planning_context', { context: current }).then(() => current.revision);
+        });
     }
 
     async plan(payload, catalogs, spotCatalog = catalogs.spots || EMPTY_SPOTS) {
@@ -230,16 +244,7 @@ class ClanPlanningCoordinator {
         this.closed = true;
         const worker = this.worker;
         if (worker) {
-            this.worker = null;
-            this.spotWriter = null;
-            this.spotPublishedWorker = null;
-            this.contextPublication = null;
-            this.tableChannel.detach(this);
-            for (const entry of this.pending.values()) {
-                clearTimeout(entry.timer);
-                entry.reject(new Error('clan planning worker stopped'));
-            }
-            this.pending.clear();
+            this.release(new Error('clan planning worker stopped'));
             await worker.terminate();
         }
     }
@@ -249,8 +254,10 @@ class ClanPlanningCoordinator {
 
 let coordinator = null;
 let enabled = false;
-const staticMarkets = new Map();
-const staticMarketBuilds = new Map();
+// One static market, for the current rate and published recipes: its NPC
+// offers cover the recipes' materials, so a new rate or recipe set (a
+// crafter level change) replaces it.
+let staticMarket = null;
 // The planning context crosses to the worker once per revision. A new
 // revision only when one of its owners hands out a new value: the per-rate
 // NPC market, the configured stores' rows, the published recipes, the settings.
@@ -263,40 +270,54 @@ function offerRow(offer) {
     return { selfId, sourceType, sourceId, town, price, count, available, sellerKind, playerPriority };
 }
 
-async function context() {
+async function buildStaticMarket(recipes) {
     const cache = invoke('GameServer/DataCache');
     const market = invoke('GameServer/Bot/Economy/MarketOpportunity');
-    const craft = invoke('GameServer/Bot/Economy/CraftShopService');
     const shops = invoke('GameServer/World/Generics/NpcShopBuyLists');
-    const recipes = craft.publishedStationRecipes().recipes;
-    const rate = invoke('GameServer/ProgressionRates').profile().multiplier;
-    if (!staticMarkets.has(rate)) {
-        if (!staticMarketBuilds.has(rate)) staticMarketBuilds.set(rate, (async () => {
-            const items = BotGear.currentWearableRows(cache.items);
-            const npcOffers = [];
-            const supplyIds = [...new Set([...items.map(item => item.selfId),
-                ...recipes.flatMap(recipe => recipe.materials.map(row => row.selfId))])];
-            for (let i = 0; i < supplyIds.length; i++) {
-                npcOffers.push(...market.npcOffersAll(supplyIds[i]).map(offerRow));
-                if (i % 8 === 7) await yieldLoop();
-            }
-            const shopEntries = shops.allEntries().map(({ selfId }) => ({ selfId }));
-            const wearableIds = new Set(items.map(item => Number(item.selfId)));
-            const pricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
-            const npcPriceRows = [];
-            // FirstPrice also needs native NPC floors for crafting inputs and
-            // consumables. Scalar quotes do not add sources to MarketOpportunity.
-            for (const selfId of new Set(shopEntries.map(entry => Number(entry.selfId)))) {
-                if (wearableIds.has(selfId)) continue;
-                const price = pricing.npcPrice({ selfId });
-                if (Number.isFinite(price) && price > 0) npcPriceRows.push({ selfId, price });
-            }
-            return { npcOffers, npcPriceRows, towns: market.TOWN_NPC_SELLERS, shopEntries };
-        })());
-        try { staticMarkets.set(rate, await staticMarketBuilds.get(rate)); }
-        finally { staticMarketBuilds.delete(rate); }
+    const items = BotGear.currentWearableRows(cache.items);
+    const npcOffers = [];
+    const supplyIds = [...new Set([...items.map(item => item.selfId),
+        ...recipes.flatMap(recipe => recipe.materials.map(row => row.selfId))])];
+    for (let i = 0; i < supplyIds.length; i++) {
+        npcOffers.push(...market.npcOffersAll(supplyIds[i]).map(offerRow));
+        if (i % 8 === 7) await yieldLoop();
     }
-    const staticMarket = staticMarkets.get(rate);
+    const shopEntries = shops.allEntries().map(({ selfId }) => ({ selfId }));
+    const wearableIds = new Set(items.map(item => Number(item.selfId)));
+    const pricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
+    const npcPriceRows = [];
+    // FirstPrice also needs native NPC floors for crafting inputs and
+    // consumables. Scalar quotes do not add sources to MarketOpportunity.
+    for (const selfId of new Set(shopEntries.map(entry => Number(entry.selfId)))) {
+        if (wearableIds.has(selfId)) continue;
+        const price = pricing.npcPrice({ selfId });
+        if (Number.isFinite(price) && price > 0) npcPriceRows.push({ selfId, price });
+    }
+    return { npcOffers, npcPriceRows, towns: market.TOWN_NPC_SELLERS, shopEntries };
+}
+
+// Callers during a build share it; a failed build is not kept.
+function staticMarketFor(rate, recipes) {
+    if (staticMarket?.rate !== rate || staticMarket.recipes !== recipes) {
+        const entry = { rate, recipes, value: buildStaticMarket(recipes) };
+        staticMarket = entry;
+        entry.value.catch(() => { if (staticMarket === entry) staticMarket = null; });
+    }
+    return staticMarket.value;
+}
+
+async function context() {
+    const market = invoke('GameServer/Bot/Economy/MarketOpportunity');
+    const craft = invoke('GameServer/Bot/Economy/CraftShopService');
+    const rates = invoke('GameServer/ProgressionRates');
+    // The rate or recipes may change during a build: a context is made only
+    // from the current ones, so a newer revision never carries older recipes.
+    let recipes, rate, built;
+    do {
+        recipes = craft.publishedStationRecipes().recipes;
+        rate = rates.profile().multiplier;
+        built = await staticMarketFor(rate, recipes);
+    } while (recipes !== craft.publishedStationRecipes().recipes || rate !== rates.profile().multiplier);
     // The board reaches the worker as its 'board' table. The configured
     // stores' rows are frozen per economy rate and store config
     // (FixedShotOffers.offers): the same array until one of them changes.
@@ -309,8 +330,8 @@ async function context() {
     const progressionRate = process.env.L2NODE_PROGRESSION_RATE;
     const settings = [...Object.values(general), progression.contentCap, progressionRate].join('|');
     const held = planningContext;
-    if (held?.staticMarket !== staticMarket || held.fixed !== fixed || held.recipes !== recipes || held.settings !== settings) {
-        planningContext = { staticMarket, fixed, recipes, settings, value: { revision: ++planningContextRevision, ...staticMarket,
+    if (held?.staticMarket !== built || held.fixed !== fixed || held.recipes !== recipes || held.settings !== settings) {
+        planningContext = { staticMarket: built, fixed, recipes, settings, value: { revision: ++planningContextRevision, ...built,
             fixedOffers: fixed.map(offerRow), recipes, general, progression, progressionRate } };
     }
     return planningContext.value;

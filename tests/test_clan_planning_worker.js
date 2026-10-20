@@ -211,6 +211,25 @@ async function parityAndIntegration() {
         }
     } finally { await worker.shutdown(); }
 
+    // Two plans in flight across a context revision change: the worker gets
+    // revision 1, then 2, then plan A made under 1. Both plan with the
+    // newest static context it holds.
+    {
+        let revision = 0;
+        const moving = new ClanPlanningCoordinator({ restartDelayMs: 0,
+            planningContext: async () => ({ ...(await Runtime.context()), revision: ++revision }) });
+        try {
+            const members = [[4, 20], [15, 40]].map(([classId, level]) => ({ characterId: 990001, classId, level,
+                phase: 'cold', stats: { classId }, inventory: {}, adena: 100000, currentRegion: 'Giran' }));
+            const options = { maxExpectedKills: 1500 };
+            const plans = await Promise.all(members.map(member =>
+                moving.plan({ member, spots: [], warehouseRows: [], options }, DataCache)));
+            members.forEach((member, index) => assert.deepEqual(plans[index], planForMember(member, [], [], options),
+                'a plan made under an older context revision must still be planned'));
+            assert.equal(moving.metrics().contextPublishes, 2, 'each revision crosses once');
+        } finally { await moving.shutdown(); }
+    }
+
     const clan = { id: 99, level: 3, leaderId: 990001, state: { mode: 'autonomous', updatedAt: 123, warehouseRevision: 1 },
         members: [{ characterId: 990001, level: 40, classId: 4, phase: 'cold',
             inventory: {}, adena: 100000, stats: { classId: 4 } }] };
