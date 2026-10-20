@@ -24,16 +24,15 @@ const adapters = {
     'GameServer/Progression/ProgressionCap': { effectiveLevelCap: () => 40 },
     'GameServer/Bot/AI/KnowledgeLearning': { stages: () => [{ grade: 'c', maxLevel: 51 }], gradeOfLevel: () => 'c' },
     'GameServer/Bot/AI/BotGear': { wishKitsFor: require('../src/GameServer/Bot/AI/BotGear').wishKitsFor },
-    'GameServer/Bot/AI/GearAcquisitionPlanner': { sourceRouteReader: () => () => true, roleFor: () => 'melee', gradeForLevel: () => 'c',
+    'GameServer/Bot/AI/GearAcquisitionPlanner': { sourceGround: () => null, sourceRouteReader: () => () => true, roleFor: () => 'melee', gradeForLevel: () => 'c',
         suitable: () => true, considerable: () => true, itemScore: () => 1, withReadiness: fn => fn(),
         equipmentCandidate: () => true, equipmentItemBetter: (item, current) => !current },
-    'GameServer/Bot/Population/ColdCombatProfile': { withEquipmentPreparation: fn => fn(), skillsFor: () => [], buildGainsFor: () => ({}),
-        gainFor: (build, key, fn) => fn(), powerNumbers: () => ({ pAtk: 100, pDef: 100, mDef: 100 }),
-        powerFor: () => ({ pAtk: 200, pDef: 100, mDef: 100 }), buildOptions: () => ({}) },
+    'GameServer/Bot/Population/ColdCombatProfile': { skillsFor: () => [], candidateProfiles: () => ({
+        before: { pAtk: 100, pDef: 100, mDef: 100 }, after: () => ({ pAtk: 200, pDef: 100, mDef: 100 }) }) },
     'GameServer/Bot/Economy/BotImprovementPolicy': { opportunities: () => [], crystalPath: () => null },
     'GameServer/Items/C4RecipeItems': { resolveVariantsByProductId: id => allowCraft && id === 101 ? recipeVariants : [],
         resolveByRecipeId: id => recipeVariants.find(row => row.recipeId === Number(id)) || null },
-    'GameServer/Items/C4DualSwordCombinations': { loadRecipes: () => [] },
+    'GameServer/Items/C4DualSwordCombinations': { resolveByProductId: () => null, resolveByRecipeId: () => null },
     'GameServer/Items/SoulCrystalProgression': require('../src/GameServer/Items/SoulCrystalProgression'),
     'GameServer/Bot/Economy/CraftShopService': { canCraft: () => ownCraft, isServiceCrafter: () => false },
     'GameServer/Skills/SkillBookCatalog': { missingBooks: () => [] },
@@ -76,21 +75,27 @@ adapters['GameServer/Bot/AI/GearAcquisitionPlanner'].sourceFacts = function* (st
     })())).filter(fact => !(options.readyOnly || options.counts) || fact.status === 'ready');
 };
 const invokeAdapter = name => { assert(name in adapters, name); return adapters[name]; };
-const valuation = load('EconomicValuation.js', () => { throw Error('unexpected require'); }, invokeAdapter);
+const valuation = load('EconomicValuation.js', name => require(path.resolve(root, name)), invokeAdapter);
 const tendency = { MIN: 0.02, roll: () => 0.5 };
 const network = load('WishNetwork.js', name => {
+    // WishNetwork reads the thread kind (c3a6771d); this fixture is the main thread.
+    if (name === 'node:worker_threads') return require('node:worker_threads');
     if (name === './EconomyDiagnostics') return { active: () => false };
     if (name === './PurchaseFunding') return require('../src/GameServer/Bot/Economy/PurchaseFunding');
+    if (name === './CompactBytes') return require('../src/GameServer/Bot/Economy/CompactBytes');
     if (name === './EconomicValuation') return valuation;
     if (name.endsWith('TendencyRoll')) return tendency;
     if (name.endsWith('Fnv1a')) return { fnv1a32: () => 1 };
     throw Error(name);
 });
 const provider = load('WishProviders.js', name => {
+    if (name === '../../Items/SoulCrystalProgression') return adapters['GameServer/Items/SoulCrystalProgression'];
+    if (name === '../../Items/C4DualSwordCombinations') return adapters['GameServer/Items/C4DualSwordCombinations'];
+    if (name === './PurchaseFunding') return require('../src/GameServer/Bot/Economy/PurchaseFunding');
     // This isolated routing fixture supplies admitted synthetic origins.
     if (name.endsWith('ItemAcquisitionCatalog')) return { revision: () => 1, hasSource: () => true, hasNonRaidSource: () => true, allowsRecipe: () => true };
     if (name === './CraftProfitPolicy') return require('../src/GameServer/Bot/Economy/CraftProfitPolicy');
-    if (name === './EconomyDiagnostics') return { active: () => false };
+    if (name === './EconomyDiagnostics') return { active: () => false, laps: () => null };
     if (name === './EconomicValuation') return valuation;
     if (name === './WishNetwork') return network;
     if (name === '../AI/PersonalGearProgression') return { assess: () => ({ required: false, gaps: new Map() }), gapFor: () => null, preparation: () => null, priority: () => 0, personal: () => false, allowsCGradeAcquisition: () => false, acquisitionRankFor: () => 'c',
@@ -247,7 +252,7 @@ const freeVisit = new network.WishNetwork().build({ actorKey: 'free', inputKey: 
 assert.equal(freeVisit.plans.get('free').effort, 3, 'zero cash is not multiplied by an unknown hour price');
 
 const ColdDecision = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
-const decoded = ColdDecision.compact({ key: 'city', updatedAt: 1, riskWeight: 1,
+const decoded = ColdDecision.compact({ echo: [1, 0, null], updatedAt: 1, riskWeight: 1,
     activity: { activity: 'shopping', itemId: 202, amount: 6, price: 106, unitPrice: 1,
         rootKey: 'gear', town: 'Giran', sourceType: 'npc' } }).activity;
 assert.equal(decoded.town, 'Giran'); assert.equal(decoded.sourceType, 'npc');
@@ -271,7 +276,7 @@ assert.equal(goal.plan.marketTown, 'Giran', 'execution keeps the selected reacha
 assert.equal(goal.plan.sourceType, 'npc', 'execution keeps the chosen source class');
 assert.equal(goal.target.adena, 1, 'travel fee cannot inflate the executable unit quote');
 assert.equal(goal.plan.estimatedCost, 106, 'the complete monetary estimate retains its future trip');
-const wideDecision = ColdDecision.compact({ key: '65|57|hunting|0|', updatedAt: 1, riskWeight: 1,
+const wideDecision = ColdDecision.compact({ echo: [65, 57, null], updatedAt: 1, riskWeight: 1,
     usefulness: Array.from({ length: 80 }, (_, i) => i + 1),
     watch: Array.from({ length: 3 }, (_, i) => [200 + i, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 3]),
     materials: Array.from({ length: 8 }, (_, i) => [300 + i, Number.MAX_SAFE_INTEGER]),

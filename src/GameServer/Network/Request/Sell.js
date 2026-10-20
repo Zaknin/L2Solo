@@ -197,7 +197,7 @@ function sellToNpcShop(session, list) {
                         || shop.items.get(line.objectId)?.price !== line.price) throw new NpcSaleRejected('NPC sale item changed');
                 }
             };
-            const result = await Database.sellItemsToNpc(actor.fetchId(), requested.map(({ item, ...line }) => line), validate);
+            const result = await Database.sellItemsToNpc(actor.fetchId(), requested.map(({ objectId, selfId, amount, price, expectedAmount }) => ({ objectId, selfId, amount, price, expectedAmount })), validate);
             // The transaction committed the entire batch and its payout. Publish
             // only those committed amounts, never a pre-await balance plus price.
             for (const sold of result.sold) {

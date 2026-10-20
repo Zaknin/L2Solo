@@ -83,7 +83,7 @@ async function enter(a, coldLifeState) {
     const cpState={level:20,stats:{coldCombat:Profile.capture(wounded,clock)}};
     const cpArrival=actor();cpArrival.setCp=value=>cpArrival.cp=value;cpArrival.fetchMaxCp=()=>200;
     await enter(cpArrival,cpState);
-    assert.strictEqual(cpArrival.cp,Math.min(200,Profile.profileFor(cpState,clock).cp),
+    assert.strictEqual(cpArrival.cp,Math.min(200,Profile.currentCp(cpState,Profile.profileFor(cpState,clock),clock)),
         'native enter-world restores cold CP instead of granting a fresh shield');
     const Response=invoke('GameServer/Network/Response');
     patch(Response,'charInfo',a=>({flag:a.fetchPvpFlag()}));

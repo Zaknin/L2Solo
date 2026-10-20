@@ -43,43 +43,10 @@ function jobMetrics(job) {
             overruns: 0,
             grantedMs: 0,
             actualMs: 0,
-            reasons: new DiagnosticMetricMap(),
-            stages: new DiagnosticMetricMap(),
-            progress: { selected: 0, processed: 0, skipped: 0, resumed: 0, deadlineStops: 0, pending: 0 }
+            reasons: new DiagnosticMetricMap()
         });
     }
     return metrics.jobs.get(key);
-}
-
-function recordStage(job, stage, durationMs) {
-    if (!Config.developerDiagnostics) return;
-    const name = String(stage || 'unknown');
-    const values = jobMetrics(job).stages;
-    if (!values.has(name)) values.set(name, []);
-    const samples = values.get(name);
-    samples.push(Math.max(0, number(durationMs)));
-    if (samples.length > 128) samples.splice(0, samples.length - 128);
-}
-
-function recordProgress(job, progress) {
-    if (!Config.developerDiagnostics) return;
-    const target = jobMetrics(job).progress;
-    for (const key of ['selected', 'processed', 'skipped', 'resumed', 'deadlineStops']) {
-        target[key] += Math.max(0, number(progress[key]));
-    }
-    target.pending = Math.max(0, number(progress.pending));
-}
-
-function stageStats(values = []) {
-    if (!values.length) return { count: 0, avgMs: 0, p95Ms: 0, maxMs: 0 };
-    const sorted = [...values].sort((left, right) => left - right);
-    const total = values.reduce((sum, value) => sum + value, 0);
-    return {
-        count: values.length,
-        avgMs: Math.round(total / values.length),
-        p95Ms: Math.round(sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)]),
-        maxMs: Math.round(sorted[sorted.length - 1])
-    };
 }
 
 function windowMs() {
@@ -115,7 +82,7 @@ function pressureSnapshot(options = {}) {
     let dbPending = number(options.dbPending, NaN);
     if (!Number.isFinite(dbPending)) {
         try {
-            dbPending = Math.max(0, number(Database.stats().pending));
+            dbPending = Math.max(0, number(Database.pending()));
         } catch (_) {
             dbPending = 0;
         }
@@ -237,9 +204,7 @@ function serializeJobMetrics() {
         overruns: value.overruns,
         grantedMs: value.grantedMs,
         actualMs: value.actualMs,
-        progress: { ...value.progress },
-        reasons: Object.fromEntries(value.reasons.entries()),
-        stages: Object.fromEntries([...value.stages.entries()].map(([stage, samples]) => [stage, stageStats(samples)]))
+        reasons: Object.fromEntries(value.reasons.entries())
     }]));
 }
 
@@ -285,4 +250,4 @@ function reset() {
     metrics.jobs.clear();
 }
 
-module.exports = { admit, complete, recordStage, recordProgress, pressureSnapshot, snapshot, reset };
+module.exports = { admit, complete, pressureSnapshot, snapshot, reset };

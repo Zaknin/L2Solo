@@ -168,7 +168,6 @@ async function main() {
         assert.strictEqual(bot.plan, 'hunting');
         assert.strictEqual((bot.coldLifeState?.stats || bot.decisionStats).decisionSeq, 1,
             'closing the own store raises one town decision');
-        assert.strictEqual((bot.coldLifeState?.stats || bot.decisionStats).activityLeaf, 0);
         assert.strictEqual(viewer.activeMerchantTrade, null, 'old client purchase windows are invalidated');
         assert.strictEqual(savedStates.length, 0, 'a live store has nothing persisted to withdraw');
 

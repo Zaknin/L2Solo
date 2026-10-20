@@ -9,6 +9,8 @@ const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const WorldAreaCatalog = invoke('GameServer/World/WorldAreaCatalog');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
+const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
+const BotTargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
 
 const anonymousStateIds = new WeakMap();
 let nextAnonymousStateId = 1;
@@ -130,6 +132,14 @@ function levelFit(spot, targetLevel, options = {}) {
     };
 }
 
+// Mobs per hour one spawn gives back (E69): 3600 / its respawn seconds. The
+// respawn spread is symmetric (SpawnNpcs.respawnDelayMs), so its mean is
+// `respawn`; a leader's minions come back with their leader.
+function respawnsPerHour(npc) {
+    const respawn = Number((npc?.spawnDefinition || npc?.minionLeader?.spawnDefinition)?.spawn?.respawn) || 0;
+    return respawn > 0 ? 3600 / respawn : 0;
+}
+
 function isSuitable(spot, targetLevel, options = {}) {
     if (!spot) return false;
     const fit = levelFit(spot, targetLevel, options);
@@ -140,6 +150,7 @@ function isSuitable(spot, targetLevel, options = {}) {
 
 const SpotService = {
     MAX_WALK_SPOT_DISTANCE,
+    respawnsPerHour,
     spots: null,
 
     reset() {
@@ -180,6 +191,7 @@ const SpotService = {
                     selfIds: {},
                     npcs: {},
                     arrivalPoints: [],
+                    records: [],
                     partitionedAreaId: partition.area?.id || null
                 };
             }
@@ -199,13 +211,15 @@ const SpotService = {
             const selfId = Number(npc.fetchSelfId?.() || 0);
             if (selfId) sector.selfIds[selfId] = (sector.selfIds[selfId] || 0) + 1;
             const npcKey = selfId ? `id:${selfId}` : `name:${name}`;
-            sector.npcs[npcKey] = sector.npcs[npcKey] || { selfId, name, level, count: 0 };
+            sector.npcs[npcKey] = sector.npcs[npcKey] || { selfId, name, level, count: 0, production: 0 };
             sector.npcs[npcKey].count++;
+            sector.npcs[npcKey].production += respawnsPerHour(npc);
             sector.arrivalPoints.push({
                 locX: npc.fetchLocX(),
                 locY: npc.fetchLocY(),
                 locZ: npc.fetchLocZ()
             });
+            sector.records.push(BotPullEstimate.record(npc));
         });
 
         this.spots = Object.values(sectors).map((sector) => {
@@ -234,20 +248,43 @@ const SpotService = {
                 density: sector.count,
                 npcNames: nameEntries.slice(0, 3).map((item) => item.name),
                 npcSelfIds: selfIdEntries.slice(0, 8).map((item) => item.selfId),
+                // `production`: the group's mobs per hour from its respawns (E69).
                 npcEntries: Object.values(sector.npcs)
                     .sort((a, b) => b.count - a.count)
-                    .map((entry) => ({ ...entry })),
+                    .map((entry) => ({ ...entry, production: Math.round(entry.production * 100) / 100 })),
                 arrivalPoints: sector.arrivalPoints.map((point) => ({ ...point })),
                 levelCounts: { ...sector.levels },
                 dominantLevels: levelEntries.slice(0, 3),
-                partitionedAreaId: sector.partitionedAreaId
+                partitionedAreaId: sector.partitionedAreaId,
+                records: sector.records
             };
 
             spot.name = spotName(spot);
             return WorldAreaCatalog.decorateSpot(spot);
         });
+        // lazy: worker SpotService also loads in the cold worker; these aggro owners import the live world.
+        const SocialAggro = invoke('GameServer/Npc/SocialAggro');
+        const NpcAggro = invoke('GameServer/Npc/NpcAggro'); // lazy: worker as SocialAggro above.
+        const MinionManager = invoke('GameServer/World/RaidBossMinionManager'); // lazy: worker as SocialAggro above.
+        const pulls = BotPullEstimate.annotate(this.spots, {
+            assistZ: SocialAggro.MAX_ASSIST_Z_DIFFERENCE,
+            aggroRadius: NpcAggro.AGGRO_RADIUS,
+            aggroZ: NpcAggro.MAX_AGGRO_Z_DIFFERENCE
+        }, BotPullEstimate.minionJoiners(MinionManager.groupsByBoss));
+        // One number on each spot entry that pulls more than one mob, in this
+        // catalogue, its SpotProfiles copy and the cold worker's copy.
+        utils.infoSuccess('Spots', '%d spots, pull table %d of %d entries above one (~%d KB per copy)',
+            this.spots.length, pulls.pulls, pulls.entries, Math.ceil(pulls.pulls * 16 / 1024));
 
         return this.spots;
+    },
+
+    // Mobs that come with this one (BotPullEstimate), from the table built
+    // when the spots were indexed at start; 1 before that.
+    pullSizeFor(npc) {
+        if (!this.spots || !npc?.fetchLocX) return 1;
+        const spot = SpotIndex.spotById(this.spots, spotIdAt(locFromActor(npc)).id);
+        return BotPullEstimate.entryPull(spot, npc.fetchSelfId?.());
     },
 
     findById(id) {
@@ -259,6 +296,16 @@ const SpotService = {
     findCurrentSpot(loc, spots = null) {
         if (!loc || !Number.isFinite(Number(loc.locX)) || !Number.isFinite(Number(loc.locY))) return null;
         return spots ? SpotIndex.spotById(spots, spotIdAt(loc).id) : this.findById(spotIdAt(loc).id);
+    },
+
+    // The spot a bot stands at, in `spots`: a declared raid profile first (it
+    // is virtual and sits inside an ordinary sector; the party resolver needs
+    // the boss profile, not the field around it), else the spot under its
+    // position, else its declared spot.
+    standingSpot(state, spots) {
+        const declared = SpotIndex.spotById(spots, state?.spotId || '');
+        if (declared?.raidBoss === true) return declared;
+        return this.findCurrentSpot(state?.loc, spots) || declared;
     },
 
     containsLocation(spot, loc) {
@@ -297,7 +344,9 @@ const SpotService = {
             role: options.role || status.role,
             equipment: options.equipment
         };
-        routeOptions.matchupProfiles = invoke('GameServer/Bot/AI/BotTargetMatchup').stateProfiles(routeState, routeOptions);
+        // The stand-in state carries the bot's id without its bag: a what-if
+        // for the kit profile store.
+        routeOptions.matchupProfiles = BotTargetMatchup.stateProfiles(routeState, { ...routeOptions, store: false });
 
         const candidates = this.ensureIndexed()
             .filter((spot) => !(Number(options.spotRetryAfter?.[spot.id]) > Date.now()))
@@ -337,10 +386,9 @@ const SpotService = {
                     ...candidate,
                     spot: decoratedSpot,
                     score: candidate.score + routeMatch.routeScore + routeMatch.variation
-                        - routeMatch.crowdPenalty - routeMatch.localityPenalty - routeMatch.targetMatchup.penalty,
+                        - routeMatch.localityPenalty - routeMatch.targetMatchup.penalty,
                     route: decoratedSpot.route || null,
                     routeScore: routeMatch.routeScore,
-                    crowdPenalty: routeMatch.crowdPenalty,
                     localityPenalty: routeMatch.localityPenalty,
                     huntingGroundPenalty: routeMatch.huntingGroundPenalty,
                     variation: routeMatch.variation
@@ -353,6 +401,7 @@ const SpotService = {
 
     assignSpot(session, spot) {
         if (!spot) return null;
+        const moved = spot.id !== session.currentSpot?.id;
         session.currentSpot = {
             id: spot.id,
             name: spot.name,
@@ -367,6 +416,9 @@ const SpotService = {
             area: spot.area ? { ...spot.area } : null,
             route: spot.route || null
         };
+        // The arrival after the choice is the same spot: no second post.
+        // lazy: cycle BotLifeState invokes SpotService at its top.
+        if (moved) invoke('GameServer/Bot/Population/BotLifeState').notifyNearFacts(session, 'near_spot');
         return session.currentSpot;
     },
 

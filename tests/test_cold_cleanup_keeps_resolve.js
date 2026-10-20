@@ -1,15 +1,13 @@
 const assert = require('assert');
 
-require('../src/Global');
-
+const { createWorld, Database } = require('./helpers/c4QuestHarness');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
-const DataCache = invoke('GameServer/DataCache');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
-
-DataCache.init();
 
 const originals = {
     inventoryCleanupNeed: ItemDisposition.inventoryCleanupNeed,
@@ -18,7 +16,7 @@ const originals = {
     recordMany: LifeEvents.recordMany
 };
 
-function hunter(characterId, token) {
+function hunter(characterId) {
     return {
         characterId,
         name: `Overloaded${characterId}`,
@@ -33,8 +31,7 @@ function hunter(characterId, token) {
         vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
         inventory: {},
         stats: {},
-        timing: {},
-        ...(token ? { simulation: token } : {})
+        timing: {}
     };
 }
 
@@ -46,24 +43,26 @@ const fightResult = () => ({
 });
 
 (async () => {
+    // Main commits over the state it holds: the bots are in its cache.
+    const world = await createWorld([{ id: 7301, level: 40 }, { id: 7303, level: 40 }], 'cold-cleanup-keeps-resolve');
     try {
-        // Every bot is over the author's cleanup threshold.
-        ItemDisposition.inventoryCleanupNeed = () => ({ reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 });
-
+        await LifeState.init();
         // Resolver path: the worker's projected state already holds the fight.
         const coordinator = new ColdSimulationCoordinator();
         coordinator.population = {
             realPlayerSessions: () => [],
             prepareInventoryCleanupProposal: (...args) => PopulationService.prepareInventoryCleanupProposal(...args)
         };
-        const token = { characterId: 7301, ownerId: 'cold_worker', revision: 3, leaseId: 'cleanup-lease', leaseUntil: Date.now() + 60000 };
-        const base = hunter(7301, token);
+        const base = await LifeState.upsertState(hunter(7301), 'cleanup_resolve_fixture');
+        const simulation = base.simulation;
         const proposal = {
             characterId: 7301,
-            token,
+            revision: simulation.revision,
             enqueuedAt: Date.now(),
-            baseState: base,
+            ...InventorySummary.bagChange(base.inventory, base.inventory),
             nextState: { ...base, exp: base.exp + 500, adena: base.adena + 600 },
+            // The worker found the bag over the author's cleanup threshold.
+            cleanupNeed: { reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 },
             result: fightResult()
         };
         const prepared = await coordinator.prepareProposal(proposal);
@@ -75,7 +74,7 @@ const fightResult = () => ({
         const tripFee = (state) => Number(state.stats?.travel?.paid?.fee || 0);
         assert.strictEqual(prepared.adena, base.adena + 600 - tripFee(prepared), 'the fight\'s adena is kept');
         assert.strictEqual(proposal.result.events.length, 1, 'the fight\'s events are still recorded');
-        assert.strictEqual(prepared.simulation?.leaseId, token.leaseId, 'the commit keeps the worker lease');
+        assert.strictEqual(prepared.simulation?.revision, simulation.revision, 'the commit keeps the step base revision');
 
         // The cleanup still outranks a route trip the worker started this resolve.
         const routed = await coordinator.prepareProposal({
@@ -88,33 +87,49 @@ const fightResult = () => ({
         assert.strictEqual(routed.stats.travel?.reason, 'market_sale_inventory');
         assert.strictEqual(routed.exp, base.exp + 500, 'and the fight before it is kept');
 
-        // A bot that died in the fight stays dead; the cleanup waits.
+        // A bot that died in the fight stays dead; the cleanup waits (the
+        // worker sends no need for it).
         const died = await coordinator.prepareProposal({
             ...proposal,
+            cleanupNeed: undefined,
             result: fightResult(),
             nextState: { ...base, activity: 'dead' }
         });
         assert.strictEqual(died.activity, 'dead');
         assert(!died.stats?.forcedMarketCleanup);
 
-        // An atomic group commits all members or none: a member its party
-        // releases in this commit is judged as claimed (still in the party).
-        const member = { ...hunter(7303, { ...token, characterId: 7303 }), activity: 'grouped',
-            party: { partyId: 'dissolving', leaderId: 7303 } };
-        const released = await coordinator.prepareProposal({
-            characterId: 7303,
-            token: { ...token, characterId: 7303 },
+        // The trip pays on main (the bot's last Scroll of Escape, a gatekeeper
+        // fee) over a step that left the bag as it was: the commit still writes
+        // what the trip took from the bag.
+        const payerId = 7303;
+        await Database.setItem(payerId, { selfId: 736, amount: 1, slot: 0 });
+        await Database.setItem(payerId, { selfId: 57, amount: 5000, slot: 0 });
+        const payerBag = LifeState.inventorySummaryFromItems(await Database.fetchItems(payerId));
+        const payer = await LifeState.upsertState({ ...hunter(payerId), adena: Number(payerBag[57].amount),
+            inventory: payerBag }, 'cleanup_resolve_fixture');
+        const walletBefore = await world.amount(payerId, 57);
+        const paying = {
+            characterId: payerId,
+            revision: payer.simulation.revision,
             enqueuedAt: Date.now(),
-            baseState: member,
-            atomicGroup: { id: 'party:dissolving', memberIds: [7303] },
-            nextState: { ...member, activity: 'hunting', party: { partyId: null }, exp: member.exp + 500 },
-            result: fightResult()
-        });
-        assert(released, 'a released party member does not fail its atomic group');
-        assert.strictEqual(released.exp, member.exp + 500);
-        assert(!released.stats?.forcedMarketCleanup);
+            ...InventorySummary.bagChange(payer.inventory, payer.inventory),
+            nextState: { ...payer, exp: payer.exp + 500 },
+            cleanupNeed: { reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 },
+            result: fightResult(),
+            options: { allowLifecycle: true }
+        };
+        const trip = await coordinator.prepareProposal(paying);
+        assert.strictEqual(trip?.stats?.travel?.paid?.scroll, 736, 'fixture: the cleanup trip reads the bot\'s last scroll');
+        // The commit queue's prepared entry (ColdCommitQueue) to the owner.
+        const [paid] = await ColdSimulationOwner.commitBatch([{ proposal: paying, revision: paying.revision,
+            nextState: trip, options: paying.options }], { timestamp: Date.now() });
+        assert(paid.ok, 'the paid trip commits');
+        assert.strictEqual(await world.amount(payerId, 736), 0, 'the read scroll leaves the physical bag');
+        assert.strictEqual(await world.amount(payerId, 57), walletBefore - tripFee(trip), 'the fee leaves the physical wallet');
 
-        // Command path: the worker's precomputed fight is applied before the trip.
+        // Command path: the worker's precomputed fight is applied before the
+        // trip; main decides the cleanup there, on a bag over the threshold.
+        ItemDisposition.inventoryCleanupNeed = () => ({ reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 });
         const applied = [];
         const recorded = [];
         LifeState.applyResolve = async (state, result) => {
@@ -138,6 +153,7 @@ const fightResult = () => ({
         Object.assign(ItemDisposition, { inventoryCleanupNeed: originals.inventoryCleanupNeed });
         Object.assign(LifeState, { applyResolve: originals.applyResolve, upsertState: originals.upsertState });
         LifeEvents.recordMany = originals.recordMany;
+        await world.close();
     }
 })().catch((error) => {
     console.error(error);

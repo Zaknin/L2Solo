@@ -46,7 +46,7 @@ assert.strictEqual(Policy.spotDeathPressure({ ...state, spotId: 'other_spot' }),
 const backoff = SpotRiskPolicy.backoffForStates([state], state.spotId, 1000);
 assert.deepStrictEqual(backoff, {
     spotId: 'dion_ruins', deaths: 2, fights: 8, deathRate: 0.25,
-    reason: 'death_pressure', startedAt: 1000, until: 1000 + SpotRiskPolicy.BACKOFF_MS
+    reason: 'death_pressure', startedAt: 1000, steps: SpotRiskPolicy.BACKOFF_STEPS
 });
 const backedOff = SpotRiskPolicy.withBackoff(state, backoff, 1000);
 assert(SpotRiskPolicy.excludedSpotIdsForStates([backedOff], 2000).has('dion_ruins'),
@@ -59,7 +59,8 @@ const relocated = {
         spotRisk: { spotId: 'other_spot', deathsAtEntry: 3, fightsAtEntry: 10 }
     }
 };
-assert.strictEqual(SpotRiskPolicy.excludedSpotIdsForStates([relocated], backoff.until + 1).has('dion_ruins'), false,
+const later = { ...relocated, stats: { ...relocated.stats, stepCount: SpotRiskPolicy.stepCount(relocated) + backoff.steps } };
+assert.strictEqual(SpotRiskPolicy.excludedSpotIdsForStates([later]).has('dion_ruins'), false,
     'the spot must become eligible again after the bounded cooldown');
 
 // ARCH-NOTE: the direct legacy compatibility policy above keeps its own

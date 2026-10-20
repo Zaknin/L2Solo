@@ -245,21 +245,15 @@ async function craft(state, random = Math.random) {
     const characters = station.clan || station.workshop ? [{ id: station.characterId }] : await Database.fetchCharacters(account);
     const crafter = characters[0];
     if (!crafter) return { state, crafted: false, reason: 'missing_station' };
-    let crafterState = await LifeState.findByCharacterId(crafter.id);
+    const crafterState = await LifeState.findByCharacterId(crafter.id);
     if (!crafterState || crafterState.phase !== 'cold') return { state, crafted: false, reason: 'station_busy' };
 
     let learning = false;
     if (station.clan) {
-        if (crafterState.simulation?.ownerId === 'cold_simulation_owner') {
-            const handedOff = await invoke('GameServer/Bot/Population/ColdSimulationOwner').handoffToMain(crafterState);
-            if (!handedOff.ok) return { state, crafted: false, reason: 'clan_crafter_busy' };
-            crafterState = await LifeState.findByCharacterId(crafter.id);
-        }
         const clanId = Number(plan.clanGoal?.clanId);
         const [membership] = await Database.execute(['SELECT clanId FROM characters WHERE id = ?', [crafter.id]]);
         if (Number(membership?.clanId) !== clanId || (crafterState.partyId || crafterState.party?.partyId)
             || Number(crafterState.vitals?.hp) <= 0 || ['dead', 'respawning'].includes(crafterState.activity)
-            || String(crafterState.simulation?.ownerId || crafterState.simulationOwner || 'legacy_main') !== 'legacy_main'
             || !CraftShopService.canCraft(crafterState, recipe)) {
             return { state, crafted: false, reason: 'clan_crafter_unavailable' };
         }

@@ -106,7 +106,53 @@ assert.notEqual(removed.activityLeaf, eventFirst.activityLeaf);
 assert.equal(removed.decisionSeq, 2, 'a new focus raises the decision once before its activity roll');
 const sameKeyNewEvent = network.build({ ...eventInput, decisionSeq: 51 });
 assert.equal(sameKeyNewEvent.decisionSeq, 51, 'an unchanged input key cannot reuse another decision');
-console.log('PASS individual event seeds / held leaves / missing leaf / focus transition');
+// An event keeps the held step while no other step beats it by the bot's
+// loyalty; a step that became much better is rolled for once.
+const valued = hours => ({ ...eventInput, previous: { focus: ['right', 0, 0] },
+    nodes: [eventInput.nodes[0], { ...eventInput.nodes[1], valueHours: hours }] });
+let leftLeaf = 0;
+for (let decisionSeq = 1; !leftLeaf && decisionSeq <= 50; decisionSeq++) {
+    const pick = network.build({ ...valued(3), decisionSeq, remembered: false });
+    if (pick.activity.rootKey === 'left') leftLeaf = pick.activityLeaf;
+}
+assert(leftLeaf > 0);
+const outscoredPicks = new Set();
+for (let decisionSeq = 2; decisionSeq <= 30; decisionSeq++) {
+    // Loyalty .5: the held off-focus step is worth 1 * .5, the focus step .7 <= .5 * 1.5.
+    const loyal = network.build({ ...valued(0.7), persona: { traits: { commitment: 0.5 } }, decisionSeq,
+        activityLeaf: leftLeaf, remembered: false });
+    assert.equal(loyal.activityLeaf, leftLeaf, 'a step within the loyalty margin survives the event');
+    assert.equal(loyal.decisionSeq, decisionSeq);
+    const outscored = network.build({ ...valued(3), decisionSeq, activityLeaf: leftLeaf, remembered: false });
+    assert.equal(outscored.decisionSeq, decisionSeq + 1, 'an outscored step is rolled for under a new seed');
+    outscoredPicks.add(outscored.activity.rootKey);
+}
+assert(outscoredPicks.has('right'), 'the better step can win the roll');
+// Without an event (reconsider false) the held step stays while it is still
+// a candidate, however much better another became: no new seed, no roll.
+for (let decisionSeq = 2; decisionSeq <= 30; decisionSeq++) {
+    const kept = network.build({ ...valued(3), decisionSeq, activityLeaf: leftLeaf, remembered: false, reconsider: false });
+    assert.equal(kept.activityLeaf, leftLeaf, 'an ordinary rebuild keeps the held step');
+    assert.equal(kept.decisionSeq, decisionSeq, 'an ordinary rebuild does not reseed the roll');
+}
+const goneWithoutEvent = network.build({ ...eventInput, inputKey: 'leaf-gone-quiet', activityLeaf: eventFirst.activityLeaf,
+    previous: { focus: ['replacement', 0, 0] }, roots: ['replacement'], nodes: [{ key: 'replacement', need: 'power', valueHours: 1,
+        paths: [{ activity: 'crafting', costHours: 1 }] }], remembered: false, reconsider: false });
+assert.equal(goneWithoutEvent.activity.activity, 'crafting', 'a held step that is no longer a candidate is replaced without an event');
+assert.equal(goneWithoutEvent.decisionSeq, eventInput.decisionSeq + 1);
+// The focus reads the same event gate: a quiet rebuild keeps the held focus
+// however much better a challenger became; an event lets it move.
+const challenged = { ...eventInput, previous: { focus: ['left', 0, 0] },
+    nodes: [eventInput.nodes[0], { ...eventInput.nodes[1], valueHours: 3 }], remembered: false };
+const movedFocus = new Set();
+for (let decisionSeq = 1; decisionSeq <= 30; decisionSeq++) {
+    const quiet = network.build({ ...challenged, decisionSeq, reconsider: false });
+    assert.equal(quiet.focus[0], 'left', 'a quiet rebuild keeps the held focus');
+    assert.equal(quiet.decisionSeq, decisionSeq, 'a kept focus does not reseed the roll');
+    movedFocus.add(network.build({ ...challenged, decisionSeq, reconsider: true }).focus[0]);
+}
+assert(movedFocus.has('right'), 'an event lets an outscoring focus win the roll');
+console.log('PASS individual event seeds / held leaves / missing leaf / focus transition / outscored held leaf / quiet rebuild keeps the leaf and focus');
 
 const liquidationInput = { actorKey: 'finite-sale', inputKey: 'bag', remembered: false,
     wallet: 10, hourAdena: 0, roots: ['upgrade'], nodes: [{ key: 'upgrade', need: 'power',

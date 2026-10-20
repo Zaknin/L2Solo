@@ -27,15 +27,16 @@ async function createParty(ids, name = `party-${ids[0]}`) {
     const prepared = Party.prepareCommit({ partyId: name, leaderId: ids[0], memberIds: ids,
         spotId: 'test', status: 'active', startedAt: at, nextResolveAt: at + 45000, stats: { objective: ids[0] === 1 ? null : { npcId: 10 } } });
     const assigned = ids.map(id => Life.preparePartyAssignment(state(id), name, 'dps', ids[0], at + 45000));
-    assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
-    Life.acceptPartyAssignments(assigned);
-    return Party.acceptCommit(prepared);
+    const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+    assert(formed.ok);
+    Life.acceptPartyAssignments(assigned, formed.lifeRows);
+    return Party.acceptRow(formed.partyRow);
 }
 function event(a, b) {
     const participant = id => {
         const party = Party.find(state(id).party?.partyId);
         return { id, revision: state(id).simulation.revision, memoryRevision: Memory.snapshot(id).revision,
-            partyId: party?.partyId, partyUpdatedAt: party?.updatedAt, size: party?.memberIds.length || 1 };
+            partyId: party?.partyId, partyRevision: party?.revision, size: party?.memberIds.length || 1 };
     };
     return { key: `competition:${a}:${b}`, at, pressure: 3, spotId: 'test', npcId: 10, action: 'contest',
         actor: participant(a), peer: participant(b) };
@@ -51,7 +52,7 @@ async function run() {
         await Database.execute([`INSERT INTO bot_life_state(characterId,accountName,characterName,phase,activity,spotId,hp,maxHp,mp,maxMp,level,
             nextResolveAt,lastResolvedAt,updatedAt,statsJson) VALUES (?,?,?,'cold','hunting','test',100,100,100,100,20,?,?,?,?)`,
         [id, `bot_conflict_${id}`, `Conflict${id}`, at + 60000, at - 30000, at, JSON.stringify(id <= 4 ? { ...stats, coldCompetition: { key: 'old-pvp', at: at - 700000,
-            outcome: 'pvp_fighting', endedAt: at - 600000, avoid: { spotId: 'elsewhere', until: at + 600000 } } } : stats)]]);
+            outcome: 'pvp_fighting', endedAt: at - 600000, avoid: { spotId: 'elsewhere', untilStep: 10 } } } : stats)]]);
     }
     await Life.init();
     await Party.init();
@@ -109,8 +110,19 @@ async function run() {
 
     await createParty(range(9, 9));
     await createParty(range(18, 9));
+    // The native row owns the agreement: the commit rebuilds it from the DB row,
+    // so the cache must show that row, not the proposal built from the old cache.
+    await Database.execute(['UPDATE bot_background_parties SET statsJson = json_patch(statsJson, ?) WHERE partyId = ?',
+        [JSON.stringify({ agreement: { terms: 'db-only' } }), 'party-9']]);
     const full = await apply(9, 18);
     assert(full.ok, JSON.stringify(full));
+    for (const partyId of ['party-9', 'party-18']) {
+        const [saved] = await Database.execute(['SELECT revision, statsJson FROM bot_background_parties WHERE partyId=?', [partyId]]);
+        assert.strictEqual(Party.find(partyId).revision, Number(saved.revision), 'each side caches its own committed party row');
+        assert.deepStrictEqual(Party.find(partyId).stats.agreement, JSON.parse(saved.statsJson).agreement,
+            'the cached agreement is the committed one, not the proposed one');
+    }
+    assert.strictEqual(Party.find('party-9').stats.agreement.terms, 'db-only');
     assert.strictEqual(full.matchup, 'party_vs_party');
     assert.strictEqual(full.participants.length, 18);
     assert.strictEqual(full.memoryEvents, 17, '9v9 attribution is linear, not 81 relationships');
@@ -157,7 +169,7 @@ async function run() {
     await createParty([34, 35]);
     assert.strictEqual((await apply(34, 36, { participantAllowed: id => id !== 35 })).ok, false, 'a hot handoff on a nonprincipal member fences the group');
     assert.strictEqual((await apply(34, 36, { contestContextAllowed: s => s.characterId !== 35 })).ok, false, 'every member must physically occupy the spot');
-    assert.strictEqual((await apply(34, 36, { memory: { ...Memory, snapshot: id => id === 35 ? null : Memory.snapshot(id) } })).ok, false);
+    assert.strictEqual((await apply(34, 36, { memory: { revision: id => id === 35 ? undefined : Memory.revision(id) } })).ok, false);
     assert.strictEqual((await apply(34, 36, { event: { ...event(34, 36), actor: { ...event(34, 36).actor, size: 1 } } })).reason, 'party_changed');
     for (const [detail, patch] of [
         ['member_supply_errand', { stats: { ...state(35).stats, supplyErrand: { reason: 'potions' } } }],
@@ -175,7 +187,7 @@ async function run() {
         if (detail === 'member_competition_wait') assert.strictEqual(failure.rejectionContext.expired, true);
     }
     for (const [detail, patch] of [
-        ['party_revision_changed', { updatedAt: Party.find('party-34').updatedAt + 1 }],
+        ['party_revision_changed', { revision: Party.find('party-34').revision + 1 }],
         ['party_travelling', { stats: { objective: { npcId: 10 }, travel: {} } }],
         ['party_target_changed', { stats: { objective: { npcId: 11 } } }],
         ['party_competition_wait', { stats: { objective: { npcId: 10 }, coldCompetition: { wait: { until: at + 1 } } } }],
@@ -190,12 +202,9 @@ async function run() {
     });
     assert.strictEqual(targetChange.detail, 'party_target_changed');
     assert.strictEqual(targetChange.rejectionContext.actual, 11, 'validate the current leader target, not the representative or stale forecast');
-    const partial = await apply(34, 36, { owner: { ...Owner, claimBatch: (states, opts) => Owner.claimBatch(states.slice(0, 2), opts) } });
-    assert.strictEqual(partial.reason, 'claim_rejected');
-    assert([34, 35, 36].every(id => !state(id).simulation.leaseId), 'partial grants are released');
-    const race = await apply(34, 36, { owner: { ...Owner, commitAndReleaseBatch: async (entries, opts) => {
-        await Database.execute(['UPDATE bot_background_parties SET updatedAt=updatedAt+1 WHERE partyId=?', ['party-34']]);
-        return Owner.commitAndReleaseBatch(entries, opts);
+    const race = await apply(34, 36, { owner: { ...Owner, commitBatch: async (entries, opts) => {
+        await Database.execute(['UPDATE bot_background_parties SET revision=revision+1 WHERE partyId=?', ['party-34']]);
+        return Owner.commitBatch(entries, opts);
     } } });
     assert.strictEqual(race.reason, 'commit_rejected');
     const rows = await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId IN (34,35,36)', []]);
@@ -203,9 +212,9 @@ async function run() {
     assert.strictEqual((await Repository.load(36)).relations.length, 0);
 
     await createParty([37, 38]);
-    await assert.rejects(() => apply(37, 39, { owner: { ...Owner, commitAndReleaseBatch: (entries, opts) => {
+    await assert.rejects(() => apply(37, 39, { owner: { ...Owner, commitBatch: (entries, opts) => {
         entries.find(e => e.proposal.result.memoryEvents.length).proposal.result.memoryEvents[0].key = '';
-        return Owner.commitAndReleaseBatch(entries, opts);
+        return Owner.commitBatch(entries, opts);
     } } }), /memory/i);
     const rolledParty = await Database.execute(['SELECT statsJson,nextResolveAt FROM bot_background_parties WHERE partyId=?', ['party-37']]);
     assert(!JSON.parse(rolledParty[0].statsJson).coldCompetition);
@@ -221,34 +230,26 @@ async function run() {
     assert.strictEqual(routed.pvp, false);
 
     await createParty([43, 44]);
-    const staleMember = await apply(43, 45, { owner: { ...Owner, commitAndReleaseBatch: async (entries, opts) => {
+    const staleMember = await apply(43, 45, { owner: { ...Owner, commitBatch: async (entries, opts) => {
         await Database.execute(['UPDATE bot_life_state SET simulationRevision=simulationRevision+1 WHERE characterId=44', []]);
-        return Owner.commitAndReleaseBatch(entries, opts);
+        return Owner.commitBatch(entries, opts);
     } } });
     assert.strictEqual(staleMember.reason, 'commit_rejected', 'a nonprincipal member CAS rejects the whole group');
     assert.strictEqual((await Repository.load(45)).relations.length, 0);
     assert(!Party.find('party-43').stats.coldCompetition);
     await createParty([46, 47]);
-    const rosterRace = await apply(46, 48, { owner: { ...Owner, commitAndReleaseBatch: async (entries, opts) => {
+    const rosterRace = await apply(46, 48, { owner: { ...Owner, commitBatch: async (entries, opts) => {
         await Database.execute(['UPDATE bot_background_parties SET memberIdsJson=? WHERE partyId=?', ['[46,52]', 'party-46']]);
-        return Owner.commitAndReleaseBatch(entries, opts);
+        return Owner.commitBatch(entries, opts);
     } } });
     assert.strictEqual(rosterRace.reason, 'commit_rejected', 'full roster identity is checked even without a version increment');
     assert.strictEqual((await Repository.load(48)).relations.length, 0);
-    await createParty([49, 50]);
-    const memoryRace = await apply(49, 51, { owner: { ...Owner, claimBatch: async (...args) => {
-        const result = await Owner.claimBatch(...args);
-        Memory.accept({ ...Memory.snapshot(50), revision: Memory.snapshot(50).revision + 1 });
-        return result;
-    } } });
-    assert.strictEqual(memoryRace.reason, 'contest_changed_during_claim');
-    assert([49, 50, 51].every(id => !state(id).simulation.leaseId));
     const freshActions = new ColdCompetitionActions({ ...base, conflictsEnabled: () => true });
     const forecast = (a, b) => ({ ...event(a, b), contextVersion: 1, decisionRolls: [0.99, 0.99, 0, 0.99] });
     await createParty([53, 54]);
     const staleForecast = forecast(53, 55), savedForecast = JSON.stringify(staleForecast);
     const beforeSave = Party.find('party-53');
-    await Database.execute(['UPDATE bot_background_parties SET updatedAt=updatedAt+1, nextResolveAt=nextResolveAt+100 WHERE partyId=?', ['party-53']]);
+    await Database.execute(['UPDATE bot_background_parties SET revision=revision+1, nextResolveAt=nextResolveAt+100 WHERE partyId=?', ['party-53']]);
     Party.acceptRow((await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', ['party-53']]))[0]);
     await Database.execute(['UPDATE bot_life_state SET hp=99,simulationRevision=simulationRevision+1 WHERE characterId=53', []]);
     Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=53', []]))[0]);

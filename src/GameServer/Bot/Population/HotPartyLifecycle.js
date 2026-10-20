@@ -5,23 +5,20 @@ const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator'
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const Placement = invoke('GameServer/Bot/Population/ActivationPlacement');
 const World = invoke('GameServer/World/World');
+const RaidEntityIndex = invoke('GameServer/World/RaidEntityIndex');
+const Database = invoke('Database');
 const pending = new Set();
 const raidFailures = new Set();
 const RAID_FAILURE_RETREAT_MS = 15000;
 const id = session => Number(session?.actor?.fetchId?.());
 
 function raidObjective(party) {
-    const objective = party?.stats?.objective;
-    return objective?.sourceKind === 'raid'
-        && Number(objective.raidBossTemplateId || objective.npcId) > 0 ? objective : null;
+    return Parties.raidBossKey(party) ? party.stats.objective : null;
 }
 
 function raidBossForParty(party) {
-    const objective = raidObjective(party);
-    return objective ? invoke('GameServer/World/RaidEntityIndex').bossByTemplateId(
-        World,
-        Number(objective.raidBossTemplateId || objective.npcId)
-    ) : null;
+    const bossKey = Parties.raidBossKey(party);
+    return bossKey ? RaidEntityIndex.bossByTemplateId(World, bossKey) : null;
 }
 
 function syncColdRaidHp(party) {
@@ -34,8 +31,8 @@ function syncColdRaidHp(party) {
 }
 
 function captureHotRaidHp(party, timestamp = Date.now()) {
-    const objective = raidObjective(party);
-    if (!objective) return party;
+    const bossTemplateId = Parties.raidBossKey(party);
+    if (!bossTemplateId) return party;
     const Roster = require('../../Clan/ClanRaidRoster');
     if (Roster.markerFor(party) && !Roster.held(party)) {
         if (!Roster.nativeHotStarted(party)) return party;
@@ -48,7 +45,7 @@ function captureHotRaidHp(party, timestamp = Date.now()) {
     const maxHp = Math.max(1, Number(boss?.fetchMaxHp?.() || previous.maxHp
         || party.stats?.hotRaidBoss?.maxHp || previous.encounter?.mob?.maxHp || hp || 1));
     const defeated = !boss || boss.isDead?.() || boss.state?.fetchDead?.() || hp <= 0;
-    const key = previous.key || `raid:${Number(objective.raidBossTemplateId || objective.npcId)}`;
+    const key = previous.key || `raid:${bossTemplateId}`;
     const encounter = defeated ? null : {
         ...(previous.encounter || {}),
         version: 1,
@@ -61,7 +58,7 @@ function captureHotRaidHp(party, timestamp = Date.now()) {
         ...previous,
         version: 1,
         key,
-        bossTemplateId: Number(objective.raidBossTemplateId || objective.npcId),
+        bossTemplateId,
         raidInstanceId: invoke('GameServer/RaidBoss/RaidEncounterScope').instanceId(boss)
             || previous.raidInstanceId || party.stats?.hotRaidBoss?.instanceId || null,
         status: defeated ? 'defeated' : 'active',
@@ -101,8 +98,7 @@ function pauseRaidWorld(party, sourceSession) {
     const boss = raidBossForParty(party);
     if (!boss) return null;
     if (invoke('GameServer/RaidBoss/RaidEncounterScope').otherParticipants(World, boss, party.memberIds)) return boss;
-    const index = invoke('GameServer/World/RaidEntityIndex');
-    for (const entity of index.entitiesForRaid(World, {
+    for (const entity of RaidEntityIndex.entitiesForRaid(World, {
         bossId: Number(boss.fetchId?.() || 0),
         bossTemplateId: Number(boss.fetchSelfId?.() || 0)
     })) {
@@ -302,8 +298,8 @@ async function transition(party, states, next, phase, reason) {
     // Hot time has already been played. It is never another cold reward window.
     const nextStates = next.map(s => ({ ...s, phase, activity: 'grouped',
         timing: { ...s.timing, nextResolveAt, lastResolvedAt: at }, updatedAt: at }));
-    const result = await invoke('Database').transitionBackgroundParty({ partyId: party.partyId,
-        expectedStatus: party.status, expectedUpdatedAt: party.updatedAt, expectedPhase: states[0].phase,
+    const result = await Database.transitionBackgroundParty({ partyId: party.partyId,
+        expectedStatus: party.status, expectedPartyRevision: party.revision, expectedPhase: states[0].phase,
         phase, nextResolveAt, statsJson: JSON.stringify(stats),
         members: nextStates.map((s, index) => ({ characterId: s.characterId,
             expectedRevision: Number(states[index].simulation?.revision || 0),
@@ -427,10 +423,7 @@ async function activate(partyId, reason = 'near_player', options = {}) {
         for (const state of states) invoke('GameServer/Bot/Population/PopulationMetrics').recordActivation();
         if (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) console.info('BotPopulation :: activated party %s members=%d reason=%s', partyId, states.length, reason);
         if (raidObjective(party) && options.raidFanout !== false) {
-            const bossTemplateId = Number(raidObjective(party).raidBossTemplateId || raidObjective(party).npcId);
-            const competitors = Parties.active().filter((candidate) => candidate.partyId !== party.partyId
-                && candidate.status === 'active'
-                && Number(raidObjective(candidate)?.raidBossTemplateId || raidObjective(candidate)?.npcId) === bossTemplateId);
+            const competitors = Parties.raidCompetitors(Parties.raidBossKey(party), 'active', party.partyId, 'raid_fanout_activate');
             for (const competitor of competitors) {
                 await activate(competitor.partyId, reason, { ...options, raidFanout: false });
             }
@@ -508,10 +501,7 @@ async function cooldown(partyId, reason = 'policy', options = {}) {
             }
         }
         if (raidObjective(party) && options.raidFanout !== false) {
-            const bossTemplateId = Number(raidObjective(party).raidBossTemplateId || raidObjective(party).npcId);
-            const competitors = Parties.admitted().filter((candidate) => candidate.partyId !== party.partyId
-                && candidate.status === 'hot'
-                && Number(raidObjective(candidate)?.raidBossTemplateId || raidObjective(candidate)?.npcId) === bossTemplateId);
+            const competitors = Parties.raidCompetitors(Parties.raidBossKey(party), 'hot', party.partyId, 'raid_fanout_cooldown');
             for (const competitor of competitors) {
                 await cooldown(competitor.partyId, reason, { ...options, raidFanout: false });
             }
@@ -538,7 +528,7 @@ function markedHotStates(party, sessions) {
         // stats serialization. Full lifecycle snapshots belong to its CAS.
         const items = (actor.backpack?.fetchItems?.() || []).filter(item => item.fetchEquipped?.() ?? item.equipped);
         return { ...current, classId: Number(actor.fetchClassId()), clanId: Number(actor.fetchClanId()), level: Number(actor.fetchLevel()),
-            partyId: current.party?.partyId, simulationOwner: current.simulation?.ownerId || 'legacy_main',
+            partyId: current.party?.partyId,
             loc: { locX: actor.fetchLocX(), locY: actor.fetchLocY(), locZ: actor.fetchLocZ() },
             vitals: { hp: actor.fetchHp(), maxHp: actor.fetchMaxHp() },
             inventory: Life.inventorySummaryFromItems(items),
@@ -557,7 +547,7 @@ async function openMarkedRaid(party, sessions, timestamp = Date.now()) {
         const marker = Roster.markerFor(party);
         const spot = invoke('GameServer/RaidBoss/RaidEncounterScope').projectSource(
             invoke('GameServer/RaidBoss/RaidBossSourceCatalog').findById(marker.sourceId));
-        const owner = invoke('Database').clanRaidOwner(marker);
+        const owner = Database.clanRaidOwner(marker);
         const current = await Life.statesByIds(marker.memberIds);
         if (current.length !== 9 || current.some(state => state.phase !== 'hot' || state.partyId !== party.partyId))
             return { ok: false, reason: 'raid_roster_member_changed' };
@@ -588,7 +578,7 @@ async function openMarkedRaid(party, sessions, timestamp = Date.now()) {
             && session.hotBackgroundPartyId === party.partyId && !session.partyCompanion)
             && require('./PartyHuntingAssembly').nearby(fresh)
             && fresh.every(state => !state.stats?.travel && invoke('GameServer/Bot/AI/SpotService').containsLocation(spot, state.loc));
-        const checked = Roster.admission(party, fresh, spot, { owner: invoke('Database').clanRaidOwner(marker), arrived: freshArrived, timestamp, phase: 'hot',
+        const checked = Roster.admission(party, fresh, spot, { owner: Database.clanRaidOwner(marker), arrived: freshArrived, timestamp, phase: 'hot',
             assessment: { ready: true, eligible: fresh } });
         if (!checked.ok) { cancellation = checked.reason; return checked; }
         const next = { ...party, stats: { ...party.stats, raidAdmission: checked.proof } };
@@ -632,7 +622,7 @@ function openMarkedRaidAtImpact(party, session, actor, target, boss, nativeImpac
     const sessions = party.memberIds.map(memberId => World.registeredActorById(memberId)?.session).filter(Boolean);
     const members = markedAttackInputs(party, sessions);
     if (members.length !== 9) return false;
-    const result = invoke('Database').openClanRaidPartyAtImpact({ partyId: party.partyId, expectedUpdatedAt: party.updatedAt,
+    const result = Database.openClanRaidPartyAtImpact({ partyId: party.partyId, expectedPartyRevision: party.revision,
         attackerId: id(session), targetId: Number(target.fetchId()), bossId: Number(boss.fetchId()),
         raidInstanceId: invoke('GameServer/RaidBoss/RaidEncounterScope').instanceId(boss), members, nativeImpact });
     if (!result.ok) return false;

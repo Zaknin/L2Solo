@@ -251,15 +251,17 @@ function skill(id, type, target, effect, power = 100) {
 }
 
 // PvP consumes successive owned potions, including quick healing under HoT;
-// the farming cap, cooldowns, empty inventory, and active HoT remain enforced.
+// cooldowns, empty inventory, and active HoT remain enforced. A second bottle
+// on the same target is no longer capped: the potion HoT and the item reuse
+// limit it (E70).
 {
     const { own, bot, enemy } = setup({ hp: 20 });
-    let amount = 3;
+    let amount = 4;
     bot.backpack.fetchItems = () => [{ fetchSelfId: () => 1060, fetchAmount: () => amount, fetchId: () => 888 }];
     bot.backpack.buildItemSkill = () => ({ fetchSelfId: () => 2031 });
     bot.backpack.useItem = () => { amount--; };
     assert(Potions.tryUseInCombat(own, bot, enemy));
-    assert.strictEqual(Potions.tryUseInCombat(own, bot, enemy), null);
+    assert(Potions.tryUseInCombat(own, bot, enemy), 'no per-target cap on a second bottle (E70)');
     assert(Potions.tryUseInCombat(own, bot, enemy, { pvp: true }));
     bot.canUseSkill = () => false;
     assert.strictEqual(Potions.tryUseInCombat(own, bot, enemy, { pvp: true }), null);

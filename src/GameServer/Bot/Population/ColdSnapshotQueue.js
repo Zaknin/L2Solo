@@ -17,6 +17,8 @@ class ColdSnapshotQueue {
             critical: 0,
             delivered: 0
         };
+        // Near facts (BotLifeState.notifyNearFacts) marked, by reason, since start: always on.
+        this.nearFacts = {};
     }
 
     mark(state, options = {}) {
@@ -36,6 +38,7 @@ class ColdSnapshotQueue {
         };
         this.dirty.set(characterId, entry);
         if (critical) this.critical.set(characterId, entry);
+        if (options.near === true) this.nearFacts[entry.reason] = (this.nearFacts[entry.reason] || 0) + 1;
         DiagnosticConfig.developerDiagnostics && (this.counters.marked += 1);
         if (previous) DiagnosticConfig.developerDiagnostics && (this.counters.coalesced += 1);
         if (critical) DiagnosticConfig.developerDiagnostics && (this.counters.critical += 1);
@@ -111,6 +114,7 @@ class ColdSnapshotQueue {
             maxDeferralMs: this.maxDeferralMs,
             lagThrottleMs: this.lagThrottleMs,
             lagAbortMs: this.lagAbortMs,
+            nearFacts: { ...this.nearFacts },
             ...(DiagnosticConfig.developerDiagnostics ? this.counters : { diagnosticsEnabled: false })
         };
     }

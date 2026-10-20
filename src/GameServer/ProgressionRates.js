@@ -190,6 +190,13 @@ function deepBlueActive(npcLevel, killerLevel) {
     return deepBlueLevelGap(npcLevel, attackerLevel(killerLevel)) >= DEEP_BLUE_LEVEL_GAP;
 }
 
+// The single-killer penaltyPercent of deepBlueRule (0 when no penalty applies),
+// without building the rule (L129).
+function deepBluePenaltyPercent(npcLevel, killerLevel) {
+    const levelGap = deepBlueLevelGap(npcLevel, attackerLevel(killerLevel));
+    return levelGap < DEEP_BLUE_LEVEL_GAP ? 0 : (levelGap - (DEEP_BLUE_LEVEL_GAP - 1)) * DEEP_BLUE_PENALTY_PER_LEVEL;
+}
+
 function deepBlueRule({ npcLevel, killerLevel, attackerLevels = [] } = {}) {
     const levels = [killerLevel, ...attackerLevels]
         .map(attackerLevel)
@@ -257,6 +264,7 @@ module.exports = {
     rollDropAmount,
     deepBlueRule,
     deepBlueActive,
+    deepBluePenaltyPercent,
     rewardGroupRoll,
     scaleAmount
 };

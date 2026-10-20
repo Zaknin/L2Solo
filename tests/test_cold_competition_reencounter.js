@@ -7,7 +7,8 @@ const Runtime = invoke('GameServer/Social/InteractionMemoryRuntime');
 const Persona = invoke('GameServer/Bot/AI/BotPersona');
 const { decide } = require('../src/GameServer/Bot/Population/ColdCompetitionPolicy');
 const { reaction } = require('../src/GameServer/Bot/Population/ColdPartyConflict');
-const { seeded, ColdCompetitionMonitor, INTERVAL_MS } = require('../src/GameServer/Bot/Population/ColdCompetitionMonitor');
+const { ColdCompetitionMonitor, INTERVAL_MS } = require('../src/GameServer/Bot/Population/ColdCompetitionMonitor');
+const { seeded } = require('../src/GameServer/Bot/AI/TendencyRoll');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 const Preference = require('../src/GameServer/Bot/Population/PartyMemoryPreference');
 const HotCompetition = invoke('GameServer/Bot/AI/BotMobCompetition');
@@ -42,8 +43,9 @@ function hydrate(c, snapshots) {
         Runtime.accept(s);
         // Exercise the actual main-to-worker memory projection and receiver.
         const state = c.states.find(state => state.characterId === s.ownerId);
-        kernel.upsert(clone({ state: { ...state, phase: 'cold', activity: 'hunting' },
-            context: { interactionMemory: Runtime.snapshot(s.ownerId) } }));
+        kernel.upsert(clone({ state: { ...state, phase: 'cold', activity: 'hunting' } }));
+        // The memory table's row as the worker's memory watch accepts it.
+        kernel.interactionMemory.accept(clone(Runtime.snapshot(s.ownerId)));
     }
     for (const a of c.states) for (const b of c.states) if (a !== b) {
         const source = { id: a.characterId }, target = { id: b.characterId };
@@ -94,15 +96,18 @@ function distribution(c, memory, reverse) {
 }
 
 function monitorReplay(c, memory) {
-    const monitor = new ColdCompetitionMonitor({ capacityForSpot: () => c.states.length / 3, personaFor: Persona.generate });
+    // The parties table, read through each party's leader.
+    const led = new Map();
     const spot = { id: c.spotId, npcEntries: [{ selfId: c.npcId, count: 1 }] };
+    const monitor = new ColdCompetitionMonitor({ capacityForSpot: () => c.states.length / 3, personaFor: Persona.generate,
+        leaderParty: id => led.get(Number(id)) || null, spotOf: () => spot });
     const entries = c.states.map(s => {
         const side = c.groups.findIndex(ids => ids.includes(s.characterId)), u = unit(c, side);
         const party = u.partyId ? { partyId: u.partyId, memberIds: c.groups[side], leaderId: c.groups[side][0],
             status: 'active', spotId: c.spotId, updatedAt: timestamp, stats: { objective: { npcId: c.npcId } } } : null;
+        if (party) led.set(Number(party.leaderId), party);
         return { state: { ...s, phase: 'cold', activity: party ? 'grouped' : 'hunting', spotId: c.spotId,
-            vitals: { hp: 100 }, party: { partyId: party?.partyId || null } },
-        context: { spot, party, targetNpcId: c.npcId } };
+            vitals: { hp: 100 }, party: { partyId: party?.partyId || null } } };
     });
     const decisions = new Map();
     for (let scan = 0; scan <= 1440; scan++) {

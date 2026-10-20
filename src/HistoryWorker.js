@@ -1,13 +1,18 @@
 'use strict';
 
-// The history thread: the only writer of the history file. Every few hundred
-// milliseconds (or at once on a flush) it moves the world's outbox rows into
-// the history file in batches and runs the age cleanup once a minute. It only
-// reads the world file; the main thread deletes the moved outbox rows.
+// The history thread: the only writer of the history file. It moves the
+// world's outbox rows into the history file in batches: after a wake message
+// from the main thread (a world write job ended), at most once per transfer
+// interval, and at once on a flush. Once a minute it also drains and runs the
+// age cleanup, which bounds the delay of a lost wake message (the rows stay in
+// the outbox until reported as moved, so nothing is ever lost). It only reads
+// the world file; the main thread deletes the moved outbox rows.
 
 const { parentPort, workerData } = require('worker_threads');
 const { DatabaseSync } = require('node:sqlite');
 const HistoryStore = require('./HistoryStore');
+const { heapRecord, observe } = require('./GameServer/Bot/Population/WorkerHeapTelemetry');
+if (workerData.developerDiagnostics === true) observe(); // major-GC window for the v8Heap record (WorkerHeapTelemetry)
 const diagnosticWriter = workerData.developerDiagnostics === true && workerData.diagnostics ? new (require('./EconomyDiagnosticWriter').EconomyDiagnosticWriter)(
     require('node:path').join(require('node:path').dirname(workerData.worldPath), 'logs'), workerData.diagnostics, { enabled: true }) : null;
 
@@ -17,9 +22,10 @@ const BATCH = 1000;
 
 const history = HistoryStore.open(String(workerData.historyPath));
 const world = new DatabaseSync(String(workerData.worldPath), { readOnly: true, timeout: 5000 });
-let lastRetentionAt = 0;
 let reportedUpTo = 0;
-let timer = null;
+let lastTickAt = 0;
+let tickTimer = null;
+let retentionTimer = null;
 
 // Moves every outbox row that is there now; returns the totals.
 function drain() {
@@ -34,17 +40,22 @@ function drain() {
     }
 }
 
-function tick() {
+function tick(withRetention = false) {
+    lastTickAt = Date.now();
     try {
         const result = drain();
+        // The once-a-minute tick also carries this thread's heap.
+        const heap = withRetention ? { v8Heap: heapRecord() } : null;
         // Also report a cursor that was reached before a restart: the main
         // thread then deletes outbox rows a crash left behind.
         if (result.upTo > reportedUpTo) {
             reportedUpTo = result.upTo;
-            parentPort.postMessage({ type: 'moved', ...result });
+            parentPort.postMessage({ type: 'moved', ...result, ...heap });
+        } else {
+            // Lets the main thread send the next wake message.
+            parentPort.postMessage({ type: 'idle', ...heap });
         }
-        if (Date.now() - lastRetentionAt >= RETENTION_MS) {
-            lastRetentionAt = Date.now();
+        if (withRetention) {
             HistoryStore.retention(history);
             diagnosticWriter?.cleanup();
         }
@@ -53,7 +64,22 @@ function tick() {
     }
 }
 
+// A wake message ends the wait: the next tick runs now, or when the transfer
+// interval since the last one has passed, so a busy world still transfers in
+// batches at the old pace.
+function scheduleTick() {
+    if (tickTimer) return;
+    tickTimer = setTimeout(() => {
+        tickTimer = null;
+        tick();
+    }, Math.max(0, lastTickAt + TRANSFER_MS - Date.now()));
+}
+
 parentPort.on('message', (message = {}) => {
+    if (message.type === 'wake') {
+        scheduleTick();
+        return;
+    }
     if (message.type === 'economy_diagnostics') {
         if (!diagnosticWriter) return;
         let written = 0;
@@ -76,12 +102,13 @@ parentPort.on('message', (message = {}) => {
         parentPort.postMessage({ type: 'flushed', id: message.id, ...reply });
         return;
     }
-    clearInterval(timer);
+    clearTimeout(tickTimer);
+    clearInterval(retentionTimer);
     world.close();
     history.close();
     parentPort.postMessage({ type: 'stopped', id: message.id, ...reply });
     parentPort.close();
 });
 
-tick();
-timer = setInterval(tick, TRANSFER_MS);
+tick(true);
+retentionTimer = setInterval(() => tick(true), RETENTION_MS);

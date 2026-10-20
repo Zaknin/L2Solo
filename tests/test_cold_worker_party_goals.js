@@ -125,8 +125,6 @@ const originals = {
     assert.strictEqual(emergency.departed.stats.lastPartyMarketBreak.slots, 81);
     assert.strictEqual(savedParty.stats.marketAbsences[2].objective.clanGoalKey, 'clan:1:gear');
     assert.deepStrictEqual(savedParty.memberIds, [1, 3]);
-    assert.strictEqual(PopulationService.partySessionExpired(savedParty, now), false,
-        'a short essential errand must not expire the shared hunt');
     assert.strictEqual(require('../src/GameServer/Bot/Population/PartyMarketBreak').pending(savedParty, now + 16 * 60000).length, 0,
         'a missing bot cannot reserve a slot forever');
     members[0].stats.equipmentPlan = { status: 'active', strategy: 'craft',

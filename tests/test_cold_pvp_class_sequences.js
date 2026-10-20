@@ -7,7 +7,7 @@ require('../src/GameServer/Bot/AI/TendencyRoll').roll = () => 0.49;
 invoke('GameServer/DataCache').init();
 const Profiles = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Pvp = invoke('GameServer/Bot/Population/ColdPvpResolver');
-const { seeded } = require('../src/GameServer/Bot/Population/ColdCompetitionMonitor');
+const { seeded } = require('../src/GameServer/Bot/AI/TendencyRoll');
 const at = 2000000;
 function fighter(id) {
     const state = { characterId: id, name: `Force${id}`, phase: 'cold', level: 30,

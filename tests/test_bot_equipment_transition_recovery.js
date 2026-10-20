@@ -56,8 +56,7 @@ assert.strictEqual(item(Gear.replacementPlanFor(robeState, oldFarm, Spots.ensure
 const dual = { characterId: 123, level: 59, adena: 6330530,
     stats: { classId: 34, role: 'buffer', clanId: 7 }, inventory: inventory([...heavy, [127, [7]]]) };
 const spots = Spots.ensure();
-const occupancy = Spots.occupancySnapshot(spots, [dual]);
-const forced = Gear.planFor(dual, { spots, occupancy, clanCrafting: true, recipeId: 902551 });
+const forced = Gear.planFor(dual, { spots, clanCrafting: true, recipeId: 902551 });
 assert.strictEqual(forced.strategy, 'market',
     'live availability must consider buying the missing blade before rejecting its recipe');
 assert.strictEqual(forced.target.selfId, 127);
@@ -66,7 +65,7 @@ const bridge = Gear.npcWeaponBridgePlan(dual);
 assert(bridge?.weaponBridge && bridge.combine, 'a clan member lacking duals needs an affordable blacksmith bridge');
 assert.strictEqual(item(bridge.combine.resultId).etc.rank, 'c');
 assert(bridge.market.price + bridge.market.reserve <= dual.adena);
-assert.strictEqual(Gear.planFor(dual, { spots, occupancy }).combine.resultId, bridge.combine.resultId,
+assert.strictEqual(Gear.planFor(dual, { spots }).combine.resultId, bridge.combine.resultId,
     'normal planning at B grade must recover a usable C bridge');
 for (const classId of [2, 34]) {
     for (const level of [40, 52, 61]) {

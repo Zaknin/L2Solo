@@ -26,7 +26,7 @@ const base = 830000;
 const heal = [{ selfId: 1015, level: 1 }], buff = [{ selfId: 1068, level: 1 }];
 function member(id, classId, skills = []) {
     const value = { characterId: id, classId, clanId: 0, level: 50, phase: 'cold', activity: 'hunting', spotId: 'ordinary:fixture',
-        partyId: null, simulationOwner: 'legacy_main', simulationRevision: 0, inventory: {}, accountName: 'bot_pop_recruitment',
+        partyId: null, simulationRevision: 0, inventory: {}, accountName: 'bot_pop_recruitment',
         stats: { generatedCold: true, classId, partyHistory: { peer: { runs: 4 } }, coldCombat: {
             version: Combat.PROFILE_VERSION, classId, skillSource: 'database', skills: Combat.skillSnapshotsFromRecords(skills) } } };
     const role = Gear.roleFor(value);
@@ -58,7 +58,7 @@ for (const value of [...roster, healer, damage, ...Array.from({ length: 71 }, (_
 }
 seed.close();
 const query = (sql, args = []) => Database.execute([sql, args]);
-const originals = { find: Catalog.findById, decorate: Scope.decorateSpot, project: Scope.projectSource, share: Config.maxBotMemberShare,
+const originals = { find: Catalog.findById, project: Scope.projectSource, share: Config.maxBotMemberShare,
     reload: invoke('GameServer/Clan/ClanService').reload };
 const plan = { status: 'active', strategy: 'direct_drop', partyNeed: 'required', expectedKills: 10, expectedEffort: 10,
     target: { selfId: 80, name: 'Sword', slot: 7 }, next: { spotId: spot.id, npcId: spot.raidBossTemplateId, itemId: 80,
@@ -246,9 +246,9 @@ function scalarSourceCase() {
         const scalar = originals.project(spot);
         assert.equal(sessionsReads, 0); assert.equal(snapshotReads, 0);
         assert(!Object.hasOwn(scalar, 'raidAuthority') && !Object.hasOwn(scalar, 'raidExternallyEngaged'));
-        const full = originals.decorate(spot);
+        const full = { ...spot, ...Scope.raidRow(spot.raidBossTemplateId) };
         assert.equal(Demand.sourceFingerprint(scalar), Demand.sourceFingerprint(full));
-        assert.equal(sessionsReads, 1); assert.equal(snapshotReads, 1, 'legacy full encounter decoration still reads its old inputs');
+        assert.equal(sessionsReads, 1); assert.equal(snapshotReads, 1, 'the raids table row still reads the full encounter inputs');
         dead = true;
         const gone = originals.project(spot);
         assert.equal(gone.raidWorldAvailable, false); assert.equal(gone.raidInstanceId, scalar.raidInstanceId);
@@ -376,7 +376,7 @@ async function main() {
             console.log('Clan recruitment critic fixes: same-key cleanup, min9/generation/roster delivery, started preservation and scalar source checks passed');
             return;
         }
-        let prospects = await Life.statesByIds([healer.characterId, damage.characterId], { unassigned: true, ownerId: 'legacy_main' });
+        let prospects = await Life.statesByIds([healer.characterId, damage.characterId], { unassigned: true });
         await pureAndWorker(clan, prospects);
         await boundedContinuation(clan); clan = await Goals.clanProjectionById(clan.id);
         let captured = planning(clan, prospects);
@@ -439,7 +439,7 @@ async function main() {
         for (const m of current.members) assert(!m.stats.equipmentPlan && !m.stats.clanPartyObjective, 'waiting applies no plan, pay or party objective');
         assert.equal((await query("SELECT COUNT(*) AS n FROM clan_operation_members WHERE status='active'"))[0].n, 0);
         await query('UPDATE characters SET clanJoinExpiryTime=0 WHERE id=?', [healer.characterId]);
-        prospects = await Life.statesByIds([healer.characterId], { unassigned: true, ownerId: 'legacy_main' });
+        prospects = await Life.statesByIds([healer.characterId], { unassigned: true });
         const joining = await Equipment.resolveClan(current, current.state.productionGoal,
             { ownerSection: 'productionGoal', planning: planning(current, prospects) });
         assert.equal(joining.joined.accepted, healer.characterId);
@@ -464,7 +464,7 @@ async function main() {
         await fundedOwners();
         console.log('Clan goal recruitment: native conditional RPC, alternatives, capacity, stale CAS, refusal, accepted9 and owner/watch tests passed');
     } finally {
-        Catalog.findById = originals.find; Scope.decorateSpot = originals.decorate; Scope.projectSource = originals.project; Config.maxBotMemberShare = originals.share;
+        Catalog.findById = originals.find; Scope.projectSource = originals.project; Config.maxBotMemberShare = originals.share;
         invoke('GameServer/Clan/ClanService').reload = originals.reload;
         Events.stop(); await Runtime.shutdown(); await Database.close(); fs.rmSync(isolated.directory, { recursive: true, force: true });
     }

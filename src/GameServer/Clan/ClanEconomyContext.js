@@ -5,6 +5,7 @@ const { WishNetwork, fundable: fundableWish } = require('../Bot/Economy/WishNetw
 const HallPolicy = require('../ClanHall/Policy');
 const Rules = require('./ClanRules');
 const Contributions = invoke('GameServer/Clan/ClanContributionPolicy');
+const WishProviders = require('../Bot/Economy/WishProviders');
 const engine = new WishNetwork();
 const positive = value => Math.max(0, Number(value) || 0);
 const trait = (persona, name) => Math.max(0, Math.min(1, Number(persona?.traits?.[name] ?? 0.5)));
@@ -150,7 +151,7 @@ function forClan(clan, inputs = {}) {
             if (Number(id) === Number(numbers?.plan?.itemId)) return positive(numbers.plan.valueHours);
             const item = require('../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, id);
             if (!item?.etc?.slot) return 0;
-            const gain = require('../Bot/Economy/WishProviders').gearGain(member, item, basics().timestamp);
+            const gain = WishProviders.gearGain(member, item, basics().timestamp);
             return Math.max(0, (gain.attack + gain.defence * basics().deathHours) * clanHorizon);
         };
         return { persona: member.persona || basics().persona, clanHorizon,

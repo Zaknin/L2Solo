@@ -5,6 +5,7 @@ const Rates = invoke('GameServer/ProgressionRates');
 const Index = require('../../Item/ItemTemplateIndex');
 const Drops = require('../Population/BackgroundDropResolver');
 const Sell = require('../../Items/NpcSellRules');
+const Diagnostics = require('./EconomyDiagnostics');
 
 const MAX_NPC_VALUES = 16384;
 const MAX_SPOT_VALUES = 32768;
@@ -13,6 +14,11 @@ let revisionId = 0;
 let compositions = new WeakMap();
 let spotValues = new WeakMap();
 let spotValueCount = 0;
+// The held spot rows in insertion order, as [rows, key] pairs flat: at the
+// cap the oldest one row leaves, not all of them (a wipe re-measured the
+// whole atlas at once). At most 2 x MAX_SPOT_VALUES slots, ~512 KB.
+let spotValueOrder = [];
+let spotValueNext = 0;
 let rewardGroups = new WeakMap();
 const npcValues = new Map();
 
@@ -27,6 +33,8 @@ function refresh(rates = Rates.profile()) {
         compositions = new WeakMap();
         spotValues = new WeakMap();
         spotValueCount = 0;
+        spotValueOrder = [];
+        spotValueNext = 0;
         rewardGroups = new WeakMap();
         npcValues.clear();
     }
@@ -138,13 +146,17 @@ function value(spot, killerLevel, { spoilSkillLevel = 0, spoilerLevel = killerLe
                 skillLevel: spoilSkillLevel, attackerLevel: spoilerLevel, targetLevel: entry.level });
     }
     if (spotValueCount >= MAX_SPOT_VALUES) {
-        spotValues = new WeakMap();
-        spotValueCount = 0;
-        rows = null;
+        // A ring: the slot of the oldest held row takes the new one.
+        spotValueOrder[spotValueNext].delete(spotValueOrder[spotValueNext + 1]);
+        spotValueCount--;
+        Diagnostics.count('spot_reward', 'evict', 'oldest');
     }
     if (!rows) { rows = new Map(); spotValues.set(spot, rows); }
     rows.set(key, held);
     spotValueCount++;
+    spotValueOrder[spotValueNext] = rows;
+    spotValueOrder[spotValueNext + 1] = key;
+    spotValueNext = (spotValueNext + 2) % (2 * MAX_SPOT_VALUES);
     return { ...held };
 }
 

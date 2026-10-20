@@ -10,7 +10,6 @@ const Database = invoke('Database');
 const Data = invoke('GameServer/DataCache');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Population = invoke('GameServer/Bot/Population/PopulationService');
-const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Protocol = invoke('GameServer/Bot/Population/ColdSimulationProtocol');
 const { ColdSimulationCoordinator } = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
@@ -46,7 +45,7 @@ async function seed() {
 async function inner(mode) {
     const id = await seed(), state = clone(Life.snapshot(id)), time = Date.now();
     const request = { kind: 'lifecycle', characterId: id, commandId: `inner:${serial}`,
-        commandCheckpoint: Protocol.commandCheckpoint(state), state, context: {},
+        commandCheckpoint: Protocol.commandCheckpoint(state), state,
         precomputedResult: { patch: { activity: 'resting', vitals: { ...state.vitals, hp: 90 },
             stats: { restUntil: time + 60000 } }, events: [],
             materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: time + 60000 } };
@@ -62,13 +61,12 @@ async function inner(mode) {
     const worker = label => ({ terminate: async () => {}, postMessage(message) {
         sent.push({ label, message: clone(message) });
         if (message.type === 'fence') setImmediate(() => c.onMessage(Protocol.envelope('fence_ack',
-            message.workerEpoch, { characterId: id, proposal: null, token: null }, message.msgId), c.worker, c.workerEpoch));
+            message.workerEpoch, { characterId: id, proposal: null }, message.msgId), c.worker, c.workerEpoch));
         if (message.type === 'shutdown') setImmediate(() => c.onMessage(Protocol.envelope('drained',
             message.workerEpoch, { ok: true }, message.msgId), c.worker, c.workerEpoch));
     } });
     c.worker = worker('A');
     const originalWorker = c.worker, originalEpoch = c.workerEpoch;
-    c.contextIndex = () => ({}); c.contextFor = () => ({});
     c.population = { executeWorkerLifecycleCommand(...args) {
         calls.push(args[0]); admissions.push(args[2]?.workerAdmission);
         const work = Population.executeWorkerLifecycleCommand(...args);
@@ -100,24 +98,17 @@ async function inner(mode) {
             Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [id]]))[0]);
             assert.equal(Protocol.sameCommandCheckpoint(request.commandCheckpoint, Life.cachedState(id)), false);
         }
-        if (mode === 'deadline_metadata') {
-            // Same native tuple, deadline-only metadata: this proves admission
-            // parity, not a worker-owned legacy apply or native grant renewal.
-            await Database.execute(['UPDATE bot_life_state SET simulationLeaseUntil = ? WHERE characterId = ?', [Date.now() + 120000, id]]);
-            Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [id]]))[0]);
-            assert(Protocol.sameCommandCheckpoint(request.commandCheckpoint, Life.cachedState(id)));
-            assert.equal(admissions[0].check(), null, 'same11 cached deadline-only metadata admits synchronously before prepareResolve');
-        }
         if (mode === 'owned_replaced') c.commandInflight.set(id, Promise.resolve());
         if (mode === 'request_changed') {
             request.commandCheckpoint.updatedAt += 1000;
             assert.deepEqual(admissions[0].commandCheckpoint, originalCheckpoint,
                 'a later request mutation cannot replace the captured original authority');
         }
-        if (mode === 'claimed') {
-            const grant = await Owner.claimBatch([Life.snapshot(id)], { allowLifecycle: true, leaseMs: 120000 });
-            assert.equal(grant.grants.length, 1, JSON.stringify(grant.rejected));
-            assert(Life.cachedState(id).simulation.leaseId, 'existing native lease CAS boundary is exercised');
+        if (mode === 'moved') {
+            // A main write moved the row's revision past the command's copy.
+            await Database.execute(['UPDATE bot_life_state SET simulationRevision = simulationRevision + 1 WHERE characterId = ?', [id]]);
+            Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [id]]))[0]);
+            assert.equal(Protocol.sameCommandCheckpoint(request.commandCheckpoint, Life.cachedState(id)), false);
         }
         if (mode === 'fence') {
             const fenced = await c.fenceBot(id, 10);
@@ -139,7 +130,7 @@ async function inner(mode) {
             receipts: receipts.map(row => [row.label, row.message.payload.results[0]?.reason]) }));
         if (mode === 'owned_replaced') c.commandInflight.delete(id);
         assert.equal(c.commandInflight.size, 0);
-        if (mode === 'current' || mode === 'deadline_metadata' || mode === 'request_changed') {
+        if (mode === 'current' || mode === 'request_changed') {
             assert.equal(after.characters.find(row => row.id === id).hp, 90, 'current genuine native transition persists');
             assert(after.cache.timing.lastResolvedAt > state.timing.lastResolvedAt);
             assert.equal(receipts.length, 1); assert.equal(receipts[0].message.payload.results[0].ok, true);
@@ -164,7 +155,7 @@ async function inner(mode) {
 }
 function command(state) {
     return { characterId: state.characterId, kind: 'lifecycle', commandId: `manual:${++serial}`,
-        commandCheckpoint: Protocol.commandCheckpoint(state), state, context: {},
+        commandCheckpoint: Protocol.commandCheckpoint(state), state,
         precomputedResult: { patch: { activity: 'resting', vitals: { ...state.vitals, hp: 90 },
             stats: { restUntil: Date.now() + 60000 } }, events: [],
             materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: Date.now() + 60000 } };
@@ -177,25 +168,6 @@ async function manualCurrent() {
     const id = await seed(), state = Life.snapshot(id), request = command(state);
     const result = await Population.executeWorkerLifecycleCommand(state, request);
     assert.equal(result.ok, true); assert.equal((await facts(id)).characters.find(row => row.id === id).hp, 90);
-}
-async function manualOwnerCas() {
-    const id = await seed(), state = Life.snapshot(id), request = command(state);
-    const entered = deferred(), gate = deferred();
-    const blocker = Life.serializeClanLevelUp(id, async () => { entered.resolve(); await gate.promise; });
-    await entered.promise;
-    const pending = Population.executeWorkerLifecycleCommand(state, request); // truly optional-absent
-    try {
-        const grant = await Owner.claimBatch([Life.snapshot(id)], { allowLifecycle: true, leaseMs: 120000 });
-        assert.equal(grant.grants.length, 1, JSON.stringify(grant.rejected));
-        const before = await facts(id), failuresBefore = Database.stats().failures;
-        gate.resolve(); await blocker;
-        const result = await pending;
-        assert.equal(result.ok, false); assert.equal(result.reason, 'apply_failed', 'manual path reaches the retained native ownership write guard');
-        assert.deepEqual(await facts(id), before);
-        assert.equal(Database.stats().failures, failuresBefore + 1, 'native refusal remains visible in failure accounting');
-        assert.equal(Database.isColdTrainingSourceRetired(Error('cold_training_source_retired')), false,
-            'an unrelated same-message error cannot enter the native refusal domain');
-    } finally { gate.resolve(); await blocker; await pending; }
 }
 async function malformedOptions() {
     const id = await seed(), state = Life.snapshot(id), request = command(state), good = capability(state);
@@ -284,7 +256,7 @@ async function versionedTraining(key, mode, worker = false) {
         const c = new ColdSimulationCoordinator(), sent = [];
         c.ready = true; c.workerEpoch = `versioned-training:${id}`;
         c.worker = { postMessage(message) { sent.push(clone(message)); }, terminate: async () => {} };
-        c.contextIndex = () => ({}); c.contextFor = () => ({}); c.population = Population;
+        c.population = Population;
         await c.onMessage(Protocol.envelope('command_request', c.workerEpoch, { requests: [request] }, `versioned-message:${id}`),
             c.worker, c.workerEpoch);
         await c.commandTail;
@@ -396,7 +368,7 @@ async function hiddenVersionTraining(kind, worker) {
         const c = new ColdSimulationCoordinator(), sent = [];
         c.ready = true; c.workerEpoch = `hidden-training:${id}`;
         c.worker = { postMessage(message) { sent.push(clone(message)); }, terminate: async () => {} };
-        c.contextIndex = () => ({}); c.contextFor = () => ({}); c.population = Population;
+        c.population = Population;
         await c.onMessage(Protocol.envelope('command_request', c.workerEpoch, { requests: [request] }, `hidden-message:${id}`),
             c.worker, c.workerEpoch);
         await c.commandTail;
@@ -471,7 +443,7 @@ async function check(name, work) {
     options.default.Database.path = path.join(directory, 'world.sqlite');
     options.default.Database.historyPath = path.join(directory, 'history.sqlite');
     Database.init(); assert(Database.isReady()); Data.init(); await Life.init();
-    for (const mode of ['current', 'replace', 'stop', 'changed', 'fence', 'claimed', 'deadline_metadata', 'owned_replaced', 'request_changed']) {
+    for (const mode of ['current', 'replace', 'stop', 'changed', 'fence', 'moved', 'owned_replaced', 'request_changed']) {
         await check(`native inner ${mode}`, () => inner(mode));
     }
     for (const key of ['clanInventoryRevision', 'clanLevelSpVersion', 'clanMembershipVersion']) {
@@ -491,7 +463,6 @@ async function check(name, work) {
         await check(`hidden version ${kind}:${worker ? 'worker' : 'manual'}`, () => hiddenVersionTraining(kind, worker));
     }
     await check('optional-absent current manual native transition', manualCurrent);
-    await check('optional-absent claimed manual keeps genuine native SQL owner guard', manualOwnerCas);
     await check('strict malformed optional capabilities cannot start work', malformedOptions);
     await check('actual queued check is synchronous and refused work cleans up', malformedQueued);
     await check('unrelated error identity preserved and planned activity accepted', plannedStateAndFailure);

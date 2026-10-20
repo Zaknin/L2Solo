@@ -27,8 +27,6 @@ function setup() {
     coordinator.workerEpoch = 'snapshot-test';
     coordinator.ready = true;
     coordinator.started = true;
-    coordinator.contextIndex = () => ({ spots: new Map(), parties: new Map() });
-    coordinator.snapshotEntry = (state) => ({ state, context: {} });
     coordinator.post = (type, payload) => {
         messages.push({ type, payload });
         return `${type}:${messages.length}`;
@@ -92,29 +90,25 @@ function setup() {
     assert(Protocol.byteLength(commandMessage) < PAGE_BYTES, 'native reconstruction removes only the redundant planned state');
     assert.throws(() => StateWire.unpackState({ ...packed,
         inventoryInstanceColumns: { 952: ['id'] } }), /invalid_inventory_wire/);
-    for (const mode of ['full', 'incremental', 'snapshot_page', 'claim_ack', 'commit_ack', 'release_ack', 'command_ack']) {
+    for (const mode of ['full', 'incremental', 'snapshot_page', 'commit_ack', 'command_ack']) {
         const { coordinator, messages } = setup();
         delete coordinator.post;
         coordinator.worker.postMessage = message => messages.push(message);
         coordinator.reconcileOrphanedBackgroundParties = async () => {};
         LifeState.everyState = () => [largeState];
         if (mode === 'full') assert.strictEqual((await coordinator.sendFullSnapshot()).ok, true);
-        else if (mode === 'incremental') assert.strictEqual((await coordinator.sendIncrementalEntries([largeState], {}, 32)).ok, true);
+        else if (mode === 'incremental') assert.strictEqual((await coordinator.sendIncrementalEntries([largeState], 32)).ok, true);
         else {
-            const field = mode === 'snapshot_page' ? 'rows' : mode === 'claim_ack' ? 'rejected' : 'results';
+            const field = mode === 'snapshot_page' ? 'rows' : 'results';
             const row = { characterId: 1, ok: false, state: largeState,
-                ...(mode === 'commit_ack' ? { proposalId: 'p', inputToken: { characterId: 1,
-                    ownerId: 'cold_simulation_owner', revision: 1, leaseId: 'l', leaseUntil: 9999999999999 } } : {}),
-                ...(mode === 'release_ack' ? { releaseRequestId: 'r', inputToken: { characterId: 1,
-                    ownerId: 'cold_simulation_owner', revision: 1, leaseId: 'l', leaseUntil: 9999999999999 } } : {}) };
-            assert.strictEqual(coordinator.postCollections(mode, { [field]: [row],
-                ...(mode === 'claim_ack' ? { grants: [] } : {}) }), 1, mode);
+                ...(mode === 'commit_ack' ? { proposalId: '1:1' } : {}) };
+            assert.strictEqual(coordinator.postCollections(mode, { [field]: [row] }), 1, mode);
         }
         assert(messages.length > 0, mode);
         const message = messages.at(-1);
         assert(Protocol.byteLength(message) < Protocol.MAX_MESSAGE_BYTES);
         const payload = StateWire.unpackPayload(message.type, message.payload);
-        const rows = payload.rows || payload.rejected || payload.results;
+        const rows = payload.rows || payload.results;
         assert.deepStrictEqual(rows[0].state, largeState, mode);
         if (mode === 'full') assert.strictEqual(message.payload.done, true, 'a large bag must not suppress bootstrap readiness');
     }
@@ -151,27 +145,8 @@ function setup() {
     assert.strictEqual(critical.messages[0].payload.priority, 'P0', 'critical state must bypass ordinary refresh');
     assert.strictEqual(critical.messages[0].payload.rows[0].state.characterId, 99);
 
-    const duringBootstrap = setup();
-    const sharedCoordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
-    const previous = { cachedState: LifeState.cachedState, markDirty: sharedCoordinator.markDirty,
-        initial: sharedCoordinator.snapshotInFlightInitial };
-    try {
-        const state = { characterId: 99, phase: 'cold' };
-        LifeState.cachedState = () => state;
-        sharedCoordinator.snapshotInFlightInitial = true;
-        duringBootstrap.coordinator.snapshotInFlightInitial = true;
-        sharedCoordinator.markDirty = (value, options) => duringBootstrap.coordinator.markDirty(value, options);
-        Memory.events.onCommit(99);
-        assert.strictEqual(duringBootstrap.coordinator.snapshotQueue.size(), 1, 'memory committed during bootstrap must not be dropped');
-        assert.strictEqual(await duringBootstrap.coordinator.flushCriticalSnapshots(), false);
-        duringBootstrap.coordinator.snapshotInFlightInitial = false;
-        await duringBootstrap.coordinator.flushCriticalSnapshots();
-        assert.strictEqual(duringBootstrap.messages[0].payload.rows[0].state.characterId, 99);
-    } finally {
-        LifeState.cachedState = previous.cachedState;
-        sharedCoordinator.markDirty = previous.markDirty;
-        sharedCoordinator.snapshotInFlightInitial = previous.initial;
-    }
+    // A committed memory episode reaches the worker as a 'memory' table row
+    // (InteractionMemoryRuntime), not as a re-sent state: no bootstrap case here.
 
     // Exercise actual envelope validation with Unicode payloads large enough
     // to hit the byte limit before the row limit, in both delivery paths.
@@ -194,7 +169,7 @@ function setup() {
         }));
         LifeState.everyState = () => states;
         const send = () => mode === 'full' ? coordinator.sendFullSnapshot()
-            : coordinator.sendIncrementalEntries(states, {}, 32, 'P0');
+            : coordinator.sendIncrementalEntries(states, 32, 'P0');
         const result = await send();
         assert.strictEqual(result.ok, true);
         assert.strictEqual(result.rowsSent, states.length);
@@ -252,7 +227,8 @@ function setup() {
     try {
         Date.now = () => clock;
         for (let id = 201; id <= 203; id++) sliced.coordinator.markDirty({ characterId: id, phase: 'cold' });
-        sliced.coordinator.snapshotEntry = state => { clock += 20; return { state, context: {} }; };
+        // Each row's preparation costs 20 ms of the slice.
+        sliced.coordinator.ensureCraftRecipes = async () => { clock += 20; };
         governor.admit = () => ({ ok: true, lease: { budgetMs: 1 } });
         governor.complete = () => { completed++; };
         const first = await sliced.coordinator.sendSnapshots(false, true);
@@ -278,7 +254,7 @@ function setup() {
     const previousCachedState = LifeState.cachedState;
     const waitingMeeting = { characterId: 930021, phase: 'cold', activity: 'hunting', updatedAt: 1000,
         stats: { tradeMeeting: [7, 1] }, timing: { nextResolveAt: 2000 },
-        simulation: { revision: 40, ownerId: 'legacy_main', leaseId: null } };
+        simulation: { revision: 40 } };
     const paidLeg = { ...waitingMeeting, activity: 'traveling', updatedAt: 1001,
         stats: { ...waitingMeeting.stats, travel: { reason: 'trade_meeting', arrivalAt: 3000 } },
         timing: { nextResolveAt: 3000 }, simulation: { ...waitingMeeting.simulation, revision: 41 } };

@@ -31,7 +31,6 @@ const originals = {
     upsertState: LifeState.upsertState,
     acceptInventoryProjection: LifeState.acceptInventoryProjection,
     applyNpcLiquidation: LifeState.applyNpcLiquidation,
-    applyWarehouseGearCleanup: LifeState.applyWarehouseGearCleanup,
     findByCharacterId: LifeState.findByCharacterId,
     statesByIds: LifeState.statesByIds,
     allStates: LifeState.allStates,
@@ -55,7 +54,7 @@ async function run() {
                 ? { ...instance, amount: instance.amount - item.amount } : instance).filter(instance => instance.amount > 0) } : {})
         } };
         return { state: { ...state, inventory, simulation: { ...state.simulation,
-            ownerId: 'legacy_main', revision: Number(state.simulation?.revision || 0) + 1 } } };
+            revision: Number(state.simulation?.revision || 0) + 1 } } };
     };
     LifeState.acceptInventoryProjection = row => row.state;
     const material = { selfId: 1870, name: 'Animal Bone', amount: 20, kind: 'Other.Material', rank: 'none' };
@@ -158,13 +157,6 @@ async function run() {
     assert.strictEqual(capped.overflow[0].count, 2, 'surplus gear must be reported for the common market choice');
     assert.strictEqual(capped.state.inventory['94'].amount, 2, 'surplus cold gear stays in the bag until its sale decision');
     assert.strictEqual(capped.state.stats.lastNpcLiquidation, undefined, 'the warehouse cap cannot independently create NPC income');
-    const depositCalls = calls.length;
-    const ownedDeposit = await BotWarehouse.depositCold({
-        ...state,
-        simulation: { ownerId: 'cold_simulation_owner', revision: 1, leaseId: 'lease', leaseUntil: Date.now() + 1000 }
-    });
-    assert.strictEqual(ownedDeposit.count, 0, 'cold warehouse deposit must defer while the logical owner holds the row');
-    assert.strictEqual(calls.length, depositCalls, 'deferred warehouse deposit must not mutate inventory rows');
 
     const beforeConcurrentFetchItems = Database.fetchItems;
     const beforeConcurrentFetchWarehouseItems = Database.fetchWarehouseItems;
@@ -381,26 +373,6 @@ async function run() {
     assert.strictEqual(warehouseRows[0].amount, 50, 'unfunded warehouse surplus must remain stored');
     assert.strictEqual(marketRelease.state.stats.marketSellRetryAfter, null,
         'new funded WTB demand must clear a stale no-demand sale cooldown');
-    const withdrawalsBeforeFence = withdrawals.length;
-    const ownedRelease = await BotWarehouse.releaseCold({
-        ...marketRelease.state,
-        simulation: { ownerId: 'cold_simulation_owner', revision: 1, leaseId: 'lease', leaseUntil: Date.now() + 1000 }
-    }, { inTown: true });
-    assert.strictEqual(ownedRelease.released, false, 'warehouse release must remain legacy-main while a cold lease is active');
-    assert.strictEqual(withdrawals.length, withdrawalsBeforeFence, 'warehouse ownership fence must prevent physical item writes');
-    const historicalRows = [
-        { id: 81, selfId: 94, name: 'Bec de Corbin', amount: 1, enchant: 0 },
-        { id: 82, selfId: 94, name: 'Bec de Corbin', amount: 1, enchant: 3 },
-        { id: 83, selfId: 94, name: 'Bec de Corbin', amount: 1, enchant: 1 },
-        { id: 84, selfId: 94, name: 'Bec de Corbin', amount: 1, enchant: 2 },
-        { id: 85, selfId: 1870, name: 'Animal Bone', amount: 500, enchant: 0 }
-    ];
-    const historicalOverflow = BotWarehouse.historicalGearOverflow(historicalRows, 16);
-    assert.deepStrictEqual(historicalOverflow.map((item) => [item.id, item.enchant]), [[83, 1], [81, 0]],
-        'historical cleanup must keep the two best enchanted copies and ignore material stacks');
-    assert.deepStrictEqual(BotWarehouse.historicalGearOverflow(historicalRows, 1).map((item) => item.id), [83],
-        'historical cleanup must stop at its per-owner unit budget');
-
     const adena = liveItem(50, { selfId: 57, name: 'Adena', amount: 100, stackable: true });
     adena.setAmount = (amount) => { adena.amount = amount; };
     const junkBackpack = {
@@ -446,7 +418,6 @@ run().catch((err) => {
     LifeState.upsertState = originals.upsertState;
     LifeState.acceptInventoryProjection = originals.acceptInventoryProjection;
     LifeState.applyNpcLiquidation = originals.applyNpcLiquidation;
-    LifeState.applyWarehouseGearCleanup = originals.applyWarehouseGearCleanup;
     LifeState.findByCharacterId = originals.findByCharacterId;
     LifeState.statesByIds = originals.statesByIds;
     LifeState.allStates = originals.allStates;

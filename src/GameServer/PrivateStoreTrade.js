@@ -4,6 +4,11 @@ const World = invoke('GameServer/World/World');
 const Database = invoke('Database');
 const ServerResponse = invoke('GameServer/Network/Response');
 const Funding = require('./Bot/Economy/PurchaseFunding');
+const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
+const TownTransitPolicy = invoke('GameServer/Bot/AI/TownTransitPolicy');
+const PrivateStore = invoke('GameServer/PrivateStore');
+const refreshPartyMemberships = require('./World/PartyMembershipPublication');
 
 const INTERACTION_DISTANCE = 300;
 
@@ -23,13 +28,12 @@ function syncInventory(session, actor, rows, spent = 0, funding = {}) {
     for (const row of byId.values()) actor.backpack.insertItem(row.id, row.selfId, row);
     actor.backpack.inventoryRevision = Number(actor.backpack.inventoryRevision || 0) + 1;
     if (session.coldLifeState) {
-        const Life = invoke('GameServer/Bot/Population/BotLifeState');
         session.coldLifeState = { ...session.coldLifeState,
             adena: rows.filter(row => Number(row.selfId) === 57).reduce((sum, row) => sum + Number(row.amount), 0),
-            inventory: Life.inventorySummaryFromItems(rows), stats: { ...session.coldLifeState.stats,
+            inventory: BotLifeState.inventorySummaryFromItems(rows), stats: { ...session.coldLifeState.stats,
                 money: Funding.packetAfterPurchase(session.coldLifeState.stats?.money, spent, funding) } };
-        require('./World/PartyMembershipPublication')([session], invoke);
-        invoke('GameServer/Bot/Economy/EconomyContext').forget(actor.fetchId());
+        refreshPartyMemberships([session], invoke);
+        EconomyContext.forget(actor.fetchId());
     }
     session.dataSendToMe?.(ServerResponse.itemsList(actor.backpack.fetchItems()));
 }
@@ -42,6 +46,7 @@ async function sell(seller, buyerSession, store, selfId, quantity, options = {})
     if (!buyer || !line || !source || !Number.isSafeInteger(amount) || amount < 1
         || !Number.isSafeInteger(price) || price < 1) throw Error('private_store_unavailable');
     const validate = () => {
+        // lazy: cycle TradeService loads PrivateStoreTrade at module top
         const available = invoke('GameServer/Bot/TradeService').sellableActorItems(seller, sellerSession?.coldLifeState)
             .find(item => item.fetchId() === source.fetchId());
         if (buyer === seller || buyerSession.actor !== buyer || sellerSession?.actor !== seller
@@ -57,7 +62,7 @@ async function sell(seller, buyerSession, store, selfId, quantity, options = {})
     validate();
     const result = await Database.buyFromLivePrivateStore(buyer.fetchId(), {
         sellerId: seller.fetchId(), selfId, objectId: source.fetchId(), amount, price, validate, buyOrder: true,
-        town: invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(buyer)
+        town: TownTransitPolicy.townAt(buyer)
     });
     line.count -= amount;
     if (line.count <= 0) store.items = store.items.filter(item => item !== line);
@@ -69,7 +74,7 @@ async function sell(seller, buyerSession, store, selfId, quantity, options = {})
         buyerSession.dataSendToMe?.(ServerResponse.systemMessage.text(
             `Bought ${amount}x ${result.name} from ${seller.fetchName()} for ${result.totalAdena} Adena.`));
         if (!store.items.length && buyerSession.actor === buyer && buyer.fetchPrivateStore?.() === store)
-            invoke('GameServer/PrivateStore').quit(buyerSession, 3);
+            PrivateStore.quit(buyerSession, 3);
     } catch (error) { utils.infoWarn('PrivateStore', 'notification after committed buy order: %s', error.message); }
     return { qty: amount, totalAdena: result.totalAdena, name: result.name, budgetBacked: true };
 }
@@ -107,7 +112,7 @@ async function buy(buyer, sellerSession, store, selfId, quantity, options = {}) 
     const result = await Database.buyFromLivePrivateStore(buyer.fetchId(), {
         sellerId: seller.fetchId(), objectId, selfId, amount, price, validate,
         funding, fundingPacket: botBuyer ? () => buyerSession.coldLifeState?.stats?.money : null,
-        town: invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(seller) || store.town || null
+        town: TownTransitPolicy.townAt(seller) || store.town || null
     });
     // Nothing below can turn a committed exchange into a failed/retryable buy.
     line.count -= amount;
@@ -124,7 +129,7 @@ async function buy(buyer, sellerSession, store, selfId, quantity, options = {}) 
         }
     }
     if (!store.items.length && sellerSession.actor === seller && seller.fetchPrivateStore?.() === store) {
-        try { invoke('GameServer/PrivateStore').quit(sellerSession, 1); }
+        try { PrivateStore.quit(sellerSession, 1); }
         catch (error) { utils.infoWarn('PrivateStore', 'closing filled shop: %s', error.message); }
     }
     return { qty: amount, totalAdena: result.totalAdena, name: result.name };

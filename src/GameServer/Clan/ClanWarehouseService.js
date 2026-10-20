@@ -267,7 +267,6 @@ async function resolveClan(clan, options = {}) {
         const supplyIds = Object.values(member.inventory || {})
             .filter(item => Policy.isClanWarehouseCandidate(item, { ...Config, demand }))
             .map(item => Number(item.selfId));
-        if (member.simulationOwner === 'cold_simulation_owner' && !supplyIds.length) continue;
         if (Database.materializeClanSupplies && !await Database.materializeClanSupplies(member.characterId, member.simulationRevision, supplyIds)) continue;
         const items = await Database.fetchItems(member.characterId, 'clan_warehouse_resolve');
         const candidates = Policy.depositCandidates(member, items, warehouseRows, { ...Config, demand, goalKey: goal?.goalKey });

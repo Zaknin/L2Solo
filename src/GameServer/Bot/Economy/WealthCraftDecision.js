@@ -179,12 +179,18 @@ function createAction(state, knownRecipes, context, options = {}) {
     return { iterator: decisionSearch(state, knownRecipes, context, options, 'action'), done: false,
         value: null, stage: 0, units: 0, mode: 'action' };
 }
+const STAGES = Object.freeze(['stock', 'recipe', 'ingredient', 'owned', 'quote', 'trip', 'exit', 'without', 'success',
+    'utility', 'candidate', 'funding', 'exits']);
+// A shot search yields one 'edge' per gear row it walks (ShotCraftPolicy):
+// up to EDGE_STEPS of them run as one step, as the worker batches its own
+// edges; this stage table has no 'edge', so the worker could not batch them.
+const EDGE_STEPS = 64;
 function stepOccupation(cursor) {
     if (cursor.done) return true;
-    const next = cursor.iterator.next(); cursor.units++;
+    let next = cursor.iterator.next(); cursor.units++;
+    for (let edges = 1; next.value === 'edge' && edges < EDGE_STEPS; edges++) { next = cursor.iterator.next(); cursor.units++; }
     cursor.stage = typeof next.value === 'object' ? Number(next.value?.stage || 0)
-        : ['stock', 'recipe', 'ingredient', 'owned', 'quote', 'trip', 'exit', 'without', 'success',
-            'utility', 'candidate', 'funding', 'exits'].indexOf(next.value) + 1;
+        : STAGES.indexOf(next.value) + 1;
     if (next.done) { cursor.done = true; cursor.value = cursor.mode === 'action' ? next.value : occupationResult(next.value);
         if (next.value?.valueHours !== undefined) cursor.selectedValueHours = next.value.valueHours;
         cursor.iterator = null; }

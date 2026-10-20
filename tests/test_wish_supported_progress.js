@@ -61,8 +61,13 @@ for (const result of run('both-funded', [node('future', 100, 10, { executable: t
 const heldInput = { actorKey: 'character:77', characterId: 77, inputKey: 'held', decisionSeq: 2, wallet: 100, hourAdena: 100,
     persona: { traits: { commitment: 0 } }, previous: { focus: ['ready', 0, 0] }, roots: ['old', 'ready'],
     nodes: [{ key: 'old', need: 'care', valueHours: 1, paths: [{ activity: 'helping', costHours: 1 }] },
-        { key: 'ready', need: 'power', valueHours: 100, paths: [{ activity: 'hunting', costHours: 1 }] }],
+        { key: 'ready', need: 'power', valueHours: 1, paths: [{ activity: 'hunting', costHours: 1 }] }],
     activityLeaf: fnv1a32('old:old:helping') };
+// The held step survives while it exists and no step beats it by the bot's
+// loyalty (00a3dead; an outscored held step is pinned in test_wish_network.js):
+// with commitment 0 an equal step does not outscore it.
+// Without the held leaf this seed rolls the other step: 'old' below is the hold, not the roll.
+assert.equal(new WishNetwork().build({ ...heldInput, activityLeaf: 0 }).activity.rootKey, 'ready');
 const heldNetwork = new WishNetwork();
 assert.equal(heldNetwork.build(heldInput).activity.rootKey, 'old');
 assert.equal(heldNetwork.build({ ...heldInput, inputKey: 'gone', nodes: [{ ...heldInput.nodes[0],

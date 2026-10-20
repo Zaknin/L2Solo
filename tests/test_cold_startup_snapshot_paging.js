@@ -71,11 +71,9 @@ function coordinatorWithWorker() {
     {
         const { coordinator, messages } = coordinatorWithWorker();
         coordinator.reconcileOrphanedBackgroundParties = async () => {};
-        coordinator.contextIndex = () => ({ spots: new Map(), parties: new Map() });
-        coordinator.snapshotEntry = (state) => {
+        coordinator.ensureCraftRecipes = async () => {
             const until = Date.now() + 4;
-            while (Date.now() < until) { /* a cold-cache route decision */ }
-            return { state, context: {} };
+            while (Date.now() < until) { /* a cold recipe cache load */ }
         };
         const states = Array.from({ length: 60 }, (_, index) => ({ characterId: index + 1, phase: 'cold' }));
         LifeState.everyState = () => states;

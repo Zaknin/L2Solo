@@ -2,6 +2,7 @@ const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
 const ClassPolicy = invoke('GameServer/Bot/AI/BotClassPolicy');
 const BotHuntingGroundPolicy = invoke('GameServer/Bot/AI/BotHuntingGroundPolicy');
 const TargetMatchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 // Resolved on first use; invoke() re-resolves the path on every call inside spot scans.
 let SpotRiskPolicy;
 const spotRiskPolicy = () => SpotRiskPolicy || (SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy'));
@@ -222,14 +223,23 @@ function textForSpot(spot = {}) {
     ].join(' ').toLowerCase();
 }
 
-// Tags derive from a spot's static id, name, mob names and level bounds, but
-// route checks ask for them on every candidate of every search.
-const spotTags = new WeakMap();
+// What depends only on one spot object (game data: id, names, mob names,
+// level bounds, center) is derived on the first question and shared by every
+// candidate of every search: its tags, starter regions and peace zone.
+const spotFacts = new WeakMap();
+
+function factsFor(spot) {
+    let facts = spotFacts.get(spot);
+    if (!facts) {
+        spotFacts.set(spot, facts = { tags: deriveTags(spot), starterRegions: null, peace: null });
+        Diagnostics.count('spot_facts', 'built', 'tags');
+    }
+    return facts;
+}
 
 function tagsForSpot(spot = {}) {
     if (!spot || typeof spot !== 'object') return deriveTags(spot);
-    if (!spotTags.has(spot)) spotTags.set(spot, deriveTags(spot));
-    return [...spotTags.get(spot)];
+    return [...factsFor(spot).tags];
 }
 
 function deriveTags(spot) {
@@ -246,12 +256,6 @@ function deriveTags(spot) {
     return uniq(tags);
 }
 
-function occupancyForSpot(occupancy, spotId) {
-    const entry = occupancy instanceof Map ? occupancy.get(spotId) : occupancy?.[spotId];
-    if (entry && typeof entry === 'object') return Math.max(0, Number(entry.count || 0));
-    return Math.max(0, Number(entry || 0));
-}
-
 function capacityForSpot(spot = {}) {
     const explicit = Number(spot.capacity || 0);
     if (explicit > 0) return explicit;
@@ -262,16 +266,21 @@ function capacityForSpot(spot = {}) {
     return Math.max(9, Math.min(36, densityCapacity));
 }
 
-function crowdPenaltyForSpot(spot, occupancy) {
-    const count = occupancyForSpot(occupancy, spot.id);
-    const capacity = capacityForSpot(spot);
-    if (!count || !capacity) return 0;
-    const ratio = count / capacity;
-    if (ratio <= 1) return ratio * ratio * 60;
-    return 60 + Math.pow(ratio - 1, 2) * 120;
+// How many bots a spot holds: its capacity, never below one. The room check at
+// arrival and the status line's overfill count read this one rule.
+function roomForSpot(spot = {}) {
+    return Math.max(1, capacityForSpot(spot));
 }
 
+// Read-only result: shared by every search of the spot.
 function starterRegionsFor(spot = {}) {
+    if (!spot || typeof spot !== 'object') return deriveStarterRegions(spot);
+    const facts = factsFor(spot);
+    if (!facts.starterRegions) facts.starterRegions = deriveStarterRegions(spot);
+    return facts.starterRegions;
+}
+
+function deriveStarterRegions(spot = {}) {
     const x = Number(spot.center?.locX);
     const y = Number(spot.center?.locY);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return [];
@@ -339,14 +348,24 @@ function scoreRoute(route, spot, context, tags) {
     return 70 + modeBonus + roleBonus + requiredTagBonus + narrowRoleBonus + preferredTagCount * 22 - levelGap * 12 - routeGap * 1.5;
 }
 
+function inPeaceZone(spot) {
+    if (typeof utils?.isInPeaceZone !== 'function') return false;
+    if (!spot || typeof spot !== 'object') return Boolean(utils.isInPeaceZone(spot?.center?.locX, spot?.center?.locY));
+    const facts = factsFor(spot);
+    if (facts.peace === null) facts.peace = Boolean(utils.isInPeaceZone(spot.center?.locX, spot.center?.locY));
+    return facts.peace;
+}
+
 function baseScore(spot, context) {
     const levelGap = Math.abs(Number(spot.avgLevel || spot.minLevel || 1) - context.level);
     const density = Math.min(12, Number(spot.density || 1));
-    const peacePenalty = utils.isInPeaceZone?.(spot.center?.locX, spot.center?.locY) ? 40 : 0;
+    const peacePenalty = inPeaceZone(spot) ? 40 : 0;
     return density * 3 - levelGap * 18 - peacePenalty;
 }
 
-function scoreSpot(spot, state = {}, options = {}) {
+// The leveling-guide route of one spot for this bot: the best scored of the
+// routes that apply. decorateSpot reads it; scoreSpot adds it to the score.
+function routeMatchFor(spot, state = {}, options = {}) {
     const tags = tagsForSpot(spot);
     const context = {
         state,
@@ -361,36 +380,37 @@ function scoreSpot(spot, state = {}, options = {}) {
             score: scoreRoute(route, spot, context, tags)
         }))
         .sort((a, b) => b.score - a.score);
-
     const routeMatch = matchingRoutes[0] || null;
-    const occupancy = occupancyForSpot(options.occupancy, spot.id);
+    return { route: routeMatch?.route || null, routeScore: routeMatch?.score || 0, tags,
+        role: context.role, mode: context.mode, level: context.level, context };
+}
+
+function scoreSpot(spot, state = {}, options = {}) {
+    const { route, routeScore, tags, context } = routeMatchFor(spot, state, options);
     const capacity = capacityForSpot(spot);
-    const crowdPenalty = crowdPenaltyForSpot(spot, options.occupancy);
     const localityPenalty = localityPenaltyForSpot(spot, state, context, tags);
     const huntingGround = BotHuntingGroundPolicy.evaluate(spot, state, { ...options, ...context, tags });
     const huntingGroundPenalty = huntingGround.allowed ? 0 : 10000;
     const variation = stableVariation(spot, state);
     const economics = (options.spotEconomics || invoke('GameServer/Bot/Economy/SpotEconomics').create(state,
-        { timestamp: options.timestamp, mode: context.mode, occupancy: options.occupancy }))(spot);
+        { timestamp: options.timestamp, mode: context.mode }))(spot);
     const efficiencyAdjustment = economics ? economics.valueHours * 100 : 0;
     const targetMatchup = TargetMatchup.spotMatchup(spot, TargetMatchup.stateProfiles(state, { ...options, mode: context.mode }),
         safetyOptions(state, { ...options, mode: context.mode }));
-    const score = baseScore(spot, context) + (routeMatch ? routeMatch.score : 0)
-        + variation + efficiencyAdjustment - crowdPenalty - localityPenalty - huntingGroundPenalty
+    const score = baseScore(spot, context) + routeScore
+        + variation + efficiencyAdjustment - localityPenalty - huntingGroundPenalty
         - targetMatchup.penalty - (targetMatchup.eligible ? 0 : 10000);
 
     return {
         score,
-        route: routeMatch?.route || null,
-        routeScore: routeMatch?.score || 0,
+        route,
+        routeScore,
         tags,
         role: context.role,
         mode: context.mode,
         level: context.level,
         levelGap: Math.abs(Number(spot.avgLevel || spot.minLevel || 1) - context.level),
         capacity,
-        occupancy,
-        crowdPenalty,
         localityPenalty,
         huntingGroundPenalty,
         huntingGround,
@@ -424,7 +444,7 @@ function decorateSpot(spot, match) {
 function rankedSpots(spots, state = {}, options = {}) {
     options = { ...options, matchupProfiles: TargetMatchup.stateProfiles(state, { ...options, mode: modeForState(state, options) }),
         spotEconomics: options.spotEconomics || invoke('GameServer/Bot/Economy/SpotEconomics').create(state,
-            { timestamp: options.timestamp, mode: modeForState(state, options), occupancy: options.occupancy }) };
+            { timestamp: options.timestamp, mode: modeForState(state, options) }) };
     return (spots || [])
         .map((spot) => {
             const match = scoreSpot(spot, state, options);
@@ -436,8 +456,6 @@ function rankedSpots(spots, state = {}, options = {}) {
                 tags: match.tags,
                 levelGap: match.levelGap,
                 capacity: match.capacity,
-                occupancy: match.occupancy,
-                crowdPenalty: match.crowdPenalty,
                 localityPenalty: match.localityPenalty,
                 huntingGroundPenalty: match.huntingGroundPenalty,
                 efficiencyAdjustment: match.efficiencyAdjustment,
@@ -453,6 +471,7 @@ function bestSpot(spots, state = {}, options = {}) {
         .find((candidate) => candidate.huntingGround?.allowed !== false && candidate.targetMatchup?.eligible !== false) || null;
 }
 
+// One spot: the reader's checks without its closure (L131 review).
 function isSpotAllowedForState(spot, state = {}, options = {}) {
     const tags = tagsForSpot(spot);
     return BotHuntingGroundPolicy.evaluate(spot, state, { ...options, tags }).allowed
@@ -460,6 +479,28 @@ function isSpotAllowedForState(spot, state = {}, options = {}) {
             safetyOptions(state, options)).eligible;
 }
 
+// A spot search asks this for many spots of one bot with one state and
+// options (L131). The matchup profiles and safety options depend only on
+// those, so they are read once, on the first spot that passes the hunting
+// ground check. Exact only while state and options stay unchanged; without
+// options.matchupProfiles or options.timestamp the profiles read the clock
+// once here instead of once per spot.
+function spotAllowedReaderFor(state = {}, options = {}) {
+    let profiles = null;
+    let safety = null;
+    return (spot) => {
+        const tags = tagsForSpot(spot);
+        if (!BotHuntingGroundPolicy.evaluate(spot, state, { ...options, tags }).allowed) return false;
+        if (profiles === null) {
+            profiles = TargetMatchup.stateProfiles(state, { ...options, mode: modeForState(state, options) });
+            safety = safetyOptions(state, options);
+        }
+        return TargetMatchup.spotMatchup(spot, profiles, safety).eligible;
+    };
+}
+
+// The matchup's safety options for the state: solo safety outside a party
+// or duo, and the recovery's lower target level while it has a penalty.
 function safetyOptions(state, options = {}) {
     const soloSafety = !['party', 'duo'].includes(modeForState(state, options));
     const recovery = soloSafety && spotRiskPolicy().recoveryFor(state);
@@ -473,11 +514,13 @@ module.exports = {
     targetLevelForState,
     tagsForSpot,
     capacityForSpot,
-    occupancyForSpot,
-    crowdPenaltyForSpot,
+    roomForSpot,
     localityPenaltyForSpot,
     isSpotAllowedForState,
+    safetyOptions,
+    spotAllowedReaderFor,
     scoreSpot,
+    routeMatchFor,
     rankedSpots,
     bestSpot,
     decorateSpot

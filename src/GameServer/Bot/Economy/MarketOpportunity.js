@@ -7,6 +7,7 @@ const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const TownNpcCatalog = require('./TownNpcCatalog');
 const OfferOrder = require('./OfferOrder');
 const OfferQuery = require('./OfferQuery');
+const ProductionPolicy = require('./ProductionPolicy');
 const SHOT_IDS = new Set([
     1835, 1463, 1464, 1465, 1466, 1467,
     2509, 2510, 2511, 2512, 2513, 2514,
@@ -105,12 +106,12 @@ function npcTownOffers(selfId, town, held) {
 }
 
 function npcOffers(selfId, town) {
-    if (!require('./ProductionPolicy').allowsNpcShot(selfId)) return [];
+    if (!ProductionPolicy.allowsNpcShot(selfId)) return [];
     return npcTownOffers(selfId, town, npcOfferCache(selfId)).map(offer => ({ ...offer }));
 }
 
 function npcOffersAll(selfId) {
-    if (!require('./ProductionPolicy').allowsNpcShot(selfId)) return [];
+    if (!ProductionPolicy.allowsNpcShot(selfId)) return [];
     const held = npcOfferCache(selfId);
     held.all ||= Object.freeze(npcOfferTowns.flatMap(town => npcTownOffers(selfId, town, held)));
     // Preserve callers' ownership of the returned array and rows.
@@ -124,8 +125,8 @@ function botCanBuy(offer) {
     if (!offer) return false;
     const fixed = offer.sourceType === 'configured_store' || offer.sellerKind === 'fixed'
         || (offer.sourceType === 'private_store' && MerchantStoreConfigs[offer.sourceName]);
-    if (offer.sourceType === 'npc' && !require('./ProductionPolicy').allowsNpcShot(offer.selfId)) return false;
-    return !fixed || (SHOT_IDS.has(Number(offer.selfId)) && require('./ProductionPolicy').allowsFixedShot(offer.selfId));
+    if (offer.sourceType === 'npc' && !ProductionPolicy.allowsNpcShot(offer.selfId)) return false;
+    return !fixed || (SHOT_IDS.has(Number(offer.selfId)) && ProductionPolicy.allowsFixedShot(offer.selfId));
 }
 
 // A live private store's line as an offer: a configured city merchant is
@@ -171,7 +172,7 @@ function privateOffers(selfId, town) {
     return (World.user?.sessions || []).flatMap((session) => {
         const store = sellingStore(session);
         if (!store) return [];
-        const physicalTown = () => invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(session.actor);
+        const physicalTown = () => TownTransitPolicy.townAt(session.actor);
         const actualTown = store.kind === 'player' ? physicalTown() : store.town || physicalTown();
         if (town && actualTown !== town) return [];
         return (store.items || []).filter(entry => Number(entry.selfId) === Number(selfId)
@@ -182,6 +183,8 @@ function privateOffers(selfId, town) {
 
 // The worker and native purchase executor share the same shot-only table.
 const fixedStoreOffers = require('./FixedShotOffers').offers;
+const TownTransitPolicy = invoke('GameServer/Bot/AI/TownTransitPolicy');
+const PartyAdmission = require('../Population/PartyAdmission');
 
 function hotOffers(selfId, options = {}) {
     const town = options.town || null;
@@ -194,7 +197,7 @@ function hotOffers(selfId, options = {}) {
     ].filter((offer) => offer.available && Number(offer.sourceId) !== Number(options.buyerCharacterId)
         && Number(offer.price) <= (options.budget ?? Infinity)
         && (!options.accept || options.accept(offer))
-        && require('../Population/PartyAdmission').personalOfferAllowed(offer,
+        && PartyAdmission.personalOfferAllowed(offer,
         ownState, undefined, ownSession))
         .sort((left, right) => OfferOrder.compareOffers(left, right, options.cost));
 }
@@ -215,7 +218,7 @@ function bestOffer(selfId, options = {}) {
         budget: options.budget,
         cost: options.cost,
         accept: (offer) => botCanBuy(offer)
-            && require('../Population/PartyAdmission').personalOfferAllowed(offer,
+            && PartyAdmission.personalOfferAllowed(offer,
                 invoke('GameServer/Bot/Population/BotLifeState').cachedState?.(Number(options.buyerCharacterId)),
                 invoke('GameServer/Bot/Population/BotLifeState').cachedState?.(Number(offer.sourceId)),
                 World.registeredActorById?.(Number(options.buyerCharacterId))?.session,
@@ -244,7 +247,7 @@ function liveBuyBoard(town, excludeOwner = 0) {
         const actor = session.actor, store = actor?.fetchPrivateStore?.();
         if (store?.kind !== 'player' || Number(store.storeType) !== 3 || Number(actor.fetchPrivateStoreType?.()) !== 3
             || Number(actor.fetchId()) === Number(excludeOwner) || actor.isDead?.() || actor.fetchIsOnline?.() === false
-            || invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(actor) !== town) continue;
+            || TownTransitPolicy.townAt(actor) !== town) continue;
         let money = Number(actor.backpack?.fetchTotalAdena?.() || 0);
         for (const item of store.items || []) {
             const price = Number(item.price), count = Math.min(Number(item.count), Math.floor(money / price));
@@ -281,7 +284,7 @@ function liveBuyBoard(town, excludeOwner = 0) {
 function findBuyOffers(selfId, options = {}) {
     const town = options.town || null;
     return AfkTrade.offers(selfId, 3, { town, characterId: options.sellerCharacterId })
-        .filter((offer) => offer.available && require('../Population/PartyAdmission').personalOfferAllowed(offer,
+        .filter((offer) => offer.available && PartyAdmission.personalOfferAllowed(offer,
             invoke('GameServer/Bot/Population/BotLifeState').cachedState?.(Number(options.sellerCharacterId)), null,
             World.registeredActorById?.(Number(options.sellerCharacterId))?.session));
 }

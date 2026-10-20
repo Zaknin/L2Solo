@@ -46,6 +46,11 @@ module.exports = {
         : p("Unoren", "I cannot ask this of you.");
     if (s.getInt("cond") !== 2)
       return p("Unoren", "Bring ten bone fragments and three skulls.");
+    if (n(s, B) < 10 || n(s, S) < 3)
+      return p(
+        "Unoren",
+        "You do not have ten Bone Fragments and three Elf Skulls.",
+      );
     await q.takeItem(s.session, S, -1);
     await q.takeItem(s.session, B, -1);
     await q.giveItem(s.session, SH, 1);

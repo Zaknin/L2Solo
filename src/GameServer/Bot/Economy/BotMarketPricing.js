@@ -18,11 +18,13 @@ function useNpcOfferSnapshot(offers) {
     snapshotPrices = indexOffers(offers || []);
 }
 
+// Lazy: loaded on first use (load order), then kept; a require per call was ~3% of main busy (perf-map 2026-10-14).
+let catalogue = null;
 function npcPrice(item) {
     // An enchanted item is not equivalent to the ordinary NPC stock.
     if (item?.npcComparable === false || Number(item?.enchant || 0) > 0) return Infinity;
     if (snapshotPrices) return snapshotPrices.get(Number(item?.selfId)) ?? Infinity;
-    return require('../../Knowledge/GameDataCatalogue').native().npcPriceForItem(item?.selfId) ?? Infinity;
+    return (catalogue ||= require('../../Knowledge/GameDataCatalogue')).native().npcPriceForItem(item?.selfId) ?? Infinity;
 }
 
 function referencePrice(item) {

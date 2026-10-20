@@ -55,7 +55,9 @@ module.exports = {
             '<a action="bypass -h quest 108 start">Accept.</a>',
           )
         : p("Gouph", "Only level 10 dwarves may help.");
-    const move = async (take, give, next, msg) => {
+    const move = async (take, give, next, msg, what) => {
+      if (!take.every((z) => n(s, z)))
+        return p("Quest", `You do not have ${what}.`);
       for (const z of take) await q.takeItem(s.session, z, -1);
       for (const z of give) await q.giveItem(s.session, z, 1);
       await s.set("cond", next);
@@ -63,30 +65,62 @@ module.exports = {
       return p("Quest", msg);
     };
     if (id === R && c === 1)
-      return move([I[0]], [I[1]], 2, "Take the contract to Torocco.");
+      return move(
+        [I[0]],
+        [I[1]],
+        2,
+        "Take the contract to Torocco.",
+        "Gouph's Contract",
+      );
     if (id === T && c === 2)
-      return move([I[1]], [I[2]], 3, "Take the wine to Maron.");
+      return move([I[1]], [I[2]], 3, "Take the wine to Maron.", "Reep's Contract");
     if (id === MA && c === 3)
-      return move([I[2]], [I[3]], 4, "Take the dice to Brunon.");
+      return move([I[2]], [I[3]], 4, "Take the dice to Brunon.", "Elven Wine");
     if (id === B && c === 4)
-      return move([I[3]], [I[4]], 5, "Recover Aquamarine and Chrysoberyl.");
+      return move(
+        [I[3]],
+        [I[4]],
+        5,
+        "Recover Aquamarine and Chrysoberyl.",
+        "Brunon's Dice",
+      );
     if (id === B && c === 6)
       return move(
         [I[4], I[5], I[6]],
         [I[7]],
         7,
         "Return the gem box to Gouph.",
+        "Brunon's Contract, Aquamarine and Chrysoberyl",
       );
     if (id === G && c === 7)
-      return move([I[7]], [I[8]], 8, "Take coal to Brunon.");
+      return move([I[7]], [I[8]], 8, "Take coal to Brunon.", "the Gem Box");
     if (id === B && c === 8)
-      return move([I[8]], [I[9]], 9, "Take Brunon's letter to Murdoc.");
+      return move(
+        [I[8]],
+        [I[9]],
+        9,
+        "Take Brunon's letter to Murdoc.",
+        "the Coal Piece",
+      );
     if (id === M && c === 9)
-      return move([I[9]], [I[10]], 10, "Take the tart to Airy.");
+      return move(
+        [I[9]],
+        [I[10]],
+        10,
+        "Take the tart to Airy.",
+        "Brunon's Letter",
+      );
     if (id === A && c === 10)
-      return move([I[10]], [I[11]], 11, "Hunt Blade Bats for the diamond.");
+      return move(
+        [I[10]],
+        [I[11]],
+        11,
+        "Hunt Blade Bats for the diamond.",
+        "the Berry Tart",
+      );
     if (id === G && c === 12) {
-      await q.takeItem(s.session, I[12], -1);
+      if (!(await q.takeItem(s.session, I[12], -1)))
+        return p("Gouph", "You do not have the Star Diamond.");
       for (const [z, c] of [[1511, 1], [1060, 100], ...E.map((z) => [z, 10])])
         await q.giveItem(s.session, z, c);
       if (a.isNewbie?.())
@@ -115,7 +149,7 @@ module.exports = {
       } else s.playSound("ItemSound.quest_itemget");
     }
     if (c === 11 && id === 480 && Math.random() < 0.2) {
-      await Q().takeItem(s.session, I[11]);
+      if (!(await Q().takeItem(s.session, I[11]))) return;
       await Q().giveItem(s.session, I[12], 1);
       await s.set("cond", 12);
       s.playSound("ItemSound.quest_middle");

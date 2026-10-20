@@ -8,7 +8,6 @@ require('../src/Global');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const databasePath = path.join(process.cwd(), 'tmp', 'test-cold-worker-karma.sqlite');
 
@@ -54,15 +53,11 @@ function wait(ms) {
     const initial = LifeState.cachedState(characterId);
     assert.strictEqual(initial.stats.karma, 45, 'startup must restore authoritative karma into cold state');
     assert(initial, 'startup hydration must expose the copied cold row to the coordinator');
-    assert.strictEqual(initial.simulation.ownerId, Owner.LEGACY_OWNER_ID);
 
     const coordinator = new ColdSimulationCoordinator();
     await coordinator.start({
         executeWorkerLifecycleCommand() {
             throw new Error('main_resolver_must_not_run_for_simple_lifecycle');
-        },
-        resolveBackgroundParty() {
-            throw new Error('party_resolver_must_not_run_for_simple_lifecycle');
         }
     });
 
@@ -72,8 +67,8 @@ function wait(ms) {
         let row = null;
         while (Date.now() < deadline) {
             [row] = await Database.execute([
-                `SELECT activity, lastResolvedAt, nextResolveAt, simulationOwner,
-                        simulationRevision, simulationLeaseId, simulationLeaseUntil, statsJson
+                `SELECT activity, lastResolvedAt, nextResolveAt,
+                        simulationRevision, statsJson
                  FROM bot_life_state WHERE characterId = ?`, [characterId]
             ]);
             if (Number(row?.simulationRevision || 0) >= 2 && Number(row?.lastResolvedAt || 0) > dueAt) break;
@@ -90,9 +85,6 @@ function wait(ms) {
         assert(Number(snapshot.queue.committed || 0) >= 1, 'main gateway must durably commit worker progress');
         assert(Number(row.simulationRevision) >= 2, 'claim plus commit/release must advance revision twice');
         assert(Number(row.lastResolvedAt) > dueAt, 'authoritative DB progress must advance lastResolvedAt');
-        assert.strictEqual(row.simulationOwner, Owner.LEGACY_OWNER_ID);
-        assert.strictEqual(row.simulationLeaseId, null);
-        assert.strictEqual(Number(row.simulationLeaseUntil), 0, 'successful commit must not leak a lease');
         const persistedStats = JSON.parse(row.statsJson || '{}');
         assert.strictEqual(persistedStats.karma, 45, 'travel must not wash karma without XP');
         assert.strictEqual(persistedStats.equipmentPlan, null, 'town purchases must yield to karma washing');

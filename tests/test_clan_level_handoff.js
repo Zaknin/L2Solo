@@ -18,6 +18,7 @@ require('../src/Global');
 invoke('GameServer/DataCache').init();
 const Database = invoke('Database');
 const Actions = invoke('GameServer/Clan/ClanActionService');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Goals = invoke('GameServer/Clan/ClanGoalService');
 const Events = invoke('GameServer/Clan/ClanReviewEvents');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
@@ -81,12 +82,10 @@ async function noContribution(clanId) {
 }
 
 async function coldSp(leaderId, sp, replay = false) {
-    const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
     const { ColdSimulationCoordinator } = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
     const old = Life.cachedState(leaderId);
-    const token = await Owner.claim(old, { allowLifecycle: true });
-    assert(token.ok, JSON.stringify(token));
-    const proposal = { characterId: leaderId, token, baseState: old,
+    const proposal = { characterId: leaderId, revision: old.simulation.revision,
+        ...InventorySummary.bagChange(old.inventory, old.inventory),
         nextState: { ...Life.cachedState(leaderId), sp }, options: { allowLifecycle: true }, result: {}, priority: 'P1' };
     const coordinator = new ColdSimulationCoordinator();
     let emitted = 0, results = [];

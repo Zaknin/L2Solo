@@ -95,14 +95,11 @@ async function run() {
         assert(!Economy.forState(after, deps).projection.moneyPaths.some(row => row.kind === 'liquidate'));
         const empty = { ...context, network: { ...context.network, activity: null } };
         // A missing preparation holds the old goal; an authoritative empty
-        // graph ends it, for individual and batch reviews alike.
+        // graph ends it.
         const held = await Goals.review(after, { ...options, economy: { ...empty, intentPending: true } });
         assert.equal(GoalState.snapshot(id).current.status, 'active');
         assert.equal(held, null);
         await Goals.review(after, { ...options, economy: empty });
-        assert.equal(GoalState.snapshot(id).current.status, 'abandoned');
-        await GoalState.set(id, { ...need, status: 'active' });
-        await Goals.reviewBatch([after], { ...options, economy: empty });
         assert.equal(GoalState.snapshot(id).current.status, 'abandoned');
         console.log('PASS native finite projection / reservations / route / receipt / repeated receipt / goal refresh');
     } finally { Economy.reset(); await world.close(); }

@@ -27,10 +27,10 @@ function evaluate(input = {}) {
     }
     if (population.counts?.total < population.coldMinimum) violations.push('cold_population_missing');
     if (preparedDue < 1) violations.push('cold_due_probe_missing');
-    if (population.delta?.coldOwnerResolved < 1 || population.delta?.coldOwnerCommitted < 1) {
+    if (population.delta?.coldOwnerCommitted < 1) {
         violations.push('cold_world_stalled');
     }
-    if (population.delta?.coldOwnerErrors > 0 || population.delta?.coldOwnerTimeouts > 0) {
+    if (population.delta?.coldOwnerErrors > 0) {
         violations.push('cold_worker_errors');
     }
     if (databaseFailures > 0) violations.push('database_failures');

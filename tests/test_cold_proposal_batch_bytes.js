@@ -1,4 +1,5 @@
 const assert = require('assert');
+require('../src/Global');
 
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
@@ -18,11 +19,11 @@ function seeded(seed) {
 
 function proposal(characterId, enqueuedAt, padding, atomicGroup = null) {
     return {
-        proposalId: `lease-${characterId}:1`,
+        proposalId: `${characterId}:1`,
         characterId,
         priority: 'P2',
         enqueuedAt,
-        token: { ok: true, characterId, ownerId: 'cold_simulation_owner', revision: 1, leaseId: `lease-${characterId}` },
+        revision: 1,
         nextState: { characterId, stats: { note: padding } },
         result: { events: [], debug: { activity: 'hunting' } },
         ...(atomicGroup ? { atomicGroup } : {})

@@ -57,11 +57,11 @@ invoke('GameServer/Bot/Economy/PurchaseFunding').spendable = () => 1000000;
             phase: 'cold', activity: 'shopping', currentRegion: 'Giran', loc: point, inventory: {}, adena: 1000000,
             vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 }, stats: { classId: 0 },
             timing: { lastResolvedAt: now, nextResolveAt: now + 600000 },
-            simulation: { ownerId: 'legacy_main', revision: 0, leaseId: null, leaseUntil: 0 } };
-        send('snapshot_page', { rows: [{ state, context: {} }], done: true, ack: true });
+            simulation: { revision: 0 } };
+        send('snapshot_page', { rows: [{ state }], done: true, ack: true });
         await until(message => message.type === 'ready' && message.payload.phase === 'state_loaded');
         const request = (token, price) => ({ token, actorA: 42, actorB: 43, seqA: 1, seqB: 1, town: 'Giran', point,
-            parties: [0, 1].map(() => ({ phase: 'cold', ownerId: 'legacy_main', leaseId: null, hotAt: 0,
+            parties: [0, 1].map(() => ({ phase: 'cold', hotAt: 0,
                 revision: 0, sequence: 1, needRevision: 0, route: { fee: 0, scroll: false, method: 'walk', durationMs: 0 } })),
             lines: [1, 2].map(itemId => ({ payer: 0, selfId: 413, enchant: 0, itemId, count: 1, price })) });
         const prepare = input => {

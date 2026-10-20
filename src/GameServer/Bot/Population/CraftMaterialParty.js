@@ -3,7 +3,6 @@
 const MAX_SOURCE_CHECKS = 32, MAX_CAMPS = 4, MAX_CORE = 3, MAX_MEMBERS = 5;
 const REVIEW_MS = 5 * 60000, SOURCE_CACHE_SIZE = 256;
 const sources = new WeakMap();
-const negativeChecks = new WeakMap();
 const positive = value => Math.max(0, Number(value) || 0);
 const isObjective = objective => objective?.materialParty === true && !objective.clanGoalKey;
 const requestOf = state => isObjective(state.stats?.partyRequest) ? state.stats.partyRequest : null;
@@ -29,7 +28,12 @@ function campsFor(state, itemId, spots, spoiler) {
     if (!cache) sources.set(index, cache = new Map());
     const key = `${itemId}:${state.level}:${tableRole}:${Number(spoiler)}:${Planner.rateProfileSignature()}`;
     const held = cache.get(key);
-    if (held?.done) return held.rows;
+    if (held?.done) {
+        // Least recently used: a key read again moves to the newest end.
+        cache.delete(key);
+        cache.set(key, held);
+        return held.rows;
+    }
     const camps = new Map((held?.rows || []).map(row => [row.spotId, row])), entries = index.get(itemId) || [];
     const end = Math.min((held?.cursor || 0) + MAX_SOURCE_CHECKS, entries.length);
     for (let i = held?.cursor || 0; i < end; i++) {
@@ -49,16 +53,21 @@ function campsFor(state, itemId, spots, spoiler) {
     // but never trigger combat simulation or a table rebuild at runtime.
     const result = [...camps.values()].sort((a, b) => Number(b.forecastKnown) - Number(a.forecastKnown)
         || b.rate - a.rate || a.spotId.localeCompare(b.spotId)).slice(0, MAX_CAMPS);
+    // An update of a held key frees its own slot first, so it evicts nobody.
+    cache.delete(key);
     if (cache.size >= SOURCE_CACHE_SIZE) cache.delete(cache.keys().next().value);
     cache.set(key, { rows: result, cursor: end, done: end === entries.length });
     return result;
 }
 
-function request(state, plan, { spots = [], economy, timestamp = Date.now() } = {}) {
+// memo: the bot's record in the background thread; its materialMemo field
+// keeps the last "no camp is worth a party" answer while the bot's decision
+// sequence, the memo key and the spot list hold, until the review time.
+function request(state, plan, { spots = [], economy, memo = null, timestamp = Date.now() } = {}) {
     if (state.partyId || state.party?.partyId || state.level < 52 || !plan?.recipeId
         || !['active', 'deferred', 'blocked'].includes(plan.status) || plan.clanGoal
         || !spots.length || !economy) return null;
-    const focus = economy.network?.focus?.[0] || state.stats?.wishFocus?.[0];
+    const focus = economy.network?.focus?.[0];
     if (focus !== `power:${plan.target?.selfId}:${plan.target?.slot}`) return null;
     const Index = require('../../Item/ItemTemplateIndex'), Data = invoke('GameServer/DataCache');
     const target = Index.find(Data.items, plan.target.selfId);
@@ -96,12 +105,11 @@ function request(state, plan, { spots = [], economy, timestamp = Date.now() } = 
         return { ...held, status: 'open', amount, requiredTotal, materialCash, materialSoloHours };
     }
     const memoKey = `${state.level}:${state.stats?.classId ?? state.classId}:${plan.target.selfId}:${material.selfId}:${amount}`;
-    const memo = economy.plan && negativeChecks.get(economy.plan);
-    if (memo?.key === memoKey && memo.spots === spots && timestamp < memo.until) return null;
+    const seq = Number(state.stats?.decisionSeq || 0), held = memo?.materialMemo;
+    if (held?.key === memoKey && held.seq === seq && held.spots === spots && timestamp < held.until) return null;
     const noRequest = () => {
-        // Borrow the existing economic decision identity: no second per-bot
-        // book, and no repeated exact safety work while that decision holds.
-        if (economy.plan) negativeChecks.set(economy.plan, { key: memoKey, spots, until: timestamp + REVIEW_MS });
+        // No repeated exact safety work while the bot's decision holds.
+        if (memo) memo.materialMemo = { key: memoKey, seq, spots, until: timestamp + REVIEW_MS };
         return null;
     };
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -109,7 +117,7 @@ function request(state, plan, { spots = [], economy, timestamp = Date.now() } = 
     const camps = campsFor(state, material.selfId, spots, spoiler);
     if (!camps.length) return noRequest();
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
-    const allowed = Planner.sourceRouteReader(state, { timestamp });
+    const allowed = Planner.sourceRouteReader(state, { timestamp, spots });
     const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
     if (camps.some(row => allowed(SpotIndex.spotById(spots, row.spotId))
         && Planner.soloSafeForSource(state, row))) return noRequest();
@@ -135,7 +143,7 @@ function remaining(state, goal, inventory = state.inventory) {
 // renewed material decision may reopen it. No source search is needed here.
 function supplyPause(state, plan, { economy, timestamp = Date.now() } = {}) {
     const held = requestOf(state);
-    const focus = economy?.network?.focus?.[0] || state.stats?.wishFocus?.[0] || '';
+    const focus = economy?.network?.focus?.[0] || '';
     if (!held || !['open', 'deferred'].includes(held.status) || !focus.startsWith('stock:')
         || state.partyId || state.party?.partyId || state.activity === 'dead'
         || !plan?.recipeId || plan.clanGoal || plan.levelingRecovery
@@ -227,9 +235,8 @@ function selectMembers(candidates, { minSize = 2, maxSize = MAX_MEMBERS, levelRa
     const anchor = cores[0], spotId = requestOf(anchor).spotId;
     const core = cores.filter(state => requestOf(state).spotId === spotId
         && Math.abs(state.level - anchor.level) <= levelRange).slice(0, Math.min(MAX_CORE, maxSize));
-    const supports = candidates.filter(state => !requestOf(state) && !state.stats?.clanPartyObjective
-        && !(state.stats?.partyRequest?.status === 'deferred' && Number(state.stats.partyRequest.deferredUntil) > timestamp)
-        && ['healer', 'buffer', 'tank'].includes(Composition.roleForState(state)));
+    const supports = candidates.filter(state => Composition.supportRole(state, requestOf(state) || state.stats?.clanPartyObjective)
+        && !(state.stats?.partyRequest?.status === 'deferred' && Number(state.stats.partyRequest.deferredUntil) > timestamp));
     const recruits = Composition.selectRecruits(core, supports, { maxSize: Math.min(MAX_MEMBERS, maxSize), levelRange, timestamp });
     const members = [...core, ...recruits];
     return members.length >= minSize ? members : [];

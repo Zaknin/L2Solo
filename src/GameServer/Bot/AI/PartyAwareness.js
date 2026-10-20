@@ -39,17 +39,24 @@ function isPartySession(session, leaderSession) {
     );
 }
 
-function partySessions(leaderSession) {
+// The one reader of a near party's members. A background party reads its
+// roster; any other party reads the world's party index group keyed by the
+// leader session (PvpPartyMembershipKeys), in registration order. A leader that
+// is not in its own group (a companion leading, or not registered yet) goes
+// first. Default keeps online, living members; includeDead keeps all of them.
+function partySessions(leaderSession, { includeDead = false } = {}) {
     if (!leaderSession) return [];
-    if (leaderSession.hotBackgroundPartyId) {
-        return invoke('GameServer/Bot/AI/HotBackgroundParty').roster(leaderSession)
-            .filter(session => isOnlineActor(session.actor));
+    if (leaderSession.hotBackgroundPartyId && !leaderSession.partyCompanion) {
+        // lazy: cycle HotBackgroundParty loads PartyAwareness through its AI modules
+        const roster = invoke('GameServer/Bot/AI/HotBackgroundParty').roster(leaderSession);
+        return includeDead ? roster : roster.filter(session => isOnlineActor(session.actor));
     }
-
-    return (world().user?.sessions || []).filter((session) => (
+    const members = world().pvpPartySessionsForKey(leaderSession);
+    if (!members.includes(leaderSession)) members.unshift(leaderSession);
+    return members.filter((session) => (
         session &&
         isPartySession(session, leaderSession) &&
-        isOnlineActor(session.actor)
+        (includeDead || isOnlineActor(session.actor))
     ));
 }
 
@@ -111,7 +118,30 @@ function recentIncomingNpc(session, npcRadius = 2500) {
     return npc;
 }
 
-function npcThreateningActor(session, npcRadius = 2500) {
+// A live attackable NPC: the one filter of every "who is on this actor" question.
+function liveAttackableNpc(npc) {
+    return npc.fetchAttackable?.() === true && npc.isDead?.() !== true && npc.state?.fetchDead?.() !== true;
+}
+
+// An NPC hitting the actor directly (its target is the actor).
+function directlyAttacking(npc, id) {
+    return liveAttackableNpc(npc) && Number(npc.fetchDestId?.() || 0) === id;
+}
+
+// The NPCs hitting the actor directly within radius. `near` is a world scan
+// around the actor at a radius at least this large, reused instead of a new one.
+function npcsAttackingActor(actor, radius, near = null) {
+    const id = Number(actorId(actor) || 0);
+    if (!actor || !id) return [];
+    const locX = actor.fetchLocX(), locY = actor.fetchLocY();
+    const list = near ? near.filter(npc => Math.sqrt((npc.fetchLocX() - locX) ** 2 + (npc.fetchLocY() - locY) ** 2) <= radius)
+        : (world().fetchNpcsInRadius?.(locX, locY, radius) || []);
+    return list.filter(npc => directlyAttacking(npc, id));
+}
+
+// `scan`, when given, receives the world scan it made (scan.near), so the
+// caller can read the actor's attackers from it without another query.
+function npcThreateningActor(session, npcRadius = 2500, scan = null) {
     const actor = session?.actor;
     if (!actor) return null;
 
@@ -122,16 +152,14 @@ function npcThreateningActor(session, npcRadius = 2500) {
 
     const id = Number(actorId(actor) || 0);
     if (!id) return null;
-    return (world().fetchNpcsInRadius?.(
+    const near = world().fetchNpcsInRadius?.(
         actor.fetchLocX(),
         actor.fetchLocY(),
         npcRadius
-    ) || []).find((npc) => (
-        npc.fetchAttackable?.() === true &&
-        npc.isDead?.() !== true &&
-        npc.state?.fetchDead?.() !== true &&
-        (Number(npc.fetchDestId?.() || 0) === id || Number(npc.getHating?.(actor) || 0) > 0)
-    )) || null;
+    ) || [];
+    if (scan) scan.near = near;
+    return near.find((npc) => liveAttackableNpc(npc) &&
+        (Number(npc.fetchDestId?.() || 0) === id || Number(npc.getHating?.(actor) || 0) > 0)) || null;
 }
 
 // Healing adds hate even when a tank securely holds the mob. Recovery and
@@ -140,9 +168,9 @@ function underDirectNpcAttack(session, npcRadius = 2500) {
     if (!session?.actor) return false;
     if (recentIncomingNpc(session, npcRadius)) return true;
     const actor = session.actor;
+    const id = Number(actor.fetchId());
     return (world().fetchNpcsInRadius?.(actor.fetchLocX(), actor.fetchLocY(), npcRadius) || [])
-        .some(npc => npc.fetchAttackable?.() === true && npc.isDead?.() !== true
-            && npc.state?.fetchDead?.() !== true && Number(npc.fetchDestId?.()) === Number(actor.fetchId()));
+        .some(npc => directlyAttacking(npc, id));
 }
 
 function recentIncomingNpcThreat(leaderSession, memberSessions, npcRadius) {
@@ -380,6 +408,7 @@ function leaderCombatTargetId(leaderSession, options = {}) {
 
 module.exports = {
     underDirectNpcAttack,
+    npcsAttackingActor,
     isDistantQuestCourier,
     findThreatTargetingParty,
     findThreatTargetingPartyProjected,

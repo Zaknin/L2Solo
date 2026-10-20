@@ -1,6 +1,7 @@
 'use strict';
 const { SpotOccupancyIndex, stateKey } = require('./SpotOccupancyIndex');
 const ShopPlaces = require('../Economy/ShopPlaces');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 const CharacterLocationIndex = require('../../World/CharacterLocationIndex');
 const CharacterStateSources = require('../../World/CharacterStateSources');
 const { stateLocation, spatialState } = CharacterStateSources;
@@ -190,7 +191,7 @@ class LifeStateCache extends Map {
                 loc: () => stateLocation(state) }, { indexed });
         }
         this.insertOrder(id, state, sequence);
-        this.occupancy.update(state, Date.now(), { sourceId: id });
+        this.occupancy.update(state, { sourceId: id });
         ShopPlaces.syncState(id, state);
         const run = state.phase === 'cold' && state.activity === 'traveling' ? state.stats?.travel?.run : null;
         if (run) this.walkers.set(id, run);
@@ -228,16 +229,16 @@ class LifeStateCache extends Map {
         return this.ordered.slice(0, limit).map((entry) => entry.state);
     }
 
-    beyondRecent(limit) {
-        return this.ordered.slice(limit).map((entry) => entry.state);
-    }
-
     // Walkers whose place on their run at `timestamp` (the straight-line
     // estimate between its ends) is within `radius` of `loc`. One pass over the
-    // walkers, nothing stored: positions exist only while this asks.
+    // walkers, nothing stored: positions exist only while this asks. The
+    // counter shows the pass size per scan: a cell index of the runs pays only
+    // when it grows (recompute map, LifeStateCache walkers).
     walkersNear(loc, radius, timestamp) {
         const x = Number(loc.locX), y = Number(loc.locY);
         const found = [];
+        Diagnostics.count('walkers', 'scan', 'calls');
+        Diagnostics.count('walkers', 'scan', 'visited', this.walkers.size);
         for (const [id, run] of this.walkers) {
             if (timestamp < run.startAt || timestamp > run.endAt) continue;
             const progress = (timestamp - run.startAt) / Math.max(1, run.endAt - run.startAt);

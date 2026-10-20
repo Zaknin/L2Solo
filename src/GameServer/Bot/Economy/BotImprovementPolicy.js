@@ -1,8 +1,10 @@
 'use strict';
 const Sources = require('../../Items/ItemAcquisitionCatalog');
+const Rules = invoke('GameServer/Items/C4EnchantRules');
 const ItemIndex = require('../../Item/ItemTemplateIndex');
 const Valuation = require('./EconomicValuation');
 const Tendency = require('../AI/TendencyRoll');
+const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const positive = value => Math.max(0, Number(value) || 0);
 function template(id) { return ItemIndex.find(invoke('GameServer/DataCache').items, id); }
 function instances(state) {
@@ -19,23 +21,16 @@ function adapter(item) {
         fetchCristals: () => Number(source?.etc?.cristals || 0),
         isWeapon: () => kind.startsWith('Weapon.'), isArmor: () => kind.startsWith('Armor.') };
 }
-function changedInventory(state, item, patch) {
-    const inventory = { ...state.inventory };
-    const row = inventory[item.selfId];
-    const instances = (row.instances || []).filter(instance => Number(instance.id) !== Number(item.id));
-    const next = { ...item, ...patch };
-    if (next.selfId !== item.selfId) {
-        if (row.amount <= 1) delete inventory[item.selfId];
-        else inventory[item.selfId] = { ...row, amount: row.amount - 1, instances, equipped: instances.some(i => i.equipped),
-            equippedCount: instances.filter(i => i.equipped).length };
-        const target = template(next.selfId);
-        const held = inventory[next.selfId];
-        inventory[next.selfId] = { ...held, selfId: next.selfId, amount: positive(held?.amount) + 1,
-            slot: next.slot || target?.etc?.slot, equipped: next.equipped || held?.equipped,
-            equippedCount: positive(held?.equippedCount) + Number(next.equipped), enchant: next.enchant,
-            instances: [...(held?.instances || []), next] };
-    } else inventory[item.selfId] = { ...row, enchant: next.enchant, instances: [...instances, next] };
-    return { ...state, inventory };
+// The native improvement targets in the bag, in order. Market interest,
+// benefit, costs and tendency belong to opportunities.
+function targets(state) {
+    const result = [];
+    for (const item of instances(state)) {
+        if (!Sources.hasSource(item.selfId)) continue;
+        const a = adapter(item), category = Rules.categoryOf(a);
+        if (category && Rules.CRYSTAL_IDS[Rules.gradeOf(a)]) result.push({ item, a, category });
+    }
+    return result;
 }
 function isCaster(state) {
     return ['mage','healer','buffer','nuker','summoner'].includes(invoke('GameServer/Bot/AI/GearAcquisitionPlanner').roleFor(state));
@@ -49,7 +44,6 @@ function gainBetween(a, b, caster) {
 // Expected attempts to the COMPLETE target. A normal failure ends the chain;
 // blessed failures return to zero. Affine recurrence solves that renewal.
 function enchantCost(item, from, to, scroll, config) {
-    const Rules = invoke('GameServer/Items/C4EnchantRules');
     const a = adapter(item), category = Rules.categoryOf(a);
     let reach = 1, count = 0;
     if (scroll.scrollType !== 'blessed') {
@@ -68,57 +62,61 @@ function enchantCost(item, from, to, scroll, config) {
     const zero = coefficients[0].a / (1 - coefficients[0].b);
     return { count: coefficients[from].a + coefficients[from].b * zero, reach: 1, lossChance: 0 };
 }
-function stuckCost(state, item, ctx, before = null) {
+// The share of the attack rate left without the worn weapon: bare, or the
+// best spare worn instead. candidates: the bot's candidateProfiles.
+function stuckCost(state, item, ctx, candidates = null) {
     if (!item.equipped || !adapter(item).isWeapon()) return 0;
-    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
-    const timestamp = ctx.timestamp ?? Date.now();
-    before = before || Profile.powerNumbers(Profile.buildGainsFor(state, timestamp));
-    let remainder = changedInventory(state,item,{equipped:false});
-    const spares = instances(state).filter(other => other.id !== item.id && adapter(other).isWeapon());
+    candidates ||= Profile.candidateProfiles(state, ctx.timestamp ?? Date.now());
     const rate = profile => profile.pAtk * profile.atkSpd + profile.mAtk * profile.castSpd;
-    let remainingRate = rate(Profile.powerFor(remainder, timestamp));
-    for (const spare of spares) remainingRate = Math.max(remainingRate,
-        rate(Profile.powerFor(changedInventory(remainder,spare,{equipped:true}), timestamp)));
-    const remainingIncome = ctx.hunt.perHour * Math.min(1, remainingRate / Math.max(1,rate(before)));
+    const slot = slotOf(item), free = worn => worn === slot;
+    const share = wear => Math.min(1, rate(candidates.after({ free, wear })) / Math.max(1, rate(candidates.before)));
+    let kept = share(null);
+    for (const spare of instances(state)) {
+        if (spare.id === item.id || !adapter(spare).isWeapon()) continue;
+        kept = Math.max(kept, share(wornRow(spare, spare.selfId, spare.enchant, slotOf(spare))));
+    }
+    const remainingIncome = ctx.hunt.perHour * kept;
     const lostPerHour = Math.max(0,ctx.hunt.perHour - remainingIncome);
     if (!lostPerHour) return 0;
     const replacement = positive(ctx.price(item.selfId));
     return remainingIncome > 0 ? replacement + lostPerHour * replacement / remainingIncome : Infinity;
 }
+function slotOf(item) {
+    return Number(item.slot) || Number(template(item.selfId)?.etc?.slot) || 0;
+}
+// An item instance worn as selfId at enchant in slot (a candidate's wear).
+function wornRow(item, selfId, enchant, slot) {
+    return { selfId: Number(selfId), objectId: Number(item.id), enchant: positive(enchant), slot };
+}
 function opportunities(state, ctx) {
-    const Rules = invoke('GameServer/Items/C4EnchantRules');
     const scrolls = invoke('GameServer/Items/C4EnchantScrolls').ENCHANT_SCROLLS;
     const Henna = invoke('GameServer/Henna/HennaRules');
     const SA = invoke('GameServer/Items/C4WeaponSAExchange');
     const config = Rules.configWith(globalThis.options?.default?.Enchant);
-    const horizon = Valuation.stageHours(state, ctx.hunt.expPerHour, ctx.persona);
+    const horizon = Valuation.decisionHorizon(state, ctx);
     const weight = (ctx.persona.primaryDrive === 'progression' ? 1 : .5) + Valuation.trait(ctx.persona, 'caution');
-    // Gains come from the build (design 16.5): remembered per build and
-    // candidate, so a review after an ordinary fight computes none of them.
-    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
-    const timestamp = ctx.timestamp ?? Date.now();
-    const build = Profile.buildGainsFor(state, timestamp), magic = isCaster(state);
-    const value = (key, after) => {
-        const effect = Profile.gainFor(build, `${magic ? 'm' : 'p'}:${key}`,
-            () => gainBetween(Profile.powerNumbers(build), Profile.powerFor(after(), timestamp, Profile.buildOptions(build, timestamp)), magic));
+    // Gains: the bot's kit profile against its numbers after the change
+    // (candidateProfiles), read once per review.
+    const timestamp = ctx.timestamp ?? Date.now(), magic = isCaster(state);
+    let candidates;
+    const read = () => candidates ||= Profile.candidateProfiles(state, timestamp);
+    const value = change => {
+        const effect = gainBetween(read().before, read().after(change), magic);
         return (effect.attack + effect.defence * ctx.deathHours) * horizon * weight;
     };
     const result = [];
-    for (const item of instances(state)) {
-        if (!Sources.hasSource(item.selfId)) continue;
-        const a = adapter(item), category = Rules.categoryOf(a);
+    for (const { item, a, category } of targets(state)) {
         // What losing this weapon costs: once per item, only where a try can fail.
         let stuck = null;
-        const stuckOnce = () => stuck ?? (stuck = stuckCost(state, item, ctx, Profile.powerNumbers(build)));
-        if (!category || !Rules.CRYSTAL_IDS[Rules.gradeOf(a)]) continue;
+        const stuckOnce = () => stuck ?? (stuck = stuckCost(state, item, ctx, read()));
         const equipped = item.equipped;
         const buyer = !equipped && ctx.board?.first(item.selfId, 3, { excludeOwner: state.characterId });
         if (!equipped && !buyer && !ctx.board?.first(item.selfId, 1, { excludeOwner: state.characterId })) continue;
         const from = positive(item.enchant), cap = Rules.maxFor(category, config);
+        const slot = slotOf(item), free = worn => worn === slot;
         for (let to = from + 1; to <= Math.min(from + 3, cap || from + 3); to++) {
             const salePrice = !equipped && enchantedPrice(item, to, ctx);
-            const benefit = equipped ? value(`enchant:${item.selfId}:${item.slot}:${from}:${to}`,
-                () => changedInventory(state, item, { enchant: to })) : (ctx.hunt.perHour > 0
+            const benefit = equipped ? value({ free, wear: wornRow(item, item.selfId, to, slot) }) : (ctx.hunt.perHour > 0
                 ? Math.max(0, salePrice - enchantedPrice(item, from, ctx)) / ctx.hunt.perHour : 0);
             if (!(benefit > 0)) continue;
             const alternatives = Object.entries(scrolls).flatMap(([id, rule]) => {
@@ -131,7 +129,9 @@ function opportunities(state, ctx) {
                 return [{ scrollId: Number(id), scrollType: rule.scrollType, cost,
                     price: price * cost.count, riskHours: ctx.hunt.perHour > 0 ? loss / ctx.hunt.perHour : Infinity }];
             }).filter(row => {
-                const cash = row.price - positive(state.inventory?.[row.scrollId]?.amount) * ctx.price(row.scrollId);
+                const held = positive(state.inventory?.[row.scrollId]?.amount);
+                ctx.quantityInputs?.physical(row.scrollId, held);
+                const cash = row.price - held * ctx.price(row.scrollId);
                 ctx.walletBoundary?.(cash);
                 return cash <= positive(state.adena);
             });
@@ -156,9 +156,7 @@ function opportunities(state, ctx) {
         if (equipped && a.isWeapon()) for (const recipe of SA.options(7300, item.selfId, 'install')) {
             const materials = SA.costs(recipe);
             if (!Sources.hasSource(recipe.productId) || materials.some(mat => !Sources.hasSource(mat.selfId))) continue;
-            const product = { ...item, selfId: recipe.productId };
-            const benefit = value(`sa:${item.selfId}:${item.slot}:${from}:${recipe.productId}`,
-                () => changedInventory(state, item, product));
+            const benefit = value({ free, wear: wornRow(item, recipe.productId, from, slot) });
             const price = materials.reduce((sum, mat) => sum + ctx.price(mat.selfId) * mat.amount, 0);
             if (benefit > 0 && price > 0) result.push({ key: `sa:${item.id}:${recipe.id}`, kind: 'sa', objectId: item.id,
                 itemId: item.selfId, from, recipeId: recipe.id, npcId: 7300, materials, price, valueHours: benefit });
@@ -168,7 +166,7 @@ function opportunities(state, ctx) {
     if (slots.filter(Boolean).length < Henna.slotsForClass(state.stats?.classId || state.classId)) {
         for (const symbol of Henna.availableForClass(state.stats?.classId || state.classId)) {
             if (!Sources.hasSource(symbol.dyeSelfId) || slots.includes(symbol.id)) continue;
-            const benefit = value(`henna:${symbol.id}`, () => ({ ...state, stats: { ...state.stats, hennas: [...slots, symbol.id] } }));
+            const benefit = value({ hennas: [...slots, symbol.id] });
             if (benefit <= 0) continue;
             result.push({ key: `henna:${symbol.id}`, kind: 'henna', symbolId: symbol.id,
                 materials: [{ selfId: symbol.dyeSelfId, amount: symbol.dyeAmount }], fee: symbol.price,
@@ -180,7 +178,6 @@ function opportunities(state, ctx) {
 function enchantedPrice(item, level, ctx) {
     const base = positive(ctx.price(item.selfId));
     if (!level) return base;
-    const Rules = invoke('GameServer/Items/C4EnchantRules');
     const config = Rules.configWith(globalThis.options?.default?.Enchant);
     const costs = Object.entries(invoke('GameServer/Items/C4EnchantScrolls').ENCHANT_SCROLLS)
         .filter(([,rule]) => rule.scrollType === 'normal' && Rules.validTarget(adapter(item),rule))
@@ -194,7 +191,11 @@ function crystalPath(state, id, ctx, spots = []) {
     const Native = invoke('GameServer/Items/SoulCrystalProgression');
     const target = Native.catalog.crystals[id];
     if (!target || target.stage <= 0 || target.stage > 10 || state.level < 40) return null;
-    const held = Object.values(state.inventory || {}).filter(row => (Native.catalog.crystals[row.selfId] || [4662,4663,4664].includes(Number(row.selfId))) && row.amount > 0);
+    const held = Object.values(state.inventory || {}).filter(row => {
+        if (!Native.catalog.crystals[row.selfId] && ![4662,4663,4664].includes(Number(row.selfId))) return false;
+        ctx.quantityInputs?.physical(row.selfId, positive(row.amount));
+        return row.amount > 0;
+    });
     if (held.length > 1 || held[0]?.amount > 1) return null;
     const current = held[0] && (Native.catalog.crystals[held[0].selfId] || { color: {4662:'red',4663:'green',4664:'blue'}[held[0].selfId], stage: -1 });
     if (current && current.color !== target.color || current?.stage >= target.stage) return null;
@@ -224,4 +225,4 @@ function crystalPath(state, id, ctx, spots = []) {
     }
     return best;
 }
-module.exports = { isCaster, enchantedPrice, crystalPath, opportunities, instances, adapter, changedInventory, enchantCost, stuckCost };
+module.exports = { isCaster, enchantedPrice, crystalPath, opportunities, instances, adapter, enchantCost, stuckCost };

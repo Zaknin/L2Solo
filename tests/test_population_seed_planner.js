@@ -196,7 +196,8 @@ assert.ok(new Set(generatedNames.map((name) => name.toLowerCase())).size > 700, 
     [...overCap, ...services].forEach((state) => LifeState.acceptLifecycleRow({
         ...state,
         // This in-memory fixture tests population accounting after name migration.
-        statsJson: JSON.stringify({ ...state.stats, nameGeneratorVersion: 3 })
+        nameGeneratorVersion: 3,
+        statsJson: JSON.stringify(state.stats)
     }));
     try {
         SpotProfiles.ensure = () => profiles;

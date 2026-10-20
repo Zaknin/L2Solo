@@ -26,7 +26,6 @@ function eligible(state) {
         Number(state?.characterId || 0) > 0
         && state.phase === 'cold'
         && ELIGIBLE_ACTIVITIES.has(state.activity)
-        && String(state.simulation?.ownerId || 'legacy_main') === 'legacy_main'
         && !state.party?.partyId
         && !state.partyId
         && partyTradeAllowed('party', state)
@@ -53,12 +52,17 @@ function proposalFromStates(states = [], options = {}) {
     });
 
     const groups = new Map();
+    // On main this runs on the assembly event's page: its helpers were already
+    // read from the support index (PartyAssemblyEvents.supportShortlist) and
+    // filtered by PopulationService.runPartyAssemblyEvent. A second index read
+    // here would rotate the index again and skip that filter; the worker has no
+    // copy of the index. This pool is bounded by the states handed in.
     const supports = new Map();
     rows.forEach((state) => {
         const objective = objectiveFor(state);
         if (!objective) {
-            const role = PartyComposition.roleForState(state);
-            if (['healer', 'buffer', 'tank'].includes(role)) {
+            const role = PartyComposition.supportRole(state, objective);
+            if (role) {
                 const key = `${state.level}:${role}`;
                 if (!supports.has(key)) supports.set(key, []);
                 const pool = supports.get(key);
@@ -124,7 +128,7 @@ function proposalFromStates(states = [], options = {}) {
                 return { requiredCount, spotId: selectedGroup.spotId, oldestAt: selectedGroup.oldestAt,
                     minSize, maxSize, levelRange, materialParty: true,
                     candidates: members.map(state => ({ characterId: Number(state.characterId), updatedAt: Number(state.updatedAt || 0),
-                        simulation: { ownerId: state.simulation?.ownerId || 'legacy_main', revision: Math.max(0, Number(state.simulation?.revision || 0)) } })) };
+                        simulation: { revision: Math.max(0, Number(state.simulation?.revision || 0)) } })) };
             }
             if (require('../../Clan/ClanRaidRoster').selectMembers(compatible, anchor.objective, { minSize, maxSize, levelRange }).length < minSize) continue;
             return {
@@ -138,10 +142,7 @@ function proposalFromStates(states = [], options = {}) {
                 candidates: compatible.map((state) => ({
                     characterId: Number(state.characterId),
                     updatedAt: Number(state.updatedAt || 0),
-                    simulation: {
-                        ownerId: state.simulation?.ownerId || 'legacy_main',
-                        revision: Math.max(0, Number(state.simulation?.revision || 0))
-                    }
+                    simulation: { revision: Math.max(0, Number(state.simulation?.revision || 0)) }
                 }))
             };
         }

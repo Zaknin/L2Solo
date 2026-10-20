@@ -166,7 +166,10 @@ let crafter;
     for (const row of recipe.materials) assert.equal(await sqlAmount(customer, row.selfId), row.amount);
     const digest = Workshops.publicRecipeDigest(recipe.productId);
     Manufacture.shop(crafter.actor).entries[0].price = 101;
-    assert.notEqual(Workshops.publicRecipeDigest(recipe.productId), digest, 'repricing invalidates the economic read');
+    assert.equal([...Workshops.publicForRecipe(recipe.recipeId, customer.coldLifeState)].find(entry => entry.playerWorkshop)?.price, 101,
+        'a hot customer reads the repriced player workshop');
+    assert.equal(Workshops.publicRecipeDigest(recipe.productId), digest,
+        'a player workshop stays out of the bot digest the worker mirrors (meeting proofs stay current)');
     await assert.rejects(Workshops.craft(crafter.actor.fetchId(), recipe.recipeId, customer.actor.fetchId(),
         { expectedPrice: 100, funding: { r: 4e-5 } }), /workshop price changed/);
     Manufacture.shop(crafter.actor).entries[0].price = 100;

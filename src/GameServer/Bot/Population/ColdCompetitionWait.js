@@ -1,7 +1,15 @@
+const { STEP_MS } = require('./PvpEncounterBudget');
+// A bot in a cold PvP encounter is stepped by main's encounter runtime, not
+// by the worker: it waits for the turn its row names (the last step's
+// nextResolveAt), at least one encounter step away.
+function encounterUntil(states, timestamp) {
+    return Math.max(timestamp + STEP_MS, ...states.filter(s => s?.stats?.pvpEncounter)
+        .map(s => Number(s.timing?.nextResolveAt || 0)));
+}
 // Deduct lost hunting time once, whether voluntarily yielded or interrupted
 // by a resource contest. Neither case may earn catch-up farming rewards.
 function consume(state, elapsedMs, timestamp) {
-    if (state?.stats?.pvpEncounter) return { waiting: true, until: Math.max(timestamp + 1000, state.stats.pvpEncounter.expiresAt + 1000) };
+    if (state?.stats?.pvpEncounter) return { waiting: true, until: encounterUntil([state], timestamp) };
     const wait = state?.stats?.coldCompetition?.wait;
     if (!wait) return { state, elapsedMs };
     if ((state.activity === 'hunting' || wait.combat) && timestamp < wait.until) return { waiting: true, until: wait.until };
@@ -10,8 +18,7 @@ function consume(state, elapsedMs, timestamp) {
         elapsedMs: state.activity === 'hunting' || wait.combat ? Math.max(0, elapsedMs - overlap) : elapsedMs };
 }
 function consumeParty(party, members, elapsedMs, timestamp) {
-    if (members.some(s => s?.stats?.pvpEncounter)) return { waiting: true,
-        until: Math.max(timestamp + 1000, ...members.map(s => Number(s.stats?.pvpEncounter?.expiresAt || 0) + 1000)) };
+    if (members.some(s => s?.stats?.pvpEncounter)) return { waiting: true, until: encounterUntil(members, timestamp) };
     const waits = [party, ...members].map(s => s?.stats?.coldCompetition?.wait).filter(Boolean);
     if (!waits.length) return { party, members, elapsedMs };
     const resting = !waits.some(w => w.combat) && members.some(s => s.activity === 'resting');

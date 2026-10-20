@@ -33,6 +33,7 @@ let seenBeliefs = [];
 MarketCounters.counterOf = (selfId) => Number(selfId) === OTHER ? 'gear d' : 'material none';
 MarketCounters.counter = (key) => ({ deals: key === 'gear d' ? otherCounterDeals : counterDeals,
     index: 0, perHour: counterPerHour });
+MarketCounters.indexOf = () => 0;
 // The recent tail contains no own fill: exact evidence must come from the line.
 MarketCounters.itemDeals = () => ({ deals: counterDeals, prices: [], sellers: [], buyers: [] });
 MarketCounters.firstPrice = () => 1000;

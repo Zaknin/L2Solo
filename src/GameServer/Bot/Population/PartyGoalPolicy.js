@@ -1,5 +1,10 @@
 'use strict';
 
+const TendencyRoll = require('../AI/TendencyRoll');
+const PartyIncomeComparison = require('./PartyIncomeComparison');
+const CraftMaterialParty = require('./CraftMaterialParty');
+const ColdEconomyDecision = require('./ColdEconomyDecision');
+
 const positive = value => Math.max(0, Number(value) || 0);
 
 function declaration(state) {
@@ -18,13 +23,19 @@ function groupContext(party, members, deps = {}) {
 }
 
 function decide(state, peers, options = {}) {
-    const economic = require('./PartyIncomeComparison').compare(state, peers, options);
+    const economic = PartyIncomeComparison.compare(state, peers, options);
     if (economic) return { ...economic, probability: economic.accept ? 1 : 0,
         roll: options.roll ?? 0.5, goal: declaration(state) };
     return participation(state, peers, { ...options,
         persona: options.persona || invoke('GameServer/Bot/AI/BotPersona').of(state),
-        roll: options.roll ?? require('../AI/TendencyRoll').roll('party', state.characterId,
-            peers.map(peer => peer.characterId).join(':'), state.stats?.partyRequest?.requestedAt || state.updatedAt) });
+        roll: options.roll ?? TendencyRoll.roll('party', state.characterId, peerKey(peers),
+            state.stats?.partyRequest?.requestedAt || state.spotId || state.updatedAt) });
+}
+
+// One decision per (bot, peer set, request or spot), as PersonaPartyPolicy.backgroundIntent
+// seeds it: the peers in id order, and no drifting life-row stamp while a request or spot names it.
+function peerKey(peers) {
+    return peers.map(peer => Number(peer.characterId)).sort((a, b) => a - b).join(':');
 }
 
 // Goals that wait for the wish engine keep the party's current objective.
@@ -33,8 +44,7 @@ function pending(party, members) {
 }
 
 function joint(party, members, { context = null, memberContexts, spots, timestamp = context?.timestamp || Date.now() } = {}) {
-    const Material = require('./CraftMaterialParty');
-    if (Material.isObjective(party.stats?.objective)) return Material.joint(party, members, { timestamp, spots });
+    if (CraftMaterialParty.isObjective(party.stats?.objective)) return CraftMaterialParty.joint(party, members, { timestamp, spots });
     const goals = members.map(declaration);
     // The same wish engine merges members' actual wishes. Its selected leaf
     // carries a native route; a shopping/crafting leaf does not teleport a party.
@@ -47,20 +57,16 @@ function joint(party, members, { context = null, memberContexts, spots, timestam
     const objective = previous?.clanGoalKey || previous?.sourceKind === 'raid' || previous?.helpDeal
         ? previous : selected ? { ...previous, ...selected, status: 'open', priority: previous?.priority || 'preferred',
             objectiveKey: ['joint', selected.spotId, selected.npcId || 0].join(':') } : previous;
-    const Income = require('./PartyIncomeComparison');
     let review = {};
     if (!previous?.clanGoalKey && previous?.sourceKind !== 'raid' && !previous?.helpDeal
-        && timestamp - Number(party.stats?.lastIncomeReviewAt || party.startedAt || timestamp) >= Income.REVIEW_MS
+        && timestamp - Number(party.stats?.lastIncomeReviewAt || party.startedAt || timestamp) >= PartyIncomeComparison.REVIEW_MS
         && members.every(member => invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(member))
         && members.some(member => member.spotId)) {
-        const prepared = Income.prepare(members, { party, objective: previous, timestamp, memberContexts, spots });
+        const prepared = PartyIncomeComparison.prepare(members, { party, objective: previous, timestamp, memberContexts, spots });
         review = { lastIncomeReviewAt: timestamp, incomeReviews: members.map(member => ({ characterId: Number(member.characterId),
-            ...Income.compare(member, members.filter(peer => peer !== member), { prepared, party, objective: previous }) })) };
+            ...PartyIncomeComparison.compare(member, members.filter(peer => peer !== member), { prepared, party, objective: previous }) })) };
     }
-    // Waiting for a travel quote keeps the objective, but must not suspend
-    // the cheap personal income review for an already active hunt.
-    return { ...(context?.routePending ? pending(party, members)
-        : { objective, memberGoals: goals, ...(context?.statsPacket || {}) }), ...review };
+    return { objective, memberGoals: goals, ...(context?.statsPacket || {}), ...review };
 }
 
 function participation(state, peers, { persona, roll = 0.5, bonus = 0 } = {}) {
@@ -74,9 +80,8 @@ function participation(state, peers, { persona, roll = 0.5, bonus = 0 } = {}) {
 
 function formingMembers(members, requested, options = {}) {
     if (requested?.clanGoalKey || requested?.sourceKind === 'raid') return members;
-    const Income = require('./PartyIncomeComparison');
     const filter = roster => {
-        const prepared = Income.prepare(roster, { objective: requested, ...options });
+        const prepared = PartyIncomeComparison.prepare(roster, { objective: requested, ...options });
         return roster.filter(member => {
             if (!invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(member)
                 && member.stats?.partyRequest?.priority === 'required') return true;
@@ -97,22 +102,20 @@ function formingMembers(members, requested, options = {}) {
 // A prospective roster needs one bounded income/safety forecast, not new
 // personal or group wishes. Main commits only if every required voter agrees.
 function recruitment(party, members, { spots, timestamp = Date.now() } = {}) {
-    const Income = require('./PartyIncomeComparison');
     const objective = party.stats?.objective;
-    const prepared = Income.prepare(members, { party, objective, spots, timestamp });
-    const Material = require('./CraftMaterialParty');
-    const goals = Material.isObjective(objective) ? Material.needs(members, objective, party.stats.agreement) : null;
+    const prepared = PartyIncomeComparison.prepare(members, { party, objective, spots, timestamp });
+    const goals = CraftMaterialParty.isObjective(objective) ? CraftMaterialParty.needs(members, objective, party.stats.agreement) : null;
     return { objective, memberGoals: members.map(member => goals
         ? { characterId: Number(member.characterId), ...goals.find(goal => goal.characterId === Number(member.characterId)) }
         : declaration(member)), lastIncomeReviewAt: timestamp,
     incomeReviews: members.map(member => ({ characterId: Number(member.characterId),
-        ...(Income.compare(member, members.filter(peer => peer !== member), { prepared, party, objective })
-            || { ...Income.evaluate(), at: timestamp, soloSource: null, partySource: null }) })) };
+        ...(PartyIncomeComparison.compare(member, members.filter(peer => peer !== member), { prepared, party, objective })
+            || { ...PartyIncomeComparison.evaluate(), at: timestamp, soloSource: null, partySource: null }) })) };
 }
 
 function itemNeed(state, item, projected) {
     const current = { ...state, inventory: projected?.get(Number(state.characterId)) || state.inventory };
-    return positive(require('./ColdEconomyDecision').economyFor(current).itemUsefulness(Number(item.selfId)));
+    return positive(ColdEconomyDecision.economyFor(current).itemUsefulness(Number(item.selfId)));
 }
 
 module.exports = { declaration, pending, joint, participation, groupContext, decide, formingMembers, recruitment, itemNeed };

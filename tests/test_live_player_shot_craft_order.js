@@ -10,6 +10,7 @@ const World = invoke('GameServer/World/World'), Economy = invoke('GameServer/Bot
 const Manufacture = invoke('GameServer/Crafting/ManufactureShop'), Wishes = invoke('GameServer/Bot/Economy/WishProviders');
 const Shopping = invoke('GameServer/Bot/AI/States/ShoppingState'), Hunting = invoke('GameServer/Bot/AI/States/HuntingState');
 const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
+const DecisionEvents = invoke('GameServer/Bot/AI/DecisionEvents');
 const { WishNetwork } = require('../src/GameServer/Bot/Economy/WishNetwork');
 const Trip = require('../src/GameServer/Bot/Economy/EconomicTrip');
 const { POINT, character, stock, sqlAmount, memoryAmount } = require('./helpers/liveMarketActors');
@@ -31,6 +32,9 @@ function refillContext(state) {
     return { ...context, network, statsPacket: { ...context.statsPacket,
         money: Funding.packetFor(network, context.hourAdena, context.survivalReserve) } };
 }
+// The decision a near body holds: the worker's build with the fields it
+// attaches (DecisionEvents.nearFields), as DecisionEvents.receive keeps it.
+const near = context => ({ ...context, ...DecisionEvents.nearFields(context, context.state) });
 (async () => {
     Data.init(); DB.init(); World.user = { sessions: [], revision: 0 }; await Life.init();
     const Response = invoke('GameServer/Network/Response');
@@ -59,34 +63,33 @@ function refillContext(state) {
     assert.equal(leaf.workshop.characterId, crafter.actor.fetchId(), 'native price comparison selects the public player workshop');
     assert(leaf.batches > 1, 'this refill needs several whole native batches');
     assert.equal(Wishes.personalCraftPlan(context.state, context), null, 'stock orders do not replace equipment plans');
-    const target = Shopping.stockWorkshopTarget(customer, customer.actor, context);
+    const target = Shopping.stockWorkshopTarget(customer, customer.actor, near(context));
     assert.equal(target?.actorId, crafter.actor.fetchId()); assert.equal(target.interactionDistance, 150);
     assert.equal(target.state.stats.equipmentPlan.outputAmount, 2500 + leaf.amount,
         'the refill target includes shots already held exactly once');
     const closed = { ...context, state: { ...context.state, phase: 'cold' } };
-    assert.equal(Shopping.stockWorkshopTarget(customer, customer.actor, closed), null, 'cold bots cannot place remote player orders');
+    assert.equal(Shopping.stockWorkshopTarget(customer, customer.actor, near(closed)), null, 'cold bots cannot place remote player orders');
     const expensivePrice = 1000000000;
     Manufacture.shop(crafter.actor).entries[0].price = expensivePrice;
-    assert.equal(Shopping.stockWorkshopTarget(customer, customer.actor, refillContext(customer.coldLifeState)), null,
+    assert.equal(Shopping.stockWorkshopTarget(customer, customer.actor, near(refillContext(customer.coldLifeState))), null,
         'a costly player fee does not turn visibility into an order');
     Manufacture.shop(crafter.actor).entries[0].price = 50;
     assert.equal(Shopping.stockWorkshopTarget(customer, customer.actor,
-        refillContext({ ...customer.coldLifeState, adena: 0 })), null, 'an empty wallet cannot fund the order');
+        near(refillContext({ ...customer.coldLifeState, adena: 0 }))), null, 'an empty wallet cannot fund the order');
     crafter.actor.mp = 0;
-    assert.equal(Shopping.stockWorkshopTarget(customer, customer.actor, context), null, 'a crafter without MP cannot receive the visit');
+    assert.equal(Shopping.stockWorkshopTarget(customer, customer.actor, near(context)), null, 'a crafter without MP cannot receive the visit');
     crafter.actor.mp = 1000;
 
     customer.coldLifeState = await Life.upsertState({ ...customer.coldLifeState,
         stats: { ...customer.coldLifeState.stats, ...context.statsPacket } }, 'funded_shot_order');
     const selected = { ...context, state: customer.coldLifeState };
-    const nativeContext = Economy.forActor;
-    stub(Economy, 'forActor', (actor, session, deps) => actor === customer.actor ? selected : nativeContext(actor, session, deps));
     const moves = [];
     customer.actor.moveTo = move => moves.push(move);
     customer.plan = 'hunting';
     const botAI = { getClosestTown: () => ({ name: 'Giran', x: POINT.locX, y: POINT.locY, z: POINT.locZ }), say() {} };
     const compact = new (require('../src/GameServer/Bot/Population/ColdEconomyDecision').CompactActivity)(leaf);
-    assert.equal(Hunting.startWorkshopOrder(customer, customer.actor, botAI, { network: { activity: compact } }), true);
+    customer.heldEconomy = { ...near(selected), network: { ...selected.network, activity: compact } };
+    assert.equal(Hunting.startWorkshopOrder(customer, customer.actor, botAI, customer.heldEconomy), true);
     assert.equal(customer.plan, 'shopping'); assert.equal(customer.shoppingServicePhase, 'workshop');
     assert.equal(customer.shoppingTarget.actorId, crafter.actor.fetchId()); assert.equal(moves.length, 1);
     assert.deepEqual(customer.coldLifeState.stats.equipmentPlan, equipmentPlan);

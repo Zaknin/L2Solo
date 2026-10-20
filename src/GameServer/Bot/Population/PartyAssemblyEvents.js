@@ -185,6 +185,25 @@ class PartyAssemblyEvents {
         finally { this.safetyRunning = false; }
     }
 
+    // Up to `limit` support candidates (no party goal; healer, buffer or tank)
+    // of one level and role. Inspects at most `limit` entries of the pool and
+    // rotates each one, so the next call starts with other candidates. A
+    // returned id is added to `used`; ids already in it are skipped.
+    supportShortlist(level, role, limit, used = new Set()) {
+        const pool = this.supports.get(`${level}:${role}`);
+        const shortlist = [];
+        if (!pool?.size) return shortlist;
+        const count = Math.min(limit, pool.size), iterator = pool.entries();
+        for (let inspected = 0; inspected < count; inspected++) {
+            const [id, record] = iterator.next().value;
+            pool.delete(id); pool.set(id, record);
+            const state = this.life.cachedState(id);
+            if (state !== record.state || used.has(id)) continue;
+            shortlist.push(state); used.add(id);
+        }
+        return shortlist;
+    }
+
     pulse(timestamp = this.now()) {
         if (!this.active) return;
         if (this.cycle) this.safetyStep();
@@ -210,14 +229,10 @@ class PartyAssemblyEvents {
             let inspected = 0, added = 0;
             for (const gap of [0, -1, 1, -2, 2, -3, 3, -4, 4]) for (const role of ['healer', 'buffer', 'tank']) {
                 if (inspected >= 24 || added >= 12) break;
-                const pool = this.supports.get(`${Number(materialCore.level) + gap}:${role}`);
-                if (!pool?.size) continue;
-                const [id, record] = pool.entries().next().value;
-                pool.delete(id); pool.set(id, record); inspected++;
-                const state = this.life.cachedState(id);
-                if (state !== record.state || used.has(id) || state.simulation?.leaseId
-                    || state.simulation?.ownerId && state.simulation.ownerId !== 'legacy_main') continue;
-                candidates.push(state); used.add(id); added++;
+                const level = Number(materialCore.level) + gap;
+                if (!this.supports.get(`${level}:${role}`)?.size) continue;
+                inspected++;
+                for (const state of this.supportShortlist(level, role, 1, used)) { candidates.push(state); added++; }
             }
         }
         const generation = this.generation, revision = group?.revision;

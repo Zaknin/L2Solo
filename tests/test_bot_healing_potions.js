@@ -99,8 +99,8 @@ const firstTarget = { fetchId: () => 7001, fetchHp: () => 100, isDead: () => fal
 assert.strictEqual(HealingPotionStock.tryUseInCombat(session, hotActor, firstTarget).selfId, 1060);
 assert.deepStrictEqual(usedObjectIds, [101060], 'hot combat must use the real inventory object id');
 assert.strictEqual(session.lastCombatDecision.action, 'use_healing_potion');
-assert.strictEqual(HealingPotionStock.tryUseInCombat(session, hotActor, firstTarget), null,
-    'one target must not trigger repeated potion spending');
+assert.strictEqual(HealingPotionStock.tryUseInCombat(session, hotActor, firstTarget).selfId, 1060,
+    'a second bottle on the same target: the potion HoT and reuse limit it, not a per-target cap (E70)');
 
 hotActor.effects.lesser_healing_potion = {
     key: 'lesser_healing_potion',

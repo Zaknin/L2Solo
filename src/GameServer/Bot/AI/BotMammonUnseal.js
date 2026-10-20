@@ -22,7 +22,7 @@ function recipeFor(selfId, state) {
     return Catalog.options(selfId).find(r => !r.style || r.style === style) || null;
 }
 function candidate(state) {
-    return Object.values(state.inventory || {}).find(item => Number(item.amount)>0 && recipeFor(item.selfId,state));
+    return Catalog.sealedHeld(state.inventory, item => recipeFor(item.selfId,state));
 }
 function plan(session,bot,town,state) {
     if (town?.name !== 'Giran') return null;

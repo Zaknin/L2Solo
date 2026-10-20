@@ -31,7 +31,7 @@ async function buyer(id, wallet, held = 0, itemId = 2509) {
         stats: { classId: 12, money: [36000, 0.001, 0, 0, 0.001, wallet, itemId] },
         vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 }, timing: {},
         inventory: { 57: { selfId: 57, amount: wallet }, 736: { selfId: 736, amount: 2 }, ...(held ? { 2509: { selfId: 2509, amount: held } } : {}) },
-        simulation: { ownerId: 'legacy_main', revision: 0 }, updatedAt: Date.now() }, 'quantity_fixture');
+        simulation: { revision: 0 }, updatedAt: Date.now() }, 'quantity_fixture');
 }
 // The card's step: the plan's unit price (target.adena) and the root's
 // place in the money queue (plan.valueRate).

@@ -14,7 +14,7 @@ function memberFingerprint(member = {}) {
     const combat = member.stats?.coldCombat || {};
     const objective = member.stats?.clanPartyObjective;
     return hash([id(member), Number(member.classId ?? member.stats?.classId ?? 0), Number(member.level), Number(member.clanId ?? member.stats?.clanId ?? 0),
-        member.phase, member.simulationOwner || member.simulation?.ownerId || 'legacy_main', member.partyId || member.party?.partyId || null,
+        member.phase, member.partyId || member.party?.partyId || null,
         member.activity, member.spotId, !!(member.recruitmentReserved || member.stats?.tradeMeeting),
         !!member.stats?.playerPartyTakeover, member.stats?.clanHuntBackoffs || [],
         objective ? [objective.reason, objective.sourceKind, objective.raidBoss, objective.controlledBy, objective.clanId] : null,
@@ -75,7 +75,7 @@ function recipeIds(plan, member, warehouseRows = []) {
     if (!plan?.recipeId) return [];
     const Crafting = require('./ClanCraftingPolicy');
     const used = new Set();
-    Crafting.requirements(Crafting.resolveRecipe(plan.recipeId), Crafting.stockInventory(member?.inventory, warehouseRows),
+    Crafting.requirements(Crafting.resolveRecipe(plan.recipeId), Crafting.craftStock(member?.inventory, warehouseRows),
         null, 1, plan.craftProviders, plan.componentRecipes, used);
     return [...used];
 }

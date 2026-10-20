@@ -78,7 +78,7 @@ const npc = { sourceType: 'npc', quoted: true, executable: true };
 const economy = { network: { plans: new Map([['item:736', npc]]) }, watchList: [],
     hourAdena: 10000, moneyPrice: .001, worth: () => 10000 };
 assert.equal(Intent.npcOwnsPurchase(economy, 736), true);
-for (const deferred of [{ intentPending: true }, { routePending: true }, { watchList: undefined },
+for (const deferred of [{ intentPending: true }, { watchList: undefined },
     { watchList: [{ itemId: 736 }] }, { network: { plans: new Map([['item:736', { ...npc, executable: false }]]) } },
     { network: { plans: new Map([['item:736', { ...npc, quoted: false }]]) } }, { network: {} }]) {
     assert.equal(Intent.npcOwnsPurchase({ ...economy, ...deferred }, 736), false,

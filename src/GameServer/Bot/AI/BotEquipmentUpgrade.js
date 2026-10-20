@@ -5,6 +5,8 @@ const BotWeaponCompatibility = invoke('GameServer/Bot/AI/BotWeaponCompatibility'
 const ShotStock = invoke('GameServer/Inventory/ShotStock');
 const ArmorPolicy = invoke('GameServer/Bot/AI/BotArmorPolicy');
 const { gradeForLevel } = invoke('GameServer/Bot/AI/GearGradeRule');
+const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
+const Item = invoke('GameServer/Model/Item');
 
 const ARMOR_SLOTS = {
     earringRight: 1,
@@ -25,6 +27,8 @@ const ARMOR_SLOTS = {
 
 const RANK_ORDER = ['none', 'd', 'c', 'b', 'a', 's'];
 const UPGRADE_COOLDOWN_MS = 5000;
+// session -> the inputs of its last periodic pass that found no upgrade.
+const emptyPasses = new WeakMap();
 
 function isBotSession(session) {
     return !!session && (
@@ -385,14 +389,44 @@ function applyUpgradeEntries(session, upgrades) {
     return upgrades;
 }
 
+// What findBestUpgrades reads: the bag (its array and size, which direct
+// writers replace or change, and the native inventory revision), the worn gear
+// (equipment revision), level and class (grade, role) and the exchange plan
+// that reserves materials. The bag key is the one SurvivalFloor keeps for its
+// bag view; an in-place amount or enchant change bumps the revisions only on a
+// bound bag, so a held mark binds it (Item.bindInventory).
+function upgradeInputs(session) {
+    const actor = session.actor;
+    const backpack = actor.backpack;
+    const items = backpack.fetchItems?.() || [];
+    return [items, items.length, backpack.inventoryRevision, backpack.equipmentRevision,
+        actor.fetchLevel?.(), actor.fetchClassId?.(), session.coldLifeState?.stats?.equipmentPlan];
+}
+
+function sameInputs(left, right) {
+    if (!left || left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) if (left[index] !== right[index]) return false;
+    return true;
+}
+
 function applyBestUpgrades(session, options = {}) {
     if (!canApplyNow(session, options)) return [];
 
-    const actor = session.actor;
     session.lastEquipmentUpgradeCheckAt = Date.now();
+    // The periodic pass repeats an empty answer until one of its inputs moves.
+    const inputs = upgradeInputs(session);
+    if (!options.force && sameInputs(emptyPasses.get(session), inputs)) {
+        Diagnostics.count('hot_gear', 'skipped', 'same_inputs');
+        return [];
+    }
     const upgrades = findBestUpgrades(session);
-    if (upgrades.length === 0) return [];
-
+    Diagnostics.count('hot_gear', 'scanned', upgrades.length ? 'upgrade' : 'none');
+    if (upgrades.length === 0) {
+        Item.bindInventory(session.actor.backpack, inputs[0]);
+        emptyPasses.set(session, inputs);
+        return [];
+    }
+    emptyPasses.delete(session);
     return applyUpgradeEntries(session, upgrades);
 }
 

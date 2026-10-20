@@ -48,7 +48,10 @@ function statValues(actor, stat) {
     ];
     for (const skill of skills) {
         if (skill?.fetchPassive?.() !== true) continue;
-        const semantic = C4SkillRules.resolve({
+        // The skill's own shared semantic: passiveStats reads only condition,
+        // requires and the stats rows, which come from the rule table alone
+        // (an uncached resolve per lookup was 14% of sampled allocations, L126).
+        const semantic = skill.fetchSemantic?.() || C4SkillRules.resolveCached({
             selfId: skill.fetchSelfId?.(),
             name: skill.fetchName?.(),
             level: skill.fetchLevel?.()

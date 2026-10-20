@@ -1,6 +1,10 @@
 // Main-process mirror of durable raid state. One small row per boss, replaced
 // on respawn; no growing per-tick history and no database work in the worker.
 const records = new Map();
+const acceptListeners = new Set();
+// listener(templateId): a boss's durable row was accepted (RaidEncounterScope
+// publishes the boss's 'raids' row).
+function onAccept(listener) { acceptListeners.add(listener); }
 async function init() {
     const rows = await invoke('Database').execute(['SELECT * FROM bot_raid_encounters', []]);
     rows.forEach(accept);
@@ -8,6 +12,8 @@ async function init() {
 function accept(row) {
     if (!row || Number(records.get(row.raidKey)?.revision || 0) >= Number(row.revision)) return;
     records.set(row.raidKey, { revision: Number(row.revision), snapshot: JSON.parse(row.snapshotJson) });
+    const templateId = Number(String(row.raidKey).split(':')[1]);
+    for (const listener of acceptListeners) listener(templateId);
 }
 function get(key) { return records.get(key) || { revision: 0, snapshot: null }; }
 function prepare(commit) {
@@ -25,4 +31,4 @@ function prepare(commit) {
     }
     return true;
 }
-module.exports = { init, accept, get, prepare };
+module.exports = { init, accept, get, prepare, onAccept };

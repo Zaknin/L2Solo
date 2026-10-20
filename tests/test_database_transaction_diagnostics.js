@@ -67,12 +67,13 @@ console.warn = (format, serialized, ...rest) => {
 };
 const deadline = setTimeout(() => { console.error('Native transaction diagnostic fixture exceeded 45 seconds'); process.exit(1); }, 45000);
 deadline.unref();
-const claim = ids => Database.claimColdSimulationLeases(ids.map(characterId => ({
-    characterId, expectedRevision: 0, ownerId: 'cold_simulation_owner',
-    leaseId: `diagnostic:${characterId}`, timestamp: 1000, leaseUntil: 10000
-})));
+// One native transaction moving both rows: the end of the PvP encounter both
+// bots are in.
+const seeded = [];
+const ENCOUNTER = 'diagnostic:pvp';
+const recover = () => Database.endPvpEncounter(ENCOUNTER, seeded);
 const rowFacts = () => Database.execute([
-    'SELECT characterId,simulationOwner,simulationRevision,simulationLeaseId,simulationLeaseUntil FROM bot_life_state ORDER BY characterId'
+    'SELECT characterId,simulationRevision,statsJson FROM bot_life_state ORDER BY characterId'
 ]);
 const tableCount = table => Database.execute([`SELECT COUNT(*) AS n FROM ${table}`]).then(rows => rows[0].n);
 async function rejectedNative(work, sqliteCode) {
@@ -95,9 +96,11 @@ async function seed(index) {
         sex: 0, face: 0, hair: 0, hairColor: 0, locX: 0, locY: 0, locZ: 0
     })).insertId);
     await Database.execute([
-        "INSERT INTO bot_life_state(characterId,accountName,characterName,phase,activity,statsJson) VALUES(?,?,?,'cold','hunting','{}')",
-        [id, username, `TransactionDiag${index}`]
+        `INSERT INTO bot_life_state(characterId,accountName,characterName,phase,activity,statsJson)
+            VALUES(?,?,?,'cold','hunting',?)`,
+        [id, username, `TransactionDiag${index}`, JSON.stringify({ pvpEncounter: { key: ENCOUNTER } })]
     ]);
+    seeded.push(id);
     return id;
 }
 async function installWorkFault(id) {
@@ -134,19 +137,19 @@ async function installWorkFault(id) {
     await new Promise((resolve, reject) => {
         writer.once('message', message => { assert.equal(message, 'locked'); resolve(); }); writer.once('error', reject);
     });
-    await rejectedNative(() => claim(ids), 5);
+    await rejectedNative(() => recover(), 5);
     assert.equal(logs.length, 1, 'a native BEGIN failure must emit diagnostics');
     assert.equal(logs[0].phase, 'begin');
-    assert.equal(logs[0].operation, 'bot-life:cold-owner-claim-batch');
+    assert.equal(logs[0].operation, 'bot-life:pvp-encounter-end');
     assert.equal(logs[0].sqliteCode, 5);
     await released; await writerExited; writer = null;
     assert.deepEqual(await rowFacts(), before);
     assert.equal(Database.stats().failures, failuresBefore + 1);
 
     await installWorkFault(ids[1]);
-    await rejectedNative(() => claim(ids), 1);
+    await rejectedNative(() => recover(), 1);
     assert.equal(logs[1].phase, 'work'); assert.equal(logs[1].sqliteCode, 1);
-    assert.deepEqual(await rowFacts(), before, 'both earlier claim CAS and trigger effect roll back');
+    assert.deepEqual(await rowFacts(), before, 'both row updates and the trigger effect roll back');
     assert.equal(await tableCount('diagnostic_effects'), 0);
     assert.equal(Database.stats().failures, failuresBefore + 2);
     await Database.execute(['DROP TRIGGER diagnostic_work_fault']);
@@ -155,7 +158,7 @@ async function installWorkFault(id) {
         WHEN NEW.characterId = ${ids[1]} BEGIN
             INSERT INTO diagnostic_effects(id,parentId) VALUES(NEW.characterId,999999);
         END`]);
-    await rejectedNative(() => claim(ids), 787);
+    await rejectedNative(() => recover(), 787);
     assert.equal(logs[2].phase, 'commit'); assert.equal(logs[2].sqliteCode, 787);
     assert.deepEqual(await rowFacts(), before);
     assert.equal(await tableCount('diagnostic_effects'), 0);
@@ -164,7 +167,7 @@ async function installWorkFault(id) {
 
     await installWorkFault(ids[1]);
     loggerThrows = true;
-    await rejectedNative(() => claim(ids), 1);
+    await rejectedNative(() => recover(), 1);
     loggerThrows = false;
     assert.deepEqual(await rowFacts(), before);
     assert.equal(await tableCount('diagnostic_effects'), 0);
@@ -174,7 +177,7 @@ async function installWorkFault(id) {
     // Nonordinary error-descriptor control, separate from the unchanged
     // native codes 5/1/787 above. The helper must not mask it or skip rollback.
     throwCodeGetter = true;
-    const getterNative = await rejectedNative(() => claim(ids), 1);
+    const getterNative = await rejectedNative(() => recover(), 1);
     throwCodeGetter = false;
     assert.throws(() => getterNative.error.code, error => error === getterFailure);
     assert.deepEqual(await rowFacts(), before);
@@ -183,13 +186,11 @@ async function installWorkFault(id) {
     assert.equal(Database.stats().failures, failuresBefore + 5);
     await Database.execute(['DROP TRIGGER diagnostic_work_fault']);
 
-    const granted = await claim(ids);
-    assert(granted.every(row => row.ok));
+    assert.equal((await recover()).rows.length, 2);
     assert((await rowFacts()).every(row => row.simulationRevision === 1));
-    const stale = await claim(ids);
-    assert(stale.every(row => row.reason === 'stale_revision'));
+    assert.equal((await recover()).rows.length, 0, 'nothing is left to end');
     assert.equal(Database.stats().failures, failuresBefore + 5);
-    assert.equal(logs.length, 3, 'successful and stale CAS transactions do not log');
+    assert.equal(logs.length, 3, 'successful and empty transactions do not log');
     for (const log of logs) {
         assert.equal(log.code, 'ERR_SQLITE_ERROR');
         assert.equal(log.configuredWriterBusyTimeoutMs, 5000);
@@ -197,10 +198,10 @@ async function installWorkFault(id) {
         assert(log.frames.every(frame => /^\s+at /.test(frame)));
     }
     assert(!JSON.stringify(logs).includes('SECRET_DIAGNOSTIC_SQL_VALUE'));
-    console.log(JSON.stringify({ pass: true, nativeInit: true, fullSchema: true, actualClaimBatch: true,
+    console.log(JSON.stringify({ pass: true, nativeInit: true, fullSchema: true, actualPvpEndBatch: true,
         phases: logs.map(log => log.phase), sqliteCodes: logs.map(log => log.sqliteCode),
         ordinaryFailureDelta: 4, nonordinaryGetterFailureDelta: 1, sameNativeError: true,
-        rollback: true, successfulAndStaleTransactionsLog: false, noSqlOrParameters: true }));
+        rollback: true, successfulAndEmptyTransactionsLog: false, noSqlOrParameters: true }));
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
     loggerThrows = false; throwCodeGetter = false; console.warn = originalWarn;
     if (writer) { await writerExited.catch(() => null); await writer.terminate(); }

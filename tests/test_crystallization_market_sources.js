@@ -9,6 +9,11 @@ const Evidence = invoke('GameServer/Bot/Economy/WishPurchaseEvidence');
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 const Gear = invoke('GameServer/Bot/AI/BotGear');
 const { BoardIndex } = require('../src/GameServer/AfkTrade/BoardIndex');
+const Generation = require('../src/GameServer/Bot/Population/RecomputeGeneration');
+// A context holds only by its event proof, which needs the warehouse rows
+// and a recompute generation; without them every request builds anew.
+invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(() => null, () => true);
+Generation.configure({ code: '1'.repeat(40), config: '2'.repeat(64) });
 const inventory = {};
 for (const row of Gear.planFor({ classId: 46, level: 20 }).items) {
     if ([7, 14].includes(row.slot)) continue;
@@ -60,6 +65,22 @@ const held = { ...state, inventory: { ...state.inventory,
 const owned = Crystals.choices(held, () => null, station)[0];
 assert.equal(owned.selfId, 166, 'physical spares work without a market quote');
 assert.equal(owned.batchLimit, 2);
+{
+    const Network = invoke('GameServer/Bot/Economy/WishNetwork');
+    const Providers = invoke('GameServer/Bot/Economy/WishProviders');
+    const quantities = Network.createQuantityInputs();
+    const captured = Crystals.choices(held, () => null, station, 0, 'd', quantities);
+    assert.deepEqual(captured, Crystals.choices(held, () => null, station),
+        'native quantity capture preserves every ranked crystallization choice');
+    const proof = quantities.finish();
+    assert(proof, 'actual held native inputs fit the bounded owner proof');
+    assert(Network.quantityInputsHold(proof, Providers.quantityReaders(held)));
+    const consumed = { ...held, inventory: { ...held.inventory, 166: { ...held.inventory[166], amount: 1 } } };
+    assert.equal(Crystals.choices(consumed, () => null, station)[0].batchLimit, 1,
+        'native current free stock reduces the executable crystal batch');
+    assert.equal(Network.quantityInputsHold(proof, Providers.quantityReaders(consumed)), false,
+        'physical crystal inputs stay exact even while bag IDs, presence and gear capability are unchanged');
+}
 assert.deepEqual(state, before, 'source selection never mutates the live kit');
 
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
@@ -83,19 +104,27 @@ const expensive = Economy.forState(state, deps);
 const crystalPaths = context => context.projection.nodes.find(row => row.key === 'item:1458').paths
     .filter(row => row.kind === 'crystallize');
 assert(crystalPaths(expensive).some(row => row.improvement.sourceSelfId === 90));
+// The bot publishes the build's decision; later reviews read that state.
+const published = { ...state, stats: { ...state.stats, ...expensive.statsPacket } };
 offer(166, 206926);
-const cheaper = Economy.forState(state, deps);
+const cheaper = Economy.forState(published, deps);
 assert.deepEqual(cheaper.network.queue, expensive.network.queue,
-    'a new unrelated quote waits through the held decision market delay');
-const refreshed = Economy.forState(state, { ...deps, timestamp: timestamp + 10 * 60 * 1000 + 1 });
+    'a new quote of an unwatched input waits for the next decision');
+assert.strictEqual(cheaper.plan, expensive.plan, 'the published decision is held, not rebuilt');
+// The next decision: a raised sources section (the market's section) with a
+// new sequence, as a step's event raise publishes it.
+const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
+const nextDecision = from => ({ ...from, stats: { ...from.stats,
+    decisionSeq: Number(from.stats.decisionSeq || 0) + 1, wishDirty: Sections.sectionBit('sources') } });
+const refreshed = Economy.forState(nextDecision(published), deps);
 assert(crystalPaths(refreshed).some(row => row.improvement.sourceSelfId === 166),
-    'the newly listed cheap input enters at the next decision after the market delay');
+    'the newly listed cheap input enters at the next decision');
 assert(refreshed.network.queue.some(row => {
     const old = expensive.network.queue.find(other => other.key === row.key);
     return old && row.price < old.price;
 }), 'the native full C-goal estimate falls, rather than just a single-batch price');
 offer(166, 206926, 0);
-const depleted = Economy.forState(state, { ...deps, timestamp: timestamp + 10 * 60 * 1000 + 2 });
+const depleted = Economy.forState(nextDecision({ ...state, stats: { ...state.stats, ...refreshed.statsPacket } }), deps);
 assert(!crystalPaths(depleted).some(row => row.improvement.sourceSelfId === 166),
     'quote depletion invalidates the selected crystal path');
 assert.deepEqual(state, before);

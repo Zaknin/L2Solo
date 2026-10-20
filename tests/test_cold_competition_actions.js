@@ -26,7 +26,7 @@ async function run() {
         ? { id: 'test', avgLevel: 20, npcEntries: [{ selfId: 10, level: 20, count: 10 }] } : null;
     const stats = ordinaryHunt ? {} : { equipmentPlan: { status: 'active', strategy: 'direct_drop', next: { npcId: 10, spotId: 'test' } } };
     const oldEpisode = { key: 'old-fight', at: now - 700000, outcome: 'pvp_fighting', role: 'support', endedAt: now - 600000,
-        conflictUntil: now + 60000, avoid: { spotId: 'elsewhere', until: now + 600000 } };
+        conflictUntil: now + 60000, avoid: { spotId: 'elsewhere', untilStep: 10 } };
     for (const id of Array.from({ length: 18 }, (_, index) => index + 1)) {
         await Database.execute(['INSERT INTO accounts(username,password) VALUES (?,?)', [`bot_actions_${id}`, 'test']]);
         await Database.execute([`INSERT INTO characters(id,username,name,classId,race,maxHp,maxMp,sex,face,hair,hairColor,locX,locY,locZ)
@@ -46,8 +46,8 @@ async function run() {
             const assigned = members.map(s => Life.preparePartyAssignment(s, 'competition-party', 'dps', 3, now + 45000));
             const result = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
             if (!result.ok) return null;
-            Life.acceptPartyAssignments(assigned);
-            return Party.acceptCommit(prepared);
+            Life.acceptPartyAssignments(assigned, result.lifeRows);
+            return Party.acceptRow(result.partyRow);
         } });
     const event = (a, b, action = 'yield') => ({ key: `episode:${a}:${b}`, at: now, pressure: 2, spotId: 'test', npcId: 10, action, accepted: true,
         actor: { id: a, revision: Life.cachedState(a).simulation.revision, memoryRevision: 0 },
@@ -94,14 +94,14 @@ async function run() {
         const assigned = members.map(s => Life.preparePartyAssignment(s, party.partyId, 'dps', party.leaderId, party.nextResolveAt));
         const result = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned, event: lifeEvent });
         if (!result.ok) return { party: null, failed: members, reason: result.reason };
-        Life.acceptPartyAssignments(assigned);
-        return { party: Party.acceptCommit(prepared), failed: [] };
+        Life.acceptPartyAssignments(assigned, result.lifeRows);
+        return { party: Party.acceptRow(result.partyRow), failed: [] };
     };
     const recruitOptions = { parties: Party, life: Life, memory, composition: Composition,
         limitsFor: () => ({ maxSize: 5, minSize: 2, levelRange: 4 }), clanReserved: () => false, commit };
     const recruitEvent = (solo, member) => ({ ...event(solo, member, 'offer_party'),
         peer: { ...event(solo, member).peer, partyId: 'competition-party',
-            partyUpdatedAt: Party.find('competition-party').updatedAt, size: Party.find('competition-party').memberIds.length } });
+            partyRevision: Party.find('competition-party').revision, size: Party.find('competition-party').memberIds.length } });
     const join = recruitEvent(7, 3);
     await Database.execute(['UPDATE bot_life_state SET activity=? WHERE characterId=?', ['resting', 4]]);
     Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [4]]))[0]);
@@ -146,9 +146,9 @@ async function run() {
     assert.deepStrictEqual(Party.find('competition-party').memberIds, beforeRace.memberIds);
     assert(!Life.cachedState(8).party?.partyId);
     const raced = new ColdCompetitionActions({ life: Life, memory, now: () => now, owner: { ...Owner,
-        commitAndReleaseBatch: async (entries, options) => {
+        commitBatch: async (entries, options) => {
             await Database.execute(['UPDATE bot_life_state SET simulationRevision=simulationRevision+1 WHERE characterId=6', []]);
-            return Owner.commitAndReleaseBatch(entries, options);
+            return Owner.commitBatch(entries, options);
         } } });
     assert.strictEqual((await raced.apply(event(5, 6))).ok, false);
     const failedRows = await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId IN (5,6)', []]);
@@ -181,12 +181,6 @@ async function run() {
         socialParty = await Population.formCompetitionParty([Life.cachedState(9), Life.cachedState(10)], { spotId: 'test', npcId: 10 });
         assert(socialParty?.partyId, 'real population formation must create a social party');
         assert.strictEqual(socialParty.stats.capacityPool, undefined);
-        const dueReview = await Party.createOrUpdate({ ...socialParty,
-            stats: { ...socialParty.stats, sessionExpiresAt: Date.now() - 1 } });
-        const reviewed = await Population.resolveBackgroundParty(dueReview);
-        assert.strictEqual(reviewed.ok, true, JSON.stringify(reviewed));
-        assert.strictEqual(reviewed.party.status, 'active', 'legacy runtime must review rather than expire a new productive goal');
-        assert(reviewed.party.stats.sessionReview.nextAt > Date.now());
     } finally { Spots.findById = originalFind; Coordinator.requestPartyGoals = originalPartyGoals; }
     const runtimeMemory = invoke('GameServer/Social/InteractionMemoryRuntime');
     await runtimeMemory.ensureMany([13, 14, 15, 16, 17, 18]);
@@ -218,22 +212,14 @@ async function run() {
     const laterEvent = { ...contestEvent(13, 15), key: 'later-opponent', at: contestNow + 120001 };
     assert.strictEqual((await later.apply(laterEvent)).reason, 'conflict_cooldown', 'durable conflict budget covers different opponents');
     const contestedRace = new ColdCompetitionActions({ ...conflictOptions, owner: { ...Owner,
-        commitAndReleaseBatch: async (entries, options) => {
+        commitBatch: async (entries, options) => {
             await Database.execute(['UPDATE bot_life_state SET simulationRevision=simulationRevision+1 WHERE characterId=16', []]);
-            return Owner.commitAndReleaseBatch(entries, options);
+            return Owner.commitBatch(entries, options);
         } } });
     assert.strictEqual((await contestedRace.apply(contestEvent(15, 16))).ok, false);
     const rollback = await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId IN (15,16)', []]);
     assert(rollback.every(row => !JSON.parse(row.statsJson).coldCompetition), 'both physical outcomes abort on one stale lease');
     assert.strictEqual((await invoke('GameServer/Social/InteractionMemoryRepository').load(16)).relations.length, 0, 'rejected outcome must not write resentment');
-    const memoryRace = new ColdCompetitionActions({ ...conflictOptions, owner: { ...Owner,
-        claimBatch: async (...args) => {
-            const claims = await Owner.claimBatch(...args);
-            await runtimeMemory.recordBatch([{ key: 'concurrent-help', sourceId: 18, targetId: 17, type: 'helped_in_combat', at: contestNow }]);
-            return claims;
-        } } });
-    assert.strictEqual((await memoryRace.apply(contestEvent(17, 18))).reason, 'contest_changed_during_claim');
-    assert.strictEqual(runtimeMemory.assess({ id: 18 }, { id: 17 }, {}, contestNow).personal.hostility, 0);
     await assert.rejects(conflicts.apply({ ...contestEvent(17, 18), key: 'invalid/key' }), /interaction memory: invalid key/);
     const memoryRollback = await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId IN (17,18)', []]);
     assert(memoryRollback.every(row => !JSON.parse(row.statsJson).coldCompetition), 'memory failure rolls back both life-state writes');
@@ -258,8 +244,8 @@ async function run() {
     assert.strictEqual(JSON.parse(socialRows[0].statsJson).capacityPool, undefined, 'new parties have no privileged origin pool');
     const reopened = await Database.execute(['SELECT statsJson FROM bot_life_state WHERE characterId=1', []]);
     assert.strictEqual(JSON.parse(reopened[0].statsJson).coldCompetition.wait.until, yielded.waitUntil);
-    const replay = await Database.claimColdSimulationLease({ characterId: 1, expectedRevision: yieldEvent.actor.revision,
-        ownerId: 'cold_simulation_owner', leaseId: 'replay-after-restart', timestamp: now, leaseUntil: now + 30000 });
+    const [replay] = await Database.commitAndReleaseColdSimulationLeases([{ characterId: 1, expectedRevision: yieldEvent.actor.revision,
+        timestamp: now, allowLifecycle: true, patch: { phase: 'cold' } }]);
     assert.strictEqual(replay.ok, false, 'SQLite after reopen must reject the original delivered revision');
     const scheduled = [], scheduler = new ColdCompetitionActions({ now: () => now });
     scheduler.apply = async e => { scheduled.push(e.action); return { ok: true }; };

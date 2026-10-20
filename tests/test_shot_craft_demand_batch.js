@@ -34,7 +34,7 @@ Market.useSpots(() => invoke('GameServer/Bot/Population/SpotProfiles').ensure())
             let rows;
             Market.publish({ register: (_name, source) => { rows = source.allRows(); }, changed: () => {} });
             const result = await probe(state, { recipeEarning: true, timestamp,
-                context: { recipeBook: Codec.pack([recipeId]), knownShotRecipes: [recipeId] },
+                recipes: { recipeBook: Codec.pack([recipeId]), knownShotRecipes: [recipeId] },
                 tablePages: [{ tables: [
                     { name: 'board', from: null, to: 0, full: true, rows: [], removed: [], last: true },
                     { name: 'market', from: null, to: 0, full: true, rows: rows.map(row => [row[0], row]), removed: [], last: true }

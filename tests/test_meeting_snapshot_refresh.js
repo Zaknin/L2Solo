@@ -5,8 +5,8 @@ const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdS
 const Codec = require('../src/GameServer/AfkTrade/TradeMeetingCodec');
 const state = { characterId: 1, phase: 'cold', activity: 'shopping', updatedAt: 1000,
     timing: { lastResolvedAt: 1000, nextResolveAt: 2000 }, stats: {}, inventory: { 57: { amount: 1000 } },
-    simulation: { ownerId: 'legacy_main', revision: 1, leaseId: null, leaseUntil: 0 } };
-const party = { phase: 'cold', ownerId: 'legacy_main', revision: 1, leaseId: null, hotAt: 0,
+    simulation: { revision: 1 } };
+const party = { phase: 'cold', revision: 1, hotAt: 0,
     sequence: 1, needRevision: 1, route: { fee: 0, scroll: false, method: 'walk', durationMs: 0 } };
 const request = { token: 'refresh-test', actorA: 1, actorB: 2, seqA: 1, seqB: 1, town: 'Giran',
     point: { locX: 1, locY: 2, locZ: 3 }, parties: [party, { ...party }],
@@ -20,7 +20,7 @@ const admit = () => { for (const frame of frames) assert(kernel.receiveMeetingPa
 (async () => {
     kernel.upsert({ state }); admit();
     const original = kernel.states.get(1).state;
-    kernel.upsert({ state: structuredClone(state), context: { catalogRefreshed: true } });
+    kernel.upsert({ state: structuredClone(state) });
     assert.equal(kernel.states.get(1).state, original, 'identical native refresh must keep the active computation source');
     assert(kernel.commandStartedAt.has(1), 'refresh must not cancel bilateral preparation');
     finish(request); await new Promise(resolve => setImmediate(resolve));

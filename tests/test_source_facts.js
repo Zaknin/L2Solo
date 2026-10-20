@@ -52,7 +52,7 @@ try {
     assert.equal(byKind(facts(noSpoil)).spoil.reason, 'spoil_skill');
     assert.equal(byKind(facts(noSpoil)).drop.status, 'ready');
 
-    // Hunt rules: level band, occupancy, solo safety; raids are not a solo farm.
+    // Hunt rules: level band, solo safety; raids are not a solo farm.
     assert.equal(byKind(facts({ ...warsmith, level: 50 })).drop.reason, 'level_band');
     const deepBlue = { ...warsmith, level: 49,
         stats: { ...warsmith.stats, wishFocus: ['power:161:7', 1, 0] } };
@@ -63,7 +63,24 @@ try {
     assert(earning.spoil.perHour < own.spoil.perHour, 'the wider band retains the native deep-blue spoil penalty');
     assert.equal(byKind(facts({ ...warsmith, level: 56 }, { economicLower: true })).drop.reason, 'level_band',
         'equipment income does not widen the band beyond fifteen levels');
-    assert.equal(byKind(facts(warsmith, { occupancy: { 'facts-test': { count: 9, capacity: 9 } } })).drop.reason, 'occupied');
+    // The band's exact edge, killer level by killer level on one item: a
+    // target exactly minGap levels below is hunted, one level further is not,
+    // and the wish's reader picks the full view's best ready fact at each.
+    const wishBest = (state, options) => drain(Planner.sourceFacts(state, 99101, 50,
+        { spots, spotValue, timestamp: 1, ...options, bestForWish: { hourAdena: 100 } })).value;
+    for (const [level, economicLower, hunted] of [[47, false, true], [48, false, false],
+        [55, true, true], [56, true, false], [47, false, true], [48, true, true]]) {
+        // The route gate has its own level rules; this reads the band alone.
+        const state = { ...warsmith, level }, options = { economicLower, routeAllowed: () => true }, all = facts(state, options);
+        const drop = byKind(all).drop, label = `level ${level}${economicLower ? ', equipment income' : ''}`;
+        assert.equal(drop.status === 'ready', hunted, `${label}: ${drop.reason}`);
+        if (!hunted) assert.equal(drop.reason, 'level_band', label);
+        const best = all.filter(row => row.status === 'ready')
+            .reduce((winner, row) => !winner || row.costHours < winner.costHours ? row : winner, null);
+        assert.deepEqual(wishBest(state, options), best ? [best] : [], label);
+    }
+    assert(byKind(facts({ ...warsmith, level: 55 }, { economicLower: true, routeAllowed: () => true })).drop.perHour < own.drop.perHour,
+        'the wider band keeps the deep-blue penalty of its killer level');
     assert.equal(byKind(facts({ ...warsmith, inventory: {} })).drop.reason, 'party_needed');
     const raid = drain(Planner.sourceFacts(warsmith, 99101, 1, { spotValue, timestamp: 1,
         spots: [{ ...spots[0], id: 'facts-raid', raidBoss: true, raidBossTemplateId: 99001 }] })).value;
@@ -117,7 +134,7 @@ try {
     for (const [state, options] of [[warsmith, {}], [noSpoil, {}], [{ ...warsmith, level: 50 }, {}], [away, {}],
         [{ ...warsmith, inventory: {} }, {}], [warsmith, { spotValue: () => null }], [noSpoil, { spots: [spots[0], { ...spots[0], id: 'facts-test-2' }] }],
         [warsmith, { spots: [{ ...spots[0], id: 'facts-raid', raidBoss: true, raidBossTemplateId: 99001 }] }],
-        [warsmith, { occupancy: { 'facts-test': { count: 9, capacity: 9 } } }], [warsmith, { spotValue: () => ({ kills: 100, valueHours: NaN }) }]]) {
+        [warsmith, { spotValue: () => ({ kills: 100, valueHours: NaN }) }]]) {
         const all = facts(state, options), counts = new Map(), ready = facts(state, { ...options, counts });
         assert.deepEqual(facts(state, { ...options, readyOnly: true }), all.filter(row => row.status === 'ready'));
         const tally = new Map();
@@ -139,7 +156,7 @@ try {
     // learned Spoil overrides a level/hunt refusal, but never a raid refusal.
     const mixedNpcs = [
         { selfId: 99010, clanName: 'Siege Guard', template: { name: 'Mixed Guard A', level: 42, kind: 'Monster' } },
-        { selfId: 99011, template: { name: 'Mixed Occupied', level: 42, kind: 'Monster' } },
+        { selfId: 99011, template: { name: 'Mixed Early', level: 42, kind: 'Monster' } },
         { selfId: 99012, template: { name: 'Mixed Low', level: 30, kind: 'Monster' } },
         { selfId: 99013, template: { name: 'Mixed Raid', level: 42, kind: 'Monster', raidBoss: true } },
         { selfId: 99014, template: { name: 'Mixed Ready', level: 42, kind: 'Monster' } },
@@ -155,7 +172,6 @@ try {
         npcEntries: [{ selfId: npc.selfId, count: 1 }], npcSelfIds: [npc.selfId] }));
     const checkMixed = (state, extra = {}) => {
         const options = { spots: mixedSpots, spotValue, timestamp: 1,
-            occupancy: { 'mixed-99011': { count: 9, capacity: 9 } },
             trip: { details: () => ({ known: true, hours: .25, fees: 0 }) }, ...extra };
         const all = drain(Planner.sourceFacts(state, 99101, 50, options)).value;
         const expected = new Map();
@@ -184,8 +200,8 @@ try {
     }
     Data.npcRewards = mixedRewards;
     const beforeReplacement = checkMixed(warsmith);
-    assert.deepEqual([...beforeReplacement.counts.keys()], ['cannot_hunt', 'occupied', 'level_band', 'raid', 'ready']);
-    assert.deepEqual([...checkMixed(noSpoil).counts.keys()], ['cannot_hunt', 'spoil_skill', 'occupied', 'level_band', 'raid', 'ready']);
+    assert.deepEqual([...beforeReplacement.counts.keys()], ['cannot_hunt', 'ready', 'level_band', 'raid']);
+    assert.deepEqual([...checkMixed(noSpoil).counts.keys()], ['cannot_hunt', 'spoil_skill', 'ready', 'level_band', 'raid']);
     // Replacing NPC/reward/spot tables invalidates prepared ordinals as well
     // as the old expected yields; later personal availability remains live.
     Data.npcs = Data.npcs.map(npc => npc.selfId === 99012 ? { ...npc, template: { ...npc.template, level: 42 } } : npc);
@@ -195,7 +211,156 @@ try {
     const changed = checkMixed(warsmith);
     assert(changed.all.find(row => row.npcId === 99014 && row.kind === 'drop').expectedYield
         > beforeReplacement.all.find(row => row.npcId === 99014 && row.kind === 'drop').expectedYield);
-    checkMixed(warsmith, { spots: structuredClone(mixedSpots), occupancy: {} });
+    checkMixed(warsmith, { spots: structuredClone(mixedSpots) });
+
+    // The party verdict of a record is the old rule: soloSafeForSource on the
+    // target object the planner built per record (npcLevel from the record,
+    // else the spot's average level; SourceCatalog stores Number(level || 0)).
+    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    Data.npcRewards = [...saved.rewards, { selfId: 99001, template: { name: 'Facts Test Mob' },
+        rewards: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 1, max: 1 }] }],
+        spoils: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 2, max: 2 }] }] }];
+    const oldParty = (state, templateLevel, spot) => {
+        const npcLevel = Number(templateLevel || 0);
+        return !Planner.soloSafeForSource(state, { npcLevel: Number(npcLevel || spot.avgLevel || 1),
+            spotLevel: Number(spot.avgLevel || 1), sourceKind: 'drop', raidBoss: false });
+    };
+    const verdict = (state, templateLevel, avgLevel, expectParty, label) => {
+        const template = { name: 'Facts Test Mob', kind: 'Monster', ...(templateLevel === undefined ? {} : { level: templateLevel }) };
+        Data.npcs = [...saved.npcs, { selfId: 99001, template }];
+        const spot = { ...spots[0], avgLevel };
+        assert.equal(oldParty(state, templateLevel, spot), expectParty, `${label}: old rule`);
+        const row = byKind(facts(state, { spots: [spot] })).drop;
+        assert.equal(row.reason === 'party_needed', expectParty, `${label}: sourceFacts reason ${row.reason}`);
+    };
+    const healer = armed({ ...base, characterId: 990003, stats: { classId: 16 } });
+    const buffer = armed({ ...base, characterId: 990004, stats: { classId: 17 } });
+    assert.equal(Planner.roleFor(healer), 'healer');
+    assert.equal(Planner.roleFor(buffer), 'buffer');
+    // (a) a support with under two armour pieces needs a party at any margin;
+    // the warsmith at the same level is solo-ready.
+    verdict(healer, 38, 38, true, 'unprepared healer');
+    verdict(buffer, 38, 38, true, 'unprepared buffer');
+    verdict(warsmith, 38, 38, false, 'armed warsmith');
+    // (b) a margin in [-2, 0) is tight: preferred party, so not solo.
+    const effective = Planner.combatReadiness(warsmith).effectiveLevel;
+    const tight = Math.floor(effective) + 1;
+    assert(effective - tight >= -2 && effective - tight < 0);
+    verdict(warsmith, tight, tight, true, 'tight margin');
+    verdict(warsmith, tight + 2, tight + 2, true, 'underleveled');
+    verdict(warsmith, Math.floor(effective), Math.floor(effective), false, 'zero-or-better margin');
+    // (c) a record without its own level reads the spot's average level.
+    for (const level of [undefined, 0, 'abc']) {
+        verdict(warsmith, level, Math.floor(effective), false, `npc level ${level}, spot solo`);
+        verdict(warsmith, level, tight, true, `npc level ${level}, spot tight`);
+        verdict(warsmith, level, String(tight), true, `npc level ${level}, spot level string`);
+    }
+    verdict(warsmith, String(tight), Math.floor(effective), true, 'npc level string');
+    verdict(warsmith, String(Math.floor(effective)), tight, false, 'npc level string, spot tight');
+    // (d) party_needed first seen after ready keeps that key
+    // place, and its tally sums records on either side of other reasons.
+    const orderNpcs = [[99030, Math.floor(effective)], [99031, tight], [99032, Math.floor(effective)], [99033, tight]]
+        .map(([selfId, level]) => ({ selfId, template: { name: `Order ${selfId}`, level, kind: 'Monster' } }));
+    Data.npcs = [...saved.npcs, ...orderNpcs];
+    Data.npcRewards = orderNpcs.map(npc => ({ selfId: npc.selfId, template: npc.template,
+        rewards: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 1, max: 1 }] }],
+        spoils: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 2, max: 2 }] }] }));
+    const orderSpot = (npc, suffix) => ({ ...spots[0], id: `order-${npc.selfId}-${suffix}`, avgLevel: npc.template.level,
+        npcEntries: [{ selfId: npc.selfId, count: 1 }], npcSelfIds: [npc.selfId] });
+    const orderSpots = [orderSpot(orderNpcs[0], 'ready'), orderSpot(orderNpcs[0], 'full'), orderSpot(orderNpcs[1], 'a'),
+        orderSpot(orderNpcs[2], 'ready'), orderSpot(orderNpcs[3], 'b')];
+    const ordered = checkMixed(warsmith, { spots: orderSpots });
+    const keys = [...ordered.counts.keys()];
+    assert(keys.indexOf('ready') >= 0 && keys.indexOf('party_needed') > keys.indexOf('ready'), `party_needed after ready: ${keys}`);
+    assert.equal(ordered.counts.get('party_needed'), ordered.all.filter(row => row.reason === 'party_needed').length);
+    assert(ordered.counts.get('party_needed') >= 4, 'party_needed records on both sides of a later ready spot');
+
+    // The wish's synchronous drain skips the records its bot refuses as
+    // party_needed (above its solo level bound) or spoil_skill, on any list.
+    // Generic generators keep incremental work.
+    const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
+    const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
+    const diagnosticsBefore = Config.developerDiagnostics;
+    Config.developerDiagnostics = true;
+    try {
+        const skipped = () => Diagnostics.metrics().counts?.['source_bound:skip:records'] || 0;
+        const below = Math.floor(effective) + 1;
+        const longSpots = [...mixedSpots.slice(0, 4),
+            ...Array.from({ length: 40 }, (unused, index) => ({ ...mixedSpots[4], id: `bound-${index}` })),
+            ...mixedSpots.slice(5)];
+        const replaceLevels = (target, malformed = false) => {
+            Data.npcs = [...saved.npcs, ...mixedNpcs.map(npc => [99011, 99014].includes(npc.selfId)
+                ? { ...npc, template: { ...npc.template, level: malformed ? 0 : target } } : npc)];
+            return malformed ? longSpots.map(spot => spot.npcSelfIds.includes(99011) || spot.npcSelfIds.includes(99014)
+                ? { ...spot, avgLevel: 'not-a-level' } : spot) : longSpots;
+        };
+        const checkBound = (state, selectedSpots, shouldSkip, extra = {}) => {
+            const { bestForWish = {}, ...readerExtra } = extra;
+            const common = { spots: selectedSpots, timestamp: 1,
+                trip: { details: () => ({ known: true, hours: 0, fees: 0 }) },
+                routeAllowed: () => true, spotValue, ...readerExtra };
+            const full = drain(Planner.sourceFacts(state, 99101, 50, common)).value;
+            const expectedCounts = new Map([['existing', 7]]);
+            for (const row of full) {
+                const key = row.status === 'ready' ? 'ready' : row.reason;
+                expectedCounts.set(key, (expectedCounts.get(key) || 0) + 1);
+            }
+            const genericCounts = new Map([['existing', 7]]);
+            const generic = drain(Planner.sourceFacts(state, 99101, 50, { ...common, counts: genericCounts }));
+            assert.deepEqual([...genericCounts], [...expectedCounts]);
+            let routes = 0, values = 0;
+            const counts = new Map([['existing', 7]]), before = skipped();
+            const fast = drain(Planner.sourceFacts(state, 99101, 50, { ...common, counts,
+                routeAllowed: () => { routes++; return true; },
+                spotValue: spot => { values++; return spotValue(spot); },
+                bestForWish: { hourAdena: 100, ...bestForWish } }));
+            // The skip counter includes the level_band prefix: beyond it, refused
+            // records are skipped and safe ones walked.
+            const banded = full.filter(row => row.reason === 'level_band').length;
+            assert.equal(skipped() - before - banded > 0, shouldSkip, 'refused records are skipped, safe ones walked');
+            assert.deepEqual([...counts], [...expectedCounts], 'same reason totals and first-key order');
+            assert.deepEqual(fast.stages, generic.stages, 'same source yield tags and count');
+            if (shouldSkip) {
+                assert.deepEqual(fast.value, []);
+                assert.equal(routes, 0, 'a wholly refused list reads no native route');
+                assert.equal(values, 0, 'a wholly refused list reads no spot value');
+            } else {
+                const ready = generic.value;
+                const best = ready.reduce((winner, row) => !winner || row.costHours < winner.costHours ? row : winner, null);
+                assert.deepEqual(fast.value, best ? [best] : []);
+            }
+        };
+        for (const order of [mixedRewards, mixedRewards.slice().reverse()]) {
+            Data.npcRewards = order;
+            for (const rate of ['x1', 'x50']) {
+                process.env.L2NODE_PROGRESSION_RATE = rate;
+                const selected = replaceLevels(below);
+                for (const state of [warsmith, noSpoil, { ...warsmith, inventory: {} }, healer, buffer])
+                    checkBound(state, selected, true);
+                checkBound(noSpoil, selected, true, { bestForWish: { spoilOnly: true } });
+            }
+        }
+        // The same cache row follows replaced NPC/spot/rate inputs. The exact
+        // native boundary permits an armed bot; a malformed level is the
+        // Infinity rank, refused like any level above the bound; a short list
+        // and Spoil-only records without Spoil are skipped as well.
+        Data.npcRewards = mixedRewards;
+        process.env.L2NODE_PROGRESSION_RATE = 'x1';
+        checkBound(warsmith, replaceLevels(effective), false);
+        // The band's exact edge: minGap levels below is walked, one further is banded.
+        checkBound(warsmith, replaceLevels(warsmith.level - 7), false);
+        checkBound(warsmith, replaceLevels(warsmith.level - 8), false);
+        checkBound(warsmith, replaceLevels(below), true);
+        checkBound({ ...warsmith, inventory: {} }, replaceLevels(below, true), true);
+        checkBound(warsmith, replaceLevels(effective, true), true);
+        const short = replaceLevels(below).slice(0, 4);
+        checkBound(warsmith, short, true);
+        Data.npcRewards = mixedRewards.map(reward => ({ ...reward, rewards: [] }));
+        const noGearRead = { ...noSpoil };
+        Object.defineProperty(noGearRead, 'inventory', { get() { throw new Error('Spoil refusal must not read equipment'); } });
+        const spoilSpots = replaceLevels(below);
+        checkBound(noGearRead, [...spoilSpots, ...spoilSpots.map(spot => ({ ...spot, id: `${spot.id}-spoil` }))], true);
+    } finally { Config.developerDiagnostics = diagnosticsBefore; }
     console.log('test_source_facts: ok');
 } finally {
     Data.items = saved.items; Data.npcs = saved.npcs; Data.npcRewards = saved.rewards;

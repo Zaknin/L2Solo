@@ -110,14 +110,14 @@ function holdQueue(entered, gate, label) {
 async function workerBoundary(writer, stage, mode) {
     const id = await seed(), state = Life.snapshot(id), time = Date.now(), expDelta = 13;
     const request = { kind: 'lifecycle', characterId: id, commandId: `vi:${serial}`, commandCheckpoint: Protocol.commandCheckpoint(state),
-        state, context: {}, precomputedResult: { patch: { activity: 'resting', vitals: { ...state.vitals, hp: 90 }, stats: { restUntil: time + 60000 } },
+        state, precomputedResult: { patch: { activity: 'resting', vitals: { ...state.vitals, hp: 90 }, stats: { restUntil: time + 60000 } },
             events: [], materialize: { exp: expDelta, sp: 0, adena: 0, items: [{ selfId: 1869, amount: 3 }] }, nextResolveAt: time + 60000 } };
     const c = new ColdSimulationCoordinator(), sent = [], entered = deferred(), gate = deferred(), called = deferred();
     const stopEntered = deferred(), stopGate = deferred();
     c.ready = true; c.workerEpoch = `vi:${serial}`;
     const worker = label => ({ postMessage(message) { sent.push({ label, message: clone(message) });
         if (message.type === 'fence') realImmediate(() => c.onMessage(Protocol.envelope('fence_ack', message.workerEpoch,
-            { characterId: id, proposal: null, token: null }, message.msgId), c.worker, c.workerEpoch));
+            { characterId: id, proposal: null }, message.msgId), c.worker, c.workerEpoch));
         if (message.type === 'shutdown') realImmediate(() => c.onMessage(Protocol.envelope('drained', message.workerEpoch,
             { ok: true }, message.msgId), c.worker, c.workerEpoch));
     }, terminate: async () => {} });
@@ -125,7 +125,6 @@ async function workerBoundary(writer, stage, mode) {
     let admission, control, stop, targetEntered = false, held = false, targetFlushes = 0, flushCompleted = false;
     c.population = { executeWorkerLifecycleCommand(...args) { admission = args[2]?.workerAdmission;
         return Population.executeWorkerLifecycleCommand(...args); } };
-    c.contextIndex = () => ({}); c.contextFor = () => ({});
     const method = writer === 'vitals' ? 'updateCharacterVitals' : 'syncInventorySummary';
     const original = Database[method];
     Database[method] = function (...args) {

@@ -36,6 +36,8 @@ const counters = {
 };
 let last = null;
 let lastReset = null;
+// The worker's heap as of its last answer (WorkerHeapTelemetry.heapRecord).
+let workerHeap = null;
 
 function resetState() {
     for (const key of Object.keys(counters)) counters[key] = 0;
@@ -101,6 +103,7 @@ function spawn() {
         workerData: { databasePath, developerDiagnostics: DiagnosticConfig.developerDiagnostics === true }
     });
     worker = instance;
+    workerHeap = null;
     DiagnosticConfig.developerDiagnostics && (counters.starts += 1);
     instance.on('message', (message = {}) => {
         if (instance !== worker) return;
@@ -109,6 +112,7 @@ function spawn() {
             return;
         }
         if (message.type !== 'result') return;
+        if (message.v8Heap && DiagnosticConfig.developerDiagnostics) workerHeap = message.v8Heap;
         const entry = pending.get(Number(message.id));
         if (!entry) return;
         pending.delete(Number(message.id));
@@ -231,6 +235,7 @@ function snapshot() {
         p50Ms: percentile(durations, 0.5),
         p95Ms: percentile(durations, 0.95),
         maxMs: durations.length ? Number(Math.max(...durations).toFixed(2)) : 0,
+        v8Heap: workerHeap,
         } : { diagnosticsEnabled: false }),
         last: last ? { ...last } : null,
         lastReset: lastReset ? { ...lastReset } : null

@@ -13,7 +13,11 @@ const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const BuyerActivity = invoke('GameServer/Bot/Economy/MarketBuyerActivity');
 const saved = { user: World.user, speak: Response.speak, cached: LifeState.cachedState,
     upsert: LifeState.upsertState, find: Manager.findSessionById, activeShops: AfkTrade.activeShops,
-    now: Date.now, config: { ...Config } };
+    subscribe: AfkTrade.subscribeBoardChanges, now: Date.now, config: { ...Config } };
+// The chat keeps the board's books until a board change event: the test's
+// stubbed shop lists announce their change through this captured listener.
+let boardChanged = () => {};
+AfkTrade.subscribeBoardChanges = listener => { boardChanged = listener; return () => {}; };
 let now = 1000000;
 const packets = [], leaked = [], states = new Map(), hot = new Map();
 function player(sink, accountId = 'player', online = true) {
@@ -90,6 +94,7 @@ async function main() {
         assert.strictEqual(packets.length, 1, 'another seller must not repeat the same item immediately');
         const fundedBid = afkShop(703, 2, 3, 51000);
         AfkTrade.activeShops = () => [bestAsk, fundedBid];
+        boardChanged({});
         now += 30000;
         Chat.flush(now);
         assert.strictEqual(packets[1].id, 703);
@@ -134,7 +139,7 @@ async function main() {
     } finally {
         World.user = saved.user; Response.speak = saved.speak; LifeState.cachedState = saved.cached;
         LifeState.upsertState = saved.upsert; Manager.findSessionById = saved.find;
-        AfkTrade.activeShops = saved.activeShops;
+        AfkTrade.activeShops = saved.activeShops; AfkTrade.subscribeBoardChanges = saved.subscribe;
         Date.now = saved.now; Object.assign(Config, saved.config); Chat.reset(); Voice.reset();
     }
 }

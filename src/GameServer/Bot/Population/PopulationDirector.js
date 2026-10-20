@@ -1,6 +1,8 @@
 const ActorQueries = require('../../World/ActorSpatialQueries');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const Pressure = require('./PopulationPressure');
+const TableChannel = require('./ColdTableChannel').shared;
 
 function median(values) {
     if (!values.length) return null;
@@ -76,6 +78,18 @@ function realPlayerLevels() {
         .filter((level) => Number.isFinite(level) && level > 0);
 }
 
+// The 'pressure' table (ColdTableChannel, one row, key 'world'): the two
+// snapshot values the pressure formula reads (PopulationPressure), published
+// when either changes. The worker's party and solo steps read it.
+function pressureRow(snapshot) {
+    return { key: 'world', targetLevel: snapshot?.targetLevel ?? null, reason: snapshot?.reason || null };
+}
+
+TableChannel.register('pressure', {
+    key: row => row.key,
+    allRows: () => [pressureRow(PopulationDirector.lastSnapshot)]
+});
+
 const PopulationDirector = {
     timer: null,
     lastSnapshot: {
@@ -109,14 +123,23 @@ const PopulationDirector = {
         this.timer = null;
     },
 
+    // The one writer of lastSnapshot: a new target level or reason reaches
+    // the worker's 'pressure' row.
+    setSnapshot(next) {
+        const before = pressureRow(this.lastSnapshot), after = pressureRow(next);
+        this.lastSnapshot = next;
+        if (before.targetLevel !== after.targetLevel || before.reason !== after.reason) TableChannel.changed('pressure', after);
+        return next;
+    },
+
     refresh() {
         if (Config.directorEnabled === false) {
-            this.lastSnapshot = {
+            this.setSnapshot({
                 ...this.lastSnapshot,
                 updatedAt: Date.now(),
                 targetLevel: null,
                 reason: 'disabled'
-            };
+            });
             return Promise.resolve(this.lastSnapshot);
         }
 
@@ -126,7 +149,7 @@ const PopulationDirector = {
 
         return LifeState.levelHistogram().then((histogram) => {
             const bots = summarizeHistogram(histogram, targetLevel);
-            this.lastSnapshot = {
+            this.setSnapshot({
                 updatedAt: Date.now(),
                 targetLevel,
                 reason: targetLevel ? 'active_players' : 'no_active_players',
@@ -137,60 +160,13 @@ const PopulationDirector = {
                 },
                 bots,
                 phases: histogram.phases
-            };
+            });
             return this.lastSnapshot;
         });
     },
 
     pressureForState(state) {
-        if (state?.stats?.newbieAnchor) {
-            const level = Number(state.level || 1);
-            return {
-                expMultiplier: level >= Config.newbieAnchorMaxLevel ? 0 : Config.newbieAnchorExpMultiplier,
-                deathChanceMultiplier: 0.8,
-                directorReason: 'newbie_anchor'
-            };
-        }
-
-        const snapshot = this.lastSnapshot || {};
-        const targetLevel = Number(snapshot.targetLevel || 0);
-        if (!targetLevel) {
-            return {
-                expMultiplier: 1,
-                deathChanceMultiplier: 1,
-                directorReason: snapshot.reason || 'no_target'
-            };
-        }
-
-        const level = Number(state?.level || 1);
-        const radius = Config.directorTargetBandRadius;
-        const delta = targetLevel - level;
-
-        if (delta > radius) {
-            const catchUp = Math.min(
-                Config.directorMaxCatchUpMultiplier,
-                1 + (delta - radius) * 0.06
-            );
-            return {
-                expMultiplier: catchUp,
-                deathChanceMultiplier: 0.95,
-                directorReason: 'catch_up'
-            };
-        }
-
-        if (delta < -radius) {
-            return {
-                expMultiplier: Config.directorSlowdownMultiplier,
-                deathChanceMultiplier: 1.05,
-                directorReason: 'ahead_slowdown'
-            };
-        }
-
-        return {
-            expMultiplier: 1,
-            deathChanceMultiplier: 1,
-            directorReason: 'in_band'
-        };
+        return Pressure.pressureFor(state, this.lastSnapshot);
     },
 
     snapshot() {

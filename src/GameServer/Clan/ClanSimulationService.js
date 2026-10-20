@@ -230,7 +230,7 @@ async function joinExisting(candidate, clan, suitability, demand = null) {
 
 async function recruitForDemand(clan, demand) {
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
-    const candidates = await Life.statesByIds(demand.newMemberIds, { ownerId: 'legacy_main', unassigned: true });
+    const candidates = await Life.statesByIds(demand.newMemberIds, { unassigned: true });
     const rows = candidates.length ? await Database.execute([`SELECT characterId,traitsJson,primaryDrive,archetype FROM bot_personas
         WHERE characterId IN (${candidates.map(() => '?').join(',')})`, candidates.map(member => member.characterId)]) : [];
     const personas = new Map(rows.map(row => [Number(row.characterId), { traits: parseJson(row.traitsJson), primaryDrive: row.primaryDrive, archetype: row.archetype }]));
@@ -261,7 +261,7 @@ async function resolveCandidate(candidate, options = {}) {
             recordReason(Contracts.REASON_CODES.FOUNDER_EXISTING_CLAN);
             if (existing.clan.state?.recruitmentDemand) {
                 const [current] = await invoke('GameServer/Bot/Population/BotLifeState').statesByIds([candidate.characterId],
-                    { ownerId: 'legacy_main', unassigned: true });
+                    { unassigned: true });
                 if (!current) return { ok: false, code: 'recruitment_candidate_changed' };
                 return joinExisting({ ...candidate, ...current }, existing.clan, existing.suitability, existing.clan.state.recruitmentDemand);
             }

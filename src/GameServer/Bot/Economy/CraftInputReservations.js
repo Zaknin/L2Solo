@@ -3,10 +3,13 @@
 // Retain physical inputs of the selected native craft or equipment exchange DAG.
 // A missing recipe/material remains an errand; it does not release the
 // ingredients already collected toward that profitable equipment funding.
-function selectedCraftAmounts(state, network) {
+
+// The selected root's craft inputs before the bag caps them: [id, need]
+// rows by id. One walk per build: the compact network keeps them (craftNeeds).
+function selectedCraftNeeds(network) {
     const root = network?.activity?.rootKey || network?.focus?.[0];
     const plan = network?.queue?.find(row => row.key === root)?.plan || network?.plans?.get(root);
-    const reserved = {}, visited = new Set();
+    const needs = new Map(), visited = new Set();
     function visit(node) {
         if (!node || visited.has(node)) return;
         visited.add(node);
@@ -14,12 +17,28 @@ function selectedCraftAmounts(state, network) {
             const id = Number(String(row.key).replace(/^item:/, ''));
             if (!id) continue;
             const count = Number(row.amount || 0) * (row.once ? 1 : Math.max(1, Number(node.batches || 1)));
-            reserved[id] = Math.min(Number(state.inventory?.[id]?.amount || 0), (reserved[id] || 0) + count);
+            needs.set(id, (needs.get(id) || 0) + count);
         }
         for (const row of node.requirements || []) visit(row.plan || network.plans?.get(row.key));
     }
     visit(plan);
+    return [...needs].sort((a, b) => a[0] - b[0]);
+}
+// The needs capped by what the bot holds: {id: amount}.
+function selectedCraftAmounts(state, network) {
+    const reserved = {};
+    for (const [id, need] of selectedCraftNeeds(network)) reserved[id] = Math.min(Number(state.inventory?.[id]?.amount || 0), need);
     return reserved;
 }
+// The held units of given needs as [id, amount] rows: the decision card's
+// craftReservations and the held build's craft inputs.
+function heldCraftRows(state, needs) {
+    const rows = [];
+    for (const [id, need] of needs || []) {
+        const amount = Math.min(Number(state.inventory?.[id]?.amount || 0), need);
+        if (amount > 0) rows.push([id, amount]);
+    }
+    return rows;
+}
 
-module.exports = { selectedCraftAmounts };
+module.exports = { selectedCraftNeeds, selectedCraftAmounts, heldCraftRows };

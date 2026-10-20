@@ -13,7 +13,7 @@ const nativePurchase = plan => isNativeSource(plan?.sourceType) && plan.quoted =
 // Only completed preparation can retire public supply. A different root may
 // still project player supply for the same item, so keep that alternative.
 function npcOwnsPurchase(economy, selfId) {
-    return !economy?.intentPending && !economy?.routePending
+    return !economy?.intentPending
         && nativePurchase(economy?.network?.plans?.get?.(`item:${Number(selfId)}`))
         && Array.isArray(economy.watchList)
         && !economy.watchList.some(row => Number(row.itemId) === Number(selfId));

@@ -49,6 +49,92 @@ function wired() {
 }
 
 async function unitChecks() {
+    // A crafter's 'recipes' row (CraftWorkshopService): each load publishes it,
+    // a learning (recipesChanged) keeps it until the next load replaces it, and
+    // a bot that leaves takes it away.
+    {
+        const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
+        const Codec = invoke('GameServer/Bot/Economy/RecipeBookCodec');
+        const Database = invoke('Database');
+        const shared = require('../src/GameServer/Bot/Population/ColdTableChannel').shared;
+        const mirror = new TableMirror(), target = {}, id = 990001;
+        const originalFetch = Database.fetchCharacterRecipes;
+        let learned = [1];
+        Database.fetchCharacterRecipes = async () => learned.map(recipeId => ({ recipeId, type: 'dwarven' }));
+        const book = () => { shared.flush(); return mirror.rows('recipes').get(id)?.recipeBook; };
+        try {
+            shared.attach(target, 'recipes', payload => { mirror.apply(structuredClone(payload.tables)); return true; });
+            await Workshop.knownFor(id);
+            assert.strictEqual(book(), Codec.pack([1]), 'the first load publishes the row');
+            learned = [1, 2];
+            Workshop.recipesChanged(id);
+            assert.strictEqual(book(), Codec.pack([1]), 'a learning keeps the last book until the next load');
+            await Workshop.knownFor(id);
+            assert.strictEqual(book(), Codec.pack([1, 2]), 'the next load republishes the row');
+            Workshop.remove(id);
+            assert.strictEqual(book(), undefined, 'a bot that leaves takes its row away');
+        } finally {
+            shared.detach(target);
+            Database.fetchCharacterRecipes = originalFetch;
+        }
+    }
+    // Source readiness precedes transport readiness. Other tables still stream
+    // while native warehouse/clan owners finish their startup projections.
+    {
+        const Warehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+        const Supplies = invoke('GameServer/Clan/ClanSupplyPolicy');
+        const channel = new ColdTableChannel(), mirror = new TableMirror();
+        let warehouseReady = false, clanReady = false;
+        const warehouses = new Map(), clans = new Map([[7, [7, 1, [], 1]]]);
+        channel.register('personal_warehouse', { key: row => row[0], allRows: () => warehouses.values(), ready: () => warehouseReady });
+        channel.register('clan_supplies', { key: row => row[0], allRows: () => clans.values(), ready: () => clanReady });
+        channel.register('independent', { key: row => row.id, allRows: () => [{ id: 1 }] });
+        mirror.watch('personal_warehouse', { reset() {}, remove() {}, put: (_key, row) => Warehouse.prepareRow(row) });
+        mirror.watch('clan_supplies', { reset() {}, remove() {}, put: (_key, row) => Supplies.prepareRow(row) });
+        Warehouse.useRowSource(id => mirror.rows('personal_warehouse').get(id), () => mirror.ready('personal_warehouse'));
+        Supplies.useRowSource(id => mirror.rows('clan_supplies').get(id), () => mirror.ready('clan_supplies'));
+        try {
+            channel.attach({}, 'owner-ready', payload => { mirror.apply(structuredClone(payload.tables)); return true; });
+            assert(mirror.ready('independent'), 'startup overlap remains useful for independent tables');
+            assert.equal(Warehouse.contentIdentity({ characterId: 1 }), null, 'unloaded warehouse is not an empty warehouse');
+            assert.equal(Supplies.contentIdentity({ clanId: 7 }), null, 'level-only clan rows do not authorize demand reuse');
+            warehouseReady = true; channel.flush();
+            const empty = Warehouse.contentIdentity({ characterId: 1 });
+            assert.match(empty, /^[a-f0-9]{64}$/, 'a completed empty full copy publishes a known empty owner');
+            const values = [[1864, 10, 0], [627, 1, 7]], row = Warehouse.prepareRow([1, 9, values]);
+            const encoded = JSON.stringify(row);
+            warehouses.set(1, row); channel.changed('personal_warehouse', row); channel.flush();
+            const first = Warehouse.contentIdentity({ characterId: 1 });
+            assert.notEqual(first, empty);
+            assert.equal(JSON.stringify(row), encoded, 'private identity metadata adds no table wire fields');
+            const restarted = Warehouse.prepareRow([1, 1, structuredClone(values)]);
+            warehouses.set(1, restarted); channel.changed('personal_warehouse', restarted); channel.flush();
+            assert.equal(Warehouse.contentIdentity({ characterId: 1 }), first, 'numeric publication version is not content identity');
+            const reordered = Warehouse.prepareRow([1, 2, [...values].reverse()]);
+            warehouses.set(1, reordered); channel.changed('personal_warehouse', reordered); channel.flush();
+            assert.notEqual(Warehouse.contentIdentity({ characterId: 1 }), first, 'native nonstackable publication order remains an input');
+            const malformed = [1, 3, [[1864, NaN, 0]]];
+            warehouses.set(1, malformed); channel.changed('personal_warehouse', malformed); channel.flush();
+            assert.equal(Warehouse.contentIdentity({ characterId: 1 }), null, 'malformed native quantities never become an empty or null hash');
+            const final = Supplies.prepareRow([7, 1, [[1864, 3]], 22]);
+            clans.set(7, final); channel.changed('clan_supplies', final); channel.flush();
+            assert.equal(Supplies.contentIdentity({ clanId: 7 }), null, 'queued final data is unknown until its owner finishes');
+            clanReady = true; channel.flush();
+            const clan = Supplies.contentIdentity({ clanId: 7 });
+            assert.match(clan, /^[a-f0-9]{64}$/);
+            assert.equal(Supplies.contentIdentity({ clanId: 99 }), null, 'a missing positive clan is never invented empty');
+            const same = Supplies.prepareRow([7, 1, [[1864, 3]], 1]);
+            clans.set(7, same); channel.changed('clan_supplies', same); channel.flush();
+            assert.equal(Supplies.contentIdentity({ clanId: 7 }), clan);
+            const completed = Supplies.prepareRow([7, 1, [], 2]);
+            clans.set(7, completed); channel.changed('clan_supplies', completed); channel.flush();
+            assert.notEqual(Supplies.contentIdentity({ clanId: 7 }), clan, 'final empty demand differs from unmet native demand');
+            const badDemand = [7, 1, [[1864, Infinity]], 3];
+            clans.set(7, badDemand); channel.changed('clan_supplies', badDemand); channel.flush();
+            assert.equal(Supplies.contentIdentity({ clanId: 7 }), null, 'nonfinite demands cannot share JSON null identity');
+        } finally { Warehouse.useRowSource(null); Supplies.useRowSource(null); }
+    }
+
     // Attach sends the whole table; changes follow in order, one version per flush.
     {
         const w = wired();
@@ -93,6 +179,20 @@ async function unitChecks() {
         w.change({ id: 1, price: 1 });
         assert.strictEqual(w.channel.tables.get('test').pending.size, 1, 'an attached worker gets the change');
         w.channel.flush();
+        w.same();
+    }
+
+    // A row given as a function (a costly copy) is built only for an attached worker.
+    {
+        const w = wired();
+        let built = 0;
+        const lazy = (row) => { w.rows.set(row.id, row); w.channel.changed('test', () => { built += 1; return row; }); };
+        lazy({ id: 1, price: 10 });
+        assert.strictEqual(built, 0, 'no worker attached: the row is never built');
+        w.channel.attach(w.target, 'e1', w.deliver('e1'));
+        lazy({ id: 1, price: 11 });
+        w.channel.flush();
+        assert.strictEqual(built, 1);
         w.same();
     }
 
@@ -357,7 +457,8 @@ async function clanWorkerRestart() {
     const channel = new ColdTableChannel();
     const rows = new Map([[1, { id: 1, price: 10 }], [2, { id: 2, price: 20 }]]);
     channel.register('test', source(rows));
-    const coordinator = new ClanPlanningCoordinator({ tableChannel: channel, restartDelayMs: 0 });
+    const coordinator = new ClanPlanningCoordinator({ tableChannel: channel, restartDelayMs: 0,
+        planningContext: async () => ({ revision: 1 }) });
     const summary = () => coordinator.send('table_summary', {});
     try {
         await coordinator.ready({});
@@ -366,7 +467,7 @@ async function clanWorkerRestart() {
         // Changes go out before each plan, ahead of the plan message.
         rows.set(3, { id: 3, price: 30 });
         channel.changed('test', rows.get(3));
-        await assert.rejects(coordinator.plan({ member: null, context: {} }, {}));
+        await assert.rejects(coordinator.plan({ member: null }, {}));
         assert.deepStrictEqual((await summary()).test, { version: 1, rows: 3, waiting: false, loading: false });
 
         // A restarted worker starts empty and gets the table in full.

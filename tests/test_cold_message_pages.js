@@ -12,11 +12,10 @@ for (const page of pages) {
 }
 const huge = { id: 5, state: { text: 'x'.repeat(300000) } };
 let oversize = 0;
-const mixed = collectionPages('claim_ack', 'test', { grants: [huge, { id: 6 }], rejected: [{ id: 7 }] }, 'fixed', row => {
+const acks = collectionPages('commit_ack', 'test', { results: [huge, { id: 6 }, { id: 7 }] }, 'fixed', row => {
     oversize++; return { id: row.id, state: null, reason: 'too_large' };
 });
 assert.strictEqual(oversize, 1);
-assert.deepStrictEqual(mixed.flatMap(page => page.grants).map(row => row.id), [5, 6]);
-assert.deepStrictEqual(mixed.flatMap(page => page.rejected).map(row => row.id), [7]);
+assert.deepStrictEqual(acks.flatMap(page => page.results).map(row => row.id), [5, 6, 7]);
 assert.deepStrictEqual(collectionPages('snapshot_page', 'test', { rows: [huge] }, 'fixed'), []);
 console.log('Cold message UTF-8 limits, order and oversize recovery checks passed');

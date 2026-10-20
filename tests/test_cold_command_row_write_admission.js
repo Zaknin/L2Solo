@@ -13,7 +13,6 @@ const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Population = invoke('GameServer/Bot/Population/PopulationService');
 const Protocol = invoke('GameServer/Bot/Population/ColdSimulationProtocol');
 const { ColdSimulationCoordinator } = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
-const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const { WorkerCommandAdmissionRefusal } = require(path.join(gameRoot, 'src/GameServer/Bot/Population/WorkerCommandAdmission'));
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -95,7 +94,7 @@ async function seed() {
 }
 function requestFor(state) {
     return { kind:'lifecycle',characterId:state.characterId,commandId:`row-write:${serial}`,
-        commandCheckpoint:Protocol.commandCheckpoint(state),state,context:{},
+        commandCheckpoint:Protocol.commandCheckpoint(state),state,
         precomputedResult:{patch:{activity:'resting',vitals:{...state.vitals,hp:90},stats:{restUntil:Date.now()+60000}},
             events:[],materialize:{exp:0,sp:0,adena:0,items:[]},nextResolveAt:Date.now()+60000} };
 }
@@ -114,7 +113,6 @@ async function queued(mode) {
     c.worker=worker('A');const originalWorker=c.worker,originalEpoch=c.workerEpoch;
     let admission,prepareCalls=0,nativeBarrier,stop,dbOptions;
     c.population={executeWorkerLifecycleCommand(...args){admission=args[2]?.workerAdmission;return Population.executeWorkerLifecycleCommand(...args);}};
-    c.contextIndex=()=>({});c.contextFor=()=>({});
     const prepare=Life.prepareResolve,save=Database.saveBotLifeState;
     Database.saveBotLifeState=function(...args){
         savedStatement=clone(args[0]);dbOptions=args[1];
@@ -199,10 +197,6 @@ async function manualAndPolicy() {
     const stats=JSON.parse(facts(id).bot_life_state.find(row=>row.characterId===id).statsJson);
     assert.equal(stats.marketTrades,undefined);assert.deepEqual(Life.cachedState(id).marketTrades,{'material none':9});
     assert.equal((await Database.execute(['SELECT deals FROM bot_market_counts WHERE characterId=? AND counter=?', [id, 'material none']]))[0].deals,9);
-    const owner=await seed(),old=Life.snapshot(owner);
-    assert.equal((await Owner.claimBatch([old],{allowLifecycle:true,leaseMs:120000})).grants.length,1);
-    const claimed=facts(owner),result=await Population.executeWorkerLifecycleCommand(old,requestFor(old));
-    assert.equal(result.ok,false);assert.equal(result.reason,'apply_failed');assert.deepEqual(facts(owner),claimed);
     const versioned=await seed(),stale=Life.snapshot(versioned);
     await Database.execute(["UPDATE bot_life_state SET statsJson=json_set(statsJson,'$.clanInventoryRevision',1) WHERE characterId=?",[versioned]]);
     const before=facts(versioned),rejected=await Population.executeWorkerLifecycleCommand(stale,requestFor(stale));
@@ -270,7 +264,7 @@ async function check(name,work){try{await work();console.log(`PASS ${name}`);}ca
     for(const mode of ['current','replace','stop','fence','changed','callback_replaced','invalid_replaced','ordinary_error','brand_error']) {
         await check(`actual queued first row ${mode}`,()=>queued(mode));
     }
-    await check('manual omitted / marketTrades / owner and version / projection / releaseHot guards',manualAndPolicy);
+    await check('manual omitted / marketTrades / version / projection / releaseHot guards',manualAndPolicy);
     await check('native callback presence/type/return/error domain and queue cleanup',callbackDomain);
     if(failures.length)throw Error('native queued ROW contracts failed: '+failures.join(', '));
 })().catch(error=>{console.error(error);process.exitCode=1;}).finally(async()=>{

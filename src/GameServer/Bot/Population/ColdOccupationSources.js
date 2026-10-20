@@ -253,15 +253,29 @@ function* prepare(state, { board, timestamp, read = () => {}, readScope = () => 
                     && line.custodyPolicy !== 1 && line.selfId === Number(recipe.productId)).reduce((sum, line) => sum + line.count, 0) }));
         return result;
     };
+    // One town table per item and NPC admission for this request: a craft
+    // search prices the same input for batches 1..64 and across recipes.
+    // A board change of a read item invalidates the request (planner
+    // validation), so a table never outlives the board it was read from.
+    const purchaseTables = new Map();
     const preparePurchase = function* (owner, id, amount, query = {}) {
         read(id);
-        // Static NPC stock is the only unlimited ingredient source admitted here.
-        const npcOffers = query.npc === true && Production.allowsNpcShot(id) ? npcOffersFor(id) : EMPTY;
-        const towns = new Set(npcOffers.map(offer => offer.town));
-        for (const line of (board?.list(id, 1) || []).slice(0, QUOTE_DEPTH)) towns.add(line.town);
-        for (const town of towns) { if (townOrdinal.has(town)) yield* ensureTrip(town); yield 'quote'; }
-        const best = OfferQuery.cheapestTown(board, id, { amount, quoteDepth: QUOTE_DEPTH, excludeOwner: owner.characterId,
-            accept: line => !Number(line.enchant || 0) && personalOfferAllowed(line, owner), npcOffers, cost: trip });
+        const npc = query.npc === true && Production.allowsNpcShot(id);
+        const tableKey = `${Number(owner.characterId)}:${Number(id)}:${npc ? 1 : 0}`;
+        let table = purchaseTables.get(tableKey);
+        if (!table) {
+            // Static NPC stock is the only unlimited ingredient source admitted here.
+            const npcOffers = npc ? npcOffersFor(id) : EMPTY;
+            const towns = new Set(npcOffers.map(offer => offer.town));
+            for (const line of (board?.list(id, 1) || []).slice(0, QUOTE_DEPTH)) towns.add(line.town);
+            for (const town of towns) { if (townOrdinal.has(town)) yield* ensureTrip(town); yield 'quote'; }
+            // sampleWhole (E303, diagnostics only): the whole-list rerun prices only towns whose trip is warmed above, so
+            // in the worker `cap:quotes:lost` is a lower bound of the plans the cap drops.
+            table = OfferQuery.townTable(board, id, { quoteDepth: QUOTE_DEPTH, excludeOwner: owner.characterId,
+                accept: line => !Number(line.enchant || 0) && personalOfferAllowed(line, owner), npcOffers, cost: trip, sampleWhole: true });
+            purchaseTables.set(tableKey, table);
+        }
+        const best = OfferQuery.cheapestIn(table, amount);
         yield 'candidate';
         return best ? { ...best, tripDetails: trip.details(best.town), repeatable: best.npc === amount, routeKey: best.town } : null;
     };

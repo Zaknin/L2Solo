@@ -11,10 +11,10 @@ const Routes = invoke('GameServer/Bot/AI/LevelingRoutes'), Spots = invoke('GameS
 const Service = invoke('GameServer/Bot/AI/SpotService'), Matchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
 const Rewards = require('../src/GameServer/Bot/Population/ColdKillRewards');
 const Request = require('../src/GameServer/Bot/Population/PartyRequestPlanner');
-const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
+const BotRoute = require('../src/GameServer/Bot/Population/BotRoute');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 const at = Date.now(), point = { locX: 145224, locY: 120001, locZ: -4500 };
-const profiles = ['danger', 'only-one-input', 'unsafe-source', 'full-source', 'common-source', 'cash-field'].map(id => ({
+const profiles = ['danger', 'only-one-input', 'unsafe-source', 'common-source', 'cash-field'].map(id => ({
     id, name: id, capacity: 5, center: point, npcSelfIds: [626, 627], minLevel: 60, maxLevel: 65, avgLevel: 62, density: 10 }));
 const byId = new Map(profiles.map(spot => [spot.id, spot]));
 const members = [1, 2, 3].map(characterId => ({ characterId, name: `Material${characterId}`, level: 65,
@@ -22,12 +22,12 @@ const members = [1, 2, 3].map(characterId => ({ characterId, name: `Material${ch
     inventory: characterId <= 2 ? { [characterId === 1 ? 4108 : 4104]: { amount: characterId } } : {}, adena: 100000,
     party: { partyId: 'material-risk', leaderId: 1, role: characterId === 3 ? 'healer' : characterId === 2 ? 'spoiler' : 'dps' },
     vitals: { hp: 2000, maxHp: 2000, mp: 1000, maxMp: 1000 },
-    simulation: { ownerId: 'legacy_main', revision: 1 },
+    simulation: { revision: 1 },
     timing: { lastResolvedAt: at - 10000, nextResolveAt: at },
     stats: { classId: characterId === 3 ? 16 : characterId === 2 ? 54 : 8,
         role: characterId === 3 ? 'healer' : characterId === 2 ? 'spoiler' : 'dps',
         equipmentPlan: { status: 'active', target: { selfId: characterId === 1 ? 148 : 146 } },
-        spotBackoffs: [{ spotId: 'personal-only', until: at + 3600000 }] } }));
+        spotBackoffs: [{ spotId: 'personal-only', untilStep: 60 }] } }));
 const objective = { materialParty: true, status: 'open', priority: 'required', strategy: 'craft', reason: 'craft_material',
     itemId: 4108, targetId: 148, spotId: 'danger', npcId: 620, attempts: 2, objectiveKey: 'craft-material:danger' };
 const needs = [1, 2].map(characterId => ({ characterId, itemId: characterId === 1 ? 4108 : 4104,
@@ -39,16 +39,14 @@ let party = { partyId: 'material-risk', leaderId: 1, memberIds: [1, 2, 3], statu
 const evidence = Risk.record(party, { debug: { fights: 3, wins: 0, spotId: 'danger' }, partyPatch: { stats: { deaths: 2 } } }, at);
 party = { ...party, stats: { ...party.stats, ...evidence.partyPatch.stats } };
 assert(Risk.excludedSpotIds(party, at).has('danger'), 'native risk evidence excludes the original camp');
-const options = { timestamp: at, excludedSpotIds: Risk.excludedSpotIds(party, at), occupancy: {
-    'full-source': { count: 5, reservedCount: 5, capacity: 5, retained: new Set(), reservedKeys: new Set() }
-} };
+const options = { timestamp: at, excludedSpotIds: Risk.excludedSpotIds(party, at) };
 const saved = [], replace = (object, key, value) => { saved.push(() => { object[key] = value; }); object[key] = value; };
 let checks = 0, spoiler = true, physicalSpotId = 'danger';
 const source = (id, npcId, kind = 'drop') => ({ spot: byId.get(id), kind, npcLevel: 60,
     reward: { selfId: npcId }, sourceCount: 1, totalCount: 1 });
 let sourceIndex = new Map([
-    [4108, ['danger', 'only-one-input', 'unsafe-source', 'full-source', 'common-source'].map(id => source(id, 626))],
-    [4104, ['danger', 'unsafe-source', 'full-source', 'common-source'].map(id => source(id, 627, 'spoil'))]
+    [4108, ['danger', 'only-one-input', 'unsafe-source', 'common-source'].map(id => source(id, 626))],
+    [4104, ['danger', 'unsafe-source', 'common-source'].map(id => source(id, 627, 'spoil'))]
 ]);
 replace(Planner, 'sourceIndexFor', () => sourceIndex);
 replace(Planner, 'itemDropYield', () => { checks++; return { expectedYield: 1 }; });
@@ -66,46 +64,23 @@ async function proposalsFor(currentParty, roster, route, timestamp) {
     const messages = [], kernel = new ColdSimulationKernel({ now: () => timestamp,
         resolveSolo: () => { throw Error('no solo combat during evacuation'); },
         resolveParty: () => { throw Error('no party combat during travel'); },
+        // The party run's route (the worker's BotRoute.route).
+        partyRoute: () => route,
         emit: (type, payload) => messages.push({ type, payload }) });
-    const requestId = 'material-risk-claim';
-    const grants = new Map(roster.map(state => [state.characterId, { characterId: state.characterId,
-        ownerId: 'cold_simulation_owner', leaseId: `route-${state.characterId}`, revision: 2, leaseUntil: timestamp + 30000 }]));
     for (const state of roster) {
-        kernel.upsert({ state, context: {} });
-        kernel.inFlight.set(state.characterId, { state, grant: grants.get(state.characterId), partyId: party.partyId, claimRequestId: requestId });
+        kernel.upsert({ state });
+        kernel.inFlight.set(state.characterId, { state, startedAt: timestamp, partyId: party.partyId });
     }
-    kernel.partyRuns.set(currentParty.partyId, { party: currentParty, members: roster, spot: byId.get(currentParty.spotId), route, requestId, grants });
-    await kernel.resolvePartyGrant(currentParty.partyId);
+    kernel.partyRuns.set(currentParty.partyId, { party: currentParty, members: roster, spot: byId.get(currentParty.spotId), startedAt: timestamp });
+    await kernel.resolvePartyStep(currentParty.partyId);
     const proposals = messages.find(message => message.type === 'proposal_batch')?.payload.proposals;
     assert(proposals, JSON.stringify(messages));
     assert(proposals.every(row => row.atomicGroup?.memberIds.length === roster.length), 'every transition uses the complete atomic roster');
     return { members: proposals.map(row => row.nextState), party: proposals.find(row => row.partyResolution).partyResolution.party };
 }
-async function legacyTransition(currentParty, roster, timestamp = at) {
-    const undo = [], override = (object, key, value) => { const original = object[key];
-        undo.push(() => { object[key] = original; }); object[key] = value; };
-    const states = [];
-    override(Date, 'now', () => timestamp);
-    override(Spots, 'ensure', () => profiles);
-    override(Spots, 'findById', id => byId.get(id));
-    override(Spots, 'currentOccupancy', () => ({}));
-    const life = invoke('GameServer/Bot/Population/BotLifeState');
-    override(life, 'statesForParty', async () => roster);
-    override(life, 'upsertState', async state => { states.push(state); return state; });
-    override(Route, 'commitLegacy', async (_party, _members, nextParty, nextMembers) => {
-        states.push(...nextMembers); return { ok: true, party: nextParty };
-    });
-    override(invoke('GameServer/Bot/Population/BackgroundPartyState'), 'createOrUpdate', async value => value);
-    override(invoke('GameServer/Bot/Population/BotLifeEvents'), 'record', async () => null);
-    try {
-        const result = await invoke('GameServer/Bot/Population/PopulationService').resolveBackgroundParty(currentParty);
-        assert(result.ok, JSON.stringify(result));
-        return { members: states, party: result.party };
-    } finally { undo.reverse().forEach(restore => restore()); }
-}
 async function main() {
-    // Four alternatives per need still leave a common source after the risk,
-    // combat and whole-roster capacity gates remove the other three.
+    // Three alternatives per need still leave a common source after the risk
+    // and combat gates remove the other two (room is checked at arrival).
     sourceIndex.get(4108).splice(1, 1);
     const selected = Route.select(party, members, profiles, options);
     assert.equal(selected?.spot.id, 'common-source');
@@ -114,24 +89,17 @@ async function main() {
     const before = checks;
     for (let i = 0; i < 100; i++) Route.select(party, members, profiles, options);
     assert.equal(checks, before, 'warm source reviews perform no new source traversal');
-    const coordinator = new ColdSimulationCoordinator();
-    const index = { timestamp: at, profiles, spots: byId, occupancy: options.occupancy };
-    const route = coordinator.routeFor(members[0], byId.get('danger'), party, members, index);
-    assert.equal(route.spotId, 'common-source', 'the real coordinator cannot choose the unrelated cash camp');
+    const routeFor = (state, currentSpot, currentParty, roster) => BotRoute.route(state, currentSpot, currentParty, roster,
+        { spots: profiles, timestamp: at });
+    const route = routeFor(members[0], byId.get('danger'), party, members);
+    assert.equal(route.spotId, 'common-source', 'the real route search cannot choose the unrelated cash camp');
     assert(route.materialSources);
     assert.equal(route.cause, 'death_pressure');
     physicalSpotId = 'common-source';
     const backedOffParty = Risk.withBackoff(party, Risk.backoff(party, 'danger', at), at);
     const displaced = { ...backedOffParty, spotId: physicalSpotId };
-    assert(coordinator.routeFor(members[0], byId.get(physicalSpotId), displaced, members, index)?.materialSources,
+    assert(routeFor(members[0], byId.get(physicalSpotId), displaced, members)?.materialSources,
         'a previously displaced party repairs stale contract sources even when already at the selected camp');
-    const retainedOccupancy = { ...options.occupancy, 'common-source': { count: 3, reservedCount: 6, capacity: 5,
-        reservedKeys: new Set(['1', '2', '3', '4', '5', '6']), retained: new Set(['1', '2', '3', '4', '5']) } };
-    assert.equal(Spots.hasCapacityForStates(byId.get(physicalSpotId), members, retainedOccupancy), false);
-    assert.equal(Spots.hasCapacityForParty(byId.get(physicalSpotId), members, retainedOccupancy), true);
-    assert.equal(coordinator.routeFor(members[0], byId.get(physicalSpotId), displaced, members,
-        { ...index, occupancy: retainedOccupancy })?.spotId, 'common-source',
-    'surplus intentions cannot evict a fully retained party instead of repairing its material contract');
     physicalSpotId = 'danger';
     const original = JSON.stringify(party);
     const moved = await proposalsFor(party, members, route, at);
@@ -149,19 +117,15 @@ async function main() {
     });
     assert(Risk.excludedSpotIds(moved.party, at + 1).has('danger'));
     moved.members.forEach((state, i) => assert.deepEqual(state.stats.spotBackoffs, members[i].stats.spotBackoffs));
-    const legacyMoved = await legacyTransition(party, members);
-    assert.equal(legacyMoved.party.stats.objective.spotId, 'common-source', 'legacy fallback uses the same material routing policy');
-    assert.deepEqual(legacyMoved.party.stats.agreement.materialNeeds.map(goal => goal.npcId), [626, 627]);
 
     spoiler = false;
     assert.equal(Route.select(party, members, profiles, options), null, 'spoil is not an executable source without a party spoiler');
-    const evacuation = coordinator.routeFor(members[0], byId.get('danger'), party, members,
-        { ...index, occupancy: {} });
+    const evacuation = routeFor(members[0], byId.get('danger'), party, members);
     assert.equal(evacuation.spotId, 'cash-field', 'lack of materials must not prevent leaving the risky camp');
     assert.equal(evacuation.materialEvacuation, true);
     physicalSpotId = 'cash-field';
-    assert(coordinator.routeFor(members[0], byId.get(physicalSpotId), { ...backedOffParty, spotId: physicalSpotId }, members,
-        { ...index, occupancy: {} })?.materialEvacuation, 'a party already farming unrelated ground must also exit the stale operation');
+    assert(routeFor(members[0], byId.get(physicalSpotId), { ...backedOffParty, spotId: physicalSpotId }, members)
+        ?.materialEvacuation, 'a party already farming unrelated ground must also exit the stale operation');
     physicalSpotId = 'danger';
     const departed = await proposalsFor(party, members, evacuation, at);
     departed.party.stats.sessionExpiresAt = at + 1;
@@ -179,14 +143,8 @@ async function main() {
         assert.equal(Request.partyRequestForPlan({ ...state, activity: 'traveling' }, state.stats.equipmentPlan,
             departed.party.stats.travel.arrivalAt + 1), state.stats.partyRequest, 'native replanning preserves evacuation cooldown during recovery/travel');
     });
-    const legacyDeparted = await legacyTransition(party, members);
-    assert(legacyDeparted.party.stats.travel.materialEvacuation);
-    const legacyArrived = await legacyTransition(legacyDeparted.party, legacyDeparted.members,
-        legacyDeparted.party.stats.travel.arrivalAt);
-    assert.equal(legacyArrived.party.status, 'dissolved');
-    assert.deepEqual(legacyArrived.members.map(state => state.stats.partyRequest?.itemId || null), [4108, 4104, null]);
     const ordinary = { ...party, stats: { ...party.stats, objective: { spotId: 'danger' } } };
-    const normal = coordinator.routeFor(members[0], byId.get('danger'), ordinary, members, { ...index, occupancy: {} });
+    const normal = routeFor(members[0], byId.get('danger'), ordinary, members);
     assert.equal(normal.spotId, 'cash-field');
     assert.equal(normal.materialEvacuation, undefined, 'ordinary and clan hunting keep their existing risk retreat');
     spoiler = true;
@@ -196,6 +154,6 @@ async function main() {
     const unfinished = Route.select(party, [finishedOwner, ...members.slice(1)], profiles, options);
     assert.equal(unfinished?.spot.id, 'common-source');
     assert.deepEqual(unfinished.sources.map(row => row.characterId), [2], 'a physically fulfilled owner no longer constrains the remaining material route');
-    console.log('PASS bounded material-source retreat, different drop/spoil mobs, native risk/capacity gates, atomic contract retarget, evacuation and personal cooldowns');
+    console.log('PASS bounded material-source retreat, different drop/spoil mobs, native risk gates, atomic contract retarget, evacuation and personal cooldowns');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => saved.reverse().forEach(restore => restore()));

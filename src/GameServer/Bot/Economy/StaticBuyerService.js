@@ -3,16 +3,30 @@ const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
 const StaticMerchantPricing = invoke('GameServer/Bot/Economy/StaticMerchantPricing');
 const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
+const ProductionPolicy = invoke('GameServer/Bot/Economy/ProductionPolicy');
 
 // Fixed buy stores are an intentionally unlimited Adena source for the
 // background economy. Only materials and drop resources they explicitly ask
 // for go through this path; equipment still has a chance to reach players via
 // a private store.
+//
+// The buy stores are static game data: town -> its buy stores, built once at
+// load (15 stores, about 2 KB). BUYER_TOWNS keeps the config order, the
+// tie-break of bestTownFor.
+const BUYERS_BY_TOWN = new Map();
+for (const [name, store] of Object.entries(MerchantStoreConfigs)) {
+    if (store?.storeType !== 3) continue;
+    if (!BUYERS_BY_TOWN.has(store.town)) BUYERS_BY_TOWN.set(store.town, []);
+    BUYERS_BY_TOWN.get(store.town).push(Object.freeze({ name, ...store }));
+}
+const BUYER_TOWNS = Object.freeze([...BUYERS_BY_TOWN.keys()].filter(Boolean));
+const NO_BUYERS = Object.freeze([]);
+BUYERS_BY_TOWN.forEach((buyers) => Object.freeze(buyers));
+
+// The shared rows of the town; callers only read them.
 function buyersInTown(town) {
-    if (require('./ProductionPolicy').buyersDisabled()) return [];
-    return Object.entries(MerchantStoreConfigs)
-        .filter(([, store]) => store?.storeType === 3 && store.town === town)
-        .map(([name, store]) => ({ name, ...store }));
+    if (ProductionPolicy.buyersDisabled()) return NO_BUYERS;
+    return BUYERS_BY_TOWN.get(town) || NO_BUYERS;
 }
 
 function candidatesFor(state, town) {
@@ -38,13 +52,10 @@ function candidatesFor(state, town) {
 }
 
 function bestTownFor(state) {
-    const towns = [...new Set(Object.values(MerchantStoreConfigs)
-        .filter((store) => store?.storeType === 3 && store.town)
-        .map((store) => store.town))];
     const origin = state?.stats?.marketReturn?.loc || state?.loc || {};
     const hasOrigin = Number.isFinite(Number(origin.locX)) && Number.isFinite(Number(origin.locY))
         && (Number(origin.locX) !== 0 || Number(origin.locY) !== 0);
-    return towns.map((town, order) => {
+    return BUYER_TOWNS.map((town, order) => {
             const candidates = candidatesFor(state, town);
             const buyers = buyersInTown(town);
             return {

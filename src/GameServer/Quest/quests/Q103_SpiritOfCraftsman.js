@@ -38,7 +38,7 @@ module.exports = {
     await s.set("cond", 1);
     await Q().giveItem(s.session, L, 1);
     s.playSound("ItemSound.quest_accept");
-    return p("Karrod", "Take this letter to Cekton.");
+    return p("Karrod", "Take this letter to Cecktinon.");
   },
   async onTalk(s, x) {
     const id = Number(x.fetchSelfId()),
@@ -57,34 +57,63 @@ module.exports = {
             '<a action="bypass -h quest 103 start">Accept.</a>',
           )
         : p("Karrod", "Only level 11 dark elves may help.");
-    const step = async (take, give, next) => {
+    const step = async (take, give, next, who, ok, what) => {
+      if (take.some((z) => n(s, z) < (z === B ? 10 : 1)))
+        return p(who, `You do not have ${what}.`);
       for (const z of take) await q.takeItem(s.session, z, z === B ? 10 : 1);
       for (const z of give) await q.giveItem(s.session, z, 1);
       await s.set("cond", next);
       s.playSound("ItemSound.quest_middle");
+      return p(who, ok);
     };
-    if (id === C && c === 1) {
-      await step([L], [V1], 2);
-      return p("Cekton", "Speak with Harne.");
-    }
-    if (id === H && c === 2) {
-      await step([V1], [V2], 3);
-      return p("Harne", "Bring ten bone fragments.");
-    }
-    if (id === H && c === 4) {
-      await step([V2, B], [S], 5);
-      return p("Harne", "Return to Cekton.");
-    }
-    if (id === C && c === 5) {
-      await step([S], [O], 6);
-      return p("Cekton", "Use the oil on a zombie.");
-    }
-    if (id === C && c === 7) {
-      await step([Z], [ST], 8);
-      return p("Cekton", "Return to Karrod.");
-    }
+    if (id === C && c === 1)
+      return step(
+        [L],
+        [V1],
+        2,
+        "Cecktinon",
+        "Speak with Harne.",
+        "Karrod's Letter",
+      );
+    if (id === H && c === 2)
+      return step(
+        [V1],
+        [V2],
+        3,
+        "Harne",
+        "Bring ten bone fragments.",
+        "Cecktinon's First Voucher",
+      );
+    if (id === H && c === 4)
+      return step(
+        [V2, B],
+        [S],
+        5,
+        "Harne",
+        "Return to Cecktinon.",
+        "Cecktinon's Second Voucher and ten Bone Fragments",
+      );
+    if (id === C && c === 5)
+      return step(
+        [S],
+        [O],
+        6,
+        "Cecktinon",
+        "Use the oil on a zombie.",
+        "the Soul Catcher",
+      );
+    if (id === C && c === 7)
+      return step(
+        [Z],
+        [ST],
+        8,
+        "Cecktinon",
+        "Return to Karrod.",
+        "the Zombie Head",
+      );
     if (id === K && c === 8) {
-      await q.takeItem(s.session, ST);
+      if (!(await q.takeItem(s.session, ST)))
+        return p("Karrod", "You do not have the Steelbender Head.");
       for (const [z, c] of [
         [W, 1],
         [HP, 100],
@@ -97,7 +126,7 @@ module.exports = {
       return p("Karrod", "The spirit is at peace.");
     }
     return p(
-      id === C ? "Cekton" : id === H ? "Harne" : "Karrod",
+      id === C ? "Cecktinon" : id === H ? "Harne" : "Karrod",
       "Continue your task.",
     );
   },
@@ -117,7 +146,7 @@ module.exports = {
       } else s.playSound("ItemSound.quest_itemget");
     }
     if (c === 6 && [15, 20].includes(id) && Math.random() < 0.3) {
-      await Q().takeItem(s.session, O);
+      if (!(await Q().takeItem(s.session, O))) return;
       await Q().giveItem(s.session, Z, 1);
       await s.set("cond", 7);
       s.playSound("ItemSound.quest_middle");

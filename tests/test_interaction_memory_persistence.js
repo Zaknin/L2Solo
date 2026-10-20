@@ -11,6 +11,8 @@ const Database = invoke('Database');
 const Policy = require(gameRoot + '/src/GameServer/Social/InteractionMemoryPolicy');
 const Memory = require(gameRoot + '/src/GameServer/Social/InteractionMemory');
 const Repository = invoke('GameServer/Social/InteractionMemoryRepository');
+const TableChannel = require(gameRoot + '/src/GameServer/Bot/Population/ColdTableChannel').shared;
+const TableMirror = require(gameRoot + '/src/GameServer/Bot/Population/TableMirror');
 const dir = fixture.directory, file = fixture.world;
 const event = (key, sourceId = 1, targetId = 2, at = Date.now()) => ({ key, sourceId, targetId, type: 'attacked', at });
 
@@ -39,31 +41,31 @@ async function run() {
 
         const timestamp = Date.now();
         await Database.execute([`INSERT INTO bot_life_state(characterId, accountName, characterName, phase, activity, updatedAt,
-            simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil, statsJson)
-            VALUES (1, 'bot_memory_1', 'Memory1', 'cold', 'hunting', ?, 'cold_simulation_owner', 0, 'memory-lease', ?, '{}')`,
-        [timestamp, timestamp + 60000]]);
-        const request = { characterId: 1, expectedRevision: 0, ownerId: 'cold_simulation_owner', leaseId: 'memory-lease',
-            timestamp, leaseUntil: timestamp + 60000, patch: { hp: 73 }, memoryEvents: [event('cold:accepted')] };
-        const committed = await Database.commitColdSimulationLease(request);
+            simulationRevision, statsJson)
+            VALUES (1, 'bot_memory_1', 'Memory1', 'cold', 'hunting', ?, 0, '{}')`,
+        [timestamp]]);
+        const request = { characterId: 1, expectedRevision: 0, timestamp, patch: { phase: 'cold', activity: 'hunting', hp: 73 }, memoryEvents: [event('cold:accepted')] };
+        const commitOne = (one) => Database.commitAndReleaseColdSimulationLeases([one]).then(([result]) => result);
+        const committed = await commitOne(request);
         assert.strictEqual(committed.ok, true);
-        assert.strictEqual(committed.row.hp, 73);
+        assert.strictEqual((await Database.execute(['SELECT hp FROM bot_life_state WHERE characterId = 1', []]))[0].hp, 73);
         assert.strictEqual(committed.memorySnapshots[0].revision, 4);
-        const stale = await Database.commitColdSimulationLease({ ...request, memoryEvents: [event('cold:stale')] });
+        const stale = await commitOne({ ...request, memoryEvents: [event('cold:stale')] });
         assert.strictEqual(stale.ok, false);
         assert.strictEqual((await Repository.load(1)).revision, 4, 'rejected lifecycle proposal creates no social event');
-        await assert.rejects(Database.commitColdSimulationLease({ ...request, expectedRevision: 1, patch: { hp: 1 },
+        await assert.rejects(commitOne({ ...request, expectedRevision: 1, patch: { ...request.patch, hp: 1 },
             memoryEvents: [event('cold:expired', 1, 2, timestamp - Policy.ACCEPT_WINDOW_MS - 1000)] }), /expired_event/);
         assert.strictEqual((await Database.execute(['SELECT hp FROM bot_life_state WHERE characterId = 1', []]))[0].hp, 73,
             'social admission failure rolls back the physical outcome');
-        await assert.rejects(Database.commitColdSimulationLease({ ...request, expectedRevision: 1, memoryEvents: {} }), /invalid cold batch/);
+        await assert.rejects(commitOne({ ...request, expectedRevision: 1, memoryEvents: {} }), /invalid cold batch/);
         await Database.execute([`INSERT INTO bot_life_state(characterId, accountName, characterName, phase, activity, updatedAt,
-            simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil, statsJson)
-            VALUES (2, 'bot_memory_2', 'Memory2', 'cold', 'hunting', ?, 'cold_simulation_owner', 0, 'memory-lease-2', ?, '{}')`,
-        [timestamp, timestamp + 60000]]);
+            simulationRevision, statsJson)
+            VALUES (2, 'bot_memory_2', 'Memory2', 'cold', 'hunting', ?, 0, '{}')`,
+        [timestamp]]);
         const atomicGroup = { id: 'encounter:1', memberIds: [1, 2] };
         const group = [
             { ...request, expectedRevision: 1, atomicGroup, memoryEvents: [{ ...event('group:1'), type: 'hunted_together' }] },
-            { ...request, characterId: 2, leaseId: 'memory-lease-2', atomicGroup, memoryEvents: [{ ...event('group:2', 2, 1), type: 'hunted_together' }] }
+            { ...request, characterId: 2, atomicGroup, memoryEvents: [{ ...event('group:2', 2, 1), type: 'hunted_together' }] }
         ];
         const queuedChange = Database.execute(['UPDATE bot_life_state SET simulationRevision = 1 WHERE characterId = 2', []]);
         const raced = Database.commitAndReleaseColdSimulationLeases(group);
@@ -107,21 +109,27 @@ async function run() {
         const { ColdSimulationCoordinator } = require(gameRoot + '/src/GameServer/Bot/Population/ColdSimulationCoordinator');
         const kernel = new ColdSimulationKernel({ resolveSolo: () => ({}) });
         const coordinator = new ColdSimulationCoordinator();
-        coordinator.contextIndex = () => ({ spots: new Map(), parties: new Map() });
-        coordinator.routeFor = () => null;
+        // The worker's 'memory' table over the real channel: a full copy at
+        // attach, then every snapshot main accepts, accepted as the worker does.
+        const mirror = new TableMirror();
+        mirror.watch('memory', { reset() {}, put: (_key, row) => kernel.interactionMemory.accept(row), remove() {} },
+            { retain: false });
+        const channelTarget = {};
+        TableChannel.attach(channelTarget, 'memory-test', payload => { mirror.apply(payload.tables); return true; });
+        assert.strictEqual(mirror.rows('memory').size, 0, 'the worker keeps the accepted snapshots, not a second row copy');
         const coldState = { characterId: 1, phase: 'cold', activity: 'hunting', stats: {},
             simulation: { revision: 5 }, timing: { nextResolveAt: Date.now() + 60000 } };
-        const oldPage = coordinator.snapshotEntry(coldState);
+        const oldPage = { state: coldState };
         kernel.upsert(oldPage);
         assert.deepStrictEqual(kernel.interactionMemory.assess({ id: 1 }, { id: 2 }, {}, timestamp),
             runtime.assess({ id: 1 }, { id: 2 }, {}, timestamp));
-        assert(!kernel.states.get(1).context.interactionMemory, 'worker stores one indexed view, not an extra context copy');
         await runtime.recordBatch([event('ack:memory')]);
-        const token = { characterId: 1, ownerId: 'cold_simulation_owner', revision: 5,
-            leaseId: 'memory-ack', leaseUntil: Date.now() + 30000 };
-        const proposal = { characterId: 1, proposalId: 'memory-ack:5', token,
-            baseState: coldState, priority: 'P2', enqueuedAt: Date.now(), result: { events: [] } };
-        kernel.inFlight.set(1, { state: coldState, grant: token });
+        TableChannel.flush();
+        assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'a committed episode reaches the worker as a memory row');
+        const startedAt = Date.now();
+        const proposal = { characterId: 1, proposalId: `1:${startedAt}`, revision: 5,
+            priority: 'P2', enqueuedAt: startedAt, result: { events: [] } };
+        kernel.inFlight.set(1, { state: coldState, startedAt });
         kernel.dirty.set(1, proposal); kernel.flush(null, true);
         coordinator.postCollections = (type, payload) => {
             assert.strictEqual(type, 'commit_ack');
@@ -129,13 +137,12 @@ async function run() {
         };
         await coordinator.handleCommitResults([{ ok: true, characterId: 1, nextState: coldState, proposal }]);
         kernel.upsert(oldPage);
-        assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'late catalog pages cannot overwrite ACK memory');
+        assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'a late state page cannot overwrite table memory');
         kernel.upsert({ state: { ...coldState, phase: 'hot', simulation: { revision: 6 } } });
         assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'phase changes do not erase memory');
         kernel.remove(1);
-        assert.strictEqual(kernel.interactionMemory.inspect(1).ready, false);
-        kernel.upsert(coordinator.snapshotEntry(coldState));
-        assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'a returning cold bot is rehydrated');
+        assert.strictEqual(kernel.interactionMemory.inspect(1).revision, 7, 'a state leaving the worker keeps its table memory');
+        TableChannel.detach(channelTarget);
         const saved = await Repository.load(1);
         await Database.close();
         Database.init();

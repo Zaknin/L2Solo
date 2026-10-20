@@ -139,11 +139,9 @@ function* details(state, town, { origin = null } = {}, tailScope = null) {
     const fees = Number(plan.route.fee || 0);
     return Number.isFinite(hours) && Number.isFinite(fees) && fees >= 0 ? { known: true, hours, fees } : unknown();
 }
-function read(state, town, options) {
-    const iterator = details(state, town, options);
-    let step; do { step = iterator.next(); } while (!step.done);
-    return step.value;
-}
+// A preparation run to its end in one call (no slices).
+function drain(iterator) { let step; do { step = iterator.next(); } while (!step.done); return step.value; }
+function read(state, town, options) { return drain(details(state, town, options)); }
 const point = loc => loc ? { locX: Number(loc.locX || 0), locY: Number(loc.locY || 0), locZ: Number(loc.locZ || 0) } : null;
 // Only own route inputs cross the existing worker boundary. The caller holds
 // the decision's location anchor; no inventory or market graph is copied.
@@ -151,9 +149,12 @@ function frame(state) {
     const travel = state?.stats?.travel;
     return { activity: String(state?.activity || ''), currentRegion: state?.currentRegion == null ? null : String(state.currentRegion),
         loc: point(state?.loc), inventory: { 736: { amount: Math.max(0, Number(state?.inventory?.[736]?.amount || 0)) } },
-        stats: { karma: Math.max(0, Number(state?.stats?.karma || 0)),
+        // Karma: only its town-closing flip is a route input (Karma.closesTowns);
+        // for the economy decision the same flip is part of the kit fact (DecisionSections.kit).
+        stats: { karma: Number(Karma.closesTowns(state?.stats?.karma)),
             marketReturn: state?.stats?.marketReturn?.loc ? { loc: point(state.stats.marketReturn.loc) } : null,
             travel: travel ? { townName: travel.townName == null ? null : String(travel.townName),
+                spotId: travel.spotId == null ? null : String(travel.spotId),
                 arrivalActivity: travel.arrivalActivity == null ? null : String(travel.arrivalActivity), to: point(travel.to) } : null } };
 }
 function key(state) { return JSON.stringify([Trip.honest(), frame(state)]); }
@@ -176,6 +177,8 @@ function* prepare(state) {
     if (preparedTables.size > MAX_PREPARED_TABLES) preparedTables.delete(preparedTables.keys().next().value);
     return rows;
 }
+// The same table in one call, for a caller that cannot slice (EconomyContext.forState).
+function prepared(state) { return drain(prepare(state)); }
 function preparedReader(rows, { hourAdena } = {}) {
     const row = town => {
         const index = townOrdinal.get(town), value = index === undefined ? null : rows?.[index];
@@ -194,7 +197,7 @@ function preparedReader(rows, { hourAdena } = {}) {
 function reader(state, { hourAdena, origin = null } = {}) {
     const pointKey = loc => [loc?.locX, loc?.locY, loc?.locZ];
     const key = JSON.stringify([hourAdena, Trip.honest(), state?.activity, state?.currentRegion,
-        state?.stats?.karma, state?.inventory?.[736]?.amount, pointKey(state?.loc), pointKey(origin),
+        Karma.closesTowns(state?.stats?.karma), state?.inventory?.[736]?.amount, pointKey(state?.loc), pointKey(origin),
         pointKey(state?.stats?.marketReturn?.loc), state?.stats?.travel?.townName,
         state?.stats?.travel?.arrivalActivity, pointKey(state?.stats?.travel?.to)]);
     if (state && readers.get(state)?.key === key) return readers.get(state).cost;
@@ -221,4 +224,4 @@ function reader(state, { hourAdena, origin = null } = {}) {
     if (state && typeof state === 'object') readers.set(state, { key, cost });
     return cost;
 }
-module.exports = { details, read, reader, regionalTown, towns, frame, key, prepare, preparedReader };
+module.exports = { details, read, reader, regionalTown, towns, frame, key, prepare, prepared, preparedReader };

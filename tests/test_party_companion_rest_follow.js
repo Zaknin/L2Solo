@@ -396,6 +396,20 @@ function learnSkill(actor, data) {
 // its actor or the party group. Registration makes no SQL writes or starts World tickers.
 const publishedSessions = new Set();
 let fixtureUsers;
+// The decision the background thread takes for a near body on its post
+// (DecisionEvents.nearFields over the body's economy build), received as the
+// coordinator receives it.
+function deliverNearDecision(session) {
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    const Decisions = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+    const Events = invoke('GameServer/Bot/AI/DecisionEvents');
+    const posted = Economy.stateForActor(session.actor, session);
+    const economy = Economy.forState(posted);
+    const state = { ...posted, stats: { ...posted.stats, ...economy.statsPacket } };
+    Events.receive(session, Decisions.compact(Decisions.capture(economy, state)),
+        { ...Events.nearFields(economy, state), nearSeq: Number(session.heldNearSeq || 0) + 1, raiseSeq: 0 });
+}
+
 function publishSessions(sessions) {
     if (!fixtureUsers) { fixtureUsers = { sessions: [], revision: 0 }; World.user = fixtureUsers; }
     for (const session of [...publishedSessions]) {
@@ -2221,16 +2235,41 @@ try {
     });
     assert.strictEqual(autoPullSkillCast, false, 'a mob already attacking its tank must not be taunted again');
     assert.strictEqual(engagedPulledTarget, autoPullTarget, 'the tank should fight the mob it already pulled');
+    // In resurrection reach, as in production (the fallen companion is a bot
+    // session too): the tank revives it with a scroll instead of pulling.
     const fallenAutoPullMember = fakeActor(2000098, { locX: 60, locY: 0 });
     fallenAutoPullMember.state.dead = true;
     const fallenAutoPullSession = fakeSession('bot_auto_pull_fallen_member', fallenAutoPullMember);
     fallenAutoPullSession.followPlayerSession = healerLeaderSession;
     fallenAutoPullSession.partyCompanion = true;
     fallenAutoPullSession.plan = 'following';
+    BotManager.sessions = [autoPullTankSession, fallenAutoPullSession];
     autoPullTargetId = undefined;
     PartyAwareness.invalidateThreatProjection(healerLeaderSession);
     autoPullTankSession.currentTargetId = undefined;
     autoPullTank.unselect();
+    publishSessions([healerLeaderSession, autoPullTankSession, fallenAutoPullSession]);
+    let scrollTargetId = null;
+    autoPullTank.automation.scheduleAction = (_session, _actor, target) => { scrollTargetId = target.fetchId(); };
+    let revivingPullCombat = false;
+    FollowingState.tick(autoPullTankSession, autoPullTank, {
+        skillExec() { revivingPullCombat = true; }
+    }, {
+        say() {},
+        executeCombat() { revivingPullCombat = true; },
+        executePvPCombat() {}
+    });
+    assert.strictEqual(revivingPullCombat, false, 'a tank reviving a party member must not pull');
+    assert.strictEqual(scrollTargetId, fallenAutoPullMember.fetchId(), 'the tank casts a resurrection scroll on the fallen member in reach');
+    assert.strictEqual(healerLeaderSession.partyRevivalAttempt?.providerId, autoPullTank.fetchId());
+    assert.strictEqual(healerLeaderSession.partyRevivalAttempt?.source, 'scroll');
+    delete autoPullTank.automation.scheduleAction;
+    healerLeaderSession.partyRevivalAttempt = null;
+    autoPullTank.unselect();
+    autoPullTankSession.currentTargetId = undefined;
+
+    // Out of resurrection reach: no one can revive it this tick, so the pull rule decides.
+    fallenAutoPullMember.locX = 5000;
     publishSessions([healerLeaderSession, autoPullTankSession, fallenAutoPullSession]);
     let blockedAutoPullCombat = false;
     FollowingState.tick(autoPullTankSession, autoPullTank, {
@@ -2368,6 +2407,7 @@ try {
     // Original unfunded setup: retaining the rank-only weapon and no Adena
     // must neither create an errand nor manufacture inventory/money.
     publishSessions([errandLeaderSession, zeroWalletErrandSession, fakeSession('bot_shot_seller', shotSeller)]);
+    deliverNearDecision(zeroWalletErrandSession);
     FollowingState.tick(zeroWalletErrandSession, zeroWalletErrandBot, {}, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         getClosestTown: () => ({ name: 'Giran', x: 83396, y: 147904, z: -3404 }),
@@ -2386,7 +2426,7 @@ try {
     errandSession.lastCompanionEquipmentCheckAt = Date.now();
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     publishSessions([errandLeaderSession, errandSession, fakeSession('bot_shot_seller', shotSeller)]);
-    assert(Economy.forActor(errandBot, errandSession).stock('shots').usePerHour > 0,
+    assert(Economy.basics(Economy.stateForActor(errandBot, errandSession)).stock('shots').usePerHour > 0,
         'the equipped zero-wallet control must have positive native shot use');
     FollowingState.tick(errandSession, errandBot, {}, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
@@ -2418,7 +2458,7 @@ try {
     assert.strictEqual(physicalShotQuote.price,
         Pricing.sellersOf(authoredShotInputs.shotId).find(row => row.sourceName === 'Squeesh' && row.town === 'Giran').price,
         'the scene quote must equal the independently authored static merchant price');
-    assert.strictEqual(Economy.forActor(errandBot, errandSession).stock('shots').usePerHour, authoredShotInputs.shotUse,
+    assert.strictEqual(Economy.basics(Economy.stateForActor(errandBot, errandSession)).stock('shots').usePerHour, authoredShotInputs.shotUse,
         'the native economic output must agree with the independently funded input');
 
     const assertFundedStockKitUnchanged = recordPhysicalKit(errandBot, errandSession.accountId);
@@ -2429,6 +2469,7 @@ try {
         return true;
     };
     publishSessions([errandLeaderSession, errandSession, fakeSession('bot_shot_seller', shotSeller)]);
+    deliverNearDecision(errandSession);
     FollowingState.tick(errandSession, errandBot, {}, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         getClosestTown: () => ({ name: 'Giran', x: 83396, y: 147904, z: -3404 }),
@@ -3357,7 +3398,12 @@ try {
     shoppingSession.plan = 'shopping';
     shoppingSession.shoppingTarget = { name: 'shop', locX: 1000, locY: 0, locZ: 0 };
 
-    ShoppingState.tick(shoppingSession, shoppingCompanion, {}, { say() {} });
+    // Main never builds an economy for a near bot: the build belongs to the worker.
+    const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
+    const realForState = EconomyContext.forState;
+    EconomyContext.forState = () => { throw new Error('main built a near economy'); };
+    try { ShoppingState.tick(shoppingSession, shoppingCompanion, {}, { say() {} }); }
+    finally { EconomyContext.forState = realForState; }
 
     assert.strictEqual(shoppingSession.plan, 'following', 'shopping companion should return to follow state');
     assert.strictEqual(shoppingSession.shoppingTarget, undefined, 'shopping target should be cleared for companions');

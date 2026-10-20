@@ -1,5 +1,6 @@
 const ActorQueries = require('../../../World/ActorSpatialQueries');
 const refreshPartyMemberships = require('../../../World/PartyMembershipPublication');
+const NpcObjectIndex = require('../../../World/NpcObjectIndex');
 const Speech = invoke('GameServer/Bot/AI/BotSpeechTemplates');
 const SpeckMath      = invoke('GameServer/SpeckMath');
 const World          = invoke('GameServer/World/World');
@@ -16,6 +17,7 @@ const EncounterReadiness = invoke('GameServer/Bot/AI/BotEncounterReadiness');
 const BotPvpRisk      = invoke('GameServer/Bot/AI/BotPvpRisk');
 const BotRoles        = invoke('GameServer/Bot/AI/BotRoles');
 const RestPolicy      = invoke('GameServer/Bot/AI/RestPolicy');
+const DangerMoment    = invoke('GameServer/Bot/AI/DangerMoment');
 const SummonerTactics = invoke('GameServer/Bot/AI/SummonerTactics');
 const BotTownTravel  = invoke('GameServer/Bot/AI/BotTownTravel');
 const BotSpotTravel  = invoke('GameServer/Bot/AI/BotSpotTravel');
@@ -25,6 +27,7 @@ const BotRaidSafety   = invoke('GameServer/Bot/AI/BotRaidSafety');
 const HotActorLodPolicy = invoke('GameServer/Bot/AI/HotActorLodPolicy');
 const BotRangedCombatPositioning = invoke('GameServer/Bot/AI/BotRangedCombatPositioning');
 const BotHuntingTargetPolicy = invoke('GameServer/Bot/AI/BotHuntingTargetPolicy');
+const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
 const TownNpcApproach = invoke('GameServer/Bot/AI/TownNpcApproach');
 const TownPathfinder = invoke('GameServer/Bot/AI/TownPathfinder');
 const CompanionNavigationRecovery = invoke('GameServer/Bot/AI/CompanionNavigationRecovery');
@@ -36,6 +39,7 @@ const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const SurvivalFloor = invoke('GameServer/Bot/Population/SurvivalFloor');
 const DecisionEvents = require('../DecisionEvents');
 const MarketListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy');
+const ShoppingState = invoke('GameServer/Bot/AI/States/ShoppingState');
 const { SPOT_CELL_SIZE } = invoke('GameServer/World/WorldConstants');
 
 const TARGET_STALL_TICKS = 5;
@@ -126,22 +130,6 @@ function isPartyCompanion(session) {
     return session.partyCompanion === true && !!session.followPlayerSession;
 }
 
-function economyForHunt(session, bot) {
-    return DecisionEvents.held(session) || DecisionEvents.hold(session, bot,
-        invoke('GameServer/Bot/Economy/EconomyContext').forActor(bot, session));
-}
-
-function isClaimedByOtherSoloBot(session, npc) {
-    const BotManager = invoke('GameServer/Bot/BotManager');
-    const npcId = npc.fetchId();
-
-    return BotManager.sessions.some((otherSession) => {
-        if (otherSession === session || !otherSession.actor || !isSoloHunter(otherSession)) return false;
-        if (otherSession.currentTargetId !== npcId) return false;
-        return !otherSession.actor.state.fetchDead();
-    });
-}
-
 function startShopping(session, bot, BotAI, reason, townName = null) {
     if (isPartyCompanion(session)) {
         session.plan = 'following';
@@ -163,9 +151,9 @@ function startWorkshopOrder(session, bot, BotAI, economy) {
     if (!isSoloHunter(session) || leaf?.activity !== 'crafting' || leaf.kind !== 'craft'
         || !/^stock:(shots|potions|scrolls)$/.test(String(leaf.rootKey))
         || BotTownTravel.hasCombatThreat(session, bot) || bot.state?.fetchCasts?.()) return false;
-    // The held activity is compact. Read its existing full wish to retain the
-    // selected dwarf, fee, quantities and funding through the physical visit.
-    const target = invoke('GameServer/Bot/AI/States/ShoppingState').stockWorkshopTarget(session, bot);
+    // The held decision carries the worker's stock plan (the selected dwarf,
+    // fee, quantities and funding) through the physical visit.
+    const target = ShoppingState.stockWorkshopTarget(session, bot, economy);
     if (!target) return false;
     const trip = startShopping(session, bot, BotAI, 'Heading to town for my planned craft order.', target.town);
     if (trip === 'deferred' || trip === false) return false;
@@ -175,13 +163,18 @@ function startWorkshopOrder(session, bot, BotAI, economy) {
     return true;
 }
 
+// The targets other live solo hunters hold. No index owns session.currentTargetId
+// (it has writers in many modules, hot and cold), so this is one pass over the
+// sessions; a caller that asks twice in one decision passes the set along.
 function claimedTargetIds(session, sessions = invoke('GameServer/Bot/BotManager').sessions || []) {
+    const startedAt = performance.now();
     const claimed = new Set();
-    sessions.forEach((otherSession) => {
-        if (otherSession === session || !otherSession.actor || !isSoloHunter(otherSession)) return;
-        if (!otherSession.currentTargetId || otherSession.actor.state.fetchDead()) return;
+    for (const otherSession of sessions) {
+        if (otherSession === session || !otherSession.actor || !isSoloHunter(otherSession)) continue;
+        if (!otherSession.currentTargetId || otherSession.actor.state.fetchDead()) continue;
         claimed.add(Number(otherSession.currentTargetId));
-    });
+    }
+    HotActorLodPolicy.recordSubsystem('claimScan', performance.now() - startedAt, sessions.length);
     return claimed;
 }
 
@@ -209,12 +202,7 @@ function findPreferredMonster(session, bot, radius, options = {}) {
         .filter((npc) => BotHuntingTargetPolicy.canHunt(npc))
         .filter((npc) => npc.fetchAttackable() && !npc.isDead());
     const nearbyNpcs = limitTargetCandidates(session, bot, eligibleNearbyNpcs);
-    const claimedIds = claimedTargetIds(session);
-    const clanCounts = nearbyNpcs.reduce((counts, npc) => {
-        const clan = npc.fetchClanName?.();
-        if (clan) counts.set(clan, (counts.get(clan) || 0) + 1);
-        return counts;
-    }, new Map());
+    const claimedIds = options.claimedIds || claimedTargetIds(session);
     const spotIdAt = (actor) => `${Math.floor(actor.fetchLocX() / SPOT_CELL_SIZE)}_${Math.floor(actor.fetchLocY() / SPOT_CELL_SIZE)}`;
     const currentSpotId = String(session.currentSpot?.id || spotIdAt(bot)).split(':')[0];
     const partyActors = session.followPlayerSession || session.hotBackgroundPartyId
@@ -233,11 +221,12 @@ function findPreferredMonster(session, bot, radius, options = {}) {
         .map((npc) => {
             const claimed = claimedIds.has(Number(npc.fetchId()));
             const npcSpotId = spotIdAt(npc);
-            const clan = npc.fetchClanName?.();
+            // The target's helpers, aggressive neighbours and minions come with it.
+            const pull = SpotService.pullSizeFor(npc);
             const matchupTarget = TargetMatchup.targetView(npc, matchupStats);
             const targetMatchup = TargetMatchup.evaluate(matchupProfiles, matchupTarget);
             if (isSoloHunter(session) && partyActors.length <= 1) {
-                const canHunt = TargetMatchup.soloCanHunt(matchupProfiles, matchupTarget);
+                const canHunt = TargetMatchup.soloCanHunt(matchupProfiles, BotPullEstimate.pullView(matchupTarget, pull));
                 Object.assign(targetMatchup, { eligible: canHunt.eligible, reason: canHunt.reason });
             }
             const scoreContext = {
@@ -253,7 +242,7 @@ function findPreferredMonster(session, bot, radius, options = {}) {
                 currentSpotId,
                 npcSpotId,
                 claimed,
-                socialAllies: clan ? Math.max(0, (clanCounts.get(clan) || 1) - 1) : 0,
+                socialAllies: pull - 1,
                 solo: isSoloHunter(session) && partyActors.length <= 1,
                 botRole: BotRoles.combatRoleFor(bot),
                 botOffenseRatio: matchupProfiles.length > 1 ? matchupProfiles.reduce((sum, profile) => sum
@@ -314,7 +303,7 @@ function liveCurrentNpcTarget(session, bot, radius = 2500) {
     const targetId = Number(session.currentTargetId || 0);
     if (!targetId) return null;
 
-    const target = (World.npc?.spawns || []).find((npc) => Number(npc.fetchId?.() || 0) === targetId);
+    const target = NpcObjectIndex.find(World, targetId);
     if (!target || target.fetchAttackable?.() !== true || target.isDead?.() === true || target.state?.fetchDead?.() === true) {
         return null;
     }
@@ -592,7 +581,6 @@ function targetProgressing(session, bot, target) {
 module.exports = {
     leaveShop,
     startWorkshopOrder,
-    economyForHunt,
     sellTripDue,
     pauseSelling,
     findPreferredMonster,
@@ -604,8 +592,8 @@ module.exports = {
             if (trip !== 'deferred') return;
         }
 
-        const floor = SurvivalFloor.forActor(bot);
-        if (isSoloHunter(session)) DecisionEvents.observe(session, bot);
+        const floor = SurvivalFloor.forActor(bot, session.coldLifeState);
+        if (isSoloHunter(session)) DecisionEvents.checkWallet(session, bot);
         if (floor?.action === 'rest') {
             TownNpcApproach.reset(session);
             bot.automation.abortAll(bot);
@@ -613,6 +601,12 @@ module.exports = {
             return;
         }
         if (floor?.action === 'unload' && isSoloHunter(session)) {
+            // Like the loot sell trip below and the cold sale visit: the trip starts
+            // the sale retry, so a bag that sold nothing heavy hunts on at penalty 1.
+            // A trip deferred by a fight comes back every tick: the retry it
+            // already started stays, the trip itself waits in pendingTownTrip.
+            const retry = Number(session.coldLifeState?.stats?.marketSellRetryAfter || 0);
+            if (!(retry > Date.now())) pauseSelling(session);
             const trip = startShopping(session, bot, BotAI, `Inventory ${floor.reason}. Heading to town.`);
             if (trip !== 'deferred') return;
         }
@@ -642,7 +636,7 @@ module.exports = {
         }
 
         if (isSoloHunter(session) && Number(session.companionEquipmentRetryAt || 0) <= Date.now()) {
-            const economy = economyForHunt(session, bot);
+            const economy = DecisionEvents.held(session);
             const wealthCraft = require('../../Economy/HotWealthCraftService');
             if (wealthCraft.canStart(session, economy.network.activity)) {
                 wealthCraft.review(session, economy)
@@ -658,7 +652,7 @@ module.exports = {
                     const trip = startShopping(session, bot, BotAI, 'Heading to town for my planned improvement.');
                     if (trip !== 'deferred' && trip !== false) return;
                 }
-                invoke('GameServer/Bot/Economy/BotImprovementService').reviewHot(session, { ...economy, state })
+                improvementService.reviewHot(session)
                     .catch(error => utils.infoWarn('BotImprovement', '%s', error.message));
             }
             if (economy.network.activity?.activity === 'shopping') {
@@ -765,8 +759,10 @@ module.exports = {
 
         // 3. Immediate self-defense outranks recovery. Sitting while a mob is
         // actively hitting the bot only turns the recovery state into a death loop.
+        // The danger moment reads the mobs on the bot from the same world scan.
+        const threatScan = {};
         const incomingMonster = isSoloHunter(session)
-            ? PartyAwareness.npcThreateningActor(session)
+            ? PartyAwareness.npcThreateningActor(session, undefined, threatScan)
             : PartyAwareness.recentIncomingNpc(session);
         if (incomingMonster) {
             invoke('GameServer/Bot/AI/PendingSweep').yieldToDefense(session, bot);
@@ -775,14 +771,18 @@ module.exports = {
                 return;
             }
             const currentGround = currentHuntingGround(session, bot);
+            const matchupProfiles = TargetMatchup.actorProfiles([bot]);
             const groundSafety = currentGround
                 ? BotHuntingGroundPolicy.evaluate(currentGround, { level: bot.fetchLevel() }, {
                     mode: 'solo',
-                    matchupProfiles: TargetMatchup.actorProfiles([bot]),
+                    matchupProfiles,
                     equipment: equippedItems(bot)
                 })
                 : { allowed: true };
-            if (!groundSafety.allowed || needsEmergencyRetreat(bot)) {
+            const moment = groundSafety.allowed ? DangerMoment.take(session, bot, incomingMonster,
+                { profiles: matchupProfiles, near: threatScan.near }) : null;
+            if (moment === 'drank') return;
+            if (!groundSafety.allowed || (moment ? moment === 'flee' : needsEmergencyRetreat(bot))) {
                 if (groundSafety.allowed && isSoloHunter(session) &&
                     BotEmergencyFinisher.tryFinish(session, bot, incomingMonster, Generics, BotAI)) return;
                 retreatFromThreat(session, bot, incomingMonster);
@@ -816,7 +816,12 @@ module.exports = {
         // A live selected NPC still owns the encounter during that gap, so a
         // critically wounded bot must retreat instead of clearing the target
         // and sitting down in front of it.
-        if (liveEncounterTarget && !nativeCombatActionInFlight && needsEmergencyRetreat(bot)) {
+        // The danger moment runs mid-swing too: a potion does not wait for the
+        // swing flags, which a melee bot re-arms in the same callback.
+        const moment = liveEncounterTarget ? DangerMoment.take(session, bot, liveEncounterTarget) : null;
+        if (moment === 'drank') return;
+        if (liveEncounterTarget && (moment ? moment === 'flee'
+            : !nativeCombatActionInFlight && needsEmergencyRetreat(bot))) {
             if (session.spotRelocation) BotSpotTravel.cancel(session, bot, 'low_resources_in_combat');
             if (BotRaidSafety.retreat(session, bot, liveEncounterTarget, { distance: EMERGENCY_RETREAT_DISTANCE })) {
                 return;
@@ -949,10 +954,12 @@ module.exports = {
                             return;
                         }
 
-                        if (isClaimedByOtherSoloBot(session, npc)) {
+                        const claimedIds = claimedTargetIds(session);
+                        if (claimedIds.has(Number(npc.fetchId()))) {
                             const alternateMonster = findPreferredMonster(session, bot, 2500, {
                                 excludeTargetId: npc.fetchId(),
-                                freeOnly: true
+                                freeOnly: true,
+                                claimedIds
                             });
                             if (alternateMonster) {
                                 assignTarget(session, bot, alternateMonster);

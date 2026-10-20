@@ -54,17 +54,16 @@ async function run() {
         assert.equal(Workshop.publicRecipeDigest(successRecipe.productId), `${xor}:${sum}:${count}`);
     };
     assertPublicDigest();
-    // A native publication source may be mutated in place before its event.
-    // Removal must hash the previous published scalar, not the new object.
+    // A life state is replaced, not mutated (a cold state registered again
+    // as the same object is skipped). Removal must hash the previous
+    // published scalar, not the new state.
     const publishedBefore = Workshop.publicRecipeRows(owner.characterId);
-    const previousMp = owner.vitals.mp;
-    owner.vitals.mp = successRecipe.mpCost;
-    Workshop.register(owner);
+    Workshop.register({ ...owner, vitals: { ...owner.vitals, mp: successRecipe.mpCost } });
     assert.equal(publishedBefore.find(row => row[1] === successRecipe.recipeId)[7], 64);
     assert.equal(Workshop.publicRecipeRows(owner.characterId).find(row => row[1] === successRecipe.recipeId)[7], 1);
     assertPublicDigest();
-    owner.vitals.mp = previousMp;
     Workshop.register(owner);
+    assert.equal(Workshop.publicRecipeRows(owner.characterId).find(row => row[1] === successRecipe.recipeId)[7], 64);
     assertPublicDigest();
     const before = await image([owner.characterId, buyer.characterId]);
     const native = Database.craftForCustomer;

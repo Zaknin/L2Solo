@@ -6,20 +6,18 @@ require('../src/Global');
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Population = invoke('GameServer/Bot/Population/PopulationService');
-const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const Income = require('../src/GameServer/Bot/Population/PartyIncomeComparison');
 const Material = require('../src/GameServer/Bot/Population/CraftMaterialParty');
 const Agreement = require('../src/GameServer/Bot/Population/PartyAgreement');
 const Calculation = require('../src/GameServer/Bot/Population/PartyGoalCalculation');
-const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const at = Date.now(), spotId = 'material-recruit-fixture';
 const objective = { status: 'open', priority: 'required', reason: 'craft_material', materialParty: true,
     objectiveKey: `craft-material:${spotId}`, strategy: 'craft', spotId, npcId: 626,
     itemId: 4097, targetId: 5726, requiredTotal: 12, amount: 12 };
-const original = { request: Coordinator.requestPartyGoals, prepare: Income.prepare,
+const original = { prepare: Income.prepare, compare: Income.compare,
     commit: DB.commitBackgroundPartyMembership, maxSize: Config.partyMaxSize };
-let serial = 0, calls = 0;
+let serial = 0;
 async function seed(itemId = 4097, targetId = 5726, amount = 0) {
     const name = `MatRecruit${++serial}`, account = `bot_mat_recruit_${serial}`;
     await DB.createAccount(account, 'fixture');
@@ -33,18 +31,22 @@ async function seed(itemId = 4097, targetId = 5726, amount = 0) {
         stats: { classId: 8, role: 'dps', equipmentPlan: { status: 'active', strategy: 'craft', target: { selfId: targetId, slot: 12 } },
             partyRequest: { ...objective, itemId, targetId, npcId: itemId === 4097 ? 626 : 627 } } }, 'material_recruit_seed');
 }
-function reply(party, members, timestamp, rejectId = null) {
-    assert.equal(party.stats.recruitmentReview, true);
-    const goals = Material.needs(members, objective, party.stats.agreement);
-    const joint = { objective, memberGoals: members.map(member => ({ characterId: member.characterId,
-        ...goals.find(goal => goal.characterId === member.characterId) })), lastIncomeReviewAt: timestamp,
-    incomeReviews: members.map(member => ({ characterId: member.characterId,
-        ...Income.evaluate({ solo: null, party: { income: 1000 }, cash: 5000 }),
-        accept: member.characterId !== rejectId, at: timestamp, soloSource: null, partySource: 'table_party' })) };
-    const response = { ok: true, sources: Calculation.sources(members), joint };
-    assert(Protocol.validateEnvelope(Protocol.envelope('party_goal_result', 'recruit-fixture', response), 'worker').ok);
-    return response;
+// The leader's step in the background thread: the recruit check on its own
+// copies of the members and recruits (PartyGoalCalculation.recruitCheck), with
+// a fixed forecast in which every member accepts except rejectId.
+function leaderStep(party, members, recruits, rejectId = null) {
+    const timestamp = Date.now();
+    Income.prepare = () => ({});
+    Income.compare = member => ({ ...Income.evaluate({ solo: null, party: { income: 1000 }, cash: 5000 }),
+        accept: member.characterId !== rejectId, at: timestamp, soloSource: null, partySource: 'table_party' });
+    try {
+        const joint = Calculation.recruitCheck(party, [...members, ...recruits], { spots: [], timestamp });
+        return joint ? { outcome: 'accepted', memberIds: party.memberIds,
+            recruitIds: recruits.map(recruit => recruit.characterId), sources: Calculation.sources(recruits), joint }
+            : { outcome: 'declined' };
+    } finally { Income.prepare = noForecast; Income.compare = original.compare; }
 }
+function noForecast() { throw Error('recruitment forecast ran on main for a far party'); }
 async function stored() {
     const [row] = await DB.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', ['material-recruit']]);
     return { ...row, stats: JSON.parse(row.statsJson) };
@@ -66,7 +68,7 @@ async function stored() {
     await Parties.createOrUpdate({ ...materialParty, stats: { ...materialParty.stats,
         objective: { status: 'open', reason: 'shared_target', spotId, npcId: objective.npcId }, agreement: { mode: 'turn' } } });
     const ordinary = await stored();
-    Coordinator.requestPartyGoals = () => { throw Error('ordinary recruitment cannot admit an uncontracted material need'); };
+    Income.prepare = noForecast;
     assert.equal((await Population.recruitBackgroundMembers([novice])).size, 0);
     assert.equal((await stored()).statsJson, ordinary.statsJson);
     assert.equal(JSON.parse((await stored()).memberIdsJson).length, 2);
@@ -76,56 +78,62 @@ async function stored() {
         [novice.characterId]]))[0].statsJson).partyRequest.itemId, objective.itemId);
     await Parties.createOrUpdate(materialParty);
     const baseline = await stored();
-    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
-    const savedProfiles = { cache: Profiles.cache, occupancy: Profiles.currentOccupancy };
-    Profiles.cache = [{ id: spotId, capacity: 2 }];
-    Profiles.currentOccupancy = () => ({ [spotId]: { count: 0, reservedCount: 2, capacity: 2,
-        reservedKeys: new Set([String(a.characterId), String(b.characterId)]),
-        retained: new Set([String(a.characterId), String(b.characterId)]) } });
-    Coordinator.requestPartyGoals = () => { throw Error('a full destination must postpone recruitment before worker work'); };
-    try {
-        assert.equal((await Population.recruitBackgroundMembers([novice])).size, 0);
-        assert.equal((await stored()).statsJson, baseline.statsJson);
-        assert(Life.cachedState(novice.characterId).stats.partyRequest);
-    } finally { Profiles.cache = savedProfiles.cache; Profiles.currentOccupancy = savedProfiles.occupancy; }
-    Income.prepare = () => { throw Error('recruitment forecast ran on main'); };
-    Coordinator.requestPartyGoals = async () => { calls++; return { ok: false, reason: 'party_goal_busy' }; };
-    assert.equal((await Population.recruitBackgroundMembers([novice])).size, 0);
-    assert.equal((await stored()).statsJson, baseline.statsJson, 'busy worker changes neither contract nor membership');
-    Coordinator.requestPartyGoals = async (party, members, options) => { calls++;
-        return reply(party, members, options.timestamp, a.characterId); };
-    assert.equal((await Population.recruitBackgroundMembers([novice])).size, 0, 'a retained member may refuse the changed delivery time');
-    assert.equal((await stored()).statsJson, baseline.statsJson);
-    Coordinator.requestPartyGoals = async (party, members, options) => { calls++;
-        const result = reply(party, members, options.timestamp); result.sources[0].revision++;
-        return result; };
-    assert.equal((await Population.recruitBackgroundMembers([novice])).size, 0, 'wrong worker source never commits');
-    let release;
-    const gate = new Promise(resolve => { release = resolve; });
-    Coordinator.requestPartyGoals = async (party, members, options) => {
-        calls++;
-        assert.deepEqual(party.stats.agreement.materialNeeds.map(goal => goal.collected), [4, 8, 0]);
-        assert.equal(party.stats.agreement.materialNeeds[2].characterId, novice.characterId,
-            'the worker forecasts with the newcomer need already in the proposed contract');
-        await gate;
-        return reply(party, members, options.timestamp);
-    };
-    const pending = Population.recruitBackgroundMembers([novice]);
-    while (!release || calls < 4) await new Promise(resolve => setImmediate(resolve));
-    assert.equal((await stored()).statsJson, baseline.statsJson, 'no membership or quota is written before worker advice');
-    release();
-    assert.deepEqual([...(await pending)], [novice.characterId]);
+    // A far party (cold leader) records the pending join and runs no forecast.
+    assert.deepEqual([...(await Population.recruitBackgroundMembers([novice]))], [novice.characterId]);
+    const pendingRow = await stored();
+    assert.deepEqual(pendingRow.stats.pendingRecruits, { ids: [novice.characterId] });
+    assert.equal(JSON.parse(pendingRow.memberIdsJson).length, 2, 'no membership is written before the leader\'s check');
+    assert.deepEqual(pendingRow.stats.agreement, baseline.stats.agreement, 'no quota is written before the leader\'s check');
+    assert.equal((await Population.recruitBackgroundMembers([novice])).size, 0, 'a pending join waits for its far leader');
+    assert.equal((await stored()).statsJson, pendingRow.statsJson);
+    // The leader's step that ran on a copy of the row taken before the pending
+    // join writes the row blind: the pending join outlives it; a step that
+    // read the pending join answers it and writes the row without it.
+    const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
+    const coordinator = new ColdSimulationCoordinator();
+    coordinator.step = async (name, owner, work) => name === 'party' ? work() : undefined;
+    const workerCopy = { ...Parties.find('material-recruit') };
+    workerCopy.stats = { ...workerCopy.stats }; delete workerCopy.stats.pendingRecruits;
+    const leaderState = Life.cachedState(a.characterId);
+    await coordinator.afterCommit({ nextState: leaderState,
+        proposal: { partyResolution: { partyId: 'material-recruit', party: workerCopy } } });
+    assert.deepEqual((await stored()).stats.pendingRecruits, { ids: [novice.characterId] },
+        'a step on an older copy of the row keeps the pending join');
+    await coordinator.afterCommit({ nextState: leaderState, proposal: { partyResolution: { partyId: 'material-recruit',
+        party: workerCopy, recruitCheck: { outcome: 'declined' } } } });
+    assert.equal((await stored()).stats.pendingRecruits, undefined, 'the step that answered the pending join clears it');
+    await Parties.createOrUpdate({ ...Parties.find('material-recruit'), stats: { ...Parties.find('material-recruit').stats,
+        pendingRecruits: { ids: [novice.characterId] } } });
+    // The leader's step: the check sees the newcomer's need in the contract.
+    const party = Parties.find('material-recruit');
+    const roster = [a, b].map(member => Life.cachedState(member.characterId));
+    const recruit = Life.cachedState(novice.characterId);
+    assert.deepEqual(leaderStep(party, roster, [recruit], a.characterId), { outcome: 'declined' },
+        'a retained member may refuse the changed delivery time');
+    await Population.applyWorkerPartyJoin('material-recruit', { outcome: 'declined' });
+    assert.equal(JSON.parse((await stored()).memberIdsJson).length, 2);
+    const accepted = leaderStep(party, roster, [recruit]);
+    assert.deepEqual(accepted.joint.agreement.materialNeeds.map(goal => goal.collected), [4, 8, 0]);
+    assert.equal(accepted.joint.agreement.materialNeeds[2].characterId, novice.characterId,
+        'the check forecasts with the newcomer need already in the proposed contract');
+    const stale = { ...accepted, sources: accepted.sources.map(source => ({ ...source, revision: source.revision + 1 })) };
+    await Population.applyWorkerPartyJoin('material-recruit', stale);
+    assert.equal(JSON.parse((await stored()).memberIdsJson).length, 2, 'a recruit that moved since the check never joins');
+    await Population.applyWorkerPartyJoin('material-recruit', { ...accepted, memberIds: [a.characterId] });
+    assert.equal(JSON.parse((await stored()).memberIdsJson).length, 2, 'a roster that moved since the check never joins');
+    await Population.applyWorkerPartyJoin('material-recruit', accepted);
     const committed = await stored();
     assert.equal(JSON.parse(committed.memberIdsJson).length, 3);
     assert.equal(committed.stats.agreement.cursor, 7);
     assert.deepEqual(committed.stats.agreement.materialNeeds.map(goal => goal.collected), [4, 8, 0]);
     assert.deepEqual(committed.stats.agreement.materialNeeds.map(goal => goal.quota), [12, 12, 12]);
+    assert.equal(committed.stats.pendingRecruits, undefined, 'the join clears the pending join');
     assert.equal(Life.cachedState(novice.characterId).stats.partyRequest, null,
         'native assignment may clear the request only after its need is durable in the party');
-    assert.equal(committed.stats.recruitmentReview, undefined);
     const members = JSON.parse(committed.memberIdsJson).map(id => Life.cachedState(id));
-    assert(members.every(member => member.stats.backgroundPartySpotId === spotId),
-        'the atomic join reserves the shared destination for retained members and newcomers');
+    assert(members.every(member => member.party?.partyId === 'material-recruit'
+        && member.stats.backgroundPartySpotId === undefined),
+        'the atomic join seats retained members and newcomers; the party alone keeps its spot');
     const paid = { ...committed.stats.agreement, help: { status: 'funded', helperIds: [b.characterId], remaining: 999 } };
     const merged = Material.agreement(members, objective, paid);
     assert.deepEqual(merged.help, paid.help, 'merging needs never rewrites a funded escrow');
@@ -136,19 +144,19 @@ async function stored() {
     committed.stats.agreement, { needScore: () => { throw Error('newcomer loot rebuilt wishes'); } });
     assert.equal(looted.memberResults[2].result.materialize.items[0].amount, 2, 'the newcomer receives its actual reserved component');
     assert.equal(looted.agreement.materialNeeds[2].collected, 2);
-    console.log('PASS native recruitment commit: newcomer need, preserved progress, busy/refused/stale worker and bounded loot');
+    console.log('PASS native recruitment commit: pending join, newcomer need, preserved progress, refused/stale check and bounded loot');
 
     const later = await seed(4098, 5730);
-    Coordinator.requestPartyGoals = async (party, members, options) => { calls++; return reply(party, members, options.timestamp); };
+    const laterCheck = leaderStep(Parties.find('material-recruit'), members, [Life.cachedState(later.characterId)]);
     let rejected;
     DB.commitBackgroundPartyMembership = async request => {
         // A party-only write can race after main checked its cached source.
         // It changes no member row, so member CAS alone cannot protect it.
-        await DB.execute(["UPDATE bot_background_parties SET updatedAt=updatedAt+1,statsJson=json_set(statsJson,'$.concurrent',1) WHERE partyId=?", ['material-recruit']]);
+        await DB.execute(["UPDATE bot_background_parties SET revision=revision+1,statsJson=json_set(statsJson,'$.concurrent',1) WHERE partyId=?", ['material-recruit']]);
         const [row] = await DB.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', ['material-recruit']]); Parties.acceptRow(row);
         rejected = await original.commit.call(DB, request); return rejected;
     };
-    assert.equal((await Population.recruitBackgroundMembers([later])).size, 0);
+    await Population.applyWorkerPartyJoin('material-recruit', laterCheck);
     assert.equal(rejected.reason, 'party_recruitment_changed');
     assert.equal(JSON.parse((await stored()).memberIdsJson).length, 3);
     assert.equal((await stored()).stats.agreement.materialNeeds.length, 3);
@@ -156,13 +164,13 @@ async function stored() {
     DB.commitBackgroundPartyMembership = original.commit;
     const current = Parties.find('material-recruit');
     await Parties.createOrUpdate({ ...current, stats: { ...current.stats, pveEncounter: { pending: true } } });
-    const beforeCombatCalls = calls;
+    const beforeCombat = (await stored()).statsJson;
     assert.equal((await Population.recruitBackgroundMembers([later])).size, 0);
-    assert.equal(calls, beforeCombatCalls, 'an unfinished encounter does no recruitment work');
+    assert.equal((await stored()).statsJson, beforeCombat, 'an unfinished encounter does no recruitment work');
     assert.equal((await DB.execute(['PRAGMA integrity_check', []]))[0].integrity_check, 'ok');
     console.log('PASS native party-only CAS race rolls back all joins and preserves quotas; combat defers recruitment');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
-    Coordinator.requestPartyGoals = original.request; Income.prepare = original.prepare;
+    Income.prepare = original.prepare; Income.compare = original.compare;
     DB.commitBackgroundPartyMembership = original.commit; Config.partyMaxSize = original.maxSize;
     await world.close();
 });

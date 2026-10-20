@@ -10,8 +10,9 @@ const BoardRules = require('../../AfkTrade/BoardRules');
 const MAX_BUYS = BoardRules.BOT_SHOP_LINES + BoardRules.BOT_RECORDS.buy_ad;
 
 // Arrival and recovery are natural decision points; ordinary counts/XP/wallet
-// changes do not schedule main-thread economic work.
-function edges(before, after, context = {}, timestamp = Date.now(), options = {}) {
+// changes do not schedule main-thread economic work. options.buyOrderEscrow:
+// the adena the bot's buy orders hold (the worker's board sum).
+function edges(before, after, options = {}) {
     if (!after || ['resting', 'traveling'].includes(after.activity)
         || after.party?.partyId || after.partyId) return 0;
     const oldBag = before?.inventory || {}, bag = after.inventory || {};
@@ -27,12 +28,12 @@ function edges(before, after, context = {}, timestamp = Date.now(), options = {}
         if (!(id > 0) || !(keep > 0)) continue;
         if ((Number(oldBag[id]?.amount || 0) >= keep) !== (Number(bag[id]?.amount || 0) >= keep)) bits |= 2;
     }
-    if (!Funding.moneyReached(before) && Funding.moneyReached(after)) bits |= 4;
-    if (Number(context.goalReviewAt) > Number(before?.timing?.lastResolvedAt || 0)
-        && Number(context.goalReviewAt) <= timestamp) bits |= 8;
+    if (!Funding.moneyReached(before, options.buyOrderEscrow)
+        && Funding.moneyReached(after, options.buyOrderEscrow)) bits |= 4;
     if (after.activity === 'shopping' && before?.activity === 'traveling') bits |= 8;
-    // Rest blocks actions, so stock/loot changes and a goal deadline may have
-    // passed without preparation. Reconsider them once the bot can act again.
+    // Rest blocks actions, so stock/loot changes may have passed without
+    // preparation. Reconsider them once the bot can act again. A goal change
+    // is the decision point's (ColdEconomyDecision.refusal 'goal').
     if (after.activity === 'hunting' && before?.activity === 'resting') bits |= 8;
     if (Number(after.level) > Number(before?.level)) bits |= 16;
     if (after.activity === 'dead' && before?.activity !== 'dead') bits |= 32;
@@ -69,7 +70,7 @@ function* measured(iterator) {
 function* prepareNative(state, economy, options) {
     const Listing = require('../Economy/MarketListingPolicy');
     const Ready = require('../Economy/ReadyTradeChoice');
-    const canAct = !economy.intentPending && !economy.routePending
+    const canAct = !economy.intentPending
         && !['dead', 'resting', 'traveling', 'crafting'].includes(state.activity)
         && !state.stats?.tradeMeeting && !state.incomingPending
         && !invoke('GameServer/Bot/Population/SurvivalFloor').forState(state, Number(options.now) || Date.now());
@@ -170,7 +171,19 @@ function* prepareNative(state, economy, options) {
         try { batch = buyBatch(lines); }
         catch (_) { batch = { buyAds: [null] }; }
         Object.assign(plan, batch, { travel: goal?.plan?.marketTown ? goal.plan.wishKey || null : null });
-        if (economy.intentPending || plan.buyAds.some(row => row === null)) { delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps; plan.d = 1; }
+        // A buy part not prepared (the held build's intent pending, or a
+        // line buyBatch refused) is absent from the packet, not a page: a
+        // refresh on main's next state copy reads the same build, so only
+        // the bot's next step, which rebuilds, can prepare it. An incoming
+        // delivery still pending is main's: its settlement is a state copy
+        // that rebuilds, so it stays a page.
+        const unprepared = !economy.intentPending ? (plan.buyAds.some(row => row === null) ? 'buy_error' : null)
+            : state.incomingPending ? 'intent_incoming' : 'intent_root';
+        if (unprepared) {
+            delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps;
+            if (unprepared === 'intent_incoming') plan.d = 1;
+            if (Diagnostics.active()) Diagnostics.count('economy_plan', 'deferred', unprepared);
+        }
         const shot = decideShot(state, economy, { ...options, ownLines: own });
         if (shot) plan.shot = shot;
     }
@@ -179,6 +192,7 @@ function* prepareNative(state, economy, options) {
     if (Buffer.byteLength(JSON.stringify({ buyAds: plan.buyAds, buyKit: plan.buyKit, buyCaps: plan.buyCaps,
         bidLimits: plan.bidLimits })) > MAX_PLAN_PAYLOAD_BYTES) {
         delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps; plan.d = (plan.d || 0) | 1;
+        if (Diagnostics.active()) Diagnostics.count('economy_plan', 'deferred', 'bytes');
     }
     while (Buffer.byteLength(JSON.stringify(plan)) > MAX_PLAN_PAYLOAD_BYTES) {
         if (plan.sell.length) {
@@ -194,13 +208,14 @@ function* prepareNative(state, economy, options) {
         else if (plan.shot) { delete plan.shot; plan.d = (plan.d || 0) | 16; }
         else throw Error('economy_plan_payload_overflow');
     }
+    if (plan.d > 1 && Diagnostics.active()) Diagnostics.count('economy_plan', 'deferred', `bytes_${plan.d & ~1}`);
     if (Diagnostics.active() && Diagnostics.enabled(state.characterId)) {
         const trace = { owner: state.characterId, caller: options.caller || 'cold_plan',
             trigger: options.trigger || 'plan_request', phase: 'plan_compute',
             inputHash: economy.inputHash ?? fnv1a32(economy.inputKey || ''),
             decisionSeq: economy.network?.decisionSeq ?? state.stats?.decisionSeq,
             activityLeaf: economy.network?.activityLeaf ?? state.stats?.activityLeaf,
-            goalRevision: goal?.revision, wishKey: goal?.plan?.wishKey,
+            wishKey: goal?.plan?.wishKey,
             wallet: state.adena, escrow: options.buyOrderEscrow,
             budget: money, available: money, reserve: state.stats?.money?.[2] };
         Diagnostics.push({ ...trace, reason: plan.travel ? 'travel_planned' : 'plan_prepared', town: goal?.plan?.marketTown });

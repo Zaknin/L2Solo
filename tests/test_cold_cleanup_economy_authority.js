@@ -5,7 +5,6 @@ const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
 const Market = invoke('GameServer/Bot/Economy/BotAfkMarketService');
 const Population = invoke('GameServer/Bot/Population/PopulationService');
-const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const Town = invoke('GameServer/Bot/Economy/MarketTownPolicy');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const id = 730062, restores = [];
@@ -32,11 +31,12 @@ function stub(object, key, value) { const original = object[key]; restores.push(
         const coordinator = new ColdSimulationCoordinator();
         coordinator.population = { realPlayerSessions: () => [],
             prepareInventoryCleanupProposal: (...args) => Population.prepareInventoryCleanupProposal(...args) };
-        coordinator.worker = { postMessage() {} }; coordinator.workerEpoch = 'cleanup:fixture';
+        const acks = [];
+        coordinator.worker = { postMessage: message => message.type === 'commit_ack' && acks.push(...message.payload.results) };
+        coordinator.workerEpoch = 'cleanup:fixture';
         coordinator.reviewCommittedEconomy = async value => value;
         const refreshes = [];
         coordinator.requestEconomyRefresh = actorId => { refreshes.push(actorId); return true; };
-        stub(Disposition, 'inventoryCleanupNeed', () => ({ reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 }));
         stub(Town, 'saleTown', () => ({ town: 'Oren' }));
         stub(Life, 'enqueueEquipmentGoalAdvanceForState', () => {});
         stub(Life, 'reviewTrainingAfterCommit', async value => value);
@@ -46,6 +46,7 @@ function stub(object, key, value) { const original = object[key]; restores.push(
         stub(utils, 'infoWarn', (...args) => warnings.push(require('node:util').format(...args.slice(1))));
         const proposal = { characterId: id, token: { characterId: id, ...state.simulation }, enqueuedAt: timestamp,
             nextState: state, result: { events: [] },
+            cleanupNeed: { reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 },
             economyPlan: { sell: [], withdraw: [], travel: null,
                 buyAds: [[1458, 10, 1500, 1, 76, 7, 0, 1, .001]] } };
         const prepared = await coordinator.prepareProposal(proposal);
@@ -53,9 +54,13 @@ function stub(object, key, value) { const original = object[key]; restores.push(
         assert.equal(prepared.stats.travel.paid.fee, 11000, 'the real Giran-to-Oren route charges its fare');
         assert.equal(prepared.adena, 9000, 'cleanup replaces the planner wallet after its bid was sized');
         const committed = await Life.upsertState(prepared, 'cleanup_trip_commit_fixture');
-        await coordinator.afterCommit({ nextState: committed, proposal });
-        assert.equal(warnings.some(line => line.includes('economy_plan_bid_unfunded')), false,
-            'a superseded worker bid waits for new preparation instead of failing after the paid cleanup commit');
+        const result = { ok: true, characterId: id, nextState: committed, proposal: { ...proposal, proposalId: `${id}:1`, revision: 1 } };
+        await coordinator.afterCommit(result);
+        await coordinator.handleCommitResults([result]);
+        assert.equal(acks[0]?.ok, true);
+        assert.equal((acks[0].review || []).includes('plan'), false,
+            'a superseded worker bid is not reviewed after the paid cleanup commit: it waits for new preparation');
+        assert.equal(warnings.some(line => line.includes('economy_plan_bid_unfunded')), false);
         assert.deepEqual(refreshes, [id], 'the final native state requests one fresh worker decision');
         const after = Afk.ownerRecords(id).find(row => row.kind === 'buy_ad');
         assert.equal(after.id, standing.id); assert.equal(after.lines[0].count, 2,

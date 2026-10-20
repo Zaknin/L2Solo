@@ -52,7 +52,7 @@ function distributeRewards({ members, spot, wins, defeatedNpcIds = [], overhitCo
     const expMultiplier = Number(pressure?.expMultiplier || 1);
     const rates = ProgressionRates.profile();
     const levels = members.map((state) => Number(state.level || 1));
-    const profiles = members.map((state) => ColdCombatProfile.profileFor(state, timestamp));
+    const profiles = members.map((state) => ColdCombatProfile.fightProfile(state, timestamp));
     const spoilerIndex = members.findIndex((state) => BotRoles.isSpoiler(state));
     const kills = Array.from({ length: wins }, (_, index) => ({
         npcSelfId: defeatedNpcIds[index],
@@ -176,7 +176,7 @@ const BackgroundPartyResolver = {
             arrived: require('./PartyHuntingAssembly').ready(party, members, spot) }) : null;
         if (marked && (!admission.ok || !admission.held && party.stats?.raidEncounter?.status === 'defeated')) {
             const reason = admission.reason || 'raid_roster_not_opened';
-            const cancelled = ['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened'].includes(reason);
+            const cancelled = Roster.CANCEL_REASONS.includes(reason);
             const nextResolveAt = cancelled ? null : timestamp + 30000;
             return { atomic: true, memberResults: members.map(state => ({ state, result: { patch: {}, events: [],
                 materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt } })), events: [], nextResolveAt,
@@ -406,6 +406,9 @@ const BackgroundPartyResolver = {
             ...state,
             vitals: pending ? { ...state.vitals } : BackgroundResolver.applyStandingRegen(state, state.vitals, elapsedMs, timestamp)
         }));
+        // Raid preparation casts its own buffs; an ordinary hunt casts them between fights (F23).
+        const huntBuffs = raid || pending ? null : BackgroundResolver.castHuntPartyBuffs(combatMembers, timestamp);
+        if (huntBuffs) combatMembers = huntBuffs.members;
         for (let i = 0; i < fightBudget; i++) {
             const encounter = BackgroundResolver.resolvePartyFight({
                 members: combatMembers,
@@ -449,7 +452,7 @@ const BackgroundPartyResolver = {
                 stats: {
                     ...(member.state.stats || {}),
                     coldCombat: {
-                        ...(member.state.stats?.coldCombat || member.profile),
+                        ...(member.state.stats?.coldCombat || ColdCombatProfile.seedSnapshot(member.state, timestamp)),
                         effects: member.profile.effects || member.state.stats?.coldCombat?.effects || [],
                         cooldowns: member.cooldowns,
                         charges: member.charges || 0,
@@ -566,7 +569,7 @@ const BackgroundPartyResolver = {
                         shotActions: memberShotActions.get(Number(state.characterId)) || 0,
                         // The worker delivers member results, not the outer
                         // aggregate. Carry combat totals on this owner only.
-                        ...(index === 0 ? { combatActions, skillUses, heals } : {})
+                        ...(index === 0 ? { combatActions, skillUses, heals, partyBuffCasts: huntBuffs?.buffCasts || 0 } : {})
                     }
                 }
             });
@@ -750,6 +753,7 @@ const BackgroundPartyResolver = {
                 skillUses,
                 heals,
                 musicUses,
+                partyBuffCasts: huntBuffs?.buffCasts || 0,
                 summonUses,
                 summonActions,
                 potionsUsed,

@@ -42,6 +42,10 @@ function stateInventory(state, items = []) {
 function stateCastCosts(state, profile, timestamp) {
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const Rules = invoke('GameServer/Skills/C4SkillRules');
+    // One stat source list per call: every skill's two multipliers read it.
+    let sources = null;
+    const multiplier = stat => Profile.statMultiplier(profile, stat, timestamp,
+        sources ||= Profile.fightSources(profile, timestamp).sources);
     return Profile.offensiveSkills(profile).filter(skill => {
         const semantic = Rules.resolveCached(skill);
         return Number(state.stats?.coldCombat?.cooldowns?.[skill.selfId] || 0) <= timestamp
@@ -50,25 +54,46 @@ function stateCastCosts(state, profile, timestamp) {
     }).map(skill => {
         const stat = skill.spell ? 'magicalMpConsumeMul' : 'physicalMpConsumeMul';
         const equipment = skill.spell ? 'magicalMpConsumeRateMul' : 'physicalMpConsumeRateMul';
-        return Math.max(0, Math.floor(Number(skill.mp || 0) * Profile.statMultiplier(profile, stat, timestamp)
-            * Profile.statMultiplier(profile, equipment, timestamp) + 1e-9));
+        return Math.max(0, Math.floor(Number(skill.mp || 0) * multiplier(stat) * multiplier(equipment) + 1e-9));
     });
+}
+
+// Weight penalty 1 is only the C4 walking-speed step. During the sale retry
+// it waits like a half-full bag and the bot hunts on, spending its shots,
+// instead of flying back to a town that bought nothing. A heavier step and a
+// full bag stay the floor.
+function saleRetryWaits(floor, state, timestamp) {
+    return floor?.reason === 'overweight' && floor.weightPenalty === 1
+        && Number(state?.stats?.marketSellRetryAfter || 0) > timestamp ? null : floor;
 }
 
 function forState(state, timestamp = Date.now(), inputs = null) {
     if (!state) return null;
     if (state.activity === 'dead' || Number(state.vitals?.hp) <= 0) return { reason: 'dead', action: 'revive' };
     if (inputs || typeof invoke !== 'function') {
-        return evaluate({ hp: state.vitals?.hp, mp: state.vitals?.mp, ...stateInventory(state, inputs?.items),
-            slotLimit: InventoryLimits.forState(state, inputs || {}), ...inputs });
+        return saleRetryWaits(evaluate({ hp: state.vitals?.hp, mp: state.vitals?.mp, ...stateInventory(state, inputs?.items),
+            slotLimit: InventoryLimits.forState(state, inputs || {}), ...inputs }), state, timestamp);
     }
     const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
     const Roles = invoke('GameServer/Bot/AI/BotRoles');
     const profile = Profile.profileFor(state, timestamp);
-    return evaluate({ hp: state.vitals?.hp, mp: state.vitals?.mp ?? profile.maxMp,
+    return saleRetryWaits(evaluate({ hp: state.vitals?.hp, mp: state.vitals?.mp ?? profile.maxMp,
         manaRequired: Roles.shouldRestForMana(state), castCosts: stateCastCosts(state, profile, timestamp),
         ...stateInventory(state, invoke('GameServer/DataCache').items),
+        slotLimit: InventoryLimits.forState(state, profile), maxLoad: profile.maxLoad }), state, timestamp);
+}
+
+// The bag part of the floor alone (no slot, overweight; dead first, as in
+// forState): what a sale trip answers, without the cast costs and the mana
+// read forState pays. The author's thresholds, the same evaluate.
+function bagFor(state, timestamp = Date.now()) {
+    if (!state) return null;
+    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile'); // lazy: worker as forState.
+    const items = invoke('GameServer/DataCache').items; // lazy: worker as forState.
+    const profile = Profile.profileFor(state, timestamp);
+    const floor = evaluate({ dead: state.activity === 'dead', hp: state.vitals?.hp, ...stateInventory(state, items),
         slotLimit: InventoryLimits.forState(state, profile), maxLoad: profile.maxLoad });
+    return saleRetryWaits(floor, state, timestamp);
 }
 
 function actorInventory(actor) {
@@ -90,10 +115,13 @@ function bagMarks(actor) {
         full: Number(bag.slots >= InventoryLimits.forActor(actor)) };
 }
 
-function forActor(actor) {
+// A hot solo hunter carries its life state in the session (`coldLifeState`),
+// where the hot sale visit writes the same retry (HuntingState pauseSelling).
+function forActor(actor, state = null, timestamp = Date.now()) {
     if (!actor) return null;
+    // lazy: worker the cold worker loads this file (BackgroundResolver); forActor is hot only.
     const Attack = invoke('GameServer/Actor/Attack');
-    const Roles = invoke('GameServer/Bot/AI/BotRoles');
+    const Roles = invoke('GameServer/Bot/AI/BotRoles'); // lazy: worker as Attack above.
     const mask = Attack.weaponMaskFor(actor);
     const costs = (actor.skillset?.fetchSkills?.() || []).filter(skill => {
         const semantic = skill.fetchSemantic?.() || {};
@@ -104,9 +132,10 @@ function forActor(actor) {
             && Number(skill.fetchConsumedHp?.() || 0) < Number(actor.fetchHp?.());
     })
         .map(skill => Attack.prototype.skillMpCost(actor, skill));
-    return evaluate({ dead: actor.isDead?.() === true, hp: actor.fetchHp?.(), mp: actor.fetchMp?.(),
+    return saleRetryWaits(evaluate({ dead: actor.isDead?.() === true, hp: actor.fetchHp?.(), mp: actor.fetchMp?.(),
         manaRequired: Roles.shouldRestForMana(actor), castCosts: costs,
-        ...actorInventory(actor), slotLimit: InventoryLimits.forActor(actor), maxLoad: actor.fetchMaxLoad?.() || 0 });
+        ...actorInventory(actor), slotLimit: InventoryLimits.forActor(actor), maxLoad: actor.fetchMaxLoad?.() || 0 }),
+    state, timestamp);
 }
 
-module.exports = { evaluate, forState, forActor, bagMarks, stateInventory, inventoryLimit, weightPenalty };
+module.exports = { evaluate, forState, bagFor, forActor, bagMarks, stateInventory, inventoryLimit, weightPenalty };

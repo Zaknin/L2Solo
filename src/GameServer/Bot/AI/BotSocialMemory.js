@@ -1,5 +1,6 @@
 const Identity = invoke('GameServer/Bot/AI/BotServiceIdentity');
 const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
+const PartyAwareness = invoke('GameServer/Bot/AI/PartyAwareness');
 const { randomUUID } = require('crypto');
 const TRUSTED_TRUST = 8;
 const RECENT_ABANDON_MS = 5 * 60 * 1000;
@@ -78,20 +79,13 @@ const BotSocialMemory = {
         const npcId = npc.fetchId();
         if (!playerId || !npcId) return [];
 
-        let botSessions = [];
-        try {
-            const BotManager = invoke('GameServer/Bot/BotManager');
-            botSessions = BotManager.sessions;
-        } catch (err) {
-            utils.infoWarn('BotSocial', 'combat social lookup failed: %s', err.message);
-            return [];
-        }
-
         if (combatHelpSeen.size > 5000) {
             combatHelpSeen.clear();
         }
 
-        return botSessions
+        // The player's party (PartyAwareness: the who-where map's party group,
+        // online actors), not every hot bot session on each hit.
+        return PartyAwareness.partySessions(playerSession)
             .filter((botSession) => (
                 botSession.actor &&
                 botSession.followPlayerSession === playerSession &&

@@ -14,12 +14,12 @@ function shortfall(state = {}, price = 0, reserve = 0, escrow = 0) {
 function surplus(state = {}, price = 0, reserve = 0) {
     return Math.max(0, budget(state) - nonnegative(price) - nonnegative(reserve));
 }
-function moneyReached(state) {
+function moneyReached(state, escrow = 0) {
     const packet = state?.stats?.money;
     if (!Array.isArray(packet) || packet.length < 4 || !(Number(packet[3]) > 0)) return false;
     let fundedPrice = 0;
     for (let i = 5; i < packet.length; i += 3) fundedPrice = Math.max(fundedPrice, Number(packet[i]) || 0);
-    return budget(state) - nonnegative(packet[2]) >= fundedPrice + Number(packet[3]);
+    return budget(state, escrow) - nonnegative(packet[2]) >= fundedPrice + Number(packet[3]);
 }
 function budgetFor(packet, wallet, escrow, r, capture = null) {
     let prior = 0;

@@ -6,6 +6,9 @@ const CharacterWriteQueue = invoke('GameServer/Persistence/CharacterWriteQueue')
 const DataCache = invoke('GameServer/DataCache');
 const Item = invoke('GameServer/Item/Item');
 const { materialPlan } = invoke('GameServer/Crafting/CraftMaterials');
+const CraftWorkshopService = invoke('GameServer/Bot/Economy/CraftWorkshopService');
+const World = invoke('GameServer/World/World');
+const PrivateStoreTrade = invoke('GameServer/PrivateStoreTrade');
 
 const MANUFACTURE = 5;
 const MANUFACTURE_MANAGE = 6;
@@ -75,7 +78,6 @@ function distanceAllows(customer, crafter) {
 
 function findSession(id) {
     const BotManager = invoke('GameServer/Bot/BotManager');
-    const World = invoke('GameServer/World/World');
     return BotManager.findSessionById?.(id) || (World.user?.sessions || []).find((session) => (
         Number(session.actor?.fetchId?.()) === Number(id)
     )) || null;
@@ -120,7 +122,7 @@ function publish(session, entries) {
     session.dataSendToMeAndOthers?.(ServerResponse.sitAndStand(actor), actor);
     broadcastState(session, actor);
     session.dataSendToMeAndOthers?.(ServerResponse.recipeShopMsg(actor), actor);
-    invoke('GameServer/Bot/Economy/CraftWorkshopService').registerPlayer(session);
+    CraftWorkshopService.registerPlayer(session);
     return true;
 }
 
@@ -187,7 +189,6 @@ async function craft(session, crafterId, recipeId, random = Math.random, order =
     };
     const crafterMp = publicStation ? Number(crafter.fetchMp()) : Number(crafter.fetchMp()) - recipe.mpCost * batches;
     const validate = () => {
-        const World = invoke('GameServer/World/World');
         if (session.actor !== customer || crafterSession.actor !== crafter || findSession(actorId) !== crafterSession
             || order.botOrder && !(World.user?.sessions || []).includes(session)
             || customer.isDead?.() || crafter.isDead?.() || customer.fetchIsOnline?.() === false || crafter.fetchIsOnline?.() === false
@@ -230,8 +231,7 @@ async function craft(session, crafterId, recipeId, random = Math.random, order =
         crafterSession?.dataSendToMe?.(ServerResponse.itemsList(crafter.backpack.fetchItems()));
         session.dataSendToMe?.(ServerResponse.recipeShopItemInfo(crafter, recipe.recipeId, committed.success ? 1 : 0));
         if (order.botOrder && session.coldLifeState) {
-            const Sync = invoke('GameServer/PrivateStoreTrade');
-            Sync.syncInventory(session, customer, await Database.fetchItems(customerId), price,
+            PrivateStoreTrade.syncInventory(session, customer, await Database.fetchItems(customerId), price,
                 { ...order.funding, itemId: recipe.productId });
         }
         return order.botOrder ? committed : committed.success;

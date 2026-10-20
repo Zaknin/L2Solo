@@ -2,6 +2,7 @@ const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const { DiagnosticMetricMap } = require('../Bot/Population/DiagnosticMetricMap');
 const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const Database = invoke('Database');
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Config = invoke('GameServer/Clan/ClanSimulationConfig');
 const Contracts = invoke('GameServer/Clan/ClanSimulationContracts');
 const ContributionPolicy = invoke('GameServer/Clan/ClanContributionPolicy');
@@ -17,6 +18,8 @@ const DataCache = invoke('GameServer/DataCache');
 const ClanEconomy = require('./ClanEconomyContext');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const ReviewEvents = require('./ClanReviewEvents');
+const SupplyPolicy = require('./ClanSupplyPolicy');
+const SavedStats = require('../Bot/SavedStats');
 
 const metrics = {
     resolves: 0,
@@ -62,14 +65,31 @@ const MEMBER_JSON_IDLE_MS = 10 * 60 * 1000;
 const parsedMemberJson = new Map();
 let memberJsonSweepAt = 0;
 
-function memberJson(characterId, field, text, now = Date.now()) {
+function memberEntry(characterId, now) {
     let entry = parsedMemberJson.get(characterId);
     if (!entry) parsedMemberJson.set(characterId, entry = {});
     entry.seenAt = now;
+    return entry;
+}
+
+function memberJson(characterId, field, text, now = Date.now()) {
+    const entry = memberEntry(characterId, now);
     const cached = entry[field];
     if (cached && cached.text === text) return cached.value;
     const value = parseJson(text, {});
     entry[field] = { text, value };
+    return value;
+}
+
+// A member's one stats object: the saved mind over the saved body
+// (SavedStats.merge). The body keeps its parse while only the mind moves.
+function memberStats(characterId, statsJson, mindJson, now = Date.now()) {
+    const entry = memberEntry(characterId, now);
+    const cached = entry.stats;
+    if (cached && cached.text === statsJson && cached.mind === mindJson) return cached.value;
+    const body = cached && cached.text === statsJson ? cached.body : parseJson(statsJson, {});
+    const value = SavedStats.merge(body, mindJson);
+    entry.stats = { text: statsJson, mind: mindJson, body, value };
     return value;
 }
 
@@ -109,7 +129,7 @@ async function clanProjection(clanId = null) {
                COALESCE(life.locX, members.locX) AS locX, COALESCE(life.locY, members.locY) AS locY,
                COALESCE(life.locZ, members.locZ) AS locZ,
                life.partyId,
-               life.simulationOwner, life.simulationRevision, life.inventorySummary, life.statsJson, personas.traitsJson, personas.primaryDrive, personas.archetype
+               life.simulationRevision, life.inventorySummary, life.statsJson, life.mindJson, personas.traitsJson, personas.primaryDrive, personas.archetype
         FROM clan_simulation_clans simulated
         JOIN clans ON clans.id = simulated.clanId
         JOIN characters members ON members.clanId = simulated.clanId
@@ -149,18 +169,19 @@ async function clanProjection(clanId = null) {
             currentRegion: String(row.currentRegion || ''),
             spotId: row.spotId || null,
             partyId: row.partyId || null,
-            simulationOwner: String(row.simulationOwner || 'legacy_main'),
             adena: number(row.adena),
             simulationRevision: number(row.simulationRevision),
             inventory: memberJson(number(row.characterId), 'inventory', row.inventorySummary, now),
-            stats: memberJson(number(row.characterId), 'stats', row.statsJson, now),
+            stats: memberStats(number(row.characterId), row.statsJson, row.mindJson, now),
             persona: { primaryDrive: row.primaryDrive, archetype: row.archetype, traits: parseJson(row.traitsJson, {}) }
         };
         byId.get(clanId).physicalMemberCount++;
         if (!ClanSimulationPolicy.isStaticService(member)) byId.get(clanId).members.push(member);
     });
     const projection = [...byId.values()];
-    for (const clan of projection) require('./ClanSupplyPolicy').publish(clan);
+    for (const clan of projection) SupplyPolicy.publish(clan);
+    // Level-only startup rows are not the final native demand projection.
+    if (!hasClanId) SupplyPolicy.projectionReady();
     return projection;
 }
 
@@ -280,7 +301,7 @@ async function cancelLegacyBloodMarkDemand(clan, context) {
         goalKey: demand.goalKey,
         status: 'cancelled'
     });
-    await Database.syncClanMarketDemandSignal({
+    await LifeState.syncClanMarketDemandSignal({
         clanId: clan.id,
         itemId: Config.bloodMarkItemId,
         amount: Math.max(1, number(demand.amount, 1)),
@@ -419,6 +440,10 @@ async function resolveClanInternal(clan, options = {}) {
                 ownerSection: equipment.ownerSection || 'goal',
                 recruitmentDemand: equipment.recruitmentDemand,
                 recruitmentScan: equipment.recruitmentScan,
+                // The adopted production goal, or a copy of the same goal a
+                // promotion before this fix left in the production section.
+                supersededProductionGoalKey: previous && (previous === clan.state?.productionGoal
+                    || (previous.goalKey && previous.goalKey === clan.state?.productionGoal?.goalKey)) ? previous.goalKey : null,
                 expectedUpdatedAt: number(equipment.expectedUpdatedAt ?? clan.state?.updatedAt) || null,
                 eventType,
                 reasonCode: goal.plan?.reasonCode || ''
@@ -523,7 +548,7 @@ async function resolveClanInternal(clan, options = {}) {
     if (context.marketOffer) {
         demand = await Database.upsertClanMarketDemand({ clanId: clan.id, itemId: Config.bloodMarkItemId,
             amount: 1, maxPrice: context.marketOfferPrice, goalKey: `${clan.id}:level-2:${Config.bloodMarkItemId}`, status: 'open' });
-        await Database.syncClanMarketDemandSignal({ clanId: clan.id, itemId: Config.bloodMarkItemId,
+        await LifeState.syncClanMarketDemandSignal({ clanId: clan.id, itemId: Config.bloodMarkItemId,
             amount: 1, maxPrice: context.marketOfferPrice, goalKey: `${clan.id}:level-2:${Config.bloodMarkItemId}`, status: 'open' });
     }
     if (goal.type === 'item' && demand?.created && !context.marketOffer) {
@@ -611,7 +636,7 @@ const ClanGoalService = {
     policy: GoalPolicy,
     clanProjection,
     clanProjectionById,
-    memberJson,
+    memberStats,
     resolveClan,
     recordCatastrophicFailure,
 

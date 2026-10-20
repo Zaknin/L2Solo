@@ -201,7 +201,6 @@ async function deliveryContext(order, clan) {
     const nextRecipient = deliveryMember(next);
     const remaining = Math.max(0, number(order.amount) - deliveredAmount);
     const busy = !!next && (String(next.phase || '') !== 'cold'
-        || String(next.simulation?.ownerId || 'legacy_main') !== 'legacy_main'
         || !!String(next.party?.partyId || ''));
     return {
         kind: 'best_upgrade',
@@ -371,7 +370,7 @@ async function ensureMarketDemand(clanId, order, goal) {
             status: 'fulfilled'
         });
         if (fulfilled.ok) {
-            await Database.syncClanMarketDemandSignal({
+            await LifeState.syncClanMarketDemandSignal({
                 clanId,
                 itemId: order.itemId,
                 amount: 1,
@@ -391,7 +390,7 @@ async function ensureMarketDemand(clanId, order, goal) {
         status: 'open'
     });
     if (demand.ok) {
-        await Database.syncClanMarketDemandSignal({
+        await LifeState.syncClanMarketDemandSignal({
             clanId,
             itemId: order.itemId,
             amount,

@@ -156,4 +156,85 @@ assert(lethalMinions.slice(1).every((minion) => minion.fetchDestId() === attacke
     'surviving minions must assist after a lethal minion hit');
 MinionManager.onBossDeath(world, lethalBoss, combatSession);
 lethalBoss.abortCombatState(combatSession);
+
+// A minion that leaves the world without dying (despawn, corpse removal) must
+// reach the refill queue through the index removal, with no death announced,
+// and the tick must visit only the groups in that queue.
+const gridWorld = {
+    user: { sessions: [] },
+    npc: { spawns: [], nextId: 5000000 },
+    addNpcToGrid(npc) { return RaidEntityIndex.add(this, npc); },
+    removeNpcFromGrid(npc) { return RaidEntityIndex.remove(this, npc); }
+};
+function gridBoss(locX) {
+    const raid = new Npc(gridWorld.npc.nextId++, { ...utils.crushOb(bossTemplate), locX, locY: locX, locZ: 0, head: 0 });
+    gridWorld.npc.spawns.push(raid);
+    gridWorld.addNpcToGrid(raid);
+    return { raid, state: MinionManager.attachBoss(gridWorld, raid) };
+}
+function removeWithoutDeath(minion) {
+    gridWorld.removeNpcFromGrid(minion);
+    gridWorld.npc.spawns.splice(gridWorld.npc.spawns.indexOf(minion), 1);
+}
+const shortBoss = gridBoss(3000);
+const idleBoss = gridBoss(4000);
+const shortGroup = shortBoss.state.groups[0];
+const desired = shortGroup.desired;
+assert.strictEqual(shortGroup.members.length, desired, 'the group starts full');
+const idleGroupCount = idleBoss.state.groups.length;
+assert(shortBoss.state.groups.length + idleGroupCount > 1, 'the visit count check needs more groups than the one made short');
+
+const feedsBefore = MinionManager.stats().removalFeeds;
+removeWithoutDeath(shortGroup.members[0]);
+assert.strictEqual(MinionManager.stats().removalFeeds, feedsBefore + 1,
+    'a removal without a death must mark its group short through the index');
+
+const visitsBefore = MinionManager.stats().groupVisits;
+assert.strictEqual(MinionManager.maintain(gridWorld, Date.now()), 0, 'the respawn delay has not passed');
+assert.strictEqual(MinionManager.stats().groupVisits, visitsBefore + 1,
+    'the tick must visit only the group a removal made short, not every group of every boss');
+
+const refillsBefore = MinionManager.stats().refills;
+const refilled = MinionManager.maintain(gridWorld, Date.now() + MinionManager.MINION_RESPAWN_DELAY_MS + 1);
+assert.strictEqual(refilled, 1, 'the group refills one minion after the respawn delay');
+assert.strictEqual(shortGroup.members.length, desired, 'the refilled group is full again');
+assert.strictEqual(MinionManager.stats().refills, refillsBefore + 1);
+const visitsAfterRefill = MinionManager.stats().groupVisits;
+assert.strictEqual(MinionManager.maintain(gridWorld, Date.now() + MinionManager.MINION_RESPAWN_DELAY_MS + 2), 0);
+assert.strictEqual(MinionManager.stats().groupVisits, visitsAfterRefill,
+    'a refilled group leaves the queue: the next tick visits nothing');
+
+// The refill alarm: one timer on the nearest respawnAt, none while no group is short.
+{
+    const realSetTimeout = global.setTimeout, realNow = Date.now;
+    const armed = [];
+    global.setTimeout = (callback, delay) => { armed.push({ callback, delay }); return { unref() {} }; };
+    try {
+        MinionManager.start(gridWorld);
+        assert.strictEqual(armed.length, 0, 'no short group: no alarm');
+        removeWithoutDeath(shortGroup.members[0]);
+        assert.strictEqual(armed.length, 1, 'a short group arms the alarm');
+        assert(armed[0].delay > MinionManager.MINION_RESPAWN_DELAY_MS - 1000 && armed[0].delay <= MinionManager.MINION_RESPAWN_DELAY_MS,
+            'the alarm sleeps until the group respawnAt');
+        removeWithoutDeath(shortGroup.members[0]);
+        assert.strictEqual(armed.length, 1, 'a later loss of the same group keeps the armed alarm');
+        const fireAt = realNow() + MinionManager.MINION_RESPAWN_DELAY_MS + 1;
+        Date.now = () => fireAt;
+        armed[0].callback();
+        assert.strictEqual(shortGroup.members.length, desired, 'the alarm refills the group');
+        assert.strictEqual(armed.length, 1, 'a refilled queue arms nothing');
+    } finally {
+        Date.now = realNow;
+        global.setTimeout = realSetTimeout;
+        MinionManager.stop(gridWorld);
+    }
+}
+
+// A boss death detaches its state first: its minion removals must not queue the groups.
+const feedsBeforeBossDeath = MinionManager.stats().removalFeeds;
+MinionManager.onBossDeath(gridWorld, idleBoss.raid, combatSession);
+assert.strictEqual(MinionManager.stats().removalFeeds, feedsBeforeBossDeath,
+    'removing the minions of a dead boss must not mark their groups short');
+MinionManager.onBossDeath(gridWorld, shortBoss.raid, combatSession);
+
 console.log('Raid boss minions ok');

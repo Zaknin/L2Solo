@@ -13,24 +13,23 @@ const captures = [];
 // leaf, price, valuation or wallet value is supplied by this fixture.
 module.exports = async function withNativeEconomyInput(state, consume, timestamp = Date.now()) {
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
-    const DB = invoke('Database');
-    const Policy = invoke('GameServer/Bot/Economy/ShotCraftPolicy');
+    const Workshop = invoke('GameServer/Bot/Economy/CraftWorkshopService');
     const channel = invoke('GameServer/Bot/Population/ColdTableChannel').shared;
-    const tables = [...channel.tables.values()].filter(table => !table.streamed).map(table => channel.full(table));
-    const contexts = async value => ({ knownShotRecipes: Policy.packKnown(
-        (await DB.fetchCharacterRecipes(value.characterId)).map(row => Number(row.recipeId))) });
+    // Loading each bot's recipes fills main's 'recipes' table, read below with the other tables.
     const extraStates = [];
     for (const other of Life.everyState()) if (other.characterId !== state.characterId) {
-        extraStates.push({ state: other, context: await contexts(other) });
+        await Workshop.knownFor(other.characterId);
+        extraStates.push({ state: other });
     }
+    await Workshop.knownFor(state.characterId);
+    const tables = [...channel.tables.values()].filter(table => !table.streamed).map(table => channel.full(table));
     const before = structuredClone(state);
-    const context = await contexts(state);
     const tablePages = channel.pages(tables).map(page => page.payload);
-    const captured = await nativeDecision(state, { timestamp, context, extraStates, tablePages });
+    const captured = await nativeDecision(state, { timestamp, extraStates, tablePages });
     assert.deepEqual(state, before, 'the actual worker leaves the main input unchanged');
     const native = Decision.compact(captured.decision);
     assert.equal(native.updatedAt, Number(state.updatedAt || 0));
-    assert.equal(native.key, Decision.stateKey(state));
+    assert.deepEqual(native.echo, Decision.stateEcho({ ...state, stats: { ...state.stats, ...captured.statsPacket } }));
     assert.deepEqual(captured.forbiddenLoaded, []);
     const accepted = { ...state, stats: { ...state.stats, ...captured.statsPacket } };
     assert.equal(accepted.adena, state.adena, 'packet publication retains the original wallet');
@@ -50,7 +49,7 @@ module.exports = async function withNativeEconomyInput(state, consume, timestamp
         return originalFull.call(this, value, ...args);
     };
     const record = { input: before, timestamp, tableVersions: tables.map(table => [table.name, table.to, table.rows.length]),
-        nativeTables: structuredClone(tables), knownShotRecipes: context.knownShotRecipes, statsPacket: captured.statsPacket,
+        nativeTables: structuredClone(tables), knownShotRecipes: Workshop.knowledgeFor(state.characterId).knownShotRecipes, statsPacket: captured.statsPacket,
         decision: { ...native, data: Buffer.from(native.data).toString('base64') },
         activity: native.activity, queue: captured.queue, sourceKey: native.key,
         sourceUpdatedAt: native.updatedAt, publication: 'whole native packet + accepted command-held decision' };

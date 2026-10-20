@@ -46,6 +46,7 @@ function recordEquipmentEvent(session, item, action) {
     const Events = require('../Clan/ClanReviewEvents'), clanId = session?.actor?.fetchClanId?.();
     if (Events.tracks(clanId, item?.fetchSelfId?.())) Events.changed(clanId, 'member_gear');
     if (!session?.accountId?.startsWith?.('bot_') || !item) return;
+    invoke('GameServer/Bot/Population/BotLifeState').notifyNearFacts(session, 'equip'); // lazy: cycle BotLifeState loads Backpack at its top.
     Promise.resolve(BotEventJournal.record({
         botId: session.actor?.fetchId?.(),
         eventType: action === 'equip' ? 'equipment_change' : 'equipment_removed',

@@ -13,25 +13,8 @@ function isAlive(session) {
     return !!session?.actor && session.actor.fetchIsOnline?.() === true && !session.actor.isDead?.();
 }
 
-function partySessions(leaderSession, { includeDead = false } = {}) {
-    if (!leaderSession) return [];
-
-    // A companion is owned by BotManager before every visibility/update path
-    // has necessarily populated World.user. Read both registries so combat,
-    // loot and revival see the same party during that short lifecycle gap.
-    const BotManager = invoke('GameServer/Bot/BotManager');
-    const candidates = [
-        leaderSession,
-        ...(world().user?.sessions || []),
-        ...(BotManager.sessions || [])
-    ];
-    const unique = new Set();
-    return candidates.filter((session) => {
-        if (!session || unique.has(session)) return false;
-        unique.add(session);
-        return PartyAwareness.isPartySession(session, leaderSession) &&
-            (includeDead || isAlive(session));
-    });
+function partySessions(leaderSession, options) {
+    return PartyAwareness.partySessions(leaderSession, options);
 }
 
 function npcById(id) {

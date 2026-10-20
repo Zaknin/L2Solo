@@ -24,14 +24,13 @@ const adapters = {
     'GameServer/Progression/ProgressionCap': { effectiveLevelCap: () => 40 },
     'GameServer/Bot/AI/KnowledgeLearning': { stages: () => [{ grade: 'c', maxLevel: 51 }], gradeOfLevel: () => 'c' },
     'GameServer/Bot/AI/BotGear': { wishKitsFor: require('../src/GameServer/Bot/AI/BotGear').wishKitsFor },
-    'GameServer/Bot/AI/GearAcquisitionPlanner': { sourceRouteReader: () => () => true, roleFor: () => 'melee', gradeForLevel: () => 'c',
+    'GameServer/Bot/AI/GearAcquisitionPlanner': { sourceGround: () => null, sourceRouteReader: () => () => true, roleFor: () => 'melee', gradeForLevel: () => 'c',
         suitable: () => true, considerable: () => true, itemScore: () => 1, withReadiness: fn => fn() },
-    'GameServer/Bot/Population/ColdCombatProfile': { withEquipmentPreparation: fn => fn(), buildGainsFor: () => ({}),
-        gainFor: (build, key, fn) => fn(), powerNumbers: () => ({ pAtk: 100, pDef: 100, mDef: 100 }),
-        powerFor: () => ({ pAtk: 200, pDef: 100, mDef: 100 }), buildOptions: () => ({}) },
+    'GameServer/Bot/Population/ColdCombatProfile': { candidateProfiles: () => ({
+        before: { pAtk: 100, pDef: 100, mDef: 100 }, after: () => ({ pAtk: 200, pDef: 100, mDef: 100 }) }) },
     'GameServer/Bot/Economy/BotImprovementPolicy': { opportunities: () => [], crystalPath: () => null },
     'GameServer/Items/C4RecipeItems': { resolveVariantsByProductId: id => allowCraft && id === 101 ? [recipe] : [], resolveByRecipeId: id => id === 301 ? recipe : null },
-    'GameServer/Items/C4DualSwordCombinations': { loadRecipes: () => [] },
+    'GameServer/Items/C4DualSwordCombinations': { resolveByProductId: () => null, resolveByRecipeId: () => null },
     'GameServer/Items/SoulCrystalProgression': require('../src/GameServer/Items/SoulCrystalProgression'),
     'GameServer/Bot/Economy/CraftShopService': { canCraft: () => ownCraft, isServiceCrafter: () => true },
     'GameServer/Skills/SkillBookCatalog': { missingBooks: () => [] },
@@ -73,11 +72,14 @@ adapters['GameServer/Bot/AI/GearAcquisitionPlanner'].sourceFacts = function* (st
     })())).filter(fact => !(options.readyOnly || options.counts) || fact.status === 'ready');
 };
 const invokeAdapter = name => { assert(name in adapters, name); return adapters[name]; };
-const valuation = load('EconomicValuation.js', () => { throw Error('unexpected require'); }, invokeAdapter);
+const valuation = load('EconomicValuation.js', name => require(path.resolve(root, name)), invokeAdapter);
 const tendency = { MIN: 0.02, roll: () => 0.5 };
 const network = load('WishNetwork.js', name => {
+    // WishNetwork reads the thread kind (c3a6771d); this fixture is the main thread.
+    if (name === 'node:worker_threads') return require('node:worker_threads');
     if (name === './EconomyDiagnostics') return { active: () => false };
     if (name === './PurchaseFunding') return require('../src/GameServer/Bot/Economy/PurchaseFunding');
+    if (name === './CompactBytes') return require('../src/GameServer/Bot/Economy/CompactBytes');
     if (name === './EconomicValuation') return valuation;
     if (name.endsWith('TendencyRoll')) return tendency;
     if (name.endsWith('Fnv1a')) return { fnv1a32: () => 1 };
@@ -89,6 +91,9 @@ adapters['GameServer/Bot/Economy/PriceBelief'] = { prior: () => ({ mu: Math.log(
 const nativePrice = load('PriceDecision.js', name => require(path.resolve(root, name)), invokeAdapter);
 const producerPrice = { ...nativePrice, bidSale: (...args) => supported ? nativePrice.bidSale(...args) : { status: 'unknown' } };
 const provider = load('WishProviders.js' , name => {
+    if (name === '../../Items/SoulCrystalProgression') return adapters['GameServer/Items/SoulCrystalProgression'];
+    if (name === '../../Items/C4DualSwordCombinations') return adapters['GameServer/Items/C4DualSwordCombinations'];
+    if (name === './PurchaseFunding') return require('../src/GameServer/Bot/Economy/PurchaseFunding');
     // Admitted synthetic origins (a missing recipe is never admitted, as in the real
     // catalogue) and the shared equipment rule (82e5323c, d300b1b7).
     if (name.endsWith('ItemAcquisitionCatalog')) return { revision: () => 1, hasSource: () => true, hasNonRaidSource: () => true,
@@ -105,7 +110,7 @@ const provider = load('WishProviders.js' , name => {
     if (name === './PriceDecision') return producerPrice;
     if (name === './CraftProfitPolicy') return require('../src/GameServer/Bot/Economy/CraftProfitPolicy');
     if (name === './ShotTradeDemand') return require('../src/GameServer/Bot/Economy/ShotTradeDemand');
-    if (name === './EconomyDiagnostics') return { active: () => false };
+    if (name === './EconomyDiagnostics') return { active: () => false, laps: () => null };
     if (name === './EconomicValuation') return valuation;
     // Synthetic origins are admitted; the solver is the network under test.
     if (name.endsWith('ItemAcquisitionCatalog')) return { revision: () => 1, hasSource: () => true, hasNonRaidSource: () => true, allowsRecipe: recipe => !!recipe };

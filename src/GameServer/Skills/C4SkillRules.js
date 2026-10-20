@@ -1313,11 +1313,23 @@ function shotBoostsHeal(skillType) {
     return SHOT_BOOSTED_HEALS.has(skillType);
 }
 
+// Area, frontal-area and aura skills strike every enemy around their centre.
+// C4 skill data has no target limit for them.
+const AREA_SOURCE_TARGETS = new Set(['area', 'front_area', 'aura']);
+function hitsArea(semantic = {}) {
+    return AREA_SOURCE_TARGETS.has(semantic.sourceTarget);
+}
+
 function resolveCached(skill = {}) {
     const key = `${skill.selfId}|${skill.level}|${skill.name}|${skill.power}|${skill.buff}|${skill.spell === true}|${skill.distance}`;
     let semantic = resolved.get(key);
     if (!semantic) {
-        if (resolved.size >= RESOLVED_LIMIT) resolved.clear();
+        if (resolved.size >= RESOLVED_LIMIT) {
+            resolved.clear();
+            // L126: SkillModels share these objects; a clear ends the sharing
+            // for models built later, so the live check counts clears.
+            require('../Bot/Economy/EconomyDiagnostics').count('skill_rules', 'cache', 'clear');
+        }
         // Through the export, so a replaced resolve() (tests) applies here too.
         resolved.set(key, semantic = module.exports.resolve(skill));
     }
@@ -1565,6 +1577,7 @@ module.exports = {
     SIEGE_FLAG,
     resolve,
     resolveCached,
+    hitsArea,
     shotBoostsHeal,
     normalizeKey,
     sourcedMaxLevel,

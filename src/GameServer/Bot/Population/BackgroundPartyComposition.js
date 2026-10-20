@@ -20,6 +20,15 @@ function roleForState(state) {
     return role === 'crafter' ? 'dps' : role || 'dps';
 }
 
+// The one rule of a support candidate (a helper a material party may borrow):
+// no party objective of its own, as the caller reads it, and a support role.
+// Returns that role, or null.
+function supportRole(state, objective) {
+    if (objective) return null;
+    const role = roleForState(state);
+    return SUPPORT_ROLES.includes(role) ? role : null;
+}
+
 function clanIdForState(state) {
     return Number(
         state?.stats?.clanGoal?.clanId
@@ -232,4 +241,4 @@ function chooseLeader(members = []) {
     }, null);
 }
 
-module.exports = { DEFAULT_LEVEL_RANGE, roleForState, roleCoverage, selectMembers, selectRecruits, chooseLeader };
+module.exports = { DEFAULT_LEVEL_RANGE, roleForState, supportRole, roleCoverage, selectMembers, selectRecruits, chooseLeader };

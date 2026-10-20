@@ -42,7 +42,7 @@ const Cooldown = {
         // The hand-back of a hot row (a sold-out merchant leaves without markCold).
         return LifeState.upsertState({ ...state, phase: 'cold' }, reason, { releaseHot: true }).then((saved) => {
             if (!saved) return { ok: false, reason: 'state_save_failed' };
-            LifeState.setSessionSnapshotsPhase(session, 'cold');
+            LifeState.setSessionSnapshotsAuthority(session, saved);
 
             return ColdSimulationCoordinator.acceptColdState(saved).then((accepted) => {
                 if (!accepted.ok) {

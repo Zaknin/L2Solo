@@ -34,7 +34,7 @@ function abandonedRaid(party) {
         || Number(backoff.deaths || 0) >= 2
         || Number(backoff.attempts || 0) >= 2;
 }
-function allowed(member, objective, timestamp = Date.now()) {
+function allowed(member, objective) {
     // This is a game-mechanics limit, not merely an equipment-plan preference.
     // Keep it authoritative for every autonomous raid so a stale or synthetic
     // roster cannot enter hot combat and receive Raid Curse.
@@ -44,9 +44,9 @@ function allowed(member, objective, timestamp = Date.now()) {
     if (level && Number(member.level) > 0
         && Number(member.level) < level - Config.operationMaxTargetLevelGap) return false;
     return !(member.stats?.clanHuntBackoffs || []).some(entry =>
-        String(entry.spotId) === String(objective.spotId) && Number(entry.until) > timestamp);
+        String(entry.spotId) === String(objective.spotId) && Risk.markActive(entry, member));
 }
-function needsReview(party, members, timestamp) {
+function needsReview(party, members) {
     const objective = party?.stats?.objective;
     if (party?.stats?.raidEncounter?.status === 'failed') return true;
     if (abandonedRaid(party)) return true;
@@ -58,7 +58,7 @@ function needsReview(party, members, timestamp) {
         && (['preparing', 'ready'].includes(party?.stats?.raidPreparation?.status)
             || party?.stats?.raidEncounter?.status === 'active');
     if (raidStarted) return false;
-    return members.some(member => !allowed(member, party.stats?.objective, timestamp));
+    return members.some(member => !allowed(member, party.stats?.objective));
 }
 function recordOutcome(state, result, objective, timestamp) {
     if (!applies(objective) || !Number(result.debug?.fights)) return result;
@@ -71,13 +71,15 @@ function recordOutcome(state, result, objective, timestamp) {
         - Number(state.stats?.deaths ?? state.deathCount ?? 0));
     const spotId = result.debug.spotId || objective.spotId;
     const priorBackoff = (state.stats?.clanHuntBackoffs || []).find(entry => String(entry.spotId) === String(spotId));
-    const previous = priorBackoff && priorBackoff.until <= timestamp
+    const previous = priorBackoff && !Risk.markActive(priorBackoff, state)
         && Number(state.stats?.clanHuntRisk?.enteredAt || 0) <= priorBackoff.startedAt
         ? {} : state.stats?.clanHuntRisk || {};
     const risk = Risk.recordResolve(previous, {
         spotId, timestamp, fights: result.debug.fights, wins: result.debug.wins, deaths
     });
-    const projected = { spotId, stats: { spotRisk: risk, spotBackoffs: state.stats?.clanHuntBackoffs || [] } };
+    // The member's own counter is the clock of its clan hunt marks.
+    const projected = { spotId, stats: { spotRisk: risk, spotBackoffs: state.stats?.clanHuntBackoffs || [],
+        stepCount: Risk.stepCount(state) } };
     const backoff = Risk.backoffForStates([projected], spotId, timestamp);
     const remembered = backoff ? Risk.withBackoff(projected, backoff, timestamp) : projected;
     return { ...result, patch: { ...result.patch, stats: { ...result.patch?.stats,

@@ -80,6 +80,16 @@ function coldProfiles(profile, state = {}, timestamp = Date.now()) {
     return profiles;
 }
 
+// What of a bot's solo profile array (stateProfiles) moves with no build
+// section: whether the bot is alive (a dead bot has no profiles) and the
+// summon beside it (coldProfiles: its live cold summon, or the servitor a
+// summoner can cast now). -1 dead, 0 alone, else the summon's npc id (1 for
+// a live summon whose profile names none, the hot path's actorProfile).
+function profileKey(profiles) {
+    if (!profiles.length) return -1;
+    return profiles.length > 1 ? Number(profiles[1].npcId) || 1 : 0;
+}
+
 function profileStats(profiles) {
     return [...new Set((profiles || []).flatMap(profile => [weaponStat(profile.equipment?.weaponKind),
         ...(profile.skills || []).map(skill => {
@@ -149,14 +159,16 @@ function channels(profile, target) {
             || (kind === 'Weapon.Bow' && number(semantic.castRange ?? skill.distance, 0) < 400)) continue;
         const power = Math.max(0, number(skill.power ?? semantic.power, 0));
         if (!power) continue;
-        const weight = magic
+        // An area skill hits every mob of a pull (F20; BotPullEstimate.pullView).
+        const struck = Rules.hitsArea(semantic) ? Math.max(1, number(target.pull)) : 1;
+        const weight = struck * (magic
             ? 91 * Math.sqrt(positive(profile.mAtk)) * power / positive(target.baseMDef || target.mDef)
                 / Math.max(0.5, number(skill.hitTime, 3000) / 1000 * 333 / positive(profile.castSpd || 333))
             : 70 * (positive(profile.pAtk) + power) / positive(target.basePDef || target.pDef)
-                / Math.max(1, number(skill.hitTime, 1500) / 1000);
-        const hitDamage = magic
+                / Math.max(1, number(skill.hitTime, 1500) / 1000));
+        const hitDamage = struck * (magic
             ? 91 * Math.sqrt(positive(profile.mAtk)) * power / positive(target.baseMDef || target.mDef)
-            : 70 * (positive(profile.pAtk) + power) / positive(target.basePDef || target.pDef);
+            : 70 * (positive(profile.pAtk) + power) / positive(target.basePDef || target.pDef));
         result.push({ weight, modifier: modifier(target, semantic, magic, kind), magic,
             soloScore: profile.soloAttackScores?.[skill.selfId],
             survivalWeight: Math.min(weight, hitDamage / Math.max(0.25, number(skill.reuse, 0) / 1000)),
@@ -287,6 +299,9 @@ function soloSpotUpperBound(profiles) {
     };
 }
 
+// options.buffed: the fight profile (buffs and night at options.timestamp)
+// instead of the bot's kit profile; options.store: handed to the profile
+// (false: a what-if state under the bot's id).
 function stateProfiles(state, options = {}) {
     if (options.matchupProfiles) return options.matchupProfiles;
     const states = (options.capacityStates?.length ? options.capacityStates : [state])
@@ -294,94 +309,32 @@ function stateProfiles(state, options = {}) {
     // Do not invent the other members of an incomplete party projection.
     if (options.mode === 'party' && states.length === 1) return [];
     const Cold = coldCombatProfile();
-    return states.flatMap(member => typeof member.fetchHp === 'function'
+    const profiles = states.flatMap(member => typeof member.fetchHp === 'function'
         ? actorProfiles([member])
-        : coldProfiles({ ...Cold.profileFor(member, options.timestamp),
+        : coldProfiles({ ...Cold.withBuildSite('matchup', () => (options.buffed === true ? Cold.fightProfile : Cold.profileFor)(
+            member, options.timestamp, { store: options.store })),
             // Partial route projections must not turn an invented default
             // class/build into evidence that the real character is too weak.
             survivalKnown: !!member.stats?.coldCombat
                 || Number.isFinite(Number(member.stats?.classId ?? member.classId))
         }, member, options.timestamp));
+    return profiles;
 }
 
 // A spot search checks hundreds of spots with one profile array, and each mob
 // species appears on several of them. The verdict depends only on the
-// profiles, the species and the safety options. Searches repeat for the same
-// bot after every commit, and bots of one class, level and kit share combat
-// fields, so verdicts are shared by every profile array with the same fields.
-// Profiles unused for VERDICT_PROFILE_IDLE_MS (level-up, new gear) are dropped
-// when a new profile is added.
-const VERDICT_PROFILE_LIMIT = 4096;
-const VERDICT_PROFILE_IDLE_MS = 10 * 60 * 1000;
+// profiles, the species and the safety options: it is computed when asked and
+// kept only for that array (a WeakMap keyed by it, options.matchupProfiles of
+// one search), so it dies with the search.
 const npcVerdicts = new WeakMap();
-const sharedVerdicts = new Map();
-const uniqueVerdicts = new Map();
-let verdictSource, verdictCount = 0;
-
-// Raw values with their type: channels() and soloSurvival() coerce with
-// number(), compare and test truthiness, so only identical inputs share.
-function fingerprintValue(value) {
-    switch (typeof value) {
-    case 'number': return Object.is(value, -0) ? '-0' : String(value);
-    case 'string': return JSON.stringify(value);
-    case 'boolean': return value ? 'T' : 'F';
-    case 'undefined': return 'u';
-    default: if (value === null) return 'n';
-    }
-    throw new TypeError('unshareable matchup value');
-}
-
-// Exactly the fields channels() and soloSurvival() read.
-function profileFingerprint(profile) {
-    const role = profile.role || Roles.combatRoleFor(profile);
-    const parts = [role, profile.equipment?.weaponKind || '', profile.pAtk, profile.atkSpd, profile.mAtk,
-        profile.castSpd, profile.maxMp, profile.weaponMask, profile.maxHp, profile.pDef,
-        profile.survivalKnown === false, profile.soloDamageReceiver === false].map(fingerprintValue);
-    for (const skill of profile.skills || []) {
-        const semantic = skill.semantic || Rules.resolveCached(skill);
-        parts.push('|', ...[skill.passive, skill.spell === true, skill.mp, skill.power, skill.hitTime, skill.reuse,
-            skill.distance, semantic.skillType, semantic.target, semantic.notUsedInC4, semantic.undeadOnly,
-            semantic.requires?.weaponsAllowed, semantic.castRange, semantic.power, semantic.trait]
-            .map(fingerprintValue));
-    }
-    if (profile.soloAttackScores) {
-        parts.push('solo-priority');
-        for (const [id, score] of Object.entries(profile.soloAttackScores)) parts.push(id, fingerprintValue(score));
-    }
-    return parts.join(',');
-}
 
 // Verdicts of one profile array: safety options key -> species id -> verdict.
-function verdictsFor(profiles) {
-    let verdicts = npcVerdicts.get(profiles);
-    if (verdicts) return verdicts;
-    const source = dataCache().npcs || [];
-    if (verdictSource !== source || verdictCount !== source.length) {
-        verdictSource = source;
-        verdictCount = source.length;
-        sharedVerdicts.clear();
-        uniqueVerdicts.clear();
-    }
-    let fingerprint = null;
-    try { fingerprint = profiles.map(profileFingerprint).join('#'); } catch (_) { /* kept per array */ }
-    const now = Date.now();
-    const shared = fingerprint === null ? null : sharedVerdicts.get(fingerprint);
-    if (shared) {
-        sharedVerdicts.delete(fingerprint);
-        shared.usedAt = now;
-        sharedVerdicts.set(fingerprint, shared);
-        verdicts = shared.verdicts;
-    } else {
-        verdicts = new Map();
-        if (fingerprint !== null) {
-            sharedVerdicts.set(fingerprint, { verdicts, usedAt: now });
-            for (const [key, entry] of sharedVerdicts) {
-                if (sharedVerdicts.size <= VERDICT_PROFILE_LIMIT && now - entry.usedAt < VERDICT_PROFILE_IDLE_MS) break;
-                sharedVerdicts.delete(key);
-            }
-        }
-    }
-    npcVerdicts.set(profiles, verdicts);
+function optionVerdicts(profiles, options) {
+    let byOptions = npcVerdicts.get(profiles);
+    if (!byOptions) npcVerdicts.set(profiles, byOptions = new Map());
+    const optionsKey = `${options.soloSafety ? 1 : 0}:${options.maxTargetLevel || 0}`;
+    let verdicts = byOptions.get(optionsKey);
+    if (!verdicts) byOptions.set(optionsKey, verdicts = new Map());
     return verdicts;
 }
 
@@ -396,35 +349,29 @@ function npcVerdict(verdicts, selfId, options) {
         const canHunt = options.soloSafety ? soloCanHunt(options.profiles, target,
             { maxTargetLevel: options.maxTargetLevel, npcLevel: Number(npc.template?.level || 0) }).eligible
             : match.eligible && withinRecoveryLevel;
-        // Read-only verdicts are shared. Mixed-attack and party profiles give
-        // continuous efficiencies, so the pool is cleared at a bound; verdicts
-        // already handed out stay valid.
-        const key = `${canHunt ? 1 : 0}:${fingerprintValue(match.efficiency)}`;
-        verdict = uniqueVerdicts.get(key);
-        if (!verdict) {
-            if (uniqueVerdicts.size >= VERDICT_PROFILE_LIMIT * 4) uniqueVerdicts.clear();
-            uniqueVerdicts.set(key, verdict = Object.freeze({ efficiency: match.efficiency, canHunt }));
-        }
+        verdict = Object.freeze({ efficiency: match.efficiency, canHunt });
     }
     verdicts.set(selfId, verdict);
     return verdict;
 }
 
 // A spot's matchup reads only its mob list and the verdicts of one profile
-// fingerprint and safety options, so it is shared the same way: a spot search
-// after every commit checks hundreds of spots against the same verdicts.
+// array and safety options, so it is kept beside them: a spot search checks
+// hundreds of spots against the same verdicts.
 const spotMatchups = new WeakMap();
-// Equal results are one object: most fingerprints get the same few values on
-// most spots. Bounded like the verdict pool; results already handed out stay valid.
-const uniqueSpotResults = new Map();
+
+// One species' verdict ({ efficiency, canHunt } or null) for profiles under
+// safety options: the one a spot search with the same profiles and options
+// reads, so a solo fight's pick (ColdCombatProfile.npcForSpot) shares it.
+function speciesVerdict(profiles, selfId, options = {}) {
+    return npcVerdict(optionVerdicts(profiles, options), Number(selfId),
+        { profiles, soloSafety: options.soloSafety, maxTargetLevel: options.maxTargetLevel });
+}
 
 function spotMatchup(spot, profiles, options = {}) {
     if (!profiles?.length) return evaluate([], {});
     let total = 0, effective = 0, eligible = false, safe = 0;
-    const byOptions = verdictsFor(profiles);
-    const optionsKey = `${options.soloSafety ? 1 : 0}:${options.maxTargetLevel || 0}`;
-    let verdicts = byOptions.get(optionsKey);
-    if (!verdicts) byOptions.set(optionsKey, verdicts = new Map());
+    const verdicts = optionVerdicts(profiles, options);
     let bySpot = spotMatchups.get(verdicts);
     if (!bySpot) spotMatchups.set(verdicts, bySpot = new WeakMap());
     const known = bySpot.get(spot);
@@ -444,12 +391,7 @@ function spotMatchup(spot, profiles, options = {}) {
     const safeFraction = total ? safe / total : 1;
     const spotEligible = !total || (eligible && (!options.soloSafety || safeFraction >= 0.6));
     const penalty = Math.round((1 - efficiency) * 250 + (options.soloSafety ? (1 - safeFraction) * 250 : 0));
-    const key = `${efficiency}:${safeFraction}:${spotEligible ? 1 : 0}:${penalty}`;
-    let result = uniqueSpotResults.get(key);
-    if (!result) {
-        if (uniqueSpotResults.size >= VERDICT_PROFILE_LIMIT * 4) uniqueSpotResults.clear();
-        uniqueSpotResults.set(key, result = Object.freeze({ efficiency, safeFraction, eligible: spotEligible, penalty }));
-    }
+    const result = Object.freeze({ efficiency, safeFraction, eligible: spotEligible, penalty });
     bySpot.set(spot, result);
     return result;
 }
@@ -461,6 +403,5 @@ function damageRate(profiles, target = {}) {
         .map(attack => (attack.survivalWeight ?? attack.weight) * attack.modifier)), 0);
 }
 
-module.exports = { MIN_EFFICIENCY, VERDICT_PROFILE_LIMIT, actorProfiles, coldProfiles, targetView, skillModifier, damageRate,
-    profileStats, skillStats, evaluate, soloSurvival, soloCanHunt, soloSpotUpperBound, stateProfiles, spotMatchup,
-    sharedVerdictProfiles: () => sharedVerdicts.size, uniqueVerdictCount: () => uniqueVerdicts.size };
+module.exports = { MIN_EFFICIENCY, actorProfiles, coldProfiles, profileKey, targetView, skillModifier, damageRate,
+    profileStats, skillStats, evaluate, soloSurvival, soloCanHunt, soloSpotUpperBound, stateProfiles, spotMatchup, speciesVerdict };

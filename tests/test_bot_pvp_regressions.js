@@ -219,21 +219,15 @@ Potions.tryUseInCombat = () => false;
     const clock = Date.now;
     try {
         Date.now = () => now;
-        Index.invalidate(); Threats.members(own);
+        Threats.members(own);
         populationReads = 0;
         for (let i = 0; i < 500; i++) { Threats.members(own); Index.actor(own.actor.id); }
         assert.strictEqual(populationReads, 0, '500 lookups must not rescan 10,000 unrelated actors');
-        now += Index.REFRESH_MS + 1; Threats.members(own);
-        // ARCH-NOTE: native membership is published by its addressed writers;
-        // only the explicit legacy injected-world branch polls a snapshot.
-        assert.strictEqual(populationReads, 0, 'native membership does not rescan unrelated actors after the legacy interval');
         const joined = session(actor(nextId++));
         World.insertUser(joined);
         own.coldLifeState = joined.coldLifeState = { party: { partyId: 'addressed_membership' } };
         World.refreshPartyMemberships([own, joined]);
         assert.deepStrictEqual(Threats.members(own), [own, joined], 'a published join is visible immediately in original registration order');
-        now += Index.REFRESH_MS + 1;
-        assert.deepStrictEqual(Threats.members(own), [own, joined], 'elapsed time preserves the published membership');
         joined.coldLifeState = { party: { partyId: 'other_membership' } };
         World.refreshPartyMemberships([joined]);
         assert.deepStrictEqual(Threats.members(own), [own], 'a published leave removes the original session immediately');
@@ -307,7 +301,6 @@ Potions.tryUseInCombat = () => false;
             const ally = session(actor(nextId++), { partyCompanion: true, followPlayerSession: leader });
             World.insertUser(leader); World.insertUser(ally);
             World.refreshPartyMemberships([own]);
-            Index.invalidate();
             bot.skills = [{ fetchSelfId: () => 1069, fetchSkillType: () => Rules.EFFECT,
                 fetchTargetKind: () => 'enemy', fetchSemantic: () => ({ effect, effectType: 'debuff', sourceTarget: 'one' }),
                 fetchDistance: () => 900, fetchConsumedMp: () => 10 }];

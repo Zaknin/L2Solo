@@ -111,11 +111,10 @@ function companionSupplyErrand() {
 }
 
 async function clanWorkerPlanning() {
-    const context = await ClanPlanning.context();
     const worker = new ClanPlanning.ClanPlanningCoordinator();
     try {
         const member = { ...npcKitState(townCenters['Talking Island']), phase: 'cold', currentRegion: 'Talking Island' };
-        const payload = { member, spots: [], warehouseRows: [], context, options: { maxExpectedKills: 1500 } };
+        const payload = { member, spots: [], warehouseRows: [], options: { maxExpectedKills: 1500 } };
         const expected = planForMember(member, [], [], payload.options);
         assert.strictEqual(expected?.market?.town, 'Talking Island');
         assert.deepStrictEqual(await worker.plan(payload, DataCache), expected,

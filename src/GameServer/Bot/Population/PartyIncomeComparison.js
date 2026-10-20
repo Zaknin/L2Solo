@@ -1,9 +1,15 @@
 'use strict';
 
+const BuffPolicy = invoke('GameServer/Bot/Economy/BuffServicePolicy');
 const HOUR_MS = 3600000;
 const REVIEW_MS = 5 * 60000;
 const MAX_SOLO_CHECKS = 12;
 const soloChoices = new WeakMap();
+// Party formation hydrates fresh row copies every call, so the per-object hold
+// above never spans calls; this one holds the same choice for an unchanged row.
+const soloHolds = new Map();
+const SOLO_HOLD_LIMIT = 4096;
+const soloHoldCounts = { hits: 0, misses: 0 };
 const positive = value => Math.max(0, Number(value) || 0);
 const rosterKey = members => members.map(member => Number(member.characterId)).sort((a, b) => a - b).join(',');
 const adventurer = state => invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state);
@@ -64,8 +70,17 @@ function soloRoute(state, spots, timestamp, peers = []) {
     const standalone = soloState(state);
     let held = soloChoices.get(state);
     if (!held || held.spots !== spots || timestamp < held.at || timestamp - held.at >= REVIEW_MS) {
-        held = { spots, at: timestamp, choice: Route.select(standalone,
-            { spots, timestamp, required: true, mode: 'solo', maxChecks: MAX_SOLO_CHECKS }) };
+        const input = rowInput(state);
+        const byId = input && soloHolds.get(Number(state.characterId));
+        if (byId && byId.input === input && byId.spots === spots && timestamp >= byId.at && timestamp - byId.at < REVIEW_MS) {
+            held = { spots, at: byId.at, choice: byId.choice };
+            soloHoldCounts.hits += 1;
+        } else {
+            held = { spots, at: timestamp, choice: Route.select(standalone,
+                { spots, timestamp, required: true, mode: 'solo', maxChecks: MAX_SOLO_CHECKS }) };
+            if (input) soloHoldCounts.misses += 1;
+            if (input) holdById(Number(state.characterId), { input, spots, at: timestamp, choice: held.choice }, timestamp);
+        }
         soloChoices.set(state, held);
     }
     const choice = held.choice;
@@ -77,19 +92,18 @@ function soloRoute(state, spots, timestamp, peers = []) {
     // useful effects at the existing price with the unbuffed earning route.
     const Offer = invoke('GameServer/Bot/Economy/ColdBuffOffer');
     const Match = invoke('GameServer/Bot/AI/BotTargetMatchup');
-    const Policy = invoke('GameServer/Bot/Economy/BuffServicePolicy');
     for (const provider of peers.slice(0, 9)) {
         if (!Offer.available(provider) || provider.spotId !== choice.spot.id || standalone.spotId !== choice.spot.id) continue;
         const buff = Offer.select(provider, standalone, timestamp);
         if (!buff) continue;
-        const price = Policy.priceFor({ provider, recipient: standalone, mp: buff.mpCost, count: buff.selected.length, town: false });
-        if (price > positive(state.adena) * 0.25 || price > Policy.incomeForTenMinutes(standalone) * 0.8) continue;
+        const price = BuffPolicy.priceFor({ provider, recipient: standalone, mp: buff.mpCost, count: buff.selected.length, town: false });
+        if (price > positive(state.adena) * 0.25 || price > BuffPolicy.incomeForTenMinutes(standalone) * 0.8) continue;
         const effects = Offer.effectsFor(buff.selected, timestamp);
         const duration = Math.min(...effects.map(effect => effect.durationMs)) / HOUR_MS;
         const boosted = withEffects(standalone, effects);
-        const profiles = Match.stateProfiles(boosted, { timestamp });
+        const profiles = Match.stateProfiles(boosted, { timestamp, buffed: true });
         if (!Match.spotMatchup(choice.spot, profiles, { soloSafety: true }).eligible) continue;
-        const baseDamage = Match.damageRate(Match.stateProfiles(standalone, { timestamp }));
+        const baseDamage = Match.damageRate(Match.stateProfiles(standalone, { timestamp, buffed: true }));
         const gain = baseDamage > 0 ? Match.damageRate(profiles) / baseDamage : 1;
         const income = (row.income * Math.min(gain, 300 / Math.max(1, row.kills)) - price / duration) * Hunt.onSpotShare(state);
         if (income > best.income) best = { ...best, income, buffPrice: price, source: 'paid_buff' };
@@ -97,6 +111,25 @@ function soloRoute(state, spots, timestamp, peers = []) {
     }
     return best;
 }
+
+// Cold rows only: every write to a far row moves its revision.
+function rowInput(state) {
+    if (state.phase !== 'cold' || !(Number(state.simulation?.revision) > 0) || !(Number(state.characterId) > 0)) return null;
+    return Number(state.simulation.revision);
+}
+let soloHoldSpots = null;
+function holdById(characterId, entry, timestamp) {
+    // A rebuilt spot table (SpotProfiles.reset) voids every hold; keep no old table reachable from here.
+    if (entry.spots !== soloHoldSpots) { soloHolds.clear(); soloHoldSpots = entry.spots; }
+    // Delete before set: the Map order follows `at`, so the oldest entry is the front.
+    soloHolds.delete(characterId);
+    soloHolds.set(characterId, entry);
+    for (const [id, held] of soloHolds) {
+        if (soloHolds.size <= SOLO_HOLD_LIMIT && timestamp - held.at < REVIEW_MS) break;
+        soloHolds.delete(id);
+    }
+}
+const soloHoldStats = () => ({ ...soloHoldCounts, size: soloHolds.size });
 
 function withEffects(state, effects) {
     const Loadout = invoke('GameServer/Bot/AI/PartyBuffLoadout');
@@ -125,11 +158,13 @@ function prepare(members, { objective, party, spots, memberContexts, timestamp =
     const spoilerIndex = members.findIndex(member => invoke('GameServer/Bot/AI/BotRoles').isSpoiler(member));
     const level = Math.max(...members.map(member => positive(member.level)));
     const Offer = invoke('GameServer/Bot/Economy/ColdBuffOffer');
-    const providers = members.filter(member => invoke('GameServer/Bot/Economy/BuffServicePolicy').serviceClass(member)).slice(0, 1);
+    // The seller's solo copy is the same for every recipient: built once per roster.
+    const providers = members.filter(member => BuffPolicy.serviceClass(member))
+        .slice(0, 1).map(soloState);
     const buffed = members.map(member => {
         const recipient = soloState(member);
         for (const provider of providers) {
-            const choice = Offer.select(soloState(provider), recipient, timestamp);
+            const choice = Offer.select(provider, recipient, timestamp);
             if (choice) return withEffects(member, Offer.effectsFor(choice.selected, timestamp));
         }
         return member;
@@ -138,15 +173,15 @@ function prepare(members, { objective, party, spots, memberContexts, timestamp =
         const row = Table.value(spot.id, tableRole(member), member.level, true,
             { spoilSkillLevel: Rewards.spoilSkillLevel(member) });
         if (!row || buffed[index] === member) return row;
-        const damage = Match.damageRate(Match.stateProfiles(member, { timestamp }));
-        const gain = damage > 0 ? Match.damageRate(Match.stateProfiles(buffed[index], { timestamp })) / damage : 1;
+        const damage = Match.damageRate(Match.stateProfiles(member, { timestamp, buffed: true }));
+        const gain = damage > 0 ? Match.damageRate(Match.stateProfiles(buffed[index], { timestamp, buffed: true })) / damage : 1;
         // Native buff stats change damage throughput, never drop rates or the
         // member's ownership share. Recovery gains wait for real samples.
         return { ...row, kills: row.kills * Math.max(1, gain) };
     });
     const gross = Table.value(spot.id, 'dps', level, true) || Table.value(spot.id, 'mage', level, true);
     const safe = Match.spotMatchup(spot, Match.stateProfiles(buffed[0],
-        { timestamp, capacityStates: buffed, mode: 'party' }), { soloSafety: true }).eligible;
+        { timestamp, capacityStates: buffed, mode: 'party', buffed: true }), { soloSafety: true }).eligible;
     const totalKills = values.reduce((sum, row) => sum + positive(row?.kills), 0);
     // The cold resolver opens at most one encounter per 12 seconds, shared
     // by all members. A large group cannot multiply that supply of monsters.
@@ -289,4 +324,4 @@ function compare(state, peers, options = {}) {
     return { ...answer, at: prepared.timestamp, soloSource: solo?.source || null, partySource: party?.source || null };
 }
 
-module.exports = { compare, prepare, evaluate, soloRoute, itemHours, soloItemRouteHours, rosterKey, REVIEW_MS, MAX_SOLO_CHECKS };
+module.exports = { soloHoldStats, compare, prepare, evaluate, soloRoute, itemHours, soloItemRouteHours, rosterKey, REVIEW_MS, MAX_SOLO_CHECKS };

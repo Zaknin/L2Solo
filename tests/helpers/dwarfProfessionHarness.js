@@ -89,10 +89,12 @@ async function guildsman(c, { artisan = false, weak = false, stopAtRecipe = fals
         const Spoil = invoke('GameServer/Npc/SpoilSweep'), actor = c.session.actor, skill = actor.skillset.fetchSkill(254);
         // Capture the cast scheduler so we can execute completion deterministically;
         // the real Spoil handler, MP cost, NPC indexing and quest callback run unchanged.
-        const timer = actor.attack.queueTimer, regen = actor.automation.replenishVitals;
+        // The landing roll is pinned: each cast misses 0.22% of the time, 14 casts ~3% of runs.
+        const timer = actor.attack.queueTimer, regen = actor.automation.replenishVitals, random = Math.random;
         let complete;
         actor.attack.queueTimer = fn => { complete = fn; };
         actor.automation.replenishVitals = () => {};
+        Math.random = () => 0.5;
         try {
             for (let i = 0; i < 14; i++) {
                 const npc = H.spawn(c.state(216), 79, [0, 0, 0]);
@@ -116,7 +118,7 @@ async function guildsman(c, { artisan = false, weak = false, stopAtRecipe = fals
                 assert.equal(await c.amount(3136), previous + 5, 'duplicate cast and foreign caster award nothing');
                 H.clearSpawns(c.state(216), 79);
             }
-        } finally { actor.attack.queueTimer = timer; actor.automation.replenishVitals = regen; }
+        } finally { actor.attack.queueTimer = timer; actor.automation.replenishVitals = regen; Math.random = random; }
     }
     assert.equal(await c.amount(3136), 70); await c.click(216, 'handin', 7298);
     assert(!(await Database.fetchCharacterRecipes(c.id)).some(r => r.recipeId === 316));

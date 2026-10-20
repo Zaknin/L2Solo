@@ -1,5 +1,6 @@
 const { canDeposit } = require('./WarehouseItemRules');
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
+const NpcObjectIndex = require('../World/NpcObjectIndex');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const Item = invoke('GameServer/Item/Item');
@@ -14,7 +15,7 @@ const INTERACTION_RADIUS = 300;
 function isWarehouseNpc(session) {
     const active = session.activeNpcTalk;
     const actor = session.actor;
-    const npc = (World.npc?.spawns || []).find((entry) => Number(entry.fetchId?.()) === Number(active?.objectId));
+    const npc = NpcObjectIndex.find(World, Number(active?.objectId));
     if (!npc || !actor || !/^Warehouse (Keeper|Chief|Freightman)$/i.test(npc.fetchTitle?.() || '')) return false;
     if (Number(npc.fetchSelfId?.()) !== Number(active?.selfId)) return false;
     const dx = Number(actor.fetchLocX?.()) - Number(npc.fetchLocX?.());

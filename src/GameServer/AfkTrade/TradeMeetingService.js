@@ -2,11 +2,25 @@
 const { randomUUID } = require('node:crypto');
 const { MAX_COMMITMENTS } = require('./TradeMeeting');
 const { partyTradeAllowed } = require('../Bot/Population/PartyAdmission');
+const EconomyCommit = require('../Bot/Economy/EconomyCommit');
+const TableChannel = require('../Bot/Population/ColdTableChannel').shared;
 const staged = new Map();
 const preparedActors = new Map(); // actor -> staged token; one preparation per actor.
 const enrolled = new Map(); // At most eight numeric references per actor; no custody/terms.
 const playerWaiters = new Map(); // Derived numeric references, retired with native commitments.
 const travelNotices = new Map(); // One private acknowledgement per enrolled bot/player commitment.
+// The 'meetings' table: one row per bot the player waits for at a meeting point.
+// The cold worker reschedules the bot when its row comes or goes.
+TableChannel.register('meetings', { key: row => row.characterId,
+    allRows: () => [...playerWaiters.keys()].map(characterId => ({ characterId })), eventDriven: true });
+function publishWaiting(actor) {
+    TableChannel.changed('meetings', playerWaiters.get(actor)?.size
+        ? { characterId: actor } : { key: actor, removed: true });
+}
+function clearWaiters() {
+    for (const actor of playerWaiters.keys()) TableChannel.changed('meetings', { key: actor, removed: true });
+    playerWaiters.clear();
+}
 function notifyPlayerTravel(row) {
     if (row.state !== 'accepted') return;
     for (const [id, other, suffix] of [[row.actorA, row.actorB, 'A'], [row.actorB, row.actorA, 'B']]) {
@@ -54,9 +68,7 @@ function trackPlayerWaiting(row) {
             refs?.delete(row.id);
             if (!refs?.size) playerWaiters.delete(actor);
         }
-        if (previous !== !!playerWaiters.get(actor)?.size) {
-            coordinator()?.notifyState?.(life().cachedState(actor), { reason: 'player_meeting_wait', critical: true });
-        }
+        if (previous !== !!playerWaiters.get(actor)?.size) publishWaiting(actor);
     }
 }
 function enroll(actor, id) {
@@ -72,7 +84,7 @@ function unenroll(actor, id) {
     const waiting = playerWaiters.get(actor);
     if (waiting?.delete(id) && !waiting.size) {
         playerWaiters.delete(actor);
-        coordinator()?.notifyState?.(life().cachedState(actor), { reason: 'player_meeting_wait', critical: true });
+        publishWaiting(actor);
     }
 }
 const queue = new Set();
@@ -203,6 +215,10 @@ function stage(request) {
 function hasPreparation(characterId) {
     return preparedActors.has(Number(characterId));
 }
+// The preparation token this actor is in, or null.
+function preparationOf(characterId) {
+    return preparedActors.get(Number(characterId)) || null;
+}
 function canJoinParty(characterId, state = life().cachedState(characterId), session = sessionFor(characterId)) {
     const current = life()?.cachedState?.(characterId) || state;
     return partyTradeAllowed('party', current, session, hasPreparation(characterId), !!enrolled.get(Number(characterId))?.size);
@@ -326,12 +342,10 @@ async function prepareTrade(characterId, store, itemId, amount, options = {}) {
     // Freshly reading a participant must not turn a stale decision into consent.
     const sourceState = options.coldState || life().cachedState(characterId);
     const callerAuthority = options.economyCommand?.authority || (sourceState
-        ? require('../Bot/Economy/EconomyCommit').authority(sourceState) : null);
+        ? EconomyCommit.authority(sourceState) : null);
     if (callerAuthority) {
         const own = sides[actors.indexOf(characterId)];
-        if (own.phase !== callerAuthority.phase || own.revision !== callerAuthority.revision
-            || own.ownerId !== callerAuthority.ownerId || own.leaseId !== callerAuthority.leaseId
-            || own.hotAt !== callerAuthority.hotAt) throw Error('trade_meeting_authority_changed');
+        if (!EconomyCommit.sameAuthority(own, callerAuthority)) throw Error('trade_meeting_authority_changed');
     }
     const buyerSide = actors.indexOf(buyer), sellerSide = 1 - buyerSide;
     const sources = []; let remainder = amount;
@@ -441,7 +455,7 @@ function reset() {
     for (const token of [...staged.keys()]) discard(token);
     for (const [token, listeners] of [...resultListeners])
         notifyResult(token, [...listeners].map(listener => listener.actorId), null);
-    staged.clear(); preparedActors.clear(); refusedAds.clear(); pages = 0; transportPages = 0; transportBytes = 0; enrolled.clear(); playerWaiters.clear(); travelNotices.clear(); queue.clear();
+    staged.clear(); preparedActors.clear(); refusedAds.clear(); pages = 0; transportPages = 0; transportBytes = 0; enrolled.clear(); clearWaiters(); travelNotices.clear(); queue.clear();
 }
 function wake(id) {
     if (!enrolled.has(Number(id))) return;
@@ -558,14 +572,14 @@ async function drain() {
     } finally { draining = false; if (queue.size) { draining = true; setImmediate(drain); } }
 }
 async function init() {
-    unsubscribeLife?.(); unsubscribeMarketLife?.(); unsubscribePlayer?.(); unsubscribeBoard?.(); enrolled.clear(); playerWaiters.clear(); travelNotices.clear(); queue.clear();
+    unsubscribeLife?.(); unsubscribeMarketLife?.(); unsubscribePlayer?.(); unsubscribeBoard?.(); enrolled.clear(); clearWaiters(); travelNotices.clear(); queue.clear();
     unsubscribeLife = life().subscribeChanges(change => {
         const id = Number(typeof change === 'number' ? change : change.characterId);
         // Only bounded unaccepted preparations are replaceable. The durable
         // accepted meeting survives ordinary economic revisions and ad edits.
         for (const [key, entry] of staged) if (entry.actors.includes(id)) {
             const side = entry.actors.indexOf(id), state = life().cachedState(id);
-            if (!state || require('../Bot/Economy/EconomyCommit').authority(state).revision !== entry.revisions[side]) discard(key);
+            if (!state || EconomyCommit.authority(state).revision !== entry.revisions[side]) discard(key);
         }
         wake(id);
     });
@@ -597,7 +611,6 @@ async function init() {
         await new Promise(resolve => setImmediate(resolve));
     }
 }
-module.exports = { stage, discard, hasPreparation, canJoinParty, accept, cancel, receipt, waitForResult, prepareTrade, trade, wake, init, reset, presenceChanged,
-    isPlayerWaiting: id => !!playerWaiters.get(Number(id))?.size,
+module.exports = { stage, discard, hasPreparation, preparationOf, canJoinParty, accept, cancel, receipt, waitForResult, prepareTrade, trade, wake, init, reset, presenceChanged,
     adjustTransportPages,
     counters: () => ({ preparations: staged.size, pages: pages + transportPages, bytes: transportBytes + [...staged.values()].reduce((total, row) => total + row.bytes, 0), queued: queue.size, participants: enrolled.size }) };

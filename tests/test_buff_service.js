@@ -27,7 +27,7 @@ function state(characterId, classId, spotId = 'test-spot') {
         stats: { classId, money: [6000, 0, 0, 0], coldCombat: { skills: invoke('GameServer/Bot/Population/ColdCombatProfile').skillRecordsFromTree(classId, 55), effects: [] } },
         vitals: { hp: 100, maxHp: 100, mp: 2000, maxMp: 2000 },
         inventory: { 57: { selfId: 57, name: 'Adena', amount: 20000 } },
-        simulation: { ownerId: 'legacy_main', revision: 0, leaseId: null, leaseUntil: 0 }
+        simulation: { revision: 0 }
     };
 }
 

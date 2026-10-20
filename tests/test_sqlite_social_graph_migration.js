@@ -14,7 +14,9 @@ legacy.exec(`
     );
 `);
 const seedMigration = legacy.prepare('INSERT INTO schema_migrations(version, appliedAt) VALUES (?, 0)');
-for (let version = 1; version <= 17; version += 1) seedMigration.run(version);
+// A world at v17 had the loan columns of migration 10; today's base table has
+// none (migration 72 dropped them), so 10 stays unapplied and brings them back.
+for (let version = 1; version <= 17; version += 1) if (version !== 10) seedMigration.run(version);
 legacy.close();
 
 require('../src/Global');

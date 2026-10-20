@@ -18,6 +18,7 @@ const Henna = invoke('GameServer/Henna/HennaRules');
 const Crystals = invoke('GameServer/Bot/Population/ColdSoulCrystal');
 const NativeCrystals = invoke('GameServer/Items/SoulCrystalProgression');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const location = {locX:83396,locY:147904,locZ:-3400};
 let serial = 0;
 const cash = {selfId:57,name:'Adena',amount:10000000};
@@ -86,6 +87,27 @@ async function main() {
         assert.deepEqual(await snapshot(state.characterId),coldImage,'hot writer cannot bypass a current cold owner');
         console.log('PASS native enchant supply, real combat bonus, blessed reset, break and guarded rollback');
 
+        // The loss of a worn weapon is priced from the build without it (the
+        // chest keeps the bag off the snapshot gear fallback) and with the best
+        // spare worn in its place.
+        const chest = Data.items.find(row => row.template.kind.startsWith('Armor.') && Number(row.etc.slot) === 10);
+        const spareTemplate = Data.items.find(row => row.template.kind === weapon.template.kind
+            && Number(row.etc.slot) === Number(weapon.etc.slot) && String(row.etc.rank).toUpperCase() === 'D'
+            && row.template.price > 0 && row.template.price < weapon.template.price);
+        assert(chest && spareTemplate);
+        const worn = [{selfId:weapon.selfId,name:weapon.template.name,amount:1,equipped:true,slot:weapon.etc.slot},
+            {selfId:chest.selfId,name:chest.template.name,amount:1,equipped:true,slot:10}];
+        const stuckCtx = {hunt:{perHour:1000},price:()=>1000,timestamp:Date.now()};
+        state = await seed(worn);
+        const held = Policy.instances(state).find(row => row.selfId === weapon.selfId);
+        const alone = Policy.stuckCost(state, held, stuckCtx);
+        assert(alone > 0, 'losing the only worn weapon has a cost');
+        const spared = await seed([...worn, {selfId:spareTemplate.selfId,name:spareTemplate.template.name,amount:1}]);
+        const heldSpared = Policy.instances(spared).find(row => row.selfId === weapon.selfId);
+        const withSpare = Policy.stuckCost(spared, heldSpared, stuckCtx);
+        assert(withSpare > 0 && withSpare < alone, 'a spare worn in its place keeps part of the income');
+        console.log('PASS worn weapon loss priced bare and with the best spare worn');
+
         state=await seed([{selfId:weapon.selfId,name:weapon.template.name,amount:1,enchant:0},
             {selfId:weapon.selfId,name:weapon.template.name,amount:1,enchant:4}]);
         const Disposition=invoke('GameServer/Bot/Economy/ItemDisposition');
@@ -131,13 +153,11 @@ async function main() {
         assert.equal(Crystals.tryCast(fighter,mob,50,1000),true);assert.equal(fighter.vitals.mp,74);assert.equal(fighter.readyAt,1200);
         assert.equal(Crystals.outcome(fighter,mob,0,{at:2199}),null);
         const step=Crystals.outcome(fighter,mob,0,{at:2200});assert.equal(step.toId,4630);
-        const token=await Owner.claim(state,{allowLifecycle:true});assert.equal(token.ok,true);
-        const leased=Life.cachedState(state.characterId);
-        const committed=await Owner.commitAndReleaseBatch([{token,nextState:{...leased,inventory:fighter.state.inventory},
-            proposal:{baseState:leased,durable:{soulCrystals:[step]}},options:{allowLifecycle:true}}]);
+        const stepped=Life.cachedState(state.characterId);
+        const committed=await Owner.commitBatch([{revision:stepped.simulation.revision,nextState:{...stepped,inventory:fighter.state.inventory},
+            proposal:{...InventorySummary.bagChange(stepped.inventory,fighter.state.inventory),durable:{soulCrystals:[step]}},options:{allowLifecycle:true}}]);
         assert.equal(committed[0].ok,true);state=Life.cachedState(state.characterId);
         assert.equal((await DB.fetchItems(state.characterId)).find(row=>row.id===step.objectId).selfId,4630);
-        assert.equal(state.simulation.ownerId,'legacy_main');
         console.log('PASS actual quest, MP/time/HP Drain Soul and fenced accepted Worker physical commit');
 
         const Resolver=invoke('GameServer/Bot/Population/BackgroundPartyResolver');
@@ -154,9 +174,8 @@ async function main() {
         console.log('PASS actual party Drain Soul outcome aggregation');
 
         state=await seed([{selfId:1049,name:'Spellbook: Ice Bolt',amount:1}],{classId:10,level:14});
-        const paidToken=await Owner.claim(state,{allowLifecycle:true});assert(paidToken.ok);
         const current=Life.cachedState(state.characterId);
-        const accepted=await Owner.commitAndReleaseBatch([{token:paidToken,nextState:{...current,sp:100000},proposal:{baseState:current,durable:{classId:10}},options:{allowLifecycle:true}}]);
+        const accepted=await Owner.commitBatch([{revision:current.simulation.revision,nextState:{...current,sp:100000},proposal:{...InventorySummary.bagChange(current.inventory,current.inventory),durable:{classId:10}},options:{allowLifecycle:true}}]);
         assert(accepted[0].ok);state=Life.cachedState(state.characterId);
         assert.equal((await DB.fetchSkills(state.characterId)).length,0,'accepted proposal cannot synthesize tree ranks');
         const paid=await Life.reviewTrainingAfterCommit(state);

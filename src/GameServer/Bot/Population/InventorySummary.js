@@ -1,5 +1,7 @@
 'use strict';
 
+const { isDeepStrictEqual } = require('node:util');
+
 // Cold progression owns counts; instances retain the identity and enchant of
 // copies already materialized. A purchase/drop can grow the count before a new
 // physical row exists. Never copy the old item's enchant onto that new copy.
@@ -47,7 +49,42 @@ function canonicalize(inventory = {}) {
     }, {});
 }
 
+// What a step did to the bag, in one walk over base and next, shaped as the
+// proposal fields main's commit reads (ColdSimulationOwner): bagChanged (the
+// commit rewrites the physical items only then) and removedItemIds, the selfIds
+// of the stacks the step emptied (the commit deletes their rows). A stack with
+// no positive amount counts as absent. Equal items compare raw: raw-equal
+// implies canonical-equal, so a miss costs a write, never a skipped one.
+function bagChange(baseInventory = {}, nextInventory = {}) {
+    const base = baseInventory || {};
+    const next = nextInventory || {};
+    const removed = [];
+    let changed = false;
+    let baseCount = 0;
+    for (const key in base) {
+        const item = base[key];
+        if (!item || !(Number(item.amount) > 0)) continue;
+        baseCount += 1;
+        const after = next[key];
+        if (!after || !(Number(after.amount) > 0)) {
+            removed.push(Number(item.selfId || key));
+            changed = true;
+            continue;
+        }
+        if (!changed && after !== item && !isDeepStrictEqual(after, item)) changed = true;
+    }
+    if (!changed) {
+        // Every base stack is still there unchanged: the bag moved only if
+        // next holds a stack base did not.
+        let nextCount = 0;
+        for (const key in next) if (next[key] && Number(next[key].amount) > 0) nextCount += 1;
+        changed = nextCount !== baseCount;
+    }
+    return removed.length ? { bagChanged: changed, removedItemIds: removed } : { bagChanged: changed };
+}
+
 module.exports = {
     canonicalize,
-    completeInstances
+    completeInstances,
+    bagChange
 };

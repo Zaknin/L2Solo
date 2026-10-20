@@ -69,10 +69,12 @@ function mergedPosition(left, right, n) {
 }
 
 // A record as the table carries it: [id, kind, storeType, ownerId, town,
-// botOwned, lines[[lineId, selfId, enchant, count, price, pricing, fills]], revision], lines with stock
-// only. `record` has the main thread's fields (AfkTradeService projectionStore
-// or a database record).
-function rowOf(record) {
+// botOwned, lines[[lineId, selfId, enchant, count, price, pricing, fills]], revision,
+// custodyPolicy, escrowAdena], lines with stock only. `record` has the main
+// thread's fields (AfkTradeService projectionStore or a database record);
+// `escrowAdena` is the database record's (a projected store has none). A
+// record without stock lines holds no escrow (escrow = sum of count x price).
+function rowOf(record, escrowAdena = record.escrowAdena) {
     const lines = [];
     for (const line of record.lines || record.items || []) {
         const count = Number(line.count);
@@ -82,7 +84,14 @@ function rowOf(record) {
     }
     return [Number(record.shopId ?? record.id), String(record.kind || 'shop'), Number(record.storeType),
         Number(record.ownerId), record.town || null, record.botOwned === true ? 1 : 0, lines,
-        Number(record.revision ?? record.afkTradeRevision) || null, Number(record.custodyPolicy || 0)];
+        Number(record.revision ?? record.afkTradeRevision) || null, Number(record.custodyPolicy || 0),
+        Number(record.storeType) === BUY ? Math.max(0, Number(escrowAdena || 0)) : 0];
+}
+
+// The adena a table row's buy record holds (BotAfkMarketService.buyOrderEscrow
+// sums it per owner on the main thread; a worker sums its rows).
+function escrowOf(row) {
+    return Number(row?.[9] || 0);
 }
 
 function recordOf(row) {
@@ -135,6 +144,7 @@ class BoardIndex {
         this.epoch = 0;
         this.itemChanges = new Map();
         this.itemFingerprints = new Map();
+        this.itemIdFingerprints = new Map();
         this.groupFingerprints = new Map();
         // storeType -> itemId -> { all: [line], towns: Map(town -> [line]) }
         this.sides = new Map([[SELL, new Map()], [BUY, new Map()]]);
@@ -157,6 +167,7 @@ class BoardIndex {
         else this.epoch++;
         this.itemChanges.clear();
         this.itemFingerprints.clear();
+        this.itemIdFingerprints.clear();
         this.groupFingerprints.clear();
         this.sides.forEach((items) => items.clear());
         this.townItems.forEach((towns) => towns.clear());
@@ -177,6 +188,12 @@ class BoardIndex {
     // Updated beside the existing index; a preparation reads no line list.
     itemFingerprint(selfId) {
         return (this.itemFingerprints.get(Number(selfId)) || [0, 0, 0]).join('.');
+    }
+
+    // The complete ordered itemIds list, by side. Membership changes only;
+    // another line or price for an already listed item keeps this token.
+    itemIdsFingerprint(storeType) {
+        return (this.itemIdFingerprints.get(Number(storeType)) || [0, 0, 0]).join('.');
     }
 
     groupFingerprint(scope) {
@@ -248,8 +265,13 @@ class BoardIndex {
             towns.set(town, ids = []);
         }
         const at = itemPosition(ids, selfId);
-        if (present && ids[at] !== selfId) ids.splice(at, 0, selfId);
-        else if (!present && ids[at] === selfId) ids.splice(at, 1);
+        if (present && ids[at] !== selfId) {
+            ids.splice(at, 0, selfId);
+            if (town === '*') this.changeFingerprint(this.itemIdFingerprints, storeType, fnv1a32(String(selfId)), 1);
+        } else if (!present && ids[at] === selfId) {
+            ids.splice(at, 1);
+            if (town === '*') this.changeFingerprint(this.itemIdFingerprints, storeType, fnv1a32(String(selfId)), -1);
+        }
         if (!ids.length) towns.delete(town);
     }
 
@@ -533,4 +555,4 @@ class BoardIndex {
     }
 }
 
-module.exports = { BoardIndex, SELL, BUY, compareLines, offerFields, rowOf, recordOf };
+module.exports = { BoardIndex, SELL, BUY, compareLines, offerFields, rowOf, recordOf, escrowOf };

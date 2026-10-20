@@ -7,51 +7,27 @@ const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
 const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
 const PlayerActivitySignal = invoke('GameServer/Bot/Population/PlayerActivitySignal');
-const BotWarehouse = invoke('GameServer/Bot/Economy/BotWarehouseService');
 const PersistentStateRetention = invoke('GameServer/Bot/Population/PersistentStateRetention');
 const Database = invoke('Database');
 
-const originalSliceMs = Config.schedulerSliceMs;
-const originalYield = PopulationService.yieldSchedulerSlice;
 const originalRealPlayerSessions = PopulationService.realPlayerSessions;
 const originalEventLoopLag = Metrics.currentEventLoopLag;
 const originalIdleMaxResolves = Config.schedulerIdleMaxResolvesPerTick;
 const originalLagAbort = Config.schedulerLagAbortMs;
 const originalActivityProfile = PopulationService.playerActivityProfile;
-const originalWarehouseCleanup = BotWarehouse.cleanupHistoricalBatch;
-const originalWarehouseCleanupRunning = PopulationService.warehouseCleanupRunning;
-const originalWarehouseCleanupCursor = PopulationService.warehouseCleanupCursor;
-const originalWarehouseCleanupPassUnits = PopulationService.warehouseCleanupPassUnits;
-const originalNextWarehouseCleanupAt = PopulationService.nextWarehouseCleanupAt;
 const originalStateRetention = PersistentStateRetention.runNextBatch;
 const originalStateRetentionRunning = PopulationService.stateRetentionRunning;
 const originalStateRetentionPassRows = PopulationService.stateRetentionPassRows;
 const originalNextStateRetentionAt = PopulationService.nextStateRetentionAt;
 const originalPartyFormationPending = PopulationService.partyFormationPending;
-const originalDatabaseStats = Database.stats;
+const originalDatabasePending = Database.pending;
+const originalDatabaseCheckpointSnapshot = Database.checkpointSnapshot;
 const originalDatabaseCheckpoint = Database.checkpoint;
 const originalWalResetRunning = PopulationService.walResetRunning;
 const originalNextWalResetAt = PopulationService.nextWalResetAt;
 const originalLastWalResetResult = PopulationService.lastWalResetResult;
 
 async function run() {
-    const values = [];
-    const yields = [];
-    Config.schedulerSliceMs = 1;
-    PopulationService.yieldSchedulerSlice = async (startedAt) => {
-        yields.push(Date.now() - startedAt);
-    };
-
-    const results = await PopulationService.runInSchedulerSlices([1, 2, 3], async (value) => {
-        await new Promise((resolve) => setTimeout(resolve, 2));
-        values.push(value);
-        return value * 2;
-    });
-
-    assert.deepStrictEqual(values, [1, 2, 3], 'scheduler work must stay ordered');
-    assert.deepStrictEqual(results, [2, 4, 6], 'scheduler work results must be retained');
-    assert.strictEqual(yields.length, 3, 'each over-budget scheduler slice must yield before more work');
-
     PopulationService.playerActivityProfile = () => ({ protected: false, activeParty: false, realPlayers: 0, companionCount: 0, mode: 'idle' });
     Metrics.currentEventLoopLag = () => 0;
     Config.schedulerIdleMaxResolvesPerTick = 1000;
@@ -118,7 +94,8 @@ async function run() {
             last: { ok: true, mode: 'passive', busy: 0, afterBytes: 300, logFrames: 20, checkpointedFrames: 20 }
         }
     };
-    Database.stats = () => checkpointState;
+    Database.pending = () => checkpointState.pending;
+    Database.checkpointSnapshot = () => checkpointState.checkpoint;
     Database.checkpoint = async (checkpointOptions) => {
         checkpointCalls += 1;
         assert.strictEqual(checkpointOptions.mode, 'truncate');
@@ -129,7 +106,6 @@ async function run() {
     PopulationService.nextWalResetAt = 0;
     PopulationService.lastWalResetResult = null;
     PopulationService.resolving = false;
-    PopulationService.warehouseCleanupRunning = false;
     PopulationService.stateRetentionRunning = false;
     PopulationService.partyFormationRunning = false;
     PopulationService.playerActivityProfile = () => ({ protected: true, realPlayers: 1, connectingPlayers: 0 });
@@ -168,10 +144,10 @@ async function run() {
         'logical generation growth must trigger another reset even while the reused WAL file size is unchanged');
     assert.strictEqual(checkpointCalls, 2);
 
-    let phaseLockedCleanupCalls = 0;
-    BotWarehouse.cleanupHistoricalBatch = async () => {
-        phaseLockedCleanupCalls += 1;
-        return { cursor: 0, exhausted: false };
+    let phaseLockedRetentionCalls = 0;
+    PersistentStateRetention.runNextBatch = async () => {
+        phaseLockedRetentionCalls += 1;
+        return { policy: 'none', nextPolicy: 'none', rowsRemoved: 0, cycleComplete: false };
     };
     checkpointState = {
         pending: 0,
@@ -181,41 +157,17 @@ async function run() {
         }
     };
     PopulationService.nextWalResetAt = 0;
-    PopulationService.warehouseCleanupRunning = false;
     PopulationService.stateRetentionRunning = false;
-    PopulationService.nextWarehouseCleanupAt = 0;
-    const maintenanceReset = await PopulationService.runWarehouseCleanup(4000);
+    PopulationService.nextStateRetentionAt = 0;
+    const maintenanceReset = await PopulationService.runStateRetention(4000);
     assert.strictEqual(maintenanceReset.mode, 'truncate',
         'due WAL pressure must receive the maintenance timer quiet window even when intervals share a phase');
     assert.strictEqual(checkpointCalls, 3);
-    assert.strictEqual(phaseLockedCleanupCalls, 0, 'warehouse cleanup must yield before opening a competing transaction');
-    BotWarehouse.cleanupHistoricalBatch = originalWarehouseCleanup;
-    Database.stats = originalDatabaseStats;
+    assert.strictEqual(phaseLockedRetentionCalls, 0, 'state retention must yield before opening a competing transaction');
+    Database.pending = originalDatabasePending;
+    Database.checkpointSnapshot = originalDatabaseCheckpointSnapshot;
     Database.checkpoint = originalDatabaseCheckpoint;
     Object.assign(databaseConfig, originalResetConfig);
-
-    let cleanupCalls = 0;
-    BotWarehouse.cleanupHistoricalBatch = async (options) => {
-        cleanupCalls += 1;
-        return { cursor: 77, exhausted: false, ownersScanned: 1, ownersCompacted: 1, rowsRemoved: 2, units: 2, payout: 100, options };
-    };
-    PopulationService.warehouseCleanupRunning = false;
-    PopulationService.warehouseCleanupCursor = 0;
-    PopulationService.warehouseCleanupPassUnits = 0;
-    PopulationService.nextWarehouseCleanupAt = 0;
-    PopulationService.playerActivityProfile = () => ({ protected: true, activeParty: false, realPlayers: 1, companionCount: 0, mode: 'player' });
-    Metrics.currentEventLoopLag = () => 0;
-    assert.strictEqual(await PopulationService.runWarehouseCleanup(1000), null,
-        'historical warehouse cleanup must be completely disabled during player protection');
-    assert.strictEqual(cleanupCalls, 0);
-
-    PopulationService.playerActivityProfile = () => ({ protected: false, activeParty: false, realPlayers: 0, companionCount: 0, mode: 'idle' });
-    const cleanup = await PopulationService.runWarehouseCleanup(2000);
-    assert.strictEqual(cleanupCalls, 1, 'idle maintenance may advance one bounded historical cleanup batch');
-    assert.strictEqual(cleanup.cursor, 77);
-    assert.strictEqual(cleanup.options.ownerLimit, 1, 'one scheduler tick must perform at most one cleanup transaction');
-    assert.strictEqual(cleanup.options.maxUnitsPerOwner, 32);
-    assert.strictEqual(PopulationService.warehouseCleanupCursor, 77);
 
     let retentionCalls = 0;
     PersistentStateRetention.runNextBatch = async (options) => {
@@ -231,6 +183,7 @@ async function run() {
     PopulationService.stateRetentionRunning = false;
     PopulationService.stateRetentionPassRows = 0;
     PopulationService.nextStateRetentionAt = 0;
+    Metrics.currentEventLoopLag = () => 0;
     PopulationService.playerActivityProfile = () => ({ protected: true, activeParty: false, realPlayers: 1, companionCount: 0, mode: 'player' });
     assert.strictEqual(await PopulationService.runStateRetention(3000), null,
         'persistent-state retention must be completely disabled during player protection');
@@ -242,12 +195,6 @@ async function run() {
     assert.strictEqual(retention.rowsRemoved, 4);
     assert.strictEqual(retention.options.batchSize, Config.stateRetentionBatchSize);
     assert.strictEqual(PopulationService.stateRetentionPassRows, 4);
-
-    PopulationService.warehouseCleanupRunning = true;
-    assert.strictEqual(await PopulationService.runStateRetention(5000), null,
-        'retention and warehouse compaction must not enqueue concurrent maintenance writes');
-    assert.strictEqual(retentionCalls, 1);
-    PopulationService.warehouseCleanupRunning = false;
 
     PlayerActivitySignal.reset();
     const connecting = PlayerActivitySignal.observe({
@@ -298,17 +245,10 @@ run()
         process.exitCode = 1;
     })
     .finally(() => {
-        Config.schedulerSliceMs = originalSliceMs;
         Config.schedulerIdleMaxResolvesPerTick = originalIdleMaxResolves;
         Config.schedulerLagAbortMs = originalLagAbort;
-        PopulationService.yieldSchedulerSlice = originalYield;
         PopulationService.realPlayerSessions = originalRealPlayerSessions;
         PopulationService.playerActivityProfile = originalActivityProfile;
-        BotWarehouse.cleanupHistoricalBatch = originalWarehouseCleanup;
-        PopulationService.warehouseCleanupRunning = originalWarehouseCleanupRunning;
-        PopulationService.warehouseCleanupCursor = originalWarehouseCleanupCursor;
-        PopulationService.warehouseCleanupPassUnits = originalWarehouseCleanupPassUnits;
-        PopulationService.nextWarehouseCleanupAt = originalNextWarehouseCleanupAt;
         PersistentStateRetention.runNextBatch = originalStateRetention;
         PopulationService.stateRetentionRunning = originalStateRetentionRunning;
         PopulationService.stateRetentionPassRows = originalStateRetentionPassRows;
@@ -317,7 +257,8 @@ run()
         PopulationService.walResetRunning = originalWalResetRunning;
         PopulationService.nextWalResetAt = originalNextWalResetAt;
         PopulationService.lastWalResetResult = originalLastWalResetResult;
-        Database.stats = originalDatabaseStats;
+        Database.pending = originalDatabasePending;
+        Database.checkpointSnapshot = originalDatabaseCheckpointSnapshot;
         Database.checkpoint = originalDatabaseCheckpoint;
         Metrics.currentEventLoopLag = originalEventLoopLag;
         PlayerActivitySignal.reset();

@@ -131,8 +131,19 @@ function open(state, options = {}) {
     // the buy ads it answers here, the NPC sale, the board's listings.
     const market = invoke('GameServer/Bot/Economy/BotAfkMarketService').saleDecision(state, options);
     const initialMarket = market;
-    return BuyStoreService.sellToBestBuyer(state, town?.name, { answers: market.answers }).then((dynamicBuyerSale) => {
-    if (dynamicBuyerSale.pending) return { ...dynamicBuyerSale, listed: false };
+    // An answer may stage a trade meeting, which records the seller's revision:
+    // a later main save of the seller would discard it. The sale retry every
+    // outcome below sets is on the row before the answers run (E311).
+    const answerTown = town?.name ?? state.currentRegion;
+    const answering = market.answers.some((answer) => answer.line.town === answerTown)
+        ? LifeState.upsertState(deferSellRetry(state), 'market_sale_retry').then((saved) => saved || deferSellRetry(state))
+        : Promise.resolve(state);
+    return answering.then((answeringState) => { state = answeringState;
+        return BuyStoreService.sellToBestBuyer(state, answerTown, { answers: market.answers }); }).then((dynamicBuyerSale) => {
+    // A deal through a trade meeting ends the sale like every other outcome:
+    // the retry keeps a later pass from answering the same ad again when the
+    // payer refuses it (E311).
+    if (dynamicBuyerSale.pending) return { ...dynamicBuyerSale, state: deferSellRetry(dynamicBuyerSale.state || state), listed: false };
     return StaticBuyerService.sell(dynamicBuyerSale.state || state, town?.name).then((buyerSale) => {
     const saleState = buyerSale.state || dynamicBuyerSale.state || state;
     return LifeState.applyNpcLiquidation(saleState, market.npc, {
@@ -205,20 +216,30 @@ function open(state, options = {}) {
 // keeps its way back to its spot; the visit there opens the shop. When it
 // cannot travel, its lines wait in the bag for the next visit.
 function travelToShopTown(state, board, timestamp) {
-    const stats = { ...(state.stats || {}), shopTown: state.stats?.shopTown || { town: board.shopTown, at: timestamp } };
+    // The visit saved its sale retry before answering buy ads (open); the trip
+    // to the shop town is not a new sale trip and must not wait behind it.
+    const stats = { ...(state.stats || {}), marketSellRetryAfter: null,
+        shopTown: state.stats?.shopTown || { town: board.shopTown, at: timestamp } };
     const goal = { type: 'sell_inventory', status: 'active',
         plan: { expectedBenefit: 'market_sale_inventory', marketTown: board.shopTown } };
-    const travel = GoalExecutor.beginMarketTravel({ ...state, activity: 'hunting', stats }, goal, timestamp);
+    // A sale trip that cannot pay the gatekeeper falls back to the town the
+    // Scroll of Escape reaches (GoalExecutor.beginMarketTravel), from a town
+    // this same town: only a trip to the shop town counts. Otherwise the lines
+    // wait in the bag behind the sale retry, as every other ended sale visit,
+    // instead of a new sale trip each resolve (E304 (a)).
+    const trip = GoalExecutor.beginMarketTravel({ ...state, activity: 'hunting', stats }, goal, timestamp);
+    const travel = trip?.stats?.travel?.townName === board.shopTown ? trip : null;
     if (travel) travel.stats.marketReturn = state.stats?.marketReturn || travel.stats.marketReturn;
-    const next = travel || GoalExecutor.finishMarketVisit({ ...state, stats }, timestamp, { recoverMissingReturn: true })
-        || { ...state, stats };
+    const waiting = travel ? null : { ...state, stats: { ...stats, marketSellRetryAfter: timestamp + SELL_RETRY_DELAY_MS } };
+    const next = travel || GoalExecutor.finishMarketVisit(waiting, timestamp, { recoverMissingReturn: true })
+        || waiting;
     return LifeState.upsertState(next, travel ? 'cold_market_shop_town_trip' : 'cold_market_shop_town_unreached')
         .then((saved) => ({ state: saved || next, listed: board.listed > 0, itemCount: board.listed,
             reason: travel ? 'shop_town_trip' : 'shop_town_unreached', shopTown: board.shopTown }));
 }
 
 // A merchant without a stall: the board replaced the stalls (step 3.3), and
-// an old state, or historical cleanup, can still say merchant. There is no
+// an old state can still say merchant. There is no
 // expiry event to release it: it goes back to its trip or its hunt.
 function resolve(state, timestamp = Date.now()) {
     if (!state || state.activity !== 'merchant') return Promise.resolve({ state, closed: false });
@@ -251,5 +272,6 @@ module.exports = {
     targetMarketTownName,
     townCenter,
     open,
-    resolve
+    resolve,
+    travelToShopTown
 };

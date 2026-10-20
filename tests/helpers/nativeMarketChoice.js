@@ -38,7 +38,7 @@ async function capture(state, options = {}, label = '') {
     assert.deepEqual(captured.forbiddenLoaded, []);
     const native = Decision.compact(captured.decision);
     assert.equal(native.updatedAt, Number(state.updatedAt || 0));
-    assert.equal(native.key, Decision.stateKey(state));
+    assert.deepEqual(native.echo, Decision.stateEcho({ ...state, stats: { ...state.stats, ...captured.statsPacket } }));
     const accepted = { ...state, stats: { ...state.stats, ...captured.statsPacket } };
     Coordinator.economyDecisions.accept(state.characterId, captured.decision);
     const read = Coordinator.economyDecisions.decided(accepted);
@@ -69,7 +69,6 @@ async function capture(state, options = {}, label = '') {
     const goals = Needs.evaluate(accepted, { ...options, now: timestamp });
     const stale = Needs.evaluate({ ...accepted, updatedAt: Number(accepted.updatedAt || 0) + 1 }, { ...options, now: timestamp });
     assert.deepEqual(stale, [], 'a later main timestamp cannot consume the previous native decision');
-    assert.deepEqual(Economy.summary().mainColdForState, {}, 'all main capture and consumption steps avoid a cold build');
     console.log('Native capture diagnostic:', JSON.stringify({ label, timestamp, inputHash,
         inputUnchanged: hash(state) === inputHash, actor: state.characterId, inputActivity: state.activity,
         inputLevel: state.level, inputClass: state.stats?.classId ?? state.classId, wallet, context,

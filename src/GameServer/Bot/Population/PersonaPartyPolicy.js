@@ -1,5 +1,7 @@
 const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
 const PartyAffinity = invoke('GameServer/Bot/Population/BackgroundPartyAffinity');
+const TendencyRoll = require('../AI/TendencyRoll');
+const PartyMemoryPreference = require('./PartyMemoryPreference');
 
 function supportCount(coverage = {}) {
     return ['tank', 'healer', 'buffer'].filter((role) => Number(coverage[role] || 0) > 0).length;
@@ -29,8 +31,8 @@ function backgroundIntent(state = {}) {
     const establishedBond = Object.values(state.stats?.partyHistory || {})
         .some((entry) => Number(entry?.runs || 0) >= 3);
     const score = Math.round(baseScore(persona));
-    const probability = require('../AI/TendencyRoll').chance(score / 100 + (establishedBond ? persona.traits.commitment / 4 : 0));
-    const accept = require('../AI/TendencyRoll').roll('party_intent', state.characterId,
+    const probability = TendencyRoll.chance(score / 100 + (establishedBond ? persona.traits.commitment / 4 : 0));
+    const accept = TendencyRoll.roll('party_intent', state.characterId,
         state.stats?.partyRequest?.requestedAt || state.spotId || state.updatedAt) < probability;
     return {
         accept,
@@ -66,7 +68,7 @@ function preference(state, peers = [], coverage = {}) {
 function explain(state, peers = [], coverage = {}) {
     const result = preference(state, peers, coverage);
     const intent = backgroundIntent(state);
-    const memoryScore = require('./PartyMemoryPreference').create().score(state, peers);
+    const memoryScore = PartyMemoryPreference.create().score(state, peers);
     const memoryReason = memoryScore > 0 ? 'positive_interactions' : memoryScore < 0 ? 'personal_conflict' : null;
     return {
         score: result.score,

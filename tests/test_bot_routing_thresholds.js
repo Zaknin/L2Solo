@@ -71,7 +71,7 @@ for (let death = 0; death < 5; death++) {
 assert.deepStrictEqual(penalties, [2, 4, 6, 6, 6]);
 assert.strictEqual(Routes.targetLevelForState(dying), 23);
 
-// Spot pressure: 2 deaths at a 20% death rate; a backoff doubles from 1 h up to 6 h; at most 8 spots.
+// Spot pressure: 2 deaths at a 20% death rate; a backoff doubles from 60 own steps up to 360; at most 8 spots.
 const pressure = (windowFights, windowDeaths) => Risk.deathPressure({ ...state, stats: { spotRisk: {
     spotId: 'danger', version: Risk.RISK_WINDOW_VERSION, windowFights, windowWins: windowFights - windowDeaths,
     windowDeaths, unrecoveredDeaths: 0, failedHunts: 0 } } });
@@ -81,14 +81,15 @@ assert.strictEqual(pressure(1, 1), null, 'one death is never pressure');
 
 let backedOff = state;
 let startedAt = at;
-const hours = [];
+const steps = [];
 for (let attempt = 0; attempt < 5; attempt++) {
     backedOff = Risk.withBackoff(backedOff, { spotId: 'danger', reason: 'death_pressure', startedAt }, startedAt);
     const entry = backedOff.stats.spotBackoffs.find((backoff) => backoff.spotId === 'danger');
-    hours.push((entry.until - startedAt) / 3600000);
-    startedAt = entry.until + 1;
+    steps.push(entry.untilStep - Risk.stepCount(backedOff));
+    backedOff = { ...backedOff, stats: { ...backedOff.stats, stepCount: entry.untilStep } };
+    startedAt += 1;
 }
-assert.deepStrictEqual(hours, [1, 2, 4, 6, 6]);
+assert.deepStrictEqual(steps, [60, 120, 240, 360, 360]);
 let crowded = state;
 for (let index = 0; index < 10; index++) {
     crowded = Risk.withBackoff(crowded, { spotId: `spot_${index}`, reason: 'death_pressure', startedAt: at }, at);
@@ -115,17 +116,23 @@ try {
     assert.strictEqual(search([spot('fallback_top', 30)], { ...level35, party: { partyId: 'p1' } }), null,
         'party bots do not fall back to easier ground');
     const allowed = Routes.isSpotAllowedForState;
+    const reader = Routes.spotAllowedReaderFor;
     let fallbackChecks = 0;
     try {
         Routes.isSpotAllowedForState = (...args) => { fallbackChecks++; return allowed(...args); };
+        Routes.spotAllowedReaderFor = (...args) => {
+            const read = reader(...args);
+            return (spot) => { fallbackChecks++; return read(spot); };
+        };
         const crowdedCatalogue = Array.from({ length: 200 }, (_, i) => ({
             ...spot(`bounded-${String(i).padStart(3, '0')}`, 19), npcEntries: [{ selfId: UNSAFE_NPC, count: 8 }] }));
         assert.strictEqual(search(crowdedCatalogue, level35), null);
         assert.strictEqual(fallbackChecks, 0, 'the cheap optimistic bound rejects certainly lethal camps');
         Routes.isSpotAllowedForState = () => { fallbackChecks++; return false; };
+        Routes.spotAllowedReaderFor = () => () => { fallbackChecks++; return false; };
         assert.strictEqual(search(crowdedCatalogue, level35, [{ ...mage, survivalKnown: false }]), null);
         assert.strictEqual(fallbackChecks, 128, 'one fallback search never runs more than 128 combat gates');
-    } finally { Routes.isSpotAllowedForState = allowed; }
+    } finally { Routes.isSpotAllowedForState = allowed; Routes.spotAllowedReaderFor = reader; }
 } finally { Spots.cache = original; }
 
 console.log('test_bot_routing_thresholds passed');

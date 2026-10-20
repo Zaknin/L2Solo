@@ -3,6 +3,7 @@ const path = require('path');
 const ProgressionRates = invoke('GameServer/ProgressionRates');
 const Rewards = require('../Economy/SpotRewardExpectation');
 const SpotIndex = require('./SpotIndex');
+const DiagnosticConfig = require('../Population/PopulationConfig');
 
 // The world spot table (market-sim step 3.3(c), N44): what an hour of solo
 // hunting on a spot gives a bot of a role and level, with shots or without.
@@ -39,6 +40,17 @@ const incomeBases = new Map();
 // Three doubles and one index per cell: at most 7 MiB per thread.
 const MAX_INCOME_BASE_CELLS = 262144;
 let incomeBaseCells = 0;
+// Cache use for the cold worker heartbeat (L104); counted only with developer diagnostics.
+// memoEvictions, incomeEvictions, baseEvictions count the oldest-row drops at their caps; resets the
+// wholesale clears that dropped rows (catalog, table or rate change).
+const stats = { memoHits: 0, memoMisses: 0, memoEvictions: 0, incomeEvictions: 0, baseEvictions: 0, resets: 0,
+    bestHits: 0, bestMisses: 0, incomeHits: 0, incomeMisses: 0, spotIdRanks: 0 };
+function countReset(rows) { DiagnosticConfig.developerDiagnostics && rows && (stats.resets += 1); }
+function cachedRows() { return valueMemo.size + bestRows.size + incomeRows.size + incomeBases.size; }
+function cacheStats() {
+    return { memo: valueMemo.size, best: bestRows.size, income: incomeRows.size, bases: incomeBases.size,
+        cells: incomeBaseCells, ...stats };
+}
 let incomeTable, incomeRates;
 const EMPTY_SPOTS = [];
 let spotSource = () => EMPTY_SPOTS;
@@ -57,7 +69,8 @@ function refreshCatalog(rates) {
     if (spots !== rewardSpots || spots.length !== rewardSpotCount || revision !== rewardRevision) {
         rewardSpots = spots; rewardSpotCount = spots.length;
         rewardRevision = revision;
-        valueMemo.clear(); bestRows.clear(); incomeRows.clear();
+        countReset(cachedRows());
+        clearValueMemo(); bestRows.clear(); incomeRows.clear();
         clearIncomeBases();
         spoilLevels.clear();
     }
@@ -75,10 +88,53 @@ function roleSpoilLevel(role, level) {
 // (ProgressionRates keeps one profile object while the rates are equal).
 const MAX_VALUE_MEMO = 32768;
 const valueMemo = new Map();
+// ARCH-NOTE: PERF valueMemo's keys by slot, a ring in insertion order; valueMemoTail is the next
+// slot to fill, at the cap the oldest row's, so the drop at the cap reads the oldest key here.
+// Asking the Map for its first key walks every slot an earlier drop left empty (4.3 s per 131k
+// drops at the cap).
+const valueMemoOrder = [];
+let valueMemoTail = 0;
+function clearValueMemo() { valueMemo.clear(); valueMemoOrder.length = 0; valueMemoTail = 0; }
+// The Map holds a key's slot; the row lives at that slot as 12 numbers in a slab and a flag
+// byte. A new row drops the key filed at its slot, so a slot holds its key's row while the key
+// lives. L104: at the cap (x10, 24k real rows) the memo held 7.0 MB of the cold worker heap
+// with object rows, 1.0 MB so, plus the slab's 3 MB outside the JS heap (arrayBuffers). The ring fills
+// its slots in order before it wraps, so the slab grows by doubling and a small memo stays small.
+const ROW_NUMBERS = 12;
+const NO_ROW = 1, NO_STACKS = 2, NO_REWARDS = 4;
+const ADENA = 4, LOOT = 7, SHOTS = 8, POTIONS = 9;
+let memoNumbers = new Float64Array(0), memoFlags = new Uint8Array(0);
+function growSlab() {
+    const rows = Math.min(MAX_VALUE_MEMO, Math.max(1024, memoFlags.length * 2));
+    const numbers = new Float64Array(rows * ROW_NUMBERS), flags = new Uint8Array(rows);
+    numbers.set(memoNumbers);
+    flags.set(memoFlags);
+    memoNumbers = numbers;
+    memoFlags = flags;
+}
+function storeRow(slot, row) {
+    if (slot >= memoFlags.length) growSlab();
+    if (!row) { memoFlags[slot] = NO_ROW; return; }
+    const n = memoNumbers, at = slot * ROW_NUMBERS;
+    n[at] = row.kills; n[at + 1] = row.deaths; n[at + 2] = row.exp; n[at + 3] = row.sp; n[at + ADENA] = row.adena;
+    n[at + 5] = row.dropLoot; n[at + 6] = row.spoilLoot; n[at + LOOT] = row.loot; n[at + SHOTS] = row.shots;
+    n[at + POTIONS] = row.potions; n[at + 10] = row.stacks ?? 0; n[at + 11] = row.busyShare;
+    memoFlags[slot] = (row.stacks === null ? NO_STACKS : 0) | (row.rewardSource === 'npc_rewards' ? 0 : NO_REWARDS);
+}
+// A fresh row of computeValue's shape and key order, or null.
+function rowAt(slot) {
+    const flags = memoFlags[slot];
+    if (flags & NO_ROW) return null;
+    const n = memoNumbers, at = slot * ROW_NUMBERS;
+    return { kills: n[at], deaths: n[at + 1], exp: n[at + 2], sp: n[at + 3], adena: n[at + ADENA], dropLoot: n[at + 5],
+        spoilLoot: n[at + 6], loot: n[at + LOOT], rewardSource: flags & NO_REWARDS ? 'unavailable' : 'npc_rewards',
+        shots: n[at + SHOTS], potions: n[at + POTIONS], stacks: flags & NO_STACKS ? null : n[at + 10], busyShare: n[at + 11] };
+}
 let valueMemoTable = null, valueMemoRates = null;
 function refreshValueMemo(t, rates) {
     if (t !== valueMemoTable || rates !== valueMemoRates) {
-        valueMemo.clear();
+        countReset(valueMemo.size);
+        clearValueMemo();
         valueMemoTable = t;
         valueMemoRates = rates;
     }
@@ -187,20 +243,47 @@ function value(spotId, role, level, shots = true, rewardOptions = {}) {
     refreshCatalog(rates);
     refreshValueMemo(t, rates);
     const skill = rewardOptions.spoilSkillLevel ?? roleSpoilLevel(role, level);
-    // Callers own the result: a copy, never the remembered row.
-    const row = memoValue(t, rates, spotId, role, level, shots, skill);
-    return row && { ...row };
+    // Callers own the result: a fresh row.
+    return rowAt(memoValue(t, rates, spotId, role, level, shots, skill));
 }
 
-function memoValue(t, rates, spotId, role, level, shots, skill) {
-    const key = `${spotId}\u0000${role}\u0000${level}\u0000${shots ? 1 : 0}\u0000${skill}`;
-    let row = valueMemo.get(key);
-    if (row === undefined) {
-        row = computeValue(t, rates, spotId, role, level, shots, skill);
-        if (valueMemo.size >= MAX_VALUE_MEMO) valueMemo.delete(valueMemo.keys().next().value);
-        valueMemo.set(key, row);
+// The memo key: one small integer for a known spot, role, an integer level
+// and spoil skill (no string per call); any other argument set keeps the
+// five-part string. Each part is read as its string, as the string key reads
+// it ("5" and 5 share one row), so both forms name the same rows: one Map,
+// the same entries and the same oldest-first eviction.
+const MEMO_LEVELS = 256, MEMO_SKILLS = 64, MEMO_MAX_KEY = 2 ** 30;
+function memoPart(value, limit) {
+    if (typeof value === 'number') return Number.isInteger(value) && value >= 0 && value < limit ? value : -1;
+    const text = `${value}`, number = Number(text);
+    return Number.isInteger(number) && number >= 0 && number < limit && `${number}` === text ? number : -1;
+}
+function memoKey(t, spotId, role, level, shots, skill) {
+    const s = t.spotIndex.get(typeof spotId === 'string' ? spotId : `${spotId}`);
+    const r = t.roleIndex.get(typeof role === 'string' ? role : `${role}`);
+    const l = memoPart(level, MEMO_LEVELS), k = memoPart(skill, MEMO_SKILLS);
+    if (s !== undefined && r !== undefined && l >= 0 && k >= 0) {
+        const key = (((s * t.roleIndex.size + r) * 2 + (shots ? 1 : 0)) * MEMO_LEVELS + l) * MEMO_SKILLS + k;
+        if (key < MEMO_MAX_KEY) return key;
     }
-    return row;
+    return `${spotId}\u0000${role}\u0000${level}\u0000${shots ? 1 : 0}\u0000${skill}`;
+}
+// The slot of the argument set's row; valid until the next memoValue call.
+function memoValue(t, rates, spotId, role, level, shots, skill) {
+    const key = memoKey(t, spotId, role, level, shots, skill);
+    let slot = valueMemo.get(key);
+    if (slot === undefined) {
+        DiagnosticConfig.developerDiagnostics && (stats.memoMisses += 1);
+        const row = computeValue(t, rates, spotId, role, level, shots, skill);
+        slot = valueMemoTail;
+        valueMemoTail = (valueMemoTail + 1) % MAX_VALUE_MEMO;
+        const dropped = valueMemoOrder[slot];
+        if (dropped !== undefined && valueMemo.delete(dropped)) DiagnosticConfig.developerDiagnostics && (stats.memoEvictions += 1);
+        valueMemoOrder[slot] = key;
+        storeRow(slot, row);
+        valueMemo.set(key, slot);
+    } else DiagnosticConfig.developerDiagnostics && (stats.memoHits += 1);
+    return slot;
 }
 
 function computeValue(t, rates, spotId, role, level, shots, skill = roleSpoilLevel(role, level)) {
@@ -271,11 +354,13 @@ function best(role, level, shots = true, metric = 'exp') {
     refreshCatalog(rates);
     if (t !== incomeTable || rates !== incomeRates) {
         incomeTable = t; incomeRates = rates;
+        countReset(cachedRows());
         bestRows.clear(); incomeRows.clear();
         clearIncomeBases();
     }
     const key = `${role}:${level}:${Boolean(shots)}:${metric}`;
-    if (bestRows.has(key)) return bestRows.get(key);
+    if (bestRows.has(key)) { DiagnosticConfig.developerDiagnostics && (stats.bestHits += 1); return bestRows.get(key); }
+    DiagnosticConfig.developerDiagnostics && (stats.bestMisses += 1);
     let bestRow = null;
     // A whole-table scan reads each spot once: it bypasses the per-bot memo.
     for (const spot of t.spots) {
@@ -285,25 +370,63 @@ function best(role, level, shots = true, metric = 'exp') {
     bestRows.set(key, bestRow);
     return bestRow;
 }
-// A shared bounded shortlist keeps route reviews from scanning the atlas
-// on every actor tick. Final safety, occupancy and travel remain actor facts.
-function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7, shots = true, rewardOptions = {}) {
+// The table and rates of one income read, the shared rows reset when either moved.
+function incomeSource() {
     const t = load(), rates = ProgressionRates.profile();
     refreshCatalog(rates);
     if (t !== incomeTable || rates !== incomeRates) {
         incomeTable = t; incomeRates = rates;
-        incomeRows.clear(); bestRows.clear(); valueMemo.clear();
+        countReset(cachedRows());
+        incomeRows.clear(); bestRows.clear(); clearValueMemo();
         clearIncomeBases();
     }
     refreshValueMemo(t, rates);
+    return { t, rates };
+}
+// A shared bounded shortlist keeps route reviews from scanning the atlas
+// on every actor tick. Final safety, occupancy and travel remain actor facts.
+function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7, shots = true, rewardOptions = {}) {
+    const { t, rates } = incomeSource();
     const skill = rewardOptions.spoilSkillLevel ?? roleSpoilLevel(role, level);
     const key = `${role}:${level}:${costs.shots}:${costs.potions}:${minGap}:${Number(shots)}:${skill}`;
     if (incomeRows.has(key)) {
+        DiagnosticConfig.developerDiagnostics && (stats.incomeHits += 1);
         const held = incomeRows.get(key);
         incomeRows.delete(key); incomeRows.set(key, held);
         return held;
     }
-    const basisKey = `${role}:${level}:${minGap}:${Number(shots)}:${skill}`;
+    DiagnosticConfig.developerDiagnostics && (stats.incomeMisses += 1);
+    const ranked = rankIncome(t, rates, role, level, costs, minGap, shots, skill);
+    const result = Object.freeze(ranked.map(({ index, income }) => {
+        const spotId = t.spots[index][0];
+        return Object.freeze({ ...rowAt(memoValue(t, rates, spotId, role, level, shots, skill)), income, spotId, useShots: shots });
+    }));
+    if (incomeRows.size >= 128) {
+        incomeRows.delete(incomeRows.keys().next().value);
+        DiagnosticConfig.developerDiagnostics && (stats.incomeEvictions += 1);
+    }
+    incomeRows.set(key, result);
+    return result;
+}
+// The spot ids of rankedIncome's shortlist, in its order. For a caller that
+// prices consumables with the bot's own beliefs: those prices are no key of
+// the shared shortlist (every bot would add its own row and evict the shared
+// game-data rows), and only the ids are read, so no row objects are built.
+function rankedSpotIds(role, level, costs = { shots: 0, potions: 0 }, minGap = -7, shots = true, rewardOptions = {}) {
+    const { t, rates } = incomeSource();
+    const skill = rewardOptions.spoilSkillLevel ?? roleSpoilLevel(role, level);
+    DiagnosticConfig.developerDiagnostics && (stats.spotIdRanks += 1);
+    return rankIncome(t, rates, role, level, costs, minGap, shots, skill).map(({ index }) => t.spots[index][0]);
+}
+// The positive incomes of the role/level band at these consumable prices,
+// best first, ties to the spot whose level is closest to the bot's, then by
+// spot id; the first 64: [{ index, income }]. One basis per role and level
+// spans the widest band any reader asks (BASIS_MIN_GAP, the income route's);
+// a narrower minGap filters its rows, so the readers share one basis.
+const BASIS_MIN_GAP = -15;
+function rankIncome(t, rates, role, level, costs, minGap, shots, skill) {
+    const basisGap = Math.min(minGap, BASIS_MIN_GAP);
+    const basisKey = `${role}:${level}:${basisGap}:${Number(shots)}:${skill}`;
     let basis = incomeBases.get(basisKey);
     if (basis) {
         incomeBases.delete(basisKey); incomeBases.set(basisKey, basis);
@@ -316,13 +439,14 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
         let count = 0;
         for (let index = 0; index < t.spots.length; index++) {
             const spot = t.spots[index];
-            if (spot[1] - level < minGap || spot[1] - level > 8) continue;
-            const row = memoValue(t, rates, spot[0], role, level, shots, skill);
-            if (!row) continue;
+            if (spot[1] - level < basisGap || spot[1] - level > 8) continue;
+            const slot = memoValue(t, rates, spot[0], role, level, shots, skill);
+            if (memoFlags[slot] & NO_ROW) continue;
+            const at = slot * ROW_NUMBERS;
             indexes[count] = index;
-            values[count * 3] = row.adena + row.loot;
-            values[count * 3 + 1] = row.shots;
-            values[count * 3 + 2] = row.potions;
+            values[count * 3] = memoNumbers[at + ADENA] + memoNumbers[at + LOOT];
+            values[count * 3 + 1] = memoNumbers[at + SHOTS];
+            values[count * 3 + 2] = memoNumbers[at + POTIONS];
             count++;
         }
         basis = { indexes: indexes.slice(0, count), values: values.slice(0, count * 3) };
@@ -330,6 +454,7 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
             const oldest = incomeBases.keys().next().value;
             incomeBaseCells -= incomeBases.get(oldest).indexes.length;
             incomeBases.delete(oldest);
+            DiagnosticConfig.developerDiagnostics && (stats.baseEvictions += 1);
         }
         if (count <= MAX_INCOME_BASE_CELLS) { incomeBases.set(basisKey, basis); incomeBaseCells += count; }
     }
@@ -337,18 +462,15 @@ function rankedIncome(role, level, costs = { shots: 0, potions: 0 }, minGap = -7
     // combat/reward rows. Preserve every candidate, the exact prices and ties.
     const rows = [];
     for (let index = 0; index < basis.indexes.length; index++) {
+        if (t.spots[basis.indexes[index]][1] - level < minGap) continue;
         const income = basis.values[index * 3] - basis.values[index * 3 + 1] * costs.shots
             - basis.values[index * 3 + 2] * costs.potions;
         if (income > 0) rows.push({ index: basis.indexes[index], income });
     }
-    rows.sort((a, b) => b.income - a.income || String(t.spots[a.index][0]).localeCompare(String(t.spots[b.index][0])));
-    const result = Object.freeze(rows.slice(0, 64).map(({ index, income }) => {
-        const spotId = t.spots[index][0];
-        return Object.freeze({ ...memoValue(t, rates, spotId, role, level, shots, skill), income, spotId, useShots: shots });
-    }));
-    if (incomeRows.size >= 128) incomeRows.delete(incomeRows.keys().next().value);
-    incomeRows.set(key, result);
-    return result;
+    rows.sort((a, b) => b.income - a.income
+        || Math.abs(t.spots[a.index][1] - level) - Math.abs(t.spots[b.index][1] - level)
+        || String(t.spots[a.index][0]).localeCompare(String(t.spots[b.index][0])));
+    return rows.slice(0, 64);
 }
 function roles() {
     return load().roles;
@@ -359,8 +481,8 @@ function useFile(next = DEFAULT_FILE) {
     file = next;
     table = null;
     bestRows.clear();
-    valueMemo.clear();
+    clearValueMemo();
     clearIncomeBases();
 }
 
-module.exports = { value, spotLevel, referenceLevel, roles, best, rankedIncome, useFile, useSpots, expGapFactor, DEFAULT_FILE };
+module.exports = { value, spotLevel, referenceLevel, roles, best, rankedIncome, rankedSpotIds, useFile, useSpots, expGapFactor, cacheStats, DEFAULT_FILE };

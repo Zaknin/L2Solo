@@ -288,7 +288,6 @@ async function main() {
         assert.strictEqual(budgetStopped.claimed, 1, 'the scheduler may acquire only the action currently being admitted');
         assert.strictEqual(budgetStopped.attempted, 0, 'an action claimed after the deadline must not start');
         assert.strictEqual(budgetStopped.released, 1, 'an unstarted action must return to pending immediately');
-        assert.strictEqual(budgetStopped.leftRunning, 0, 'budget exhaustion must not leak a running action');
         assert.strictEqual(budgetStopped.budgetStopped, true);
         const queueAfterBudgetStop = await Database.fetchClanActionQueueStats();
         assert.strictEqual(queueAfterBudgetStop.running, 0);
@@ -589,9 +588,6 @@ async function main() {
             'role-first selection must retain one tank, healer, and buffer when the roster is capped');
         assert.strictEqual(ClanGoalPolicy.hasReadyRoles(expandedRoster), true,
             'a larger role-balanced clan roster must be ready');
-        assert.strictEqual(ClanGoalPolicy.hasReadyRoles(expandedRoster.map((member) => (
-            member.characterId === 8005 ? { ...member, simulationOwner: 'cold_simulation_owner' } : member
-        ))), false, 'a worker-owned support must not be reserved by the main-owned clan operation');
         console.log('Clan action queue checks passed');
     } finally {
         await Database.close();

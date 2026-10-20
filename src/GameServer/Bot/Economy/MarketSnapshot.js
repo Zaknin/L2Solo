@@ -9,6 +9,7 @@ const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
 const World = invoke('GameServer/World/World');
 const MarketEconomyOverview = require('../../../MarketEconomyOverview');
 const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
+const TownTransitPolicy = invoke('GameServer/Bot/AI/TownTransitPolicy');
 
 function emptyTown() {
     return { dynamicWts: 0, dynamicWtb: 0, fixedWts: 0, fixedWtb: 0, sellLines: 0, buyLines: 0, sellUnits: 0, buyUnits: 0 };
@@ -55,8 +56,11 @@ function snapshot() {
             items: (shop.lines || []).map(line => ({ ...line, count: line.availableCount ?? line.count }))
                 .filter(line => Number(line.count) > 0) })).filter(store => store.items.length);
     const bids = publicBuyOffers(dynamicStores);
+    const dynamic = { wts: 0, wtb: 0 };
     dynamicStores.forEach((store) => {
         const side = Number(store.storeType || 1) === 3 ? 'wtb' : 'wts';
+        if (Number(store.storeType || 1) === 1) dynamic.wts += 1;
+        else if (Number(store.storeType) === 3) dynamic.wtb += 1;
         const town = store.town || 'Unknown';
         const townEntry = byTown[town] || emptyTown();
         townEntry[side === 'wts' ? 'dynamicWts' : 'dynamicWtb'] += 1;
@@ -69,14 +73,17 @@ function snapshot() {
         byTown[town] = townEntry;
     });
 
+    const fixed = { wts: 0, wtb: 0 };
     Object.values(MerchantStoreConfigs).forEach((store) => {
+        if (Number(store?.storeType) === 1) fixed.wts += 1;
+        else if (Number(store?.storeType) === 3) fixed.wtb += 1;
         if (![1, 3].includes(Number(store?.storeType)) || !store.town) return;
         const townEntry = byTown[store.town] || emptyTown();
         townEntry[Number(store.storeType) === 3 ? 'fixedWtb' : 'fixedWts'] += 1;
         byTown[store.town] = townEntry;
     });
 
-    const rankedItems = Array.from(items.values()).sort((left, right) => (
+    const topItems = Array.from(items.values()).sort((left, right) => (
         (right.wtbUnits + right.wtsUnits) - (left.wtbUnits + left.wtsUnits) || left.selfId - right.selfId
     )).slice(0, 20).map((item) => {
         return {
@@ -87,18 +94,12 @@ function snapshot() {
         };
     });
     return {
-        dynamic: {
-            wts: dynamicStores.filter((store) => Number(store.storeType || 1) === 1).length,
-            wtb: dynamicStores.filter((store) => Number(store.storeType) === 3).length
-        },
-        fixed: {
-            wts: Object.values(MerchantStoreConfigs).filter((store) => Number(store?.storeType) === 1).length,
-            wtb: Object.values(MerchantStoreConfigs).filter((store) => Number(store?.storeType) === 3).length
-        },
+        dynamic,
+        fixed,
         activity: MarketTelemetry.current(),
         transactions: MarketTelemetry.transactions(),
         byTown,
-        topItems: rankedItems.slice(0, 20)
+        topItems
     };
 }
 
@@ -190,7 +191,7 @@ function playerStores(sessions, itemsById) {
             ownerName: actor.fetchName?.() || session.name,
             storeType: store.storeType,
             title: store.title,
-            town: store.town || invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(actor),
+            town: store.town || TownTransitPolicy.townAt(actor),
             loc: {
                 locX: actor.fetchLocX?.(),
                 locY: actor.fetchLocY?.(),

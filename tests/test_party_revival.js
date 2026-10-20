@@ -9,6 +9,7 @@ const PartyRevivalService = invoke('GameServer/Bot/AI/PartyRevivalService');
 const FollowingState = invoke('GameServer/Bot/AI/States/FollowingState');
 const C4SkillEffects = invoke('GameServer/Skills/C4SkillEffects');
 const Revive = invoke('GameServer/Actor/Generics/Revive');
+const { registerSessions } = require('./helpers/worldSessions');
 
 function actor(id, { dead = false, skills = [], items = [] } = {}) {
     const state = {
@@ -92,7 +93,7 @@ try {
         member.partyCompanion = true;
         member.plan = 'following';
     });
-    World.user = { sessions: [leaderSession, healerSession, fallenSession] };
+    registerSessions([leaderSession, healerSession, fallenSession]);
     World.npc = { spawns: [] };
     World.fetchNpcsInRadius = () => [];
     BotManager.sessions = [healerSession, fallenSession];
@@ -324,6 +325,8 @@ try {
     leader.skillset.skills = [];
     leader.backpack.fetchItems = () => [];
     BotManager.sessions = [healerSession];
+    fallenSession.partyCompanion = false;
+    World.refreshPartyMemberships([fallenSession]);
     assert.strictEqual(
         PartyRevivalService.shouldTownRespawn(leaderSession, healerSession),
         true,

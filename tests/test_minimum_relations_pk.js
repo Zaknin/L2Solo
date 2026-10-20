@@ -17,6 +17,7 @@ const Drops = require('../src/GameServer/PkDropPolicy');
 const People = require('../src/GameServer/Social/PeopleKnowledge');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const at = Date.now();
 let groups = 0;
 const done = name => { groups++; console.log('PASS ' + name); };
@@ -216,12 +217,10 @@ async function main() {
             await Database.execute(["UPDATE characters SET hp=100,karma=100,pk=5 WHERE id=2", []]);
             const state = { ...white, stats: { ...white.stats, pk: 5 } };
             Life.acceptSimulationOwnership(2, state.simulation, state);
-            const claim = await Owner.claimBatch([{ state, leaseId: 'pk-drop' }], { timestamp: at + 100, leaseMs: 60000 });
-            assert.equal(claim.grants.length, 1);
             const current = Life.cachedState(2), next = { ...current, activity: 'dead', vitals: { ...current.vitals, hp: 0 },
                 stats: { ...current.stats, deaths: 1 }, updatedAt: at + 200 };
-            const [result] = await Owner.commitAndReleaseBatch([{ token: claim.grants[0], nextState: next,
-                options: { allowLifecycle: true }, proposal: { baseState: current, durable: { pvpKills: [{ victimId: 1, victimLevel: 1, pvp: false }] } } }], { timestamp: at + 200 });
+            const [result] = await Owner.commitBatch([{ revision: current.simulation.revision, nextState: next,
+                options: { allowLifecycle: true }, proposal: { ...InventorySummary.bagChange(current.inventory, next.inventory), durable: { pvpKills: [{ victimId: 1, victimLevel: 1, pvp: false }] } } }], { timestamp: at + 200 });
             assert(result.ok); assert.equal(result.pkDrops.length, 2);
             assert.equal(Life.cachedState(2).inventory['19'], undefined);
             assert.equal(Life.cachedState(2).inventory['1864'], undefined);

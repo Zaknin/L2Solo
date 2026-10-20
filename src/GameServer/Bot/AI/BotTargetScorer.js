@@ -123,7 +123,7 @@ function score(context = {}) {
 
     const socialAllies = Math.max(0, number(context.socialAllies));
     if (socialAllies > 0) {
-        value -= Math.min(4, socialAllies) * 75;
+        value -= socialAllies * 75;
         reasons.push(`social_allies:${socialAllies}`);
     }
 

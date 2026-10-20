@@ -5,6 +5,8 @@ const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner'
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const TownNpcCatalog = invoke('GameServer/Bot/Economy/TownNpcCatalog');
+const DecisionEvents = invoke('GameServer/Bot/AI/DecisionEvents');
+const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
 
 const MAX_PURCHASES_PER_VISIT = 12;
 
@@ -16,7 +18,7 @@ function currentState(session, bot, town, economy = null) {
     // Autonomous shopping shares the physical actor's route inputs. A
     // nearby town is a destination until the actor actually reaches it.
     const physical = session.partyCompanion === true ? null : economy?.state
-        || invoke('GameServer/Bot/Economy/EconomyContext').stateForActor(bot, session);
+        || EconomyContext.stateForActor(bot, session);
     const previous = session.coldLifeState || {};
     const inventory = LifeState.inventorySummaryFromItems(bot.backpack?.fetchItems?.() || []);
     return {
@@ -71,20 +73,21 @@ function pendingTargetAmount(plan) {
 }
 
 function checkedPlan(session, state, town, options = {}) {
-    // Autonomous hot bots buy the same funded leaf as cold actors. Player
-    // companion requests retain their explicitly assigned native errands.
+    // Autonomous hot bots buy the same funded leaf as cold actors: the one of
+    // the decision the body received (DecisionEvents.held); before the first
+    // one the held plan waits. Player companion requests retain their
+    // explicitly assigned native errands.
     if (session.partyCompanion !== true) {
-        const Context = invoke('GameServer/Bot/Economy/EconomyContext');
-        const economy = options.economy || Context.forState(state);
-        if (economy.routePending) return { plan: state.stats?.equipmentPlan || null, offers: [], pending: true };
+        const economy = DecisionEvents.held(session);
+        if (!economy?.decided) return { plan: state.stats?.equipmentPlan || null, offers: [], pending: true };
         const leaf = economy.network.activity;
         const selfId = Number(leaf?.itemId || 0);
         if (leaf?.activity !== 'shopping' || !selfId || leaf.town && leaf.town !== town.name) return { plan: null, offers: [] };
         const item = require('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, selfId);
         const amount = Math.max(1, Math.ceil(leaf.amount || 1));
         const fundedState = { ...state, stats: { ...state.stats, ...economy.statsPacket } };
-        // The leaf's funded root funds it, as for a cold goal (PurchaseFunding.goalTerms).
-        const ratio = PurchaseFunding.leafRatio(leaf, economy.network.queue?.find(row => row.key === leaf.rootKey));
+        // The leaf's funded root funds it (the card leaf's r), as for a cold goal (PurchaseFunding.goalTerms).
+        const ratio = PurchaseFunding.leafRatio(leaf);
         const funding = ratio > 0 ? { valueRate: ratio } : {};
         const budget = Math.min(PurchaseFunding.spendable(fundedState, 0, PurchaseFunding.goalTerms({ plan: funding }, selfId)) / amount,
             economy.worth(selfId) ?? Infinity);

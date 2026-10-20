@@ -866,7 +866,6 @@ function detachState(companionSession, plan = 'hunting', preserveTakeover = fals
     companionSession.followPlayerSession = null;
     companionSession.partyCompanion = false;
     if (!preserveTakeover) invoke('GameServer/Bot/Population/BotLifeState').releasePlayerPartyTakeover(companionSession);
-    invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
     refreshPartyMemberships([companionSession], invoke);
     companionSession.botStay = false;
     companionSession.stayLocation = null;
@@ -991,8 +990,14 @@ const PartyCompanionService = {
             if (agreement.mode === 'turn') return nextTurnMember(leaderSession, members) || looterSession;
             if (agreement.mode === 'random') return randomMember(members) || looterSession;
             if (agreement.mode === 'need') {
-                const Context = invoke('GameServer/Bot/Economy/EconomyContext');
-                const scores = members.map(session => ({ session, value: Context.forActor(session.actor, session).itemUsefulness(Number(selfId)) }));
+                // Each bot's item value from the decision its body holds
+                // (DecisionEvents.held): an item outside its listed values
+                // scores 0, and so does the player, who holds no bot decision
+                // (reached only with a party agreement, which player parties do not carry).
+                // lazy: cycle DecisionEvents loads this module through its economy imports.
+                const DecisionEvents = invoke('GameServer/Bot/AI/DecisionEvents');
+                const scores = members.map(session => ({ session, value: world().isBotSession(session)
+                    ? DecisionEvents.held(session).itemUsefulness(Number(selfId)) : 0 }));
                 const best = Math.max(...scores.map(entry => Number(entry.value) || 0));
                 return randomMember(scores.filter(entry => Number(entry.value) === best).map(entry => entry.session)) || looterSession;
             }
@@ -1136,7 +1141,6 @@ const PartyCompanionService = {
             bot.unselect?.();
             invoke('GameServer/Bot/BotAI').cancelScheduledTick(companionSession);
         });
-        invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
         refreshPartyMemberships(roster, invoke);
 
         leaderSession.dataSendToMe?.(ServerResponse.joinParty(1));
@@ -1193,7 +1197,6 @@ const PartyCompanionService = {
         companionSession.plan = 'following';
         companionSession.followPlayerSession = leaderSession;
         companionSession.partyCompanion = true;
-        invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
         refreshPartyMemberships([companionSession], invoke);
         companionSession.botStay = false;
         companionSession.stayLocation = null;

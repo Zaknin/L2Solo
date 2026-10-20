@@ -1,6 +1,5 @@
 const ServerResponse = invoke('GameServer/Network/Response');
 const ConsoleText    = invoke('GameServer/ConsoleText');
-const NpcDecay       = invoke('GameServer/World/Generics/NpcDecay');
 const GameTime       = invoke('GameServer/World/GameTime');
 const DayNightSpawnManager = invoke('GameServer/World/DayNightSpawnManager');
 const RaidBossState = invoke('GameServer/World/RaidBossState');
@@ -336,7 +335,6 @@ const World = {
     isBotSession,
 
     async init() {
-        NpcDecay.stop(this);
         RaidBossMinionManager.stop(this);
         DayNightSpawnManager.stop(this);
         this.user  = { sessions : [], revision: 0 };
@@ -356,7 +354,6 @@ const World = {
         World.spawnNpcs();
         RaidBossMinionManager.start(this);
         this.indexSpawnsInGrid();
-        NpcDecay.start(this);
         DayNightSpawnManager.start(this);
         invoke('GameServer/Npc/NpcAggro').startAggroTicker(this);
         return this;
@@ -393,7 +390,6 @@ const World = {
         this.updateUserLocation(session);
         if (restored) notifyUserChange(Number(session.actor.fetchId?.()));
         this.user.revision += 1;
-        invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
     },
 
     removeUser(session) {
@@ -401,7 +397,6 @@ const World = {
         const wasPresent = this.user.sessions.includes(session);
         this.user.sessions = this.user.sessions.filter((ob) => ob !== session);
         this.user.revision += 1;
-        invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
         // Build the packet after removal so its online object ID becomes zero.
         if (wasPresent) invoke('GameServer/Clan/ClanService').broadcastMemberPresence(session.actor);
     },
@@ -533,7 +528,6 @@ const World = {
         return records.map(record => record.session);
     },
 
-    pvpPartyMembershipIndex: true,
     pvpPartyMembershipKeys: PvpPartyMembershipKeys,
 
     pvpPartySessionsForKey(key) {

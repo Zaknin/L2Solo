@@ -24,15 +24,11 @@ state.stats.coldCombat.effects = [{ id: 1040, key: 'shield', stats: { pDefMul: 1
 const economy = Economy.forState(state, { timestamp });
 assert.equal(economy.itemUsefulness(targetId), 0, 'a real non-top-k clan target takes the native fallback');
 const item = Data.items.find(row => Number(row.selfId) === targetId);
-assert(Profile.powerFor(state, timestamp).pDef > Profile.powerFor(state, timestamp + 60001).pDef,
+assert(Profile.fightProfile(state, timestamp).pDef > Profile.fightProfile(state, timestamp + 60001).pDef,
     'the native shield effect is active at the simulation clock and expired at the later clock');
 function verify(snapshot) {
     const expected = Providers.gearGain(snapshot, item, timestamp);
-    const initial = Profile.buildGainsFor(snapshot, timestamp), heldSize = initial.size;
     const decision = capture(economy, snapshot);
-    assert.strictEqual(Profile.buildGainsFor(snapshot, timestamp), initial,
-        'capturing a clan fallback must not replace the live simulation build with the wall-clock build');
-    assert.equal(initial.size, heldSize, 'capture preserves the numeric gains already computed for this build');
     assert.equal(decision.clan.plan.itemId, targetId);
     assert.equal(decision.clan.plan.valueHours,
         Math.max(0, (expected.attack + expected.defence * economy.deathHours) * economy.horizonHours),

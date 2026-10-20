@@ -50,7 +50,7 @@ const base = { life: Life, owner: Owner, memory: Memory, parties: Parties, now: 
     pvpEnabled: () => true, incrementalPvp: true, onEncounter: Runtime.register, waitMs: 15000, cooldownMs: 600000, rng: () => 0.5 };
 function event(a, b, key = `handoff:${a}:${b}`) {
     const p = id => { const s = state(id), party = Parties.find(s.party?.partyId); return { id,
-        partyId: party?.partyId || null, partyUpdatedAt: party?.updatedAt, size: party?.memberIds.length || 1,
+        partyId: party?.partyId || null, partyRevision: party?.revision, size: party?.memberIds.length || 1,
         revision: s.simulation.revision, memoryRevision: Memory.snapshot(id).revision }; };
     // U26: each side's can-I-win, rolled once at the dispute and carried on the event.
     return { key, at: clock, pressure: 3, spotId: 'test', npcId: 10, actor: p(a), peer: p(b), action: 'contest', pvpIntent: true, willing: [true, true] };
@@ -59,8 +59,9 @@ async function party(ids) {
     const p = Parties.prepareCommit({ partyId: `enc-party-${ids[0]}`, leaderId: ids[0], memberIds: ids,
         status: 'active', spotId: 'test', startedAt: clock, nextResolveAt: clock + 1000, stats: { objective: { npcId: 10 } } });
     const members = ids.map(id => Life.preparePartyAssignment(state(id), p.row.partyId, 'dps', ids[0], clock + 1000));
-    assert((await DB.commitBackgroundPartyMembership({ party: p.row, members })).ok);
-    Life.acceptPartyAssignments(members); Parties.acceptCommit(p);
+    const formed = await DB.commitBackgroundPartyMembership({ party: p.row, members });
+    assert(formed.ok);
+    Life.acceptPartyAssignments(members, formed.lifeRows); Parties.acceptRow(formed.partyRow);
 }
 async function main() {
     patch(Date, 'now', () => clock);
@@ -297,19 +298,12 @@ async function main() {
     await DB.execute(['UPDATE bot_life_state SET phase=? WHERE characterId=10', ['warm']]);
     Life.acceptLifecycleRow((await DB.execute(['SELECT * FROM bot_life_state WHERE characterId=10', []]))[0]);
     clock = split.encounter.expiresAt + 2000;
-    const { grants } = await Owner.claimBatch([state(9)], { timestamp: clock, allowParty: true, allowLifecycle: true });
-    assert.strictEqual(grants.length, 1);
-    await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => ticks.push(r) });
-    assert(Runtime.encounters.has(split.encounter.key), 'cleanup waits for an outstanding writer lease');
-    assert.strictEqual(ticks.filter(r => !r.encounter).length, 1, 'partial cleanup is not a completed encounter');
-    assert.strictEqual(journalRows(split.encounter.key).length, 0, 'partial cleanup writes no journal row');
-    await Owner.releaseBatch(grants);
     await Runtime.tick({ ...base, canRun: () => true, recordPvpStep: r => ticks.push(r) });
     assert(!Runtime.encounters.has(split.encounter.key));
     assert([9, 10, 11, 12].every(id => !state(id).stats.pvpEncounter));
     assert.strictEqual(Parties.find('enc-party-9').stats.coldCompetition.outcome, 'pvp_expired');
     assert.strictEqual(Parties.find('enc-party-11').stats.coldCompetition.wait, null);
-    assert.strictEqual(ticks.filter(r => !r.encounter).length, 2, 'mixed-state expiry counts once after all writes settle');
+    assert.strictEqual(ticks.filter(r => !r.encounter).length, 2, 'mixed-state expiry counts once');
     assertClosingRow(split.encounter.key, split.encounter, 'pvp_expired');
     await DB.close(); DB.init();
     const closed = (await DB.execute(['SELECT statsJson FROM bot_life_state WHERE characterId=9', []]))[0];

@@ -1,4 +1,5 @@
 const AssemblyRecovery = require('./PartyAssemblyRecovery');
+const ClanEquipment = require('./ClanEquipmentPartyPolicy');
 const MINUTE = 60000;
 const clamp = n => Math.max(0, Math.min(1, Number(n) || 0));
 const Rewards = require('../../Actor/PartyRewardMath');
@@ -45,7 +46,7 @@ function assess(party, members, timestamp, options = {}) {
         && !require('../../Clan/ClanRaidPolicy').composition(members).ready;
     const assemblyRecovered = assemblyExpired && !understaffed && !raidRosterIncomplete
         && require('./PartyHuntingAssembly').ready(party, members, { id: party.spotId });
-    const abandonedRaid = require('./ClanEquipmentPartyPolicy').abandonedRaid(party);
+    const abandonedRaid = ClanEquipment.abandonedRaid(party);
     const target = Number(party.stats?.objective?.npcId || party.stats?.acquisitionGoal?.next?.npcId || 0);
     const concerns = {}, decisions = [], experience = {};
     const eligible = new Set(Rewards.validMemberIndexes(members.map(m => Number(m.level || 1))));
@@ -99,7 +100,7 @@ function assess(party, members, timestamp, options = {}) {
         if (!marketPaused && noExperience) reason = 'party_no_experience';
         else if (!marketPaused && !reason && stalled) reason = 'party_no_progress';
         if (!paused && assemblyExpired && !assemblyRecovered) reason = AssemblyRecovery.REASON;
-        if (!require('./ClanEquipmentPartyPolicy').allowed(member, party.stats?.objective, timestamp)) {
+        if (!ClanEquipment.allowed(member, party.stats?.objective)) {
             reason = 'clan_party_unsafe';
         }
         if (abandonedRaid) reason = 'raid_failed';

@@ -42,8 +42,6 @@ const original = {
     applyBestUpgrades: BotEquipmentUpgrade.applyBestUpgrades,
     sellAndRestock: ShoppingState.sellAndRestock,
     scheduleRestock: ShoppingState.scheduleRestock,
-    economyForState: invoke('GameServer/Bot/Economy/EconomyContext').forState,
-    economyForActor: invoke('GameServer/Bot/Economy/EconomyContext').forActor,
     skillReview: BotSkillTraining.review
 };
 
@@ -195,12 +193,10 @@ async function run() {
             inventory: {}
         }
     };
-    const economyModule = invoke('GameServer/Bot/Economy/EconomyContext');
-    // Keep the native physical-state/route anchor while controlling the
-    // asynchronous economic result consumed by both shopping callers.
-    economyModule.forActor = (actor, owner) => economyModule.forState(economyModule.stateForActor(actor, owner));
-    economyModule.forState = state => ({ state, statsPacket: {}, inputKey: 'companion-fixture', worth: () => 1000,
-        network: { activity: { activity: 'shopping', itemId: 1, amount: 1 } } });
+    // The near decision the background thread sends this body (the
+    // coordinator's economy_decided -> DecisionEvents.receive): a shopping leaf.
+    const decision = { decided: true, inputHash: 1, worth: () => 1000,
+        network: { activity: { activity: 'shopping', itemId: 1, amount: 1 } } };
     genericSession.coldLifeState.stats.money = [77000, 2e-5, 15000, 0, 2e-5, 500, 1];
     let genericMarketLookups = 0;
     MarketOpportunity.bestOffer = (selfId, options = {}) => {
@@ -220,17 +216,15 @@ async function run() {
         } : null;
     };
     World.user = { sessions: [afkSellerSession] };
-    const preparedForState = economyModule.forState;
-    economyModule.forState = state => ({ ...preparedForState(state), routePending: true });
     const heldPlan = genericSession.coldLifeState.stats.equipmentPlan;
     ShoppingState.tick(genericSession, genericBot, null, { getClosestTown: () => town, say() {} });
     assert.strictEqual(genericSession.shoppingEquipmentPlanChecked, undefined,
-        'pending route is not a completed town visit check');
+        'a visit before the first decision is not a completed town visit check');
     assert.strictEqual(genericSession.coldLifeState.stats.equipmentPlan, heldPlan,
-        'pending preparation preserves the accepted equipment plan');
-    assert.strictEqual(genericSession.plan, 'shopping', 'pending route does not end the visit');
+        'waiting for the first decision preserves the accepted equipment plan');
+    assert.strictEqual(genericSession.plan, 'shopping', 'waiting for the first decision does not end the visit');
     assert.strictEqual(genericMarketLookups, 0);
-    economyModule.forState = preparedForState;
+    genericSession.heldEconomy = decision;
     ShoppingState.tick(genericSession, genericBot, null, {
         getClosestTown: () => town,
         say() {}
@@ -252,39 +246,6 @@ async function run() {
     MarketOpportunity.bestOffer = (_itemId, options = {}) => options.budget >= 500 ? { ...offer, price: 500 } : null;
     assert.strictEqual(CompanionEquipmentShopping.planErrand(nonWish, genericBot, town), null,
         'an autonomous bot cannot spend its earmarked money on an item absent from the packet');
-
-    // A visible shopper is still in the field while its route is prepared.
-    // Both native planning paths must consume the same completed route card.
-    const Trip = invoke('GameServer/Bot/Economy/EconomicTrip');
-    const { EconomyRouteCache } = invoke('GameServer/Bot/Economy/EconomyRouteCache');
-    const requests = [], fieldMoves = [];
-    const routeCache = new EconomyRouteCache({ send: payload => { requests.push(payload); return true; } });
-    const fieldBot = { ...genericBot, fetchId: () => 920003,
-        fetchLocX: () => -95000, fetchLocY: () => 240000,
-        moveTo: data => fieldMoves.push(data) };
-    const fieldSession = { accountId: 'bot_field_shop_probe', actor: fieldBot, plan: 'shopping',
-        coldLifeState: { ...genericSession.coldLifeState, characterId: fieldBot.fetchId(),
-            activity: 'hunting', currentRegion: 'Keltir fields' } };
-    let planningReads = 0;
-    economyModule.forState = state => {
-        planningReads++;
-        const rows = routeCache.read(state.characterId, Trip.key(state), Trip.frame(state));
-        return { state, routePending: !rows, statsPacket: {}, worth: () => 1000,
-            network: { activity: { activity: 'shopping', itemId: 1, amount: 1, town: town.name } } };
-    };
-    for (let tick = 0; tick < 4 && !fieldSession.shoppingTarget; tick++) {
-        ShoppingState.tick(fieldSession, fieldBot, null, { getClosestTown: () => town, say() {} });
-        for (const payload of requests) routeCache.accept({ ...payload,
-            rows: Array.from({ length: Trip.towns.length }, () => [true, 1, 0]) });
-    }
-    assert(fieldSession.shoppingTarget, 'prepared routes must let a field shopper select its seller and keep moving');
-    assert.equal(requests.length, 1, 'one town visit must not alternate between field and fabricated town route keys');
-    assert.equal(planningReads, 2, 'pending and ready ticks each build one shared economic context');
-    assert.equal(fieldSession.coldLifeState.currentRegion, 'Keltir fields',
-        'selecting a shop must not mark a bot as already arrived in town');
-    assert(fieldMoves.length > 0, 'the ready field shopper must request physical movement');
-    economyModule.forState = original.economyForState;
-    economyModule.forActor = original.economyForActor;
 
     World.user = { sessions: [] };
     MarketOpportunity.bestOffer = (selfId, options = {}) => Number(selfId) === 1 && !purchased
@@ -413,7 +374,5 @@ run().catch((error) => {
     BotEquipmentUpgrade.applyBestUpgrades = original.applyBestUpgrades;
     ShoppingState.sellAndRestock = original.sellAndRestock;
     ShoppingState.scheduleRestock = original.scheduleRestock;
-    invoke('GameServer/Bot/Economy/EconomyContext').forState = original.economyForState;
-    invoke('GameServer/Bot/Economy/EconomyContext').forActor = original.economyForActor;
     BotSkillTraining.review = original.skillReview;
 });

@@ -22,18 +22,7 @@ const DEFAULTS = {
     schedulerPartyBudgetMs: 75,
     schedulerIdleMaxResolvesPerTick: 100,
     schedulerPlayerMaxResolvesPerTick: 12,
-    // Goal metadata is repaired in short cooperative slices. Keep the
-    // player pass bounded, but let a restart backlog converge in minutes
-    // instead of leaving thousands of due rows stale for hours.
-    goalMetadataReconcileIntervalMs: 10000,
-    goalMetadataIdleBatchSize: 32,
-    goalMetadataPlayerBatchSize: 16,
-    goalMetadataIdleBudgetMs: 1000,
-    goalMetadataPlayerBudgetMs: 200,
-    coldOwnerLeaseMs: 30000,
     coldOwnerResolveTimeoutMs: 10000,
-    coldOwnerRenewalIntervalMs: 5000,
-    coldOwnerRecoveryIntervalMs: 5000,
     coldWorkerBatchSize: 64,
     coldWorkerCommitBatchSize: 32,
     // Cold simulation remains alive while a player is online, but its IPC
@@ -50,6 +39,7 @@ const DEFAULTS = {
     coldWorkerHeartbeatMs: 1000,
     coldWorkerUnhealthyMs: 5000,
     coldWorkerDeadMs: 10000,
+    coldWorkerBootMs: 60000,
     coldWorkerLoopIntervalMs: 20,
     coldWorkerSnapshotRefreshMs: 10000,
     coldWorkerSnapshotPageSize: 48,
@@ -111,23 +101,9 @@ const DEFAULTS = {
     // The persistent world is resolved in bounded batches so population
     // expansion never becomes a database spike after a restart.
     maxResolvesPerTick: 25,
-    maxPartyResolvesPerTick: 3,
-    maxMarketGoalReconcilesPerTick: 8,
-    maxWarehouseReleasesPerTick: 8,
-    // Historical gear debt is repaired only while the server is player-idle.
-    // Each pass advances by owner id and performs at most one tiny atomic
-    // transaction per owner, so cleanup cannot become a startup table sweep.
-    warehouseCleanupEnabled: true,
-    warehouseCleanupStartDelayMs: 60000,
-    warehouseCleanupIntervalMs: 500,
-    warehouseCleanupPassPauseMs: 60000,
-    warehouseCleanupIdlePauseMs: 6 * 60 * 60 * 1000,
-    warehouseCleanupOwnersPerTick: 1,
-    warehouseCleanupUnitsPerOwner: 32,
-    warehouseCleanupBudgetMs: 12,
     // Append-only diagnostics and AI memory have explicit lifecycles. Run a
-    // single indexed delete statement per idle tick and stagger it behind the
-    // warehouse repair so both jobs never form a startup write burst.
+    // single indexed delete statement per idle tick, delayed after start so it
+    // never joins the startup write burst.
     stateRetentionEnabled: true,
     stateRetentionStartDelayMs: 90000,
     stateRetentionIntervalMs: 1000,
@@ -166,14 +142,10 @@ const DEFAULTS = {
     partyRequestMaxAgeMs: 15 * 60 * 1000,
     partyPreferredMaxAgeMs: 5 * 60 * 1000,
     partyRequestCooldownMs: 5 * 60 * 1000,
-    partyRequestCleanupIntervalMs: 30000,
-    partyRequestCleanupBatchSize: 100,
     // Stagger the first shared-hunt review; this is no longer a hard lifetime.
     // Later reviews use goals, progress, relationships and individual patience.
     partySessionMaxMs: 20 * 60 * 1000,
     partyReviewIntervalMs: 5 * 60 * 1000,
-    partyRequirementRefreshMs: 5 * 60 * 1000,
-    partyRequirementRefreshBatchSize: 2,
     partySessionJitterMs: 5 * 60 * 1000,
     // Dissolved party rows are operational history, not durable state. Keep
     // a short diagnostic window without allowing every rotation to grow the
@@ -260,15 +232,7 @@ const ENV_KEYS = {
     schedulerPartyBudgetMs: 'BOT_POPULATION_SCHEDULER_PARTY_BUDGET_MS',
     schedulerIdleMaxResolvesPerTick: 'BOT_POPULATION_SCHEDULER_IDLE_MAX_RESOLVES',
     schedulerPlayerMaxResolvesPerTick: 'BOT_POPULATION_SCHEDULER_PLAYER_MAX_RESOLVES',
-    goalMetadataReconcileIntervalMs: 'BOT_POPULATION_GOAL_METADATA_INTERVAL_MS',
-    goalMetadataIdleBatchSize: 'BOT_POPULATION_GOAL_METADATA_IDLE_BATCH',
-    goalMetadataPlayerBatchSize: 'BOT_POPULATION_GOAL_METADATA_PLAYER_BATCH',
-    goalMetadataIdleBudgetMs: 'BOT_POPULATION_GOAL_METADATA_IDLE_BUDGET_MS',
-    goalMetadataPlayerBudgetMs: 'BOT_POPULATION_GOAL_METADATA_PLAYER_BUDGET_MS',
-    coldOwnerLeaseMs: 'BOT_POPULATION_COLD_OWNER_LEASE_MS',
     coldOwnerResolveTimeoutMs: 'BOT_POPULATION_COLD_OWNER_TIMEOUT_MS',
-    coldOwnerRenewalIntervalMs: 'BOT_POPULATION_COLD_OWNER_RENEWAL_MS',
-    coldOwnerRecoveryIntervalMs: 'BOT_POPULATION_COLD_OWNER_RECOVERY_MS',
     coldWorkerBatchSize: 'BOT_POPULATION_COLD_WORKER_BATCH_SIZE',
     coldWorkerCommitBatchSize: 'BOT_POPULATION_COLD_WORKER_COMMIT_BATCH_SIZE',
     coldWorkerMaxInFlight: 'BOT_POPULATION_COLD_WORKER_MAX_IN_FLIGHT',
@@ -278,6 +242,7 @@ const ENV_KEYS = {
     coldWorkerHeartbeatMs: 'BOT_POPULATION_COLD_WORKER_HEARTBEAT_MS',
     coldWorkerUnhealthyMs: 'BOT_POPULATION_COLD_WORKER_UNHEALTHY_MS',
     coldWorkerDeadMs: 'BOT_POPULATION_COLD_WORKER_DEAD_MS',
+    coldWorkerBootMs: 'BOT_POPULATION_COLD_WORKER_BOOT_MS',
     coldWorkerLoopIntervalMs: 'BOT_POPULATION_COLD_WORKER_LOOP_MS',
     coldWorkerSnapshotRefreshMs: 'BOT_POPULATION_COLD_WORKER_SNAPSHOT_MS',
     coldWorkerSnapshotPageSize: 'BOT_POPULATION_COLD_WORKER_SNAPSHOT_PAGE_SIZE',
@@ -316,14 +281,6 @@ const ENV_KEYS = {
     partyHistoryRetentionMs: 'BOT_PARTY_HISTORY_RETENTION_MS',
     partyHistoryCleanupBatchSize: 'BOT_PARTY_HISTORY_CLEANUP_BATCH_SIZE',
     partyHistoryCleanupIntervalMs: 'BOT_PARTY_HISTORY_CLEANUP_INTERVAL_MS',
-    warehouseCleanupEnabled: 'BOT_WAREHOUSE_CLEANUP_ENABLED',
-    warehouseCleanupStartDelayMs: 'BOT_WAREHOUSE_CLEANUP_START_DELAY_MS',
-    warehouseCleanupIntervalMs: 'BOT_WAREHOUSE_CLEANUP_INTERVAL_MS',
-    warehouseCleanupPassPauseMs: 'BOT_WAREHOUSE_CLEANUP_PASS_PAUSE_MS',
-    warehouseCleanupIdlePauseMs: 'BOT_WAREHOUSE_CLEANUP_IDLE_PAUSE_MS',
-    warehouseCleanupOwnersPerTick: 'BOT_WAREHOUSE_CLEANUP_OWNERS_PER_TICK',
-    warehouseCleanupUnitsPerOwner: 'BOT_WAREHOUSE_CLEANUP_UNITS_PER_OWNER',
-    warehouseCleanupBudgetMs: 'BOT_WAREHOUSE_CLEANUP_BUDGET_MS',
     stateRetentionEnabled: 'BOT_STATE_RETENTION_ENABLED',
     stateRetentionStartDelayMs: 'BOT_STATE_RETENTION_START_DELAY_MS',
     stateRetentionIntervalMs: 'BOT_STATE_RETENTION_INTERVAL_MS',

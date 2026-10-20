@@ -43,10 +43,10 @@ const lifeRow = async (patch) => ({ ...(await Database.execute(['SELECT * FROM b
         const refreshes = [];
         coordinator.requestEconomyRefresh = id => { refreshes.push(id); return true; };
         let serial = 0;
-        // The worker's card for the state it saw: authority, updatedAt and key.
+        // The worker's card for the state it saw: authority, updatedAt and echo.
         const card = state => Protocol.envelope('ready', epoch, { phase: 'economy_plan_ready', characterId: owner,
             authority: Commit.authority(state), economyPlan: { take: [Afk.SELL ?? 1, ORE, 2, 77, 78, 4, 237] },
-            economyDecision: { updatedAt: Number(state.updatedAt || 0), key: Decision.stateKey(state) } }, `b5-card-${++serial}`);
+            economyDecision: { updatedAt: Number(state.updatedAt || 0), echo: Decision.stateEcho(state) } }, `b5-card-${++serial}`);
         const kept = () => {
             assert.deepEqual(Goals.snapshot(owner).current, goal, 'the goal is kept');
             assert.equal(Life.cachedState(owner).stats?.marketRetryAfter, undefined, 'no retry penalty');
@@ -63,13 +63,13 @@ const lifeRow = async (patch) => ({ ...(await Database.execute(['SELECT * FROM b
         assert.deepEqual(refreshes, [], 'no refresh: the commit that moved the revision carries the next card');
         kept();
 
-        // 2. The lease changes while the payment is being prepared (after the
+        // 2. The revision moves while the payment is being prepared (after the
         //    coordinator admitted the card): the payment step refuses.
-        const leased = await lifeRow({ simulationRevision: revision + 1, simulationLeaseId: 'b5-new-lease' });
-        stub(Afk, 'offerOf', line => { Life.acceptLifecycleRow(leased); return offer(line); });
+        const moved = await lifeRow({ simulationRevision: revision + 2 });
+        stub(Afk, 'offerOf', line => { Life.acceptLifecycleRow(moved); return offer(line); });
         await coordinator.onMessage(card(Life.cachedState(owner)), coordinator.worker, epoch);
-        assert.equal(Life.cachedState(owner).simulation.leaseId, 'b5-new-lease', 'the lease changed mid-payment');
-        assert.equal(bought, 0, 'a lease change before the payment pays nothing');
+        assert.equal(Life.cachedState(owner).simulation.revision, revision + 2, 'the revision moved mid-payment');
+        assert.equal(bought, 0, 'a revision move before the payment pays nothing');
         assert.deepEqual(refreshes, [], 'a deferred trade asks no refresh (only buyPending does)');
         kept();
         restore.pop()();

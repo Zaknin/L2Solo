@@ -1,6 +1,7 @@
 const ClanPolicy = invoke('GameServer/Clan/ClanSimulationPolicy');
 const Gear = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const Roles = invoke('GameServer/Bot/AI/BotRoles');
+const SpotRisk = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 
 const MIN_MEMBERS = 7;
 const MAX_MEMBERS = 9;
@@ -37,7 +38,7 @@ function readinessFor(member, cache = null) {
     return cache.get(key);
 }
 
-function availableMember(member, profile, retained = new Set(), timestamp = Date.now()) {
+function availableMember(member, profile, retained = new Set()) {
     const id = memberId(member);
     const level = number(member?.level);
     const bossLevel = number(profile?.avgLevel);
@@ -55,11 +56,10 @@ function availableMember(member, profile, retained = new Set(), timestamp = Date
         // controlled, or already active raid groups here.
         if (!reclaimableEquipmentParty) return false;
     }
-    if (String(member?.simulationOwner || 'legacy_main') !== 'legacy_main') return false;
     if (bossLevel && (level < bossLevel - MAX_LEVEL_BELOW_BOSS || level > bossLevel + MAX_LEVEL_ABOVE_BOSS)) return false;
     if ((member?.stats?.clanHuntBackoffs || []).some((entry) => (
         String(entry?.spotId || '') === String(profile?.id || '')
-        && number(entry?.until) > number(timestamp)
+        && SpotRisk.markActive(entry, member)
     ))) return false;
     return true;
 }
@@ -273,9 +273,8 @@ function assessment(clan = {}, profile = {}, previousGoal = null, options = {}) 
     const compositionOptions = { desiredMembers, requireCapabilities: options.requireCapabilities === true || desiredMembers > MIN_MEMBERS };
     const readinessCache = options.readinessCache || new Map();
     const retained = new Set((previousGoal?.assignedMemberIds || []).map(number).filter(Boolean));
-    const timestamp = Date.now();
     const available = (clan.members || []).filter((member) => (
-        availableMember(member, profile, retained, timestamp)
+        availableMember(member, profile, retained)
     ));
     const candidates = available.filter((member) => (
         raidRole(member) !== 'filler' && combatCapable(member, profile, readinessCache)

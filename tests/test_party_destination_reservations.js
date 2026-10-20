@@ -5,8 +5,7 @@ const world = require('./fixtures/native_stock_world')();
 require('../src/Global');
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
-const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
-const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
+const BotRoute = require('../src/GameServer/Bot/Population/BotRoute');
 const Lifecycle = require('../src/GameServer/Bot/Population/BackgroundPartyLifecycle');
 const Material = require('../src/GameServer/Bot/Population/CraftMaterialParty');
 const { beginHuntingTrip } = require('../src/GameServer/Bot/Population/HuntingTravel');
@@ -39,43 +38,25 @@ const at = Date.now(), ids = [];
     await DB.saveBackgroundParty(prepared.row);
     await Life.init(); await Parties.init();
     const members = ids.map(id => Life.cachedState(id));
-    const stored = await DB.execute(['SELECT statsJson FROM bot_life_state WHERE partyId=?', ['old-assembly']]);
-    assert(stored.every(row => JSON.parse(row.statsJson).backgroundPartySpotId === spot.id),
-        'destination repair is durable even when hennas and combat profiles need no repair');
-    assert(members.every(state => state.stats.backgroundPartySpotId === spot.id),
-        'startup hydrates the destination of an old persisted party before occupancy publication');
     assert(members.every(state => state.spotId === 'elsewhere' && state.loc.locX === 0),
-        'a destination reservation never moves a physical actor');
-    assert.deepEqual(Profiles.indexedOccupancy(Life.occupancyIndex(), [spot]), Profiles.occupancySnapshot([spot], members),
-        'ordinary cache publication maintains the shared reservation in the existing index');
-
-    const waiting = [90001, 90002].map(characterId => ({ characterId, phase: 'cold', activity: 'hunting',
-        spotId: 'elsewhere', stats: { partyRequest: { status: 'open', spotId: spot.id } } }));
-    const occupancy = Profiles.occupancySnapshot([spot], [...members, ...waiting]);
-    assert.equal(occupancy[spot.id].count, 0);
-    assert.equal(occupancy[spot.id].reservedCount, 7);
-    assert(ids.every(id => occupancy[spot.id].retained.has(String(id))), 'capacity allocation retains the whole party');
-    assert(Profiles.reservePartyCapacity(occupancy, spot, members), 'surplus future intentions do not strand an allocated party');
-    assert(!Profiles.reservePartyCapacity(occupancy, spot, waiting), 'unallocated hunters cannot bypass a full destination');
-    const before = [...occupancy[spot.id].reservedKeys];
-    assert(!Profiles.reservePartyCapacity(occupancy, spot, [...members, { characterId: 90003 }]));
-    assert.deepEqual([...occupancy[spot.id].reservedKeys], before, 'failed admission cannot partially reserve an expanded roster');
+        'a party destination never moves a physical actor');
+    // The party record holds the destination; no member keeps a copy and no
+    // place is held for the party ahead of its arrival (ARCH-08-c).
+    assert(members.every(state => state.stats.backgroundPartySpotId === undefined),
+        'startup copies the party destination into no member');
 
     const party = Parties.find('old-assembly');
     const allStates = Life.allStates;
     Life.allStates = () => { throw Error('party gathering scanned the population'); };
     let route;
     try {
-        route = Coordinator.routeFor(members[0], null, party, members,
-            { spots: new Map([[spot.id, spot]]), occupancy, timestamp: at });
+        route = BotRoute.route(members[0], null, party, members, { spots: [spot], timestamp: at });
     } finally { Life.allStates = allStates; }
     assert(route?.needed && route.mode === 'party');
     const departed = members.map(state => beginHuntingTrip(state, route, at));
-    assert(departed.every(state => state.loc.locX === 0 && state.stats.backgroundPartySpotId === spot.id));
+    assert(departed.every(state => state.loc.locX === 0 && state.stats.backgroundPartySpotId === undefined));
     const arrived = departed.map(state => finishPartyRouteTravelState(state, at + route.travelMs));
-    assert(Assembly.ready(party, arrived, spot), 'normal party travel gathers the full reserved roster on the spot');
-    const rerouted = beginHuntingTrip(members[0], { ...route, spotId: 'new-destination' }, at);
-    assert.equal(Profiles.farmIntentSpotId(rerouted), 'new-destination', 'a new route replaces the old shared reservation');
+    assert(Assembly.ready(party, arrived, spot), 'normal party travel gathers the full roster on the spot');
 
     const owners = members.map((state, i) => ({ ...state, inventory: {}, stats: { ...state.stats,
         equipmentPlan: { status: 'active', strategy: 'craft', target: { selfId: i === 1 ? 148 : 78 } } } }));
@@ -96,7 +77,7 @@ const at = Date.now(), ids = [];
     assert(!released.stats.partyRequest.helpDeal, 'a departed owner cannot inherit another payer helper proposal');
     assert.equal(reviewed.states[0].stats.partyRequest.amount, 10, 'only the uncollected quota is requested again');
     assert(!reviewed.states[2].stats.partyRequest.materialParty, 'a helper cannot inherit somebody else material goal');
-    assert(reviewed.states.every(state => !state.stats.backgroundPartySpotId && !state.party.partyId));
+    assert(reviewed.states.every(state => !state.party.partyId));
     assert.equal(Material.requestOf(released).status, 'deferred');
     await DB.execute([`UPDATE bot_life_state SET partyId=NULL, activity='hunting', statsJson=?, updatedAt=? WHERE characterId=?`,
         [JSON.stringify(released.stats), released.updatedAt, released.characterId]]);
@@ -116,5 +97,5 @@ const at = Date.now(), ids = [];
         assert.equal(durable.itemId, 4108);
         assert.equal(durable.attempts, 1, 'the native main retry cannot clear the need before its worker retry');
     } finally { Population.started = previousStarted; Material.request = materialRequest; }
-    console.log('PASS old-party startup reservation, bounded capacity admission, native gathering and personal material recovery');
+    console.log('PASS old-party startup without a member copy, native gathering and personal material recovery');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => world.close());

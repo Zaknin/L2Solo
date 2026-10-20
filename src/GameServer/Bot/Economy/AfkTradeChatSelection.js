@@ -17,13 +17,18 @@ function valid(shop, line, minLotValue) {
         && (Number(shop.storeType) !== 3 || Number(shop.escrowAdena) >= Number(line.price));
 }
 
-function choose(shops, { now, lastItemAt, lastOwnerAt, lastTownAt, preferredSide }) {
-    const minLotValue = Pricing.scalePrice(MIN_AD_LOT_BASE_ADENA);
+function minLotValue() {
+    return Pricing.scalePrice(MIN_AD_LOT_BASE_ADENA);
+}
+
+// The board's books and the bots' candidate lines: a function of the shops
+// alone, so a caller may keep it until the board changes (BotTradeChat).
+function index(shops, minLot = minLotValue()) {
     const books = new Map();
     const candidates = [];
     for (const shop of shops) {
         for (const line of shop.lines || []) {
-            if (!valid(shop, line, minLotValue)) continue;
+            if (!valid(shop, line, minLot)) continue;
             const type = Number(shop.storeType);
             const id = itemKey(0, line);
             const book = books.get(id) || { minAsk: Infinity, secondAsk: Infinity,
@@ -42,7 +47,11 @@ function choose(shops, { now, lastItemAt, lastOwnerAt, lastTownAt, preferredSide
             }
         }
     }
+    return { minLotValue: minLot, books, candidates };
+}
 
+// The pick reads the clock, the cooldowns and the buyers: every call.
+function pick({ books, candidates }, { now, lastItemAt, lastOwnerAt, lastTownAt, preferredSide }) {
     let best = null;
     let preferred = null;
     for (const candidate of candidates) {
@@ -75,4 +84,8 @@ function choose(shops, { now, lastItemAt, lastOwnerAt, lastTownAt, preferredSide
     return preferred || best;
 }
 
-module.exports = { choose, itemKey, ITEM_COOLDOWN_MS, MIN_AD_LOT_BASE_ADENA };
+function choose(shops, context) {
+    return pick(index(shops), context);
+}
+
+module.exports = { choose, index, pick, minLotValue, itemKey, ITEM_COOLDOWN_MS, MIN_AD_LOT_BASE_ADENA };

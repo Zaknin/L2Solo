@@ -8,6 +8,8 @@ const RESOURCE_IDS = new Set([
     5220, 5549, 5550, 5551, 5552
 ]);
 const isResource = (id) => RESOURCE_IDS.has(Number(id));
+// Blades a dual-sword exchange consumes; warehouseMaterials hands them over.
+const DUAL_COMPONENT_IDS = new Set(DualSwords.COMBINATIONS.flatMap(([, leftId, rightId]) => [leftId, rightId]));
 const isSupplement = require('../Bot/Economy/CraftSupplementMaterials').isSupplementalMaterial;
 const clanIdFor = (state) => Number(state?.clanId ?? state?.stats?.clanId ?? 0);
 const resolveRecipe = (id) => Recipes.resolveByRecipeId(id) || DualSwords.resolveByRecipeId(id);
@@ -26,6 +28,14 @@ function stockInventory(inventory = {}, rows = []) {
             amount: Number(result[id]?.amount || 0) + amount };
     }
     return result;
+}
+
+// Craft requirements only: warehouse blades a dual-sword exchange consumes count
+// as stock there, so their own dwarven recipes are not asked for. Gear selection
+// keeps stockInventory: a blade in the warehouse is not the member's gear.
+function craftStock(inventory = {}, rows = []) {
+    return stockInventory(inventory, rows.map(row => DUAL_COMPONENT_IDS.has(Number(row.selfId))
+        ? { ...row, kind: 'Other.Material' } : row));
 }
 
 function recipeForProvider(recipe, provider, batches = 1) {
@@ -86,4 +96,4 @@ function warehouseMaterials(plan, inventory, rows) {
     })).filter(item => item.amount > 0);
 }
 
-module.exports = { RESOURCE_IDS, isResource, isSupplement, clanIdFor, resolveRecipe, isPersonalCraft, stockInventory, requirements, warehouseMaterials, recipeForProvider };
+module.exports = { RESOURCE_IDS, isResource, isSupplement, clanIdFor, resolveRecipe, isPersonalCraft, stockInventory, craftStock, requirements, warehouseMaterials, recipeForProvider };

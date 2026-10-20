@@ -24,10 +24,20 @@ const InteractionMemoryPolicy = require('./GameServer/Social/InteractionMemoryPo
 const ClanNameCatalog = require('./GameServer/Clan/ClanNameCatalog');
 const BoardRules = require('./GameServer/AfkTrade/BoardRules');
 const BotErrands = require('./GameServer/Bot/Population/BotErrands');
-const ColdProtocol = require('./GameServer/Bot/Population/ColdSimulationProtocol');
 const NativeWriteCheckpoint = require('./GameServer/Bot/Population/NativeWriteCheckpoint');
 const EconomyCommit = require('./GameServer/Bot/Economy/EconomyCommit');
 const Diagnostics = require('./GameServer/Bot/Economy/EconomyDiagnostics');
+const ColdCombatProfile = require('./GameServer/Bot/Population/ColdCombatProfile');
+const SavedStats = require('./GameServer/Bot/SavedStats');
+const PartyCandidateProjection = require('./DatabasePartyCandidateProjection');
+const PlayerWarehouse = require('./DatabasePlayerWarehouse');
+const DataCache = invoke('GameServer/DataCache');
+const C4Recipes = require('./GameServer/Items/C4RecipeItems');
+const TradeIntent = require('./GameServer/Bot/Economy/TradeIntent');
+const PurchaseFunding = require('./GameServer/Bot/Economy/PurchaseFunding');
+const ClanSocialPolicy = require('./GameServer/Clan/ClanSocialPolicy');
+const ClanSocialEvidence = require('./GameServer/Clan/ClanSocialEvidence');
+const PkDropPolicy = require('./GameServer/PkDropPolicy');
 let nativeDiagnosticFacts = null;
 let nativeDiagnosticCounts = null;
 let nativeDiagnosticOverflow = 0;
@@ -118,6 +128,8 @@ const metrics = {
     waitMs: 0,
     runMs: 0,
     maxPending: 0,
+    // Diagnostic snapshots built by stats(); control reads use pending().
+    snapshots: 0,
     byOperation: null
 };
 
@@ -257,10 +269,12 @@ function enqueue(work, { operation = 'raw', read = false, onTiming = null } = {}
         EconomyJournal.begin(operation);
         const candidateCheckpoint = connection?.isTransaction ? ClanReviewInputs.candidateCheckpoint() : null;
         if (!connection?.isTransaction) ClanReviewInputs.beginCandidateCommit();
+        let committed = false;
         try {
             const result = work();
             EconomyJournal.commit();
             if (!connection?.isTransaction) ClanReviewInputs.commitCandidateInputs();
+            committed = true;
             if (timed) record(operation, wait, now() - startedAt, read);
             return result;
         } catch (error) {
@@ -271,6 +285,10 @@ function enqueue(work, { operation = 'raw', read = false, onTiming = null } = {}
             throw error;
         } finally {
             metrics.pending -= 1;
+            // A committed job may have added history outbox rows (directly or
+            // by a trigger); the history thread sleeps until told. Outside the
+            // try: nothing here can turn a committed job into a discard.
+            if (committed && !read && operation !== 'history:outbox-delete') History.wake();
             if (typeof onTiming === 'function') {
                 // Observability must never turn a committed operation into a failure.
                 try { onTiming(timed ? { waitMs: wait, runMs: now() - startedAt } : undefined); }
@@ -449,7 +467,7 @@ function reportTransactionSqliteFailure(operation, phase, error) {
 // ARCH-NOTE: A queued lifecycle save can reject a stale native command before
 // SQL. Failure-only diagnostics distinguish that admission from a SQLite fault
 // without changing either rejection identity or the existing failure counters.
-function reportBotLifeSaveFailure(phase, error) {
+function reportBotLifeSaveFailure(phase, error, statement = null) {
     try {
         const checkpoint = NativeWriteCheckpoint.refusalDiagnostic(error);
         if (!DiagnosticConfig.developerDiagnostics) {
@@ -472,6 +490,9 @@ function reportBotLifeSaveFailure(phase, error) {
             sqliteCode: error?.errcode ?? null, sqliteReason: error?.errstr ?? null,
             admissionRefusalReason: error instanceof WorkerCommandAdmissionRefusal
                 && reasons.includes(error.message) ? error.message : null,
+            characterId: Array.isArray(statement?.[1]) && Number.isSafeInteger(statement[1][0]) ? statement[1][0] : null,
+            checkpointDrift: error instanceof WorkerCommandAdmissionRefusal && Array.isArray(error.checkpointDrift)
+                ? error.checkpointDrift : null,
             configuredWriterBusyTimeoutMs: 5000, frames, ...(checkpoint || {})
         }));
     } catch (_) { /* Diagnostics must preserve the original save rejection. */ }
@@ -1469,7 +1490,7 @@ function applySchemaMigrations() {
             );
             CREATE INDEX IF NOT EXISTS clan_social_memory_updated ON clan_social_memory(updatedAt, clanId);
         `)],
-        [39, () => require('./DatabasePartyCandidateProjection').install(connection)],
+        [39, () => PartyCandidateProjection.install(connection)],
         [40, () => {
             if (!connection.prepare('PRAGMA table_info(characters)').all().some(column => column.name === 'skillCooldowns'))
                 connection.exec("ALTER TABLE characters ADD COLUMN skillCooldowns TEXT NOT NULL DEFAULT '[]'");
@@ -1592,7 +1613,7 @@ function applySchemaMigrations() {
                     spotId
                 )) VIRTUAL;
         `);
-        require('./DatabasePartyCandidateProjection').createIndex(connection);
+        PartyCandidateProjection.createIndex(connection);
     }]);
     // Personas v2 (step 3.1, N6a): eleven types by class and share, clan
     // leaders through the author's founder gate, remembered listing prices reset.
@@ -1706,8 +1727,159 @@ function applySchemaMigrations() {
         const shops = connection.prepare('DELETE FROM afk_trade_shops WHERE id = ?');
         for (const { id } of empty) { lines.run(id); shops.run(id); }
     }]);
-    migrations.push([66, () => require('./DatabasePartyCandidateProjection').upgradeRecruitment(connection)]);
-    migrations.push([67, () => require('./DatabasePlayerWarehouse').migrate(connection)]);
+    migrations.push([66, () => PartyCandidateProjection.upgradeRecruitment(connection)]);
+    // The stale-goal and market-goal reconcile passes are gone (the worker
+    // decides goals); their indexes only cost every goal and state write.
+    migrations.push([67, () => connection.exec(`
+        DROP INDEX IF EXISTS bot_goal_state_review_queue;
+        DROP INDEX IF EXISTS bot_life_state_goal_review;
+        DROP INDEX IF EXISTS bot_life_state_market_page;
+    `)]);
+    // A bot's stored bag, learned skills and henna slots each carry a
+    // revision that moves with every write of that input, so a reader keys on
+    // a number instead of a JSON compare or a reread. A writer that sets
+    // inventoryRevision itself (the cold commit) skips the trigger's second
+    // row write. A world saved before this starts at 0 (unknown: recompute).
+    migrations.push([68, () => {
+        const columns = new Set(connection.prepare('PRAGMA table_info(bot_life_state)').all().map((column) => column.name));
+        for (const column of STATE_REVISION_COLUMNS) {
+            if (!columns.has(column)) connection.exec(`ALTER TABLE bot_life_state ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+        }
+        const bump = (column, id, also = '') => `UPDATE bot_life_state SET ${column} = ${column} + 1 WHERE characterId = ${id}${also};`;
+        // A row moved to another bot moves both bots' revisions, each once.
+        const moved = (column) => `${bump(column, 'NEW.characterId')} ${bump(column, 'OLD.characterId', ' AND OLD.characterId IS NOT NEW.characterId')}`;
+        // A row table's triggers only where the table exists (a test world can
+        // mark earlier migrations applied without their tables).
+        const tables = new Set(connection.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((table) => table.name));
+        connection.exec(`
+            CREATE TRIGGER IF NOT EXISTS bot_life_state_inventory_revision AFTER UPDATE OF inventorySummary ON bot_life_state
+            WHEN OLD.inventorySummary IS NOT NEW.inventorySummary AND OLD.inventoryRevision = NEW.inventoryRevision
+            BEGIN ${bump('inventoryRevision', 'NEW.characterId')} END;`);
+        if (tables.has('skills')) connection.exec(`
+            CREATE TRIGGER IF NOT EXISTS skills_revision_insert AFTER INSERT ON skills
+            BEGIN ${bump('skillsRevision', 'NEW.characterId')} END;
+            CREATE TRIGGER IF NOT EXISTS skills_revision_update AFTER UPDATE OF selfId, level, passive, characterId ON skills
+            WHEN OLD.selfId IS NOT NEW.selfId OR OLD.level IS NOT NEW.level OR OLD.passive IS NOT NEW.passive
+                OR OLD.characterId IS NOT NEW.characterId
+            BEGIN ${moved('skillsRevision')} END;
+            CREATE TRIGGER IF NOT EXISTS skills_revision_delete AFTER DELETE ON skills
+            BEGIN ${bump('skillsRevision', 'OLD.characterId')} END;`);
+        if (tables.has('character_hennas')) connection.exec(`
+            CREATE TRIGGER IF NOT EXISTS character_hennas_revision_insert AFTER INSERT ON character_hennas
+            BEGIN ${bump('hennaRevision', 'NEW.characterId')} END;
+            CREATE TRIGGER IF NOT EXISTS character_hennas_revision_update AFTER UPDATE OF slot, symbolId, characterId ON character_hennas
+            WHEN OLD.slot IS NOT NEW.slot OR OLD.symbolId IS NOT NEW.symbolId OR OLD.characterId IS NOT NEW.characterId
+            BEGIN ${moved('hennaRevision')} END;
+            CREATE TRIGGER IF NOT EXISTS character_hennas_revision_delete AFTER DELETE ON character_hennas
+            BEGIN ${bump('hennaRevision', 'OLD.characterId')} END;
+        `);
+    }]);
+    // A party row carries a revision that every party write moves in its own
+    // statement; every party fence compares it (updatedAt is only a time).
+    migrations.push([69, () => {
+        const columns = connection.prepare('PRAGMA table_info(bot_background_parties)').all();
+        if (!columns.some((column) => column.name === 'revision')) {
+            connection.exec('ALTER TABLE bot_background_parties ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+        }
+    }]);
+    // The generated name and look versions leave the stats for their own
+    // columns: only their writers move them, and each write moves the row's
+    // revision, so an older proposal is refused instead of merged. The stats
+    // copy of sex had no reader (characters.sex owns it).
+    migrations.push([70, () => {
+        const columns = new Set(connection.prepare('PRAGMA table_info(bot_life_state)').all().map((column) => column.name));
+        for (const column of ['nameGeneratorVersion', 'appearanceVersion']) {
+            if (!columns.has(column)) connection.exec(`ALTER TABLE bot_life_state ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+        }
+        connection.exec(`
+            UPDATE bot_life_state SET
+                nameGeneratorVersion = COALESCE(CAST(json_extract(statsJson, '$.nameGeneratorVersion') AS INTEGER), 0),
+                appearanceVersion = COALESCE(CAST(json_extract(statsJson, '$.appearanceVersion') AS INTEGER), 0),
+                statsJson = json_remove(statsJson, '$.nameGeneratorVersion', '$.appearanceVersion', '$.sex')
+            WHERE json_valid(statsJson) AND (json_type(statsJson, '$.nameGeneratorVersion') IS NOT NULL
+                OR json_type(statsJson, '$.appearanceVersion') IS NOT NULL OR json_type(statsJson, '$.sex') IS NOT NULL);
+        `);
+    }]);
+    // The mind (SavedStats.MIND_KEYS: what the worker decided) leaves the stats
+    // for its own column, so a refused body write keeps the decision. The move
+    // copies present keys only and keeps a null value and nested nulls as they
+    // are (json_patch would strip them); a row without a packet gets {}. The
+    // -> operator hands each value back as JSON, so true stays true
+    // (json_extract would turn it into 1).
+    migrations.push([71, () => {
+        const columns = new Set(connection.prepare('PRAGMA table_info(bot_life_state)').all().map((column) => column.name));
+        if (!columns.has('mindJson')) connection.exec("ALTER TABLE bot_life_state ADD COLUMN mindJson TEXT NOT NULL DEFAULT '{}'");
+        const keys = SavedStats.MIND_KEYS.map((key) => `'${key}'`).join(', ');
+        connection.exec(`
+            UPDATE bot_life_state SET
+                mindJson = COALESCE((SELECT json_group_object(key, statsJson -> ('$.' || key))
+                    FROM json_each(statsJson) WHERE key IN (${keys})), '{}'),
+                statsJson = json_remove(statsJson, ${SavedStats.MIND_KEYS.map((key) => `'$.${key}'`).join(', ')})
+            WHERE json_valid(statsJson) AND mindJson = '{}';
+        `);
+    }]);
+    // The phase says who runs a bot (cold: the background thread, hot: main);
+    // the row's ownership and loan columns, constant since the loan went,
+    // leave with the indexes and triggers that name them. A row a world
+    // saved while on loan is handed back first (its revision moves, as the
+    // startup reset did). DROP COLUMN refuses a column an index or a trigger
+    // still names: the known ones are dropped and created again without it,
+    // and an unknown one stops the migration by name.
+    migrations.push([72, () => {
+        const loanColumns = ['simulationOwner', 'simulationLeaseId', 'simulationLeaseUntil'];
+        const columns = new Set(connection.prepare('PRAGMA table_info(bot_life_state)').all().map((column) => column.name));
+        if (columns.has('simulationOwner')) connection.exec(`
+            UPDATE bot_life_state SET simulationOwner = 'legacy_main', simulationRevision = simulationRevision + 1,
+                simulationLeaseId = NULL, simulationLeaseUntil = 0
+            WHERE simulationOwner IS NOT 'legacy_main' OR simulationLeaseId IS NOT NULL OR simulationLeaseUntil <> 0;
+        `);
+        connection.exec(`
+            DROP TRIGGER IF EXISTS bot_party_candidate_insert;
+            DROP TRIGGER IF EXISTS bot_party_candidate_metadata;
+            DROP TRIGGER IF EXISTS bot_party_candidate_ordinary;
+            DROP INDEX IF EXISTS bot_life_state_simulation_owner_lease;
+            DROP INDEX IF EXISTS bot_life_state_party_owner_filter;
+            DROP INDEX IF EXISTS bot_life_state_party_request_expiry;
+            DROP INDEX IF EXISTS bot_life_state_warehouse_release;
+            DROP INDEX IF EXISTS bot_life_state_warehouse_demand;
+            DROP INDEX IF EXISTS bot_life_state_party_candidate_projection;
+        `);
+        const naming = connection.prepare(`SELECT type, name FROM sqlite_master
+            WHERE ${loanColumns.map(() => 'sql LIKE ?').join(' OR ')}`).all(...loanColumns.map((column) => `%${column}%`))
+            .filter((object) => !(object.type === 'table' && object.name === 'bot_life_state'));
+        if (naming.length) throw new Error(`migration 72: ${naming.map((object) => `${object.type} ${object.name}`).join(', ')} names a loan column`);
+        for (const column of loanColumns) {
+            if (columns.has(column)) connection.exec(`ALTER TABLE bot_life_state DROP COLUMN ${column}`);
+        }
+        connection.exec(`
+            CREATE INDEX bot_life_state_party_owner_filter
+                ON bot_life_state(phase, partyId, activity, spotId, updatedAt);
+            CREATE INDEX bot_life_state_party_request_expiry
+                ON bot_life_state(phase, partyRequestStatus, partyRequestedAt, partyRequestPriority);
+            CREATE INDEX bot_life_state_warehouse_release
+                ON bot_life_state(characterId, updatedAt)
+                WHERE phase = 'cold'
+                AND accountName NOT LIKE 'bot_craft_%'
+                AND (partyId IS NULL OR partyId = '')
+                AND activity IN ('hunting', 'resting');
+            CREATE INDEX bot_life_state_warehouse_demand
+                ON bot_life_state(updatedAt, characterId)
+                WHERE phase = 'cold'
+                AND accountName NOT LIKE 'bot_craft_%'
+                AND (partyId IS NULL OR partyId = '')
+                AND activity IN ('hunting', 'resting');
+        `);
+        PartyCandidateProjection.createIndex(connection);
+        const projection = connection.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_party_candidate_projection'").get();
+        const projectionColumns = projection
+            ? new Set(connection.prepare('PRAGMA table_info(bot_party_candidate_projection)').all().map((column) => column.name)) : new Set();
+        if (projectionColumns.has('joinAvailability')) {
+            PartyCandidateProjection.createAvailabilityTriggers(connection);
+            PartyCandidateProjection.refreshCandidates(connection);
+        }
+    }]);
+    // The author's account warehouse (his migration 67, numbered after ours).
+    migrations.push([73, () => PlayerWarehouse.migrate(connection)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -1794,8 +1966,7 @@ function checkCapturedWriteAdmission(admission, characterId) {
             FROM bot_life_state WHERE characterId = ?`, [...admission.coldTraining.versions, characterId]);
         const current = Protocol.commandCheckpoint(row && { ...row, activityStartedAt: row.activityStartedAt || 0,
             nextResolveAt: row.nextResolveAt || 0, lastResolvedAt: row.lastResolvedAt || 0, lastHotAt: row.lastHotAt || 0 });
-        if (current?.phase !== 'cold' || current.simulationOwner !== LEGACY_SIMULATION_OWNER
-            || row.trainingVersionsCurrent !== 1
+        if (current?.phase !== 'cold' || row.trainingVersionsCurrent !== 1
             || (!admission.nativeProof && !Protocol.sameCommandCheckpoint(admission.coldTraining, current))) throw new ColdTrainingSourceRetired();
     }
     if (admission.nativeProof) {
@@ -2154,7 +2325,7 @@ function syncPlayerManagedClanUnsafe(clanId) {
 function syncEconomySnapshotUnsafe(characterId, state, changedIds, mp = null) {
     if (!state) return null;
     const row = one('SELECT * FROM bot_life_state WHERE characterId = ?', [Number(characterId)]);
-    if (!row || row.phase !== 'cold' || row.simulationOwner !== LEGACY_SIMULATION_OWNER
+    if (!row || row.phase !== 'cold'
         || (state.simulation && Number(row.simulationRevision) !== Number(state.simulation.revision))) {
         throw new Error('economy_state_changed');
     }
@@ -2175,10 +2346,8 @@ function economyOwnerUnsafe(characterId, authority, fresh = false) {
     const row = one('SELECT life.*, c.username FROM bot_life_state life JOIN characters c ON c.id=life.characterId WHERE life.characterId=?',
         [Number(characterId)]);
     if (!row || !BoardRules.isBotAccount(row.username) || !authority
-        || row.phase !== authority.phase || row.simulationOwner !== authority.ownerId
-        || (row.simulationLeaseId || null) !== (authority.leaseId || null)
+        || row.phase !== authority.phase
         || Number(row.lastHotAt || 0) !== Number(authority.hotAt || 0)
-        || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.simulationLeaseId
         || (fresh && Number(row.simulationRevision) !== authority.revision)) throw Error('economy_owner_changed');
     return row;
 }
@@ -2203,7 +2372,7 @@ function economyStepUnsafe(characterId, command, kind) {
     }
     if (tuple[1] !== 0 || command[2] !== tuple[0]) throw Error('economy_sequence_changed');
     economyOwnerUnsafe(characterId, command.authority, true);
-    const state = { level: Number(row.level), phase: row.phase, stats: jsonObject(row.statsJson),
+    const state = { level: Number(row.level), phase: row.phase, stats: SavedStats.merge(row.statsJson, row.mindJson),
         inventory: jsonObject(row.inventorySummary) };
     // Current own protection is prepared once inside the atomic boundary,
     // never inferred from the worker's spending proposal.
@@ -2220,8 +2389,10 @@ function completeEconomyStepUnsafe(characterId, step, result, changedIds, mp = n
             recipeId: step.command[1] === EconomyCommit.KINDS.craft ? Number(result.nativeId || 0) : undefined });
     const patch = { ...statsPatch, economyCommit: tuple, ...(learning ? { lastRecipeBookLearning: learning } : {}) };
     if (step.row.phase === 'cold') return writeColdInventorySnapshotUnsafe(characterId, step.row, changedIds, mp, patch);
-    write("UPDATE bot_life_state SET statsJson=json_patch(COALESCE(statsJson,'{}'),json(?)) WHERE characterId=?",
-        [JSON.stringify(patch), Number(characterId)]);
+    const { body, mind } = SavedStats.split(patch);
+    write(`UPDATE bot_life_state SET statsJson=json_patch(COALESCE(statsJson,'{}'),json(?)),
+        mindJson=CASE WHEN ? IS NULL THEN mindJson ELSE json_patch(mindJson,json(?)) END WHERE characterId=?`,
+    [JSON.stringify(body), ...mindPatchParams(mind), Number(characterId)]);
     return normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId=?', [Number(characterId)]));
 }
 
@@ -2229,11 +2400,11 @@ function completeEconomyStepUnsafe(characterId, step, result, changedIds, mp = n
 // Only physical flags move; no predicted cold items are materialized here.
 function equipColdPurchaseUnsafe(characterId, step, itemId, autoEquip, heldItemIds = []) {
     if (!step || step.row.phase !== 'cold' || autoEquip === false) return null;
-    const template = require('./GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(itemId));
+    const template = ItemTemplateIndex.find(DataCache.items, Number(itemId));
     if (template?.etc?.stackable || !(Number(template?.etc?.slot) > 0)) return null;
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
     const physical = all('SELECT * FROM items WHERE characterId=? AND amount>0', [characterId]);
-    const stats = jsonObject(step.row.statsJson);
+    const stats = SavedStats.merge(step.row.statsJson, step.row.mindJson);
     const crystalState = { stats };
     const held = new Set([...heldItemIds, ...(stats.equipmentPlan?.materials || [])
         .filter(row => invoke('GameServer/Bot/Economy/BotCrystallization').inputAmount(crystalState, row.selfId))
@@ -2263,12 +2434,12 @@ function equipColdPurchaseUnsafe(characterId, step, itemId, autoEquip, heldItemI
 
 function checkEconomyFundingUnsafe(characterId, step, amount, funding = {}, walletOverride = null, packetOverride = null) {
     if (!step) return;
-    const stats = jsonObject(step.row.statsJson), packet = packetOverride || stats.money;
+    const stats = SavedStats.merge(step.row.statsJson, step.row.mindJson), packet = packetOverride || stats.money;
     if (!Array.isArray(packet) || packet.length < 4) throw Error('economy_funding_missing');
     const wallet = walletOverride === null ? Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=57', [characterId]).amount) : walletOverride;
     const { r, itemId, valueHours, survivalCost, clanPart } = funding;
     const fundingCapture = Diagnostics.active() && Diagnostics.enabled(characterId) ? {} : null;
-    const budget = require('./GameServer/Bot/Economy/PurchaseFunding').spendable({
+    const budget = PurchaseFunding.spendable({
         adena: wallet, stats: { money: packet }
     }, 0, { r, itemId, valueHours, survivalCost, clanPart, free: funding.free === true }, fundingCapture);
     if (Diagnostics.active()) stageNativeDiagnostic(characterId, step, 'native_funding', amount <= budget ? 'allowed' : 'funding_changed',
@@ -2283,7 +2454,7 @@ function checkEconomyFundingUnsafe(characterId, step, amount, funding = {}, wall
 // clan and explicit item reservations still belong to their original owner.
 function prepareCraftReservationsUnsafe(step, recipe) {
     if (!step || !recipe) return;
-    const stats = jsonObject(step.row.statsJson), plan = stats.equipmentPlan;
+    const stats = SavedStats.merge(step.row.statsJson, step.row.mindJson), plan = stats.equipmentPlan;
     if (plan?.strategy !== 'craft' || plan.clanGoal?.clanId
         || !['active', 'component_ready', 'ready_to_craft'].includes(plan.status)) return;
     const unsealSource = Number(plan.unseal?.sourceId) === Number(recipe.productId)
@@ -2303,7 +2474,7 @@ function prepareCraftReservationsUnsafe(step, recipe) {
 
 function checkEconomyMaterialProtectionUnsafe(characterId, step, selfId, used) {
     if (!step) return;
-    const stats = jsonObject(step.row.statsJson), inventory = jsonObject(step.row.inventorySummary);
+    const stats = SavedStats.merge(step.row.statsJson, step.row.mindJson), inventory = jsonObject(step.row.inventorySummary);
     // Bilateral market acceptance also rechecks the current gear/craft/clan
     // reserves inside its transaction, without a prepared economy command.
     step.reserved ??= invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts({
@@ -2318,15 +2489,24 @@ function checkEconomyMaterialProtectionUnsafe(characterId, step, selfId, used) {
     if (available - reserve < used) throw Error('economy_material_protected');
 }
 
-// An AFK fill changes the items of a bot whose row the cold worker may lease;
+// An AFK fill changes the items of a far bot the cold worker may be stepping;
 // the worker would later commit its older summary over them. Fence it as clan
 // writes do: the same transaction writes the new amounts into the summary and
 // advances simulationRevision, so the worker's commit fails its CAS and the
 // bot is resolved again from this row. Returns the row when it was fenced.
-function fenceLeasedColdInventoryUnsafe(characterId, changedIds) {
-    const row = one('SELECT simulationOwner, inventorySummary FROM bot_life_state WHERE characterId = ?', [Number(characterId)]);
-    if (!row || row.simulationOwner !== COLD_SIMULATION_OWNER) return null;
+function fenceColdInventoryUnsafe(characterId, changedIds) {
+    const row = one('SELECT phase, inventorySummary FROM bot_life_state WHERE characterId = ?', [Number(characterId)]);
+    if (!row || row.phase !== 'cold') return null;
     return writeColdInventorySnapshotUnsafe(characterId, row, changedIds);
+}
+
+// The bound parameters of a mind patch (SavedStats.split of a stats patch):
+// null twice when the patch moves no mind key, so the column stays as it is.
+// json_patch drops a key patched to null, so clearing a mind key must go
+// through a whole write of the column.
+function mindPatchParams(mind) {
+    const json = Object.keys(mind).length ? JSON.stringify(mind) : null;
+    return [json, json];
 }
 
 // The summary entries of changedIds and adena from the physical rows, and the
@@ -2342,12 +2522,12 @@ function writeColdInventorySnapshotUnsafe(characterId, row, changedIds, mp = nul
         else delete inventory[id];
     }
     const adena = Number(physical[57]?.amount || 0);
-    statsPatch = { ...statsPatch, hennas: nativeHennaSlotsUnsafe(characterId) };
+    const { body, mind } = SavedStats.split({ ...statsPatch, hennas: nativeHennaSlotsUnsafe(characterId) });
     write(`UPDATE bot_life_state SET inventorySummary = ?, adena = ?, mp = COALESCE(?, mp),
-        statsJson = CASE WHEN ? IS NULL THEN statsJson ELSE json_patch(statsJson,json(?)) END,
+        statsJson = json_patch(statsJson,json(?)),
+        mindJson = CASE WHEN ? IS NULL THEN mindJson ELSE json_patch(mindJson,json(?)) END,
         simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
-    [JSON.stringify(inventory), adena, mp, statsPatch ? JSON.stringify(statsPatch) : null,
-        statsPatch ? JSON.stringify(statsPatch) : null, now(), Number(characterId)]);
+    [JSON.stringify(inventory), adena, mp, JSON.stringify(body), ...mindPatchParams(mind), now(), Number(characterId)]);
     const inventoryPatch = Object.fromEntries(ids
         .map(id => [id, physical[id] || null]));
     return { ...normalizeRow(coldSimulationRow(characterId)), inventoryPatch };
@@ -2363,7 +2543,7 @@ function partyAgreementUnsafe(previous, proposed) {
     const touched = new Set();
     const ready = id => {
         const row = coldSimulationRow(id);
-        if (!row || row.phase !== 'cold' || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.simulationLeaseId) {
+        if (!row || row.phase !== 'cold') {
             throw new Error('party_payment_owner_busy');
         }
         return row;
@@ -2422,7 +2602,7 @@ function syncAdenaSnapshotUnsafe(characterId, amount, event = null) {
     };
     const stats = jsonObject(row.statsJson);
     if (event) stats.lastClanContribution = { ...event };
-    write(`UPDATE bot_life_state SET adena = ?, inventorySummary = ?, statsJson = ?, updatedAt = ?
+    write(`UPDATE bot_life_state SET adena = ?, inventorySummary = ?, statsJson = ?, updatedAt = ?, ${MOVE_FAR_REVISION}
         WHERE characterId = ?`, [
         Math.max(0, Number(amount) || 0),
         JSON.stringify(inventory),
@@ -2436,12 +2616,11 @@ function syncAdenaSnapshotUnsafe(characterId, amount, event = null) {
 function updateColdInventorySnapshotUnsafe(characterId, selfId, event = null, expectedRevision = null, allowParty = false) {
     const id = Number(characterId);
     const itemId = Number(selfId);
-    const row = one(`SELECT phase, simulationOwner, simulationRevision, partyId,
+    const row = one(`SELECT phase, simulationRevision, partyId,
             inventorySummary, statsJson
         FROM bot_life_state WHERE characterId = ?`, [id]);
     if (!row) return { ok: false, code: 'missing_state' };
     if (String(row.phase || '') !== 'cold'
-        || (!allowParty && String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER)
         || (!allowParty && String(row.partyId || '') !== '')) {
         return { ok: false, code: 'stale_snapshot' };
     }
@@ -2468,7 +2647,7 @@ function updateColdInventorySnapshotUnsafe(characterId, selfId, event = null, ex
     const updated = write(`UPDATE bot_life_state
         SET inventorySummary = ?, adena = COALESCE(?, adena), statsJson = ?, simulationRevision = ?, updatedAt = ?
         WHERE characterId = ? AND phase = 'cold'
-          AND simulationOwner = ? AND simulationRevision = ?
+          AND simulationRevision = ?
           AND (? = 1 OR partyId IS NULL OR partyId = '')`, [
         JSON.stringify(inventory),
         itemId === 57 ? physical : null,
@@ -2476,7 +2655,6 @@ function updateColdInventorySnapshotUnsafe(characterId, selfId, event = null, ex
         nextRevision,
         now(),
         id,
-        String(row.simulationOwner || LEGACY_SIMULATION_OWNER),
         currentRevision,
         allowParty ? 1 : 0
     ]);
@@ -2513,15 +2691,44 @@ const UPSERT_MACRO = `INSERT INTO macros (characterId, id, icon, name, descr, ac
     ON CONFLICT(characterId, id) DO UPDATE SET icon = excluded.icon, name = excluded.name,
         descr = excluded.descr, acronym = excluded.acronym, commands = excluded.commands`;
 
-const LEGACY_SIMULATION_OWNER = 'legacy_main';
-const COLD_SIMULATION_OWNER = 'cold_simulation_owner';
+// A main write to a far bot's row moves its revision in the same statement,
+// so a worker proposal built before it is refused (stale_revision) and rebases
+// on the row. A near bot's row keeps its number (its saves check otherwise).
+// A proposal needs one move to be refused; a second move in the same
+// transaction changes nothing for it. Where a moved row's exact number is read
+// (the commit's own UPDATE with its ack's expectedRevision + 1), a statement
+// in the same transaction does not move again (dropPkDeathItemsUnsafe in the
+// commit); elsewhere a writer that may run next to another mover (the party
+// payment inside commitBackgroundPartyMembership) can move twice. Writers that do not take it on
+// purpose: the BotLifeState startup recovery UPDATEs (they run before the
+// cache and the worker), the hot branch of completeEconomyStepUnsafe, the
+// karma/PK write inside the commit, and the PK death drop (inside the commit,
+// or after the resolve's save that already moved the row, before its publish).
+// BotLifeState `save` takes it in its upsert.
+const MOVE_FAR_REVISION = "simulationRevision = simulationRevision + CASE WHEN phase = 'cold' THEN 1 ELSE 0 END";
 const SIMPLE_COLD_ACTIVITIES = new Set(['hunting', 'resting', 'traveling', 'dead']);
 const COLD_SIMULATION_PATCH_COLUMNS = new Set([
     'level', 'exp', 'sp', 'adena', 'homeRegion', 'currentRegion', 'spotId',
     'activity', 'phase', 'activityStartedAt', 'nextResolveAt', 'lastResolvedAt',
     'lastHotAt', 'locX', 'locY', 'locZ', 'hp', 'maxHp', 'mp', 'maxMp',
-    'targetLevelBand', 'deathCount', 'partyId', 'inventorySummary', 'statsJson', 'updatedAt'
+    'targetLevelBand', 'deathCount', 'partyId', 'inventorySummary', 'statsJson', 'mindJson', 'updatedAt'
 ]);
+
+// bot_life_state columns (migration 68): the stored bag summary, the learned
+// skills rows and the henna rows of the bot. Only the database moves them.
+const STATE_REVISION_COLUMNS = Object.freeze(['inventoryRevision', 'skillsRevision', 'hennaRevision']);
+
+// The one reader of the revisions on a bot_life_state row (or a state that
+// copied them): 0 when absent, which means unknown, so recompute. The bag
+// column is inventoryRevision; on a state it is bagRevision, since the hot
+// Backpack already has an in-memory inventoryRevision with another meaning.
+function stateRevisions(row) {
+    return {
+        bagRevision: Math.max(0, Number(row?.bagRevision ?? row?.inventoryRevision) || 0),
+        skillsRevision: Math.max(0, Number(row?.skillsRevision) || 0),
+        hennaRevision: Math.max(0, Number(row?.hennaRevision) || 0)
+    };
+}
 
 function parsedObject(raw) {
     if (!raw) return {};
@@ -2534,42 +2741,28 @@ function parsedObject(raw) {
     }
 }
 
-// Both views of one stats string from a single JSON.parse: `loose` as
-// parsedObject returns it (null for bad JSON) and `plain` as jsonObject does.
-function statsViews(raw) {
-    if (typeof raw !== 'string' || !raw) return { loose: parsedObject(raw), plain: jsonObject(raw) };
-    let value;
-    try {
-        value = JSON.parse(raw);
-    } catch (_) {
-        return { loose: null, plain: {} };
-    }
-    const loose = value && typeof value === 'object' ? value : {};
-    return { loose, plain: Array.isArray(loose) ? {} : loose };
+// The kit rebuild below keeps a held rank's fields over the fresh ones and puts
+// the fresh keys first; a held skill whose keys already start with them and
+// whose identity fields match rebuilds into the same JSON.
+function heldSkillCurrent(held, fresh) {
+    if (!held || held.selfId !== fresh.selfId || held.level !== fresh.level || held.passive !== fresh.passive) return false;
+    const heldKeys = Object.keys(held);
+    let index = 0;
+    for (const key in fresh) if (heldKeys[index++] !== key) return false;
+    return true;
 }
 
-function mergeVersionedAppearance(current, proposed, proposedRaw) {
-    if (!current || !proposed) return proposedRaw;
-
-    const currentVersion = Math.max(0, Number(current.appearanceVersion || 0));
-    const proposedVersion = Math.max(0, Number(proposed.appearanceVersion || 0));
-    if (currentVersion <= proposedVersion) return proposedRaw;
-
-    const merged = { ...proposed, appearanceVersion: currentVersion };
-    if (Object.prototype.hasOwnProperty.call(current, 'sex')) merged.sex = current.sex;
-    return JSON.stringify(merged);
-}
-
-function preserveColdVersionedStats(row, patch = {}) {
-    return preserveColdVersionedStatsParsed(row, patch).patch;
-}
-
+// The kit from the learned rows. Returns `combat` itself when the rows rebuild
+// it unchanged, so the caller re-serializes stats only after a skill move (a
+// level-up, a grant).
 function nativeColdCombatSkillsUnsafe(characterId, combat) {
     if (!combat || typeof combat !== 'object' || Array.isArray(combat)) return combat;
-    const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
-    const proposed = new Map((Array.isArray(combat.skills) ? combat.skills : []).map(skill => [Number(skill.selfId), skill]));
-    const learned = Profile.skillSnapshotsFromRecords(all('SELECT selfId, level FROM skills WHERE characterId = ? ORDER BY selfId', [characterId]));
-    return { ...combat, version: Profile.PROFILE_VERSION, skillSource: 'database',
+    const learned = ColdCombatProfile.skillSnapshotsFromRecords(all('SELECT selfId, level FROM skills WHERE characterId = ? ORDER BY selfId', [characterId]));
+    const held = Array.isArray(combat.skills) ? combat.skills : null;
+    if (held && combat.version === ColdCombatProfile.PROFILE_VERSION && combat.skillSource === 'database'
+        && held.length === learned.length && learned.every((skill, index) => heldSkillCurrent(held[index], skill))) return combat;
+    const proposed = new Map((held || []).map(skill => [Number(skill.selfId), skill]));
+    return { ...combat, version: ColdCombatProfile.PROFILE_VERSION, skillSource: 'database',
         skills: learned.map(skill => {
             const sameRank = proposed.get(skill.selfId);
             // Hot Skill models resolve C4 semantics (for example buff power)
@@ -2578,86 +2771,6 @@ function nativeColdCombatSkillsUnsafe(characterId, combat) {
             return Number(sameRank?.level) === skill.level
                 ? { ...skill, ...sameRank, selfId: skill.selfId, level: skill.level, passive: skill.passive } : skill;
         }) };
-}
-
-// Resolved on first use; require() re-resolved the path on every cold commit.
-let ClanMembershipPolicyModule;
-const clanMembershipPolicy = () => ClanMembershipPolicyModule
-    || (ClanMembershipPolicyModule = require('./GameServer/Clan/ClanMembershipPolicy'));
-
-// Parses the current and proposed stats once each. Besides the patch it
-// returns what later cold commit steps would otherwise parse again: the final
-// stats as parsedObject(patch.statsJson) would see them (undefined when the
-// patch carries no stats) and the proposed death-experience record.
-function preserveColdVersionedStatsParsed(row, patch = {}) {
-    const next = { ...patch };
-    if (!Object.prototype.hasOwnProperty.call(next, 'statsJson')) return { patch: next, stats: undefined, deathExperience: undefined };
-    const proposedRaw = next.statsJson;
-    const currentViews = statsViews(row?.statsJson);
-    const proposedViews = statsViews(proposedRaw);
-    const deathExperience = proposedViews.loose?.deathExperience;
-    let stats = proposedViews.loose;
-    next.statsJson = mergeVersionedAppearance(currentViews.loose, proposedViews.loose, proposedRaw);
-    const current = currentViews.plain;
-    const incoming = next.statsJson === proposedRaw ? proposedViews.plain : jsonObject(next.statsJson);
-    if (next.statsJson !== proposedRaw) stats = incoming;
-    // A resolve owns effects, cooldowns and other transient combat state.
-    // Only the native learned rows own the skill set and its ranks.
-    const combat = incoming.coldCombat || current.coldCombat;
-    if (combat && Number(row?.characterId) > 0) {
-        incoming.coldCombat = nativeColdCombatSkillsUnsafe(row.characterId, combat);
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
-    }
-    // Physical symbols own these slots, including removals. A worker can
-    // still carry the kit from before a native improvement or hot handoff.
-    const hennas = nativeHennaSlotsUnsafe(row?.characterId);
-    if (JSON.stringify(incoming.hennas) !== JSON.stringify(hennas)) {
-        incoming.hennas = hennas;
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
-    }
-    // The native transaction owns this leaf. A stale worker/handoff snapshot
-    // cannot remove, fabricate or rewind an intent or its saved completion.
-    if (Object.hasOwn(current, 'economyCommit') || Object.hasOwn(incoming, 'economyCommit')) {
-        if (Object.hasOwn(current, 'economyCommit')) incoming.economyCommit = current.economyCommit;
-        else delete incoming.economyCommit;
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
-    }
-    // ARCH-NOTE: old workers can still carry the retired counters; the row table owns them now.
-    if (incoming.marketTrades || incoming.priceBeliefs) {
-        delete incoming.marketTrades;
-        delete incoming.priceBeliefs;
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
-    }
-    if (Number(current.nameGeneratorVersion || 0) > Number(incoming.nameGeneratorVersion || 0)) {
-        incoming.nameGeneratorVersion = current.nameGeneratorVersion;
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
-    }
-    if (Number(current.nameGeneratorVersion || 0) > 0 && 'characterName' in next) {
-        next.characterName = row.characterName;
-    }
-    if (Number(current.clanMembershipVersion || 0) > Number(incoming.clanMembershipVersion || 0)) {
-        for (const key of ['clanId', 'clanMembershipVersion', 'clanDiscipline', 'clanPartyObjective']) incoming[key] = current[key];
-        if (Number(current.clanDiscipline?.clanId) > 0
-            && incoming.equipmentPlan?.clanGoal?.clanId === current.clanDiscipline.clanId) incoming.equipmentPlan = null;
-        next.statsJson = JSON.stringify(incoming);
-        stats = incoming;
-    }
-    const proposed = {
-        activity: next.activity || row?.activity, stats: incoming
-    };
-    const policy = clanMembershipPolicy();
-    const repaired = policy.reconcileState(policy.preserveGoalInvalidation(proposed, current));
-    if (repaired !== proposed) {
-        next.statsJson = JSON.stringify(repaired.stats);
-        stats = repaired.stats;
-        if (repaired.activity !== proposed.activity) next.activity = repaired.activity;
-    }
-    return { patch: next, stats, deathExperience };
 }
 
 function syncInventorySummaryUnsafe(characterId, inventory = {}) {
@@ -2788,7 +2901,7 @@ function syncColdDeathExperienceUnsafe(characterId, record, timestamp) {
 }
 
 // The accepted fight proposal carries the actual Drain Soul mark. The
-// native lease/admission transaction still owns the physical source check.
+// native admission transaction still owns the physical source check.
 function applySoulCrystalStepsUnsafe(characterId, steps, guard = () => {}) {
     if (!Array.isArray(steps) || steps.length > 18) throw Error('invalid_cold_soul_crystals');
     const Native = invoke('GameServer/Items/SoulCrystalProgression');
@@ -2805,49 +2918,34 @@ function applySoulCrystalStepsUnsafe(characterId, steps, guard = () => {}) {
         const outcome = Native.outcomeFor(rule, crystal.stage, step.npcId, step.roll);
         const targetId = outcome === 'success' ? crystal.nextId : outcome === 'broken' ? crystal.brokenId : null;
         if (!targetId || targetId !== step.toId) throw Error('cold_soul_crystal_outcome_changed');
-        const target = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, targetId);
+        const target = ItemTemplateIndex.findStrictRequired(DataCache.items, targetId);
         if (!target) throw Error('cold_soul_crystal_template_missing');
         guard();
         write('UPDATE items SET selfId = ?, name = ? WHERE id = ? AND characterId = ?', [targetId,target.template.name,item.id,characterId]);
     }
 }
 
-// Diagnostics only: time spent in each part of one bot's cold commit; no clock
-// read and no allocation while developer diagnostics are off.
-function coldCommitParts() {
-    if (!DiagnosticConfig.developerDiagnostics) return null;
-    let last = performance.now();
-    const spent = {};
-    return {
-        lap(part) { const at = performance.now(); spent[part] = (spent[part] || 0) + at - last; last = at; },
-        done() { for (const part in spent) Diagnostics.duration(`commit_${part}`, spent[part]); }
-    };
-}
-
 function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) {
-    const before = one('SELECT hp,karma,pk FROM characters WHERE id = ?', [characterId]);
+    const before = one('SELECT level,exp,sp,hp,maxHp,mp,maxMp,classId FROM characters WHERE id = ?', [characterId]);
+    const classId = Number.isFinite(Number(physical.classId)) ? Number(physical.classId) : null;
+    const values = {
+        level: Number(physical.level || 1), exp: Number(physical.exp || 0), sp: Number(physical.sp || 0),
+        hp: Number(physical.hp || 0), maxHp: Number(physical.maxHp || 0),
+        mp: Number(physical.mp || 0), maxMp: Number(physical.maxMp || 0)
+    };
+    // The karma wash reads only an EXP gain, so a step that moves none of
+    // these columns leaves the row as it is.
+    const changed = !before || (classId !== null && Number(before.classId) !== classId)
+        || Object.keys(values).some((column) => Number(before[column]) !== values[column]);
+    parts && Diagnostics.count('commit_characters', changed ? 'written' : 'same');
     // Use the persisted XP delta inside the fenced transaction: unchanged
     // snapshots cannot wash karma twice, and non-combat updates grant none.
-    write(`UPDATE characters SET karma = MAX(0, karma - CAST(MAX(0, ? - exp) / ? AS INTEGER)),
-        level = ?, exp = ?, sp = ?, hp = ?, maxHp = ?, mp = ?, maxMp = ?${
-        Number.isFinite(Number(physical.classId)) ? ', classId = ?' : ''
-    } WHERE id = ?`, [
-        Number(physical.exp || 0), KARMA_XP_DIVIDER,
-        Number(physical.level || 1), Number(physical.exp || 0), Number(physical.sp || 0),
-        Number(physical.hp || 0), Number(physical.maxHp || 0),
-        Number(physical.mp || 0), Number(physical.maxMp || 0),
-        ...(Number.isFinite(Number(physical.classId)) ? [Number(physical.classId)] : []), characterId
+    if (changed) write(`UPDATE characters SET karma = MAX(0, karma - CAST(MAX(0, ? - exp) / ? AS INTEGER)),
+        level = ?, exp = ?, sp = ?, hp = ?, maxHp = ?, mp = ?, maxMp = ?${classId !== null ? ', classId = ?' : ''} WHERE id = ?`, [
+        values.exp, KARMA_XP_DIVIDER,
+        values.level, values.exp, values.sp, values.hp, values.maxHp, values.mp, values.maxMp,
+        ...(classId !== null ? [classId] : []), characterId
     ]);
-    (physical.skills || []).forEach((skill) => {
-        const selfId = Number(skill.selfId || 0);
-        const level = Number(skill.level || 0);
-        if (!selfId || !level) return;
-        write(`INSERT INTO skills (selfId, name, passive, level, characterId) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(characterId, selfId) DO UPDATE SET name = excluded.name, passive = excluded.passive,
-                level = MAX(skills.level, excluded.level)`, [
-            selfId, String(skill.name || `Skill ${selfId}`), skill.passive ? 1 : 0, level, characterId
-        ]);
-    });
     if (physical.soulCrystals?.length) applySoulCrystalStepsUnsafe(characterId, physical.soulCrystals);
     parts?.lap('physical');
     if (physical.inventory) syncInventorySummaryUnsafe(characterId, physical.inventory);
@@ -2873,31 +2971,36 @@ function applyColdPhysicalStateUnsafe(characterId, physical = {}, parts = null) 
         write("UPDATE bot_life_state SET statsJson = json_set(statsJson, '$.karma', ?, '$.pk', ?) WHERE characterId = ?",
             [current.karma, current.pk, characterId]);
     }
-    return Number(before?.hp) > 0 && Number(physical.hp) <= 0
-        ? dropPkDeathItemsUnsafe(characterId).drops : [];
+    // A PvP tally and a PK death drop (tried on the step that ends at 0 HP; it
+    // returns its death sequence only when it wrote) rewrite this bot's life
+    // state after the commit's UPDATE.
+    const dropped = Number(before?.hp) > 0 && Number(physical.hp) <= 0 ? dropPkDeathItemsUnsafe(characterId) : null;
+    return { drops: dropped?.drops || [],
+        rewrote: dropped?.deathSequence !== undefined || physical.pvpKills?.length > 0 };
 }
 
+// The row is already moved when this runs: by the commit's own UPDATE, or by
+// the resolve's save before its inventory sync; nobody read the number between.
 function dropPkDeathItemsUnsafe(characterId) {
     const current = one('SELECT hp,karma,pk FROM characters WHERE id=?', [characterId]);
-    if (!current || Number(current.hp) > 0 || !require('./GameServer/PkDropPolicy').enabled(current)) return { drops: [] };
+    if (!current || Number(current.hp) > 0 || !PkDropPolicy.enabled(current)) return { drops: [] };
     const life = one('SELECT deathCount,statsJson FROM bot_life_state WHERE characterId=?', [characterId]);
     const stats = jsonObject(life?.statsJson), death = Number(life?.deathCount || stats.deaths || 0);
     if (!life || death <= Number(stats.pkDropDeathSequence || 0)) return { drops: [] };
-    const Data = invoke('GameServer/DataCache');
-    const Templates = require('./GameServer/Item/ItemTemplateIndex');
     const inventory = all('SELECT * FROM items WHERE characterId=? ORDER BY id', [characterId]).map(item => {
-        const template = Templates.find(Data.items, item.selfId);
+        const template = ItemTemplateIndex.find(DataCache.items, item.selfId);
         return { ...template?.template, ...template?.etc, ...item };
     });
-    const drops = require('./GameServer/PkDropPolicy').rollPlan({ karma: current?.karma, pk: current?.pk, inventory });
+    const drops = PkDropPolicy.rollPlan({ karma: current?.karma, pk: current?.pk, inventory });
     for (const item of drops) write('DELETE FROM items WHERE id=? AND characterId=?', [item.id, characterId]);
     const summary = invoke('GameServer/Bot/Population/BotLifeState').inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId=? ORDER BY id', [characterId]));
-    write("UPDATE bot_life_state SET inventorySummary=?, statsJson=json_set(statsJson,'$.pkDropDeathSequence',?) WHERE characterId=?",
-        [JSON.stringify(summary), death, characterId]);
-    return { drops, inventory: summary, deathSequence: death };
+    const written = one(`UPDATE bot_life_state SET inventorySummary=?, statsJson=json_set(statsJson,'$.pkDropDeathSequence',?)
+        WHERE characterId=? RETURNING ${NativeWriteCheckpoint.columns.join(', ')}`, [JSON.stringify(summary), death, characterId]);
+    return { drops, inventory: summary, deathSequence: death, revision: Number(written.simulationRevision), checkpoint: written };
 }
 
-// `parsedStats`, when given, is parsedObject(row.statsJson) computed earlier.
+// `parsedStats`, when given, are the row's stats as an object (a claim's
+// flags, a commit's proposal stats): no parse here.
 function coldSimulationPartition(row, options = {}, parsedStats) {
     if (!row) return { ok: false, reason: 'missing_state' };
     if (row.phase !== 'cold') return { ok: false, reason: 'not_cold' };
@@ -2945,32 +3048,54 @@ function acceptedTradeIncomingUnsafe(characterId, row) {
     return incoming;
 }
 
-// A claim needs the lease columns and the workflow flags coldSimulationPartition
-// reads, not the whole row with its 9 KB stats. json_extract keeps JavaScript
-// truthiness for them: false, 0, '' and missing values come back as 0, '' or
-// NULL, objects and arrays as their JSON text. Empty stats parse to {} as in
-// parsedObject; malformed stats have no flags and fail as invalid_stats.
-const COLD_CLAIM_FLAGS = BotErrands.COLD_CLAIM;
-const COLD_CLAIM_SQL = `SELECT characterId, phase, activity, partyId,
-        simulationOwner, simulationRevision, simulationLeaseUntil,
-        (statsJson IS NULL OR statsJson = '' OR json_valid(statsJson)) AS statsValid,
-        ${COLD_CLAIM_FLAGS.map((flag) => `CASE WHEN json_valid(statsJson) THEN json_extract(statsJson, '$.${flag}') END AS "${flag}"`).join(',\n        ')}
-    FROM bot_life_state WHERE characterId = ?`;
-
-function coldClaimRow(characterId) {
-    const row = one(COLD_CLAIM_SQL, [Number(characterId)]);
-    if (!row) return { row: null, stats: undefined };
-    const stats = row.statsValid ? Object.fromEntries(COLD_CLAIM_FLAGS.map((flag) => [flag, row[flag]])) : null;
-    return { row, stats };
-}
-
-function coldSimulationConflict(row, request, timestamp) {
+// Why a guarded far-row write found no row: the revision is the fence.
+function coldSimulationConflict(row, request) {
     if (!row) return 'missing_state';
     if (Number(row.simulationRevision || 0) !== Number(request.expectedRevision)) return 'stale_revision';
-    if (String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== String(request.ownerId || COLD_SIMULATION_OWNER)) return 'owner_changed';
-    if (String(row.simulationLeaseId || '') !== String(request.leaseId || '')) return 'lease_changed';
-    if (Number(row.simulationLeaseUntil || 0) <= timestamp) return 'lease_expired';
+    if (row.phase !== 'cold') return 'phase_hot';
     return 'cas_failed';
+}
+
+// The assignments of a cold patch written whole. The economy leaf stays the
+// row's (EconomyCommit.preserveLeafSql): a proposal never drops or rewinds it.
+function coldPatchAssignments(entries) {
+    return entries.map(([column]) => `${escapeIdentifier(column)} = ${column === 'statsJson' ? EconomyCommit.preserveLeafSql('?') : '?'}`);
+}
+
+// An atomic group member's guard columns (coldSimulationConflict) and party.
+const COLD_GROUP_MEMBER_SQL = 'SELECT characterId, partyId, phase, simulationRevision FROM bot_life_state WHERE characterId = ?';
+
+// What a cold commit hands back on its write: the row's revisions, its time
+// and the economy leaf it kept (JSON text, NULL when none).
+const COLD_COMMIT_RETURNING = `characterId, simulationRevision, inventoryRevision, skillsRevision, hennaRevision, updatedAt,
+    json_extract(statsJson, '$.economyCommit') AS economyCommit`;
+
+// A cold commit's one write: the UPDATE of the proposal's columns guarded by
+// the far phase and the revision the step started from, with no row read
+// before it. The bag revision moves in this statement: RETURNING does not see
+// what an AFTER trigger writes, and a statement that moved it leaves the
+// trigger nothing to do. Null when the guard refused.
+// A refused commit writes nothing, the mind included: main moved the row, the
+// refusal hands that row back (coldSimulationRow), the worker rebases on it and
+// builds again (one build per refusal, stale_revision 0.3% of acks). Every mind
+// write is on the row's revision: this UPDATE on the step's base,
+// BotLifeState.save on the copy's. A refused write that kept the mind without
+// moving the revision let a main save built on that same revision overwrite it,
+// and dropped a raise main made meanwhile.
+function writeColdCommitUnsafe(fields, patch) {
+    const { characterId, expectedRevision, timestamp } = fields;
+    const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
+    const assignments = coldPatchAssignments(entries);
+    const params = entries.map(([, value]) => value);
+    if (patch.inventorySummary !== undefined) {
+        assignments.push('inventoryRevision = CASE WHEN inventorySummary IS ? THEN inventoryRevision ELSE inventoryRevision + 1 END');
+        params.push(patch.inventorySummary);
+    }
+    assignments.push('simulationRevision = ?');
+    params.push(expectedRevision + 1);
+    return one(`UPDATE bot_life_state SET ${assignments.join(', ')}
+        WHERE characterId = ? AND phase = 'cold' AND simulationRevision = ?
+        RETURNING ${COLD_COMMIT_RETURNING}`, [...params, characterId, expectedRevision]) || null;
 }
 
 function ensureSocialEntityUnsafe(entity, timestamp) {
@@ -3186,7 +3311,7 @@ function ensureBoardCounterCountsUnsafe() {
     if (boardCounterCountsReady) return;
     if (one("SELECT value FROM world_meta WHERE key = 'boardCounterCountsReady'")) { boardCounterCountsReady = true; return; }
     const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
-    if (!invoke('GameServer/DataCache').items?.length) throw new Error('board_market_data_not_ready');
+    if (!DataCache.items?.length) throw new Error('board_market_data_not_ready');
     const totals = new Map();
     for (const { key, value } of all('SELECT key, value FROM world_meta WHERE key LIKE ?', [`${BOARD_DEAL_COUNT_PREFIX}%`])) {
         const counter = MarketCounters.counterOf(Number(key.slice(BOARD_DEAL_COUNT_PREFIX.length)));
@@ -3332,7 +3457,7 @@ function repriceAfkTradeLineUnsafe(characterId, id, unitPrice, expectedRevision,
 
 // What a reprice moved: the owner's bag and the fenced cold row when an item
 // or Adena moved; a price-only change reads nothing and leaves the worker's
-// lease alone (ownerInventory null: the callers have nothing to sync).
+// row alone (ownerInventory null: the callers have nothing to sync).
 function afkTradeRepriceMovesUnsafe(characterId, changedIds, moved) {
     if (!moved) return { ownerInventory: null, coldLifeRows: {} };
     return {
@@ -3527,12 +3652,12 @@ function closeBoardRecordUnsafe(shop, { ownMove = true, at = now() } = {}) {
 }
 
 // An AFK shop write (a fill, close, reprice or publish) moves adena and the
-// items selfIds into or out of each party's backpack. Fences each party whose
-// lifecycle row the cold worker leases; by characterId.
+// items selfIds into or out of each party's backpack. Fences each far party
+// (phase cold); by characterId.
 function fenceAfkTradePartiesUnsafe(characterIds, selfIds) {
     const rows = {};
     for (const characterId of characterIds) {
-        const row = fenceLeasedColdInventoryUnsafe(characterId, selfIds);
+        const row = fenceColdInventoryUnsafe(characterId, selfIds);
         if (row) rows[Number(characterId)] = row;
     }
     return rows;
@@ -3744,7 +3869,7 @@ function openBoardRecordUnsafe(characterId, config, rows, { prepaid = false, bid
         checkConditionalBidUnsafe(characterId, rows[0], Number(rows[0].price), bidWallet);
         const revision = Number(one('SELECT simulationRevision FROM bot_life_state WHERE characterId=?', [characterId])?.simulationRevision || 0);
         if (rows[0].intent) {
-            const intent = require('./GameServer/Bot/Economy/TradeIntent').encode(rows[0].intent);
+            const intent = TradeIntent.encode(rows[0].intent);
             write('UPDATE afk_trade_lines SET intentJson=?,intentRevision=? WHERE shopId=?', [JSON.stringify(intent), revision, shopId]);
         }
     }
@@ -3788,8 +3913,10 @@ function reconcileBotPurchasesUnsafe(characterId, held, configs, purchase, times
         && current.lines.filter(line => line.count > 0).length === rows.length
         && rows.every(line => current.lines.some(old => old.selfId === line.selfId && old.enchant === Number(line.enchant || 0)
             && old.count === line.count && old.price === line.price));
+    // A kept shop's escrow stays locked; a closing one refunds it to the bag
+    // first (closeBoardRecordUnsafe), so only then does it back the bids.
     const wallet = Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=57', [characterId]).amount)
-        + (current?.storeType === BoardRules.BUY ? current.escrowAdena : 0);
+        + (!same && current?.storeType === BoardRules.BUY ? current.escrowAdena : 0);
     const closed = [], changedIds = [];
     if (current && !same && (config || current.storeType === BoardRules.BUY)) {
         changedIds.push(...closeBoardRecordUnsafe(current, { at: timestamp }), 57);
@@ -3801,14 +3928,13 @@ function reconcileBotPurchasesUnsafe(characterId, held, configs, purchase, times
         checkBotCapsUnsafe(characterId, 'shop', rows.length);
         let total = 0;
         for (const line of rows) {
-            if (line.intent) require('./GameServer/Bot/Economy/TradeIntent').encode(line.intent);
+            if (line.intent) TradeIntent.encode(line.intent);
             checkConditionalBidUnsafe(characterId, line);
             total += Number(line.count) * Number(line.price);
         }
-        const life = one('SELECT statsJson FROM bot_life_state WHERE characterId=?', [characterId]);
+        const life = one('SELECT statsJson, mindJson FROM bot_life_state WHERE characterId=?', [characterId]);
         if (life) {
-            const Funding = require('./GameServer/Bot/Economy/PurchaseFunding');
-            const allowance = Funding.spendable({ adena: wallet, stats: jsonObject(life.statsJson) }, 0,
+            const allowance = PurchaseFunding.spendable({ adena: wallet, stats: SavedStats.merge(life.statsJson, life.mindJson) }, 0,
                 { upperBound: true, survivalCost: rows.reduce((sum, line) => sum + Math.max(0, Number(line.survivalCost) || 0), 0) });
             if (!Number.isSafeInteger(total) || total > allowance) throw Error('economy_funding_changed');
         }
@@ -3852,7 +3978,7 @@ function reconcileBotBuyAdsUnsafe(characterId, held, configs, timestamp, { bidWa
         for (const shop of removed) changedIds.push(...closeBoardRecordUnsafe(shop));
         const retained = [], opened = [], changed = [];
         for (const row of wanted) {
-            const intent = row.line.intent ? require('./GameServer/Bot/Economy/TradeIntent').encode(row.line.intent) : null;
+            const intent = row.line.intent ? TradeIntent.encode(row.line.intent) : null;
             if (!row.previous) {
                 const record = openBoardRecordUnsafe(characterId, { ...row.config, kind: 'buy_ad' }, row.config.lines, { bidWallet }).shop;
                 opened.push(record); changed.push(record); continue;
@@ -3881,14 +4007,13 @@ function reconcileBotBuyAdsUnsafe(characterId, held, configs, timestamp, { bidWa
     // other kind's escrow or settlement enters this allowance.
     const additions = wanted.filter(row => !row.previous || row.count > Number(row.previous.lines[0].count));
     if (additions.length) {
-        const life = one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId]);
-        const stats = jsonObject(life?.statsJson);
+        const life = one('SELECT statsJson, mindJson FROM bot_life_state WHERE characterId = ?', [characterId]);
+        const stats = SavedStats.merge(life?.statsJson, life?.mindJson);
         if (life && (!Array.isArray(stats.money) || stats.money.length < 4)) throw Error('economy_funding_missing');
         if (Array.isArray(stats.money)) {
             const wallet = Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=57', [characterId]).amount);
-            const Funding = require('./GameServer/Bot/Economy/PurchaseFunding');
             for (const row of additions) {
-                if (newReserve > Funding.spendable({ adena: wallet, stats }, oldReserve, { itemId: Number(row.line.selfId) })) {
+                if (newReserve > PurchaseFunding.spendable({ adena: wallet, stats }, oldReserve, { itemId: Number(row.line.selfId) })) {
                     throw Error('economy_funding_changed');
                 }
             }
@@ -3989,7 +4114,6 @@ function commitInteractionMemoryUnsafe(batch, timestamp) {
 }
 
 function commitClanSocialUnsafe(batch, timestamp) {
-    const ClanSocial = require('./GameServer/Clan/ClanSocialPolicy');
     const clanSnapshots = new Map(), clanContexts = new Map(), changedClans = new Set();
     for (let i = 0; i < batch.length; i++) {
         const event = batch[i];
@@ -4004,13 +4128,13 @@ function commitClanSocialUnsafe(batch, timestamp) {
             if (!clan) continue;
             if (!clanSnapshots.has(clanId)) {
                 const row = one('SELECT snapshotJson FROM clan_social_memory WHERE clanId = ?', [clanId]);
-                clanSnapshots.set(clanId, row ? JSON.parse(row.snapshotJson) : ClanSocial.empty(clanId));
+                clanSnapshots.set(clanId, row ? JSON.parse(row.snapshotJson) : ClanSocialPolicy.empty(clanId));
             }
             const targetLeader = one('SELECT leaderId FROM clans WHERE id = ?', [event.clan.targetClanId]);
             const currentMember = one('SELECT clanId FROM characters WHERE id = ?', [event.targetId]);
             const previous = clanSnapshots.get(clanId);
             const previousRevision = previous.revision;
-            const next = ClanSocial.apply(previous, event, timestamp, {
+            const next = ClanSocialPolicy.apply(previous, event, timestamp, {
                 leaderTraits: jsonObject(clan.traitsJson), targetLeaderId: targetLeader?.leaderId,
                 currentTargetClanId: Number(currentMember?.clanId || 0), mutable: true
             });
@@ -4029,7 +4153,7 @@ function commitClanSocialUnsafe(batch, timestamp) {
 
 function rememberClanContributionUnsafe(clanId, contributor, leaderId, ledgerId, requested, sourceBefore, at) {
     if (!leaderId || leaderId === contributor || requested < Math.max(1000, sourceBefore * 0.01)) return;
-    const event = require('./GameServer/Clan/ClanSocialEvidence').attach({
+    const event = ClanSocialEvidence.attach({
         key: `clan-contribution:${ledgerId}`, sourceId: leaderId, targetId: contributor, kind: 'character', type: 'resources_received', at
     }, { clanId }, { clanId }, `clan-contribution:${ledgerId}`, 'cooperation', true);
     commitClanSocialUnsafe([event], at);
@@ -4056,14 +4180,14 @@ function commitColdInteractionMemoryUnsafe(request) {
 const ClanMembership = require('./GameServer/Clan/ClanMembershipRepository')({ all, write, inTransaction, now });
 function recruitmentRows(where, params) {
     return all(`SELECT c.id AS characterId,c.classId,c.clanId,COALESCE(l.level,c.level) AS level,
-        l.accountName,l.phase,l.activity,l.spotId,l.partyId,l.simulationOwner,l.simulationRevision,l.inventorySummary,l.statsJson,
+        l.accountName,l.phase,l.activity,l.spotId,l.partyId,l.simulationRevision,l.inventorySummary,l.statsJson,
         COALESCE(p.joinAvailability,0) AS joinAvailability,
         (EXISTS(SELECT 1 FROM clan_operation_members r WHERE r.characterId=c.id AND r.status='active')
             OR EXISTS(SELECT 1 FROM board_trade_participants t WHERE t.characterId=c.id AND t.meetingId IS NOT NULL)) AS recruitmentReserved
         FROM characters c LEFT JOIN bot_life_state l ON l.characterId=c.id
         LEFT JOIN bot_party_candidate_projection p ON p.characterId=c.id WHERE ${where}`, params).map(row => ({ ...row,
             phase: row.phase || '', activity: row.activity || '', spotId: row.spotId || null, partyId: row.partyId || null,
-            simulationOwner: row.simulationOwner || 'legacy_main', stats: jsonObject(row.statsJson), inventory: jsonObject(row.inventorySummary) }));
+            stats: jsonObject(row.statsJson), inventory: jsonObject(row.inventorySummary) }));
 }
 function recruitmentSourceCurrent(source) {
     if (source?.kind === 'economic') {
@@ -4134,8 +4258,8 @@ function raidRosterCommitReason(partyRow, nextStats, raidCommit, hotMembers = nu
     if (!source?.raidWorldAvailable || source.raidInstanceId !== marker.raidInstanceId
         || Number(source.raidBossTemplateId) !== marker.npcId
         || raidCommit && raidCommit.snapshot?.raidInstanceId !== marker.raidInstanceId) return 'raid_roster_source_changed';
-    const rows = openingAtImpact ? all(`SELECT c.id AS characterId,c.classId,c.clanId,l.level,l.partyId,l.phase,
-        l.simulationOwner,l.simulationLeaseId FROM characters c JOIN bot_life_state l ON l.characterId=c.id
+    const rows = openingAtImpact ? all(`SELECT c.id AS characterId,c.classId,c.clanId,l.level,l.partyId,l.phase
+        FROM characters c JOIN bot_life_state l ON l.characterId=c.id
         WHERE c.id IN (${marker.memberIds.map(() => '?').join(',')})`, marker.memberIds)
         : recruitmentRows(`c.id IN (${marker.memberIds.map(() => '?').join(',')})`, marker.memberIds);
     if (rows.length !== 9 || proof.members.some(([id, classId, level, fingerprint]) => {
@@ -4143,7 +4267,7 @@ function raidRosterCommitReason(partyRow, nextStats, raidCommit, hotMembers = nu
         const input = hotMembers?.find(member => member.characterId === id) || row;
         return !row || row.clanId !== marker.clanId || row.classId !== classId || row.level !== level
             || owner.members.find(member => member[0] === id)?.[4]
-            || openingAtImpact && (row.phase !== 'hot' || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.simulationLeaseId)
+            || openingAtImpact && row.phase !== 'hot'
             || row.recruitmentReserved || row.partyId !== party.partyId || Roster.inputFingerprint(input) !== fingerprint;
     })) return 'raid_roster_member_changed';
     return null;
@@ -4162,7 +4286,7 @@ function recruitmentProofCurrent(clanId, level, state, proof) {
         && (Number(member.clanId) === clanId || Number(member.clanId) === 0 && recruitmentAvailable(member))));
 }
 function recruitmentAvailable(member) {
-    return Number(member.joinAvailability) === 1 && member.phase === 'cold' && member.simulationOwner === 'legacy_main' && !member.partyId
+    return Number(member.joinAvailability) === 1 && member.phase === 'cold' && !member.partyId
         && !member.recruitmentReserved && !member.stats?.tradeMeeting
         && !require('./GameServer/Clan/ClanSimulationPolicy').isStaticService(member)
         && !one("SELECT characterId FROM clan_operation_members WHERE characterId=? AND status='active' LIMIT 1", [member.characterId]);
@@ -4178,7 +4302,10 @@ function publishClanMembership(result) {
 
 
 const Database = {
-    ...require('./DatabasePlayerWarehouse').create({ one, all, write, inTransaction, withCharacterFlush }),
+    // BotLifeState.save builds its upsert with it.
+    MOVE_FAR_REVISION,
+
+    ...PlayerWarehouse.create({ one, all, write, inTransaction, withCharacterFlush }),
     openClanRaidPartyAtImpact(request) {
         // The offensive callback cannot await our queue: its registered roster
         // could change meanwhile. Abort this native action when another write
@@ -4190,8 +4317,8 @@ const Database = {
         try {
             return performTransaction(() => {
                 const row = one('SELECT * FROM bot_background_parties WHERE partyId=?', [request.partyId]);
-                if (!row || row.status !== 'hot' || Number(row.updatedAt) !== Number(request.expectedUpdatedAt))
-                    return { ok: false, reason: 'party_changed' };
+                if (!row || row.status !== 'hot' || !Number.isSafeInteger(request.expectedPartyRevision)
+                    || Number(row.revision) !== request.expectedPartyRevision) return { ok: false, reason: 'party_changed' };
                 const party = { ...row, memberIds: JSON.parse(row.memberIdsJson), stats: jsonObject(row.statsJson) };
                 if (!Roster.admitted(party) || Roster.held(party) || !Roster.exact(request.members?.map(member => member.characterId), party.memberIds))
                     return { ok: false, reason: 'raid_roster_not_opened' };
@@ -4201,14 +4328,15 @@ const Database = {
                 const stats = { ...party.stats, raidAdmission: proof };
                 const reason = raidRosterCommitReason(row, stats, null, request.members, true);
                 if (reason) return { ok: false, reason };
-                write('UPDATE bot_background_parties SET statsJson=?,updatedAt=? WHERE partyId=? AND updatedAt=?',
-                    [JSON.stringify(stats), at, row.partyId, row.updatedAt]);
+                write('UPDATE bot_background_parties SET statsJson=?,updatedAt=?,revision=revision+1 WHERE partyId=? AND revision=?',
+                    [JSON.stringify(stats), at, row.partyId, row.revision]);
                 return { ok: true, party: one('SELECT * FROM bot_background_parties WHERE partyId=?', [row.partyId]) };
             }, 'party:marked-raid-impact');
         } catch (_) { return { ok: false, reason: 'party_opening_rollback' }; }
     },
     reconcileBotClanMembership: ClanMembership.reconcile,
     reconcileBotClanGoals: ClanMembership.reconcileGoals,
+    writeClanGoalMember: ClanMembership.writeGoalMember,
     init(callback = () => {}) {
         try {
             boardDealCountsReady = false;
@@ -4274,20 +4402,24 @@ const Database = {
                 if (admission.nativeProof) NativeWriteCheckpoint.checkRow(admission.nativeProof, statement);
                 phase = 'write_admission';
                 checkCapturedWriteAdmission(admission, admission.nativeProof ? statement[1][0] : null);
-                const returning = admission.nativeProof
-                    ? `${NativeWriteCheckpoint.columns.join(', ')}, simulationLeaseUntil, statsJson`
-                    : 'simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil, statsJson';
+                // The upsert moves a far row's revision (MOVE_FAR_REVISION) and
+                // hands back the row's own, the number the caller's cache takes;
+                // the mind comes back too: over a far row it is the worker's.
+                const returning = admission.nativeProof ? `${NativeWriteCheckpoint.columns.join(', ')}, statsJson, mindJson` : 'simulationRevision, statsJson, mindJson';
                 let params = statement[1] || [];
                 if (characterId !== undefined) {
-                    // BotLifeState.save supplies its native 29-column ROW.
+                    // BotLifeState.save supplies its native 32-column ROW and
+                    // the revision it was built on (the mind's fence).
                     // Read skills inside this queued job, after admission and
                     // immediately before SQL, so an earlier await cannot age it.
-                    if (!Number.isSafeInteger(characterId) || characterId <= 0 || params.length !== 29 || params[0] !== characterId)
+                    if (!Number.isSafeInteger(characterId) || characterId <= 0 || params.length !== 33 || params[0] !== characterId)
                         throw new TypeError('invalid_bot_life_skill_snapshot');
                     const stats = jsonObject(params[27]);
                     const combat = stats.coldCombat || jsonObject(one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId])?.statsJson).coldCombat;
-                    if (combat) {
-                        stats.coldCombat = nativeColdCombatSkillsUnsafe(characterId, combat);
+                    const rebuilt = combat && nativeColdCombatSkillsUnsafe(characterId, combat);
+                    // An unchanged kit keeps the ROW's own JSON.stringify output.
+                    if (combat && (rebuilt !== stats.coldCombat || typeof params[27] !== 'string')) {
+                        stats.coldCombat = rebuilt;
                         params = [...params];
                         params[27] = JSON.stringify(stats);
                     }
@@ -4296,11 +4428,9 @@ const Database = {
                 const row = one(`${statement[0]} RETURNING ${returning}`, params);
                 phase = 'advance';
                 if (row && admission.nativeProof) NativeWriteCheckpoint.advance(admission.nativeProof, row);
-                return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson,
-                    simulationOwner: row?.simulationOwner, simulationRevision: row?.simulationRevision,
-                    simulationLeaseId: row?.simulationLeaseId, simulationLeaseUntil: row?.simulationLeaseUntil };
+                return { affectedRows: row ? 1 : 0, statsJson: row?.statsJson, mindJson: row?.mindJson, simulationRevision: row?.simulationRevision };
             } catch (error) {
-                reportBotLifeSaveFailure(phase, error);
+                reportBotLifeSaveFailure(phase, error, statement);
                 throw error;
             }
         }, { operation: 'bot-life:save', read: false });
@@ -4425,7 +4555,10 @@ const Database = {
             return { ok: true, buyerAdena, sellerAdena, nextMp,
                 buyerRevision: Number(buyer.simulationRevision) + 1,
                 sellerRevision: Number(seller.simulationRevision) + 1,
-                buyerStats, sellerStats, buyerInventory, sellerInventory };
+                // The cache takes these as the whole stats: the body written
+                // above with each row's mind (SavedStats.MIND_KEYS) over it.
+                buyerStats: SavedStats.merge(buyerStats, buyer.mindJson),
+                sellerStats: SavedStats.merge(sellerStats, seller.mindJson), buyerInventory, sellerInventory };
         }, 'buff-service:cold')));
     },
 
@@ -4542,7 +4675,7 @@ const Database = {
             const marker = one("SELECT value FROM world_meta WHERE key = 'botMarketTradesInitialized'");
             if (marker) return { skipped: true, mode: marker.value, rows: [] };
             const MarketCounters = invoke('GameServer/Bot/Economy/MarketCounters');
-            if (!invoke('GameServer/DataCache').items?.length) throw new Error('board_market_data_not_ready');
+            if (!DataCache.items?.length) throw new Error('board_market_data_not_ready');
             const totals = new Map();
             if (mode === 'history') {
                 const pending = all("SELECT payload FROM history_outbox WHERE kind = 'market_trade' ORDER BY id")
@@ -4752,11 +4885,9 @@ const Database = {
         }
         return withCharacterFlush(characterId, () => inTransaction(() => {
             if (expectedAuthority) {
-                const row = one('SELECT phase,simulationOwner,simulationRevision,simulationLeaseId,lastHotAt FROM bot_life_state WHERE characterId=?',
-                    [characterId]);
-                if (!row || row.phase !== expectedAuthority.phase || row.simulationOwner !== expectedAuthority.ownerId
+                const row = one('SELECT phase,simulationRevision,lastHotAt FROM bot_life_state WHERE characterId=?', [characterId]);
+                if (!row || row.phase !== expectedAuthority.phase
                     || Number(row.simulationRevision) !== expectedAuthority.revision
-                    || (row.simulationLeaseId || null) !== expectedAuthority.leaseId
                     || Number(row.lastHotAt || 0) !== expectedAuthority.hotAt) throw Error('economy_plan_need_changed');
             }
             const timestamp = now();
@@ -4865,15 +4996,14 @@ const Database = {
         }, 'board:leave'));
     },
 
-    // A main-thread save of what waits for a bot on the board: merged unless
-    // the worker leases the bot (its commit merges it). Returns the bot's
-    // row when its cold state changed, and its bag.
+    // A main-thread save of what waits for a bot on the board, merged at once;
+    // the merge moves the revision, so a far bot's step under way is refused
+    // and rebases on this row. Returns the bot's row when its cold state
+    // changed, and its bag.
     settleBoardOwner(ownerId) {
         const characterId = Number(ownerId);
         if (!characterId || !pendingSettlementOwners.has(characterId)) return Promise.resolve({ settled: false });
         return withCharacterFlush(characterId, () => inTransaction(() => {
-            const life = one('SELECT simulationOwner FROM bot_life_state WHERE characterId = ?', [characterId]);
-            if (life?.simulationOwner === COLD_SIMULATION_OWNER) return { settled: false, leased: true };
             const merged = mergeBoardSettlementsUnsafe(characterId, { advance: true });
             if (!merged) return { settled: false };
             return { settled: true, row: merged.row, ownerInventory: afkTradeInventoryUnsafe(characterId) };
@@ -4963,11 +5093,9 @@ const Database = {
             if (coldAuthority && hotAuthority) throw new Error('invalid_market_review_authority');
             const authority = coldAuthority || hotAuthority;
             if (authority) {
-                const life = one(`SELECT phase, simulationOwner, simulationRevision, simulationLeaseId
-                    FROM bot_life_state WHERE characterId = ?`, [characterId]);
-                if (!life || life.phase !== (coldAuthority ? 'cold' : 'hot') || life.simulationOwner !== authority.ownerId
-                    || Number(life.simulationRevision) !== authority.revision
-                    || (life.simulationLeaseId || null) !== authority.leaseId) {
+                const life = one('SELECT phase, simulationRevision FROM bot_life_state WHERE characterId = ?', [characterId]);
+                if (!life || life.phase !== (coldAuthority ? 'cold' : 'hot')
+                    || Number(life.simulationRevision) !== authority.revision) {
                     throw new Error('stale_market_review');
                 }
             }
@@ -5335,25 +5463,6 @@ const Database = {
         }, { operation: 'afk-trade:notifications-delivered' });
     },
 
-    upsertBotGoalStates(entries = []) {
-        const batch = (entries || []).map((entry) => ({
-            characterId: Number(entry?.characterId || 0),
-            goalJson: String(entry?.goalJson || ''),
-            updatedAt: Number(entry?.updatedAt || now())
-        })).filter((entry) => Number.isSafeInteger(entry.characterId) && entry.characterId > 0 && entry.goalJson);
-        if (!batch.length) return Promise.resolve(0);
-        return inTransaction(() => {
-            const values = batch.map(() => '(?, ?, ?)').join(', ');
-            const params = batch.flatMap((entry) => [entry.characterId, entry.goalJson, entry.updatedAt]);
-            write(`INSERT INTO bot_goal_state (characterId, goalJson, updatedAt)
-                VALUES ${values}
-                ON CONFLICT(characterId) DO UPDATE SET
-                    goalJson = excluded.goalJson,
-                    updatedAt = excluded.updatedAt`, params);
-            return batch.length;
-        }, 'bot-goals:batch-save');
-    },
-
     ensureSocialEntity(entity) {
         return inTransaction(() => ensureSocialEntityUnsafe(entity, now()), 'social:entity-upsert');
     },
@@ -5384,9 +5493,10 @@ const Database = {
             const previousStats = jsonObject(previous?.statsJson), nextStats = jsonObject(row.statsJson);
             if ((proof || previousStats.raidAdmission) && (JSON.stringify(proof) !== JSON.stringify(previousStats.raidAdmission)
                 || !require('./GameServer/Clan/ClanRaidRoster').same(previousStats.objective?.fullRoster, nextStats.objective?.fullRoster)))
-                return { affectedRows: 0 };
-            if (previous?.status === 'hot' || Number(jsonObject(previous?.statsJson).clanGoalInvalidationVersion || 0)
-                > Number(jsonObject(row.statsJson).clanGoalInvalidationVersion || 0)) return { affectedRows: 0 };
+                return { affectedRows: 0, reason: 'raid_admission' };
+            if (previous?.status === 'hot') return { affectedRows: 0, reason: 'party_hot' };
+            if (Number(previousStats.clanGoalInvalidationVersion || 0) > Number(nextStats.clanGoalInvalidationVersion || 0))
+                return { affectedRows: 0, reason: 'goal_invalidated' };
             const payment = partyAgreementUnsafe(previous, row);
             row = payment.row;
             const result = write(`INSERT INTO bot_background_parties (
@@ -5397,7 +5507,8 @@ const Database = {
                 leaderId = excluded.leaderId, memberIdsJson = excluded.memberIdsJson,
                 spotId = excluded.spotId, nextResolveAt = excluded.nextResolveAt,
                 cohesion = excluded.cohesion, risk = excluded.risk, status = excluded.status,
-                roleCoverageJson = excluded.roleCoverageJson, statsJson = excluded.statsJson, updatedAt = excluded.updatedAt`,
+                roleCoverageJson = excluded.roleCoverageJson, statsJson = excluded.statsJson, updatedAt = excluded.updatedAt,
+                revision = bot_background_parties.revision + 1`,
             [row.partyId, row.leaderId, row.memberIdsJson, row.spotId, row.startedAt, row.nextResolveAt,
                 row.cohesion, row.risk, row.status, row.roleCoverageJson, row.statsJson,
                 Math.max(Number(row.updatedAt), Number(previous?.updatedAt || 0) + 1)]);
@@ -5406,7 +5517,7 @@ const Database = {
         }, 'bot-party:save-agreement');
     },
 
-    commitBackgroundPartyGoals({ partyId, expectedUpdatedAt, leaderId, memberIds, sources, statsJson, updatedAt } = {}) {
+    commitBackgroundPartyGoals({ partyId, expectedPartyRevision, leaderId, memberIds, sources, statsJson, updatedAt } = {}) {
         const ids = Array.isArray(memberIds) ? memberIds : [];
         if (!partyId || ids.length < 1 || ids.length > 9 || new Set(ids).size !== ids.length
             || !ids.every(id => Number.isSafeInteger(id) && id > 0) || !ids.includes(leaderId)
@@ -5415,8 +5526,8 @@ const Database = {
             || sources.some(source => !ids.includes(source.characterId) || source.phase !== 'cold'
                 || source.partyId !== partyId || !Number.isSafeInteger(source.updatedAt)
                 || !Number.isSafeInteger(source.revision) || source.revision < 0)
-            || !Number.isSafeInteger(expectedUpdatedAt) || !Number.isSafeInteger(updatedAt)
-            || updatedAt <= expectedUpdatedAt || typeof statsJson !== 'string')
+            || !Number.isSafeInteger(expectedPartyRevision) || expectedPartyRevision < 0
+            || !Number.isSafeInteger(updatedAt) || typeof statsJson !== 'string')
             return Promise.resolve({ ok: false, reason: 'invalid_party_goals' });
         return inTransaction(() => {
             const party = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]);
@@ -5425,28 +5536,25 @@ const Database = {
                 previousStats.objective.fullRoster, proposedStats.objective?.fullRoster)
                 || JSON.stringify(previousStats.raidAdmission) !== JSON.stringify(proposedStats.raidAdmission)))
                 return { ok: false, reason: 'party_roster_changed' };
-            if (party?.status !== 'active' || Number(party.updatedAt) !== expectedUpdatedAt
+            if (party?.status !== 'active' || Number(party.revision) !== expectedPartyRevision
                 || Number(party.leaderId) !== leaderId || party.memberIdsJson !== JSON.stringify(ids))
                 return { ok: false, reason: 'party_goals_changed' };
-            const rows = all(`SELECT characterId, phase, partyId, updatedAt, simulationOwner,
-                simulationRevision, simulationLeaseId FROM bot_life_state
+            const rows = all(`SELECT characterId, phase, partyId, updatedAt, simulationRevision FROM bot_life_state
                 WHERE characterId IN (${ids.map(() => '?').join(',')})`, ids);
             const byId = new Map(rows.map(row => [Number(row.characterId), row]));
             if (sources.some(source => {
                 const row = byId.get(source.characterId);
                 return !row || row.phase !== source.phase || row.partyId !== source.partyId
                     || Number(row.updatedAt) !== source.updatedAt
-                    || String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== source.ownerId
-                    || Number(row.simulationRevision || 0) !== source.revision
-                    || String(row.simulationLeaseId || '') !== source.leaseId;
+                    || Number(row.simulationRevision || 0) !== source.revision;
             })) return { ok: false, reason: 'party_goal_member_changed' };
-            write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ? WHERE partyId = ?',
+            write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                 [statsJson, updatedAt, partyId]);
             return { ok: true, partyRow: one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]) };
         });
     },
 
-    commitBackgroundPartyMembership({ party, members = [], event = null, review = false, expectedPartyUpdatedAt = null,
+    commitBackgroundPartyMembership({ party, members = [], event = null, review = false, expectedPartyRevision = null,
         expectedPhase = 'cold', canCommitHot = null, preserveClanOperations = false } = {}) {
         const batch = Array.isArray(members) ? members.slice(0, 40) : [];
         const characterIds = [...new Set(batch.map((entry) => Number(entry?.row?.characterId)).filter((id) => (
@@ -5461,23 +5569,23 @@ const Database = {
             if (!['cold', 'hot'].includes(expectedPhase)) return { ok: false, reason: 'invalid_membership_phase' };
             if (expectedPhase === 'hot') {
                 const declared = JSON.parse(party.memberIdsJson || '[]').map(Number);
-                const existing = one('SELECT status, memberIdsJson, updatedAt FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
+                const existing = one('SELECT status, memberIdsJson, revision FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
                 const previousIds = existing ? JSON.parse(existing.memberIdsJson || '[]').map(Number) : [];
                 if (review || party.status !== 'hot' || declared.length < 2 || declared.length > 9
                     || declared.length !== characterIds.length || !declared.includes(Number(party.leaderId))
                     || new Set(declared).size !== declared.length || declared.some(id => !characterIds.includes(id))
                     || batch.some(e => e.row.partyId !== party.partyId || (e.expectedPartyId && e.expectedPartyId !== party.partyId))
-                    || (expectedPartyUpdatedAt === null ? !!existing : existing?.status !== 'hot'
-                        || Number(existing.updatedAt) !== Number(expectedPartyUpdatedAt)
+                    || (expectedPartyRevision === null ? !!existing : existing?.status !== 'hot'
+                        || Number(existing.revision) !== Number(expectedPartyRevision)
                         || previousIds.some(id => !characterIds.includes(id))
                         || batch.some(e => !!e.expectedPartyId !== previousIds.includes(Number(e.row.characterId))))
                     || typeof canCommitHot !== 'function' || !canCommitHot()) return { ok: false, reason: 'hot_party_context_changed' };
             }
             if (review) {
-                const existing = one('SELECT status, memberIdsJson, updatedAt FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
+                const existing = one('SELECT status, memberIdsJson, revision FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
                 const ids = existing ? JSON.parse(existing.memberIdsJson || '[]').map(Number) : [];
                 const retained = JSON.parse(party.memberIdsJson || '[]').map(Number);
-                if (existing?.status !== 'active' || Number(existing.updatedAt) !== Number(expectedPartyUpdatedAt)
+                if (existing?.status !== 'active' || Number(existing.revision) !== Number(expectedPartyRevision)
                     || ids.length !== characterIds.length || ids.some(id => !characterIds.includes(id))
                     || retained.some(id => !characterIds.includes(id))
                     || batch.some(entry => entry.expectedPartyId !== party.partyId
@@ -5485,18 +5593,18 @@ const Database = {
                     return { ok: false, reason: 'party_review_membership_changed' };
                 }
             }
-            if (expectedPhase === 'cold' && !review && expectedPartyUpdatedAt !== null) {
-                const existing = one('SELECT status, memberIdsJson, updatedAt FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
+            if (expectedPhase === 'cold' && !review && expectedPartyRevision !== null) {
+                const existing = one('SELECT status, memberIdsJson, revision FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
                 const ids = existing ? JSON.parse(existing.memberIdsJson || '[]').map(Number) : [];
                 const declared = JSON.parse(party.memberIdsJson || '[]').map(Number);
-                if (existing?.status !== 'active' || Number(existing.updatedAt) !== Number(expectedPartyUpdatedAt)
+                if (existing?.status !== 'active' || Number(existing.revision) !== Number(expectedPartyRevision)
                     || ids.some(id => !characterIds.includes(id)) || declared.length !== characterIds.length
                     || declared.some(id => !characterIds.includes(id)) || !declared.includes(Number(party.leaderId))
                     || batch.some(entry => Boolean(entry.expectedPartyId) !== ids.includes(Number(entry.row.characterId))))
                     return { ok: false, reason: 'party_recruitment_changed' };
             }
             const placeholders = characterIds.map(() => '?').join(', ');
-            const currentRows = all(`SELECT characterId, phase, simulationOwner, simulationRevision, simulationLeaseId, partyId, updatedAt, statsJson
+            const currentRows = all(`SELECT characterId, phase, simulationRevision, partyId, updatedAt, statsJson
                 FROM bot_life_state WHERE characterId IN (${placeholders})`, characterIds);
             const currentById = new Map(currentRows.map((row) => [Number(row.characterId), row]));
             const conflicts = batch.filter((entry) => {
@@ -5504,13 +5612,10 @@ const Database = {
                 const current = currentById.get(Number(row.characterId));
                 return !current
                     || current.phase !== expectedPhase
-                    || String(current.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
                     || String(current.partyId || '') !== String(entry.expectedPartyId || '')
                     || Number(current.updatedAt || 0) !== Number(entry.expectedUpdatedAt || 0)
                     || entry.expectedSimulationRevision !== undefined
-                        && Number(current.simulationRevision || 0) !== entry.expectedSimulationRevision
-                    || entry.expectedSimulationLeaseId !== undefined
-                        && String(current.simulationLeaseId || '') !== entry.expectedSimulationLeaseId;
+                        && Number(current.simulationRevision || 0) !== entry.expectedSimulationRevision;
             }).map((entry) => Number(entry.row.characterId));
             if (conflicts.length) return { ok: false, reason: 'membership_conflict', conflicts };
 
@@ -5546,7 +5651,8 @@ const Database = {
                 status = excluded.status,
                 roleCoverageJson = excluded.roleCoverageJson,
                 statsJson = excluded.statsJson,
-                updatedAt = excluded.updatedAt`, [
+                updatedAt = excluded.updatedAt,
+                revision = bot_background_parties.revision + 1`, [
                 party.partyId, party.leaderId, party.memberIdsJson, party.spotId,
                 party.startedAt, party.nextResolveAt, party.cohesion, party.risk,
                 party.status, party.roleCoverageJson, party.statsJson, party.updatedAt
@@ -5559,16 +5665,15 @@ const Database = {
                 if (combat) stats.coldCombat = nativeColdCombatSkillsUnsafe(row.characterId, combat);
                 const result = write(`UPDATE bot_life_state
                     SET activity = ?, activityStartedAt = ?, nextResolveAt = ?,
-                        partyId = ?, statsJson = ?, updatedAt = ?, spotId = COALESCE(?, spotId)
+                        partyId = ?, statsJson = ?, updatedAt = ?, spotId = COALESCE(?, spotId), ${MOVE_FAR_REVISION}
                     WHERE characterId = ?
                     AND phase = ?
-                    AND simulationOwner = ?
                     AND COALESCE(partyId, '') = ?
                     AND updatedAt = ?`, [
                     row.activity, row.activityStartedAt, row.nextResolveAt,
                     row.partyId, combat ? JSON.stringify(stats) : row.statsJson, row.updatedAt,
                     expectedPhase === 'hot' ? row.spotId : null,
-                    row.characterId, expectedPhase, LEGACY_SIMULATION_OWNER,
+                    row.characterId, expectedPhase,
                     String(entry.expectedPartyId || ''), Number(entry.expectedUpdatedAt || 0)
                 ]);
                 if (result.affectedRows !== 1) {
@@ -5598,7 +5703,7 @@ const Database = {
             }
 
             const payment = partyAgreementUnsafe(previousParty, party);
-            write('UPDATE bot_background_parties SET statsJson = ? WHERE partyId = ?', [payment.row.statsJson, party.partyId]);
+            write('UPDATE bot_background_parties SET statsJson = ?, revision = revision + 1 WHERE partyId = ?', [payment.row.statsJson, party.partyId]);
             return { ok: true, partyId: party.partyId, characterIds,
                 partyRow: one('SELECT * FROM bot_background_parties WHERE partyId = ?', [party.partyId]),
                 lifeRows: characterIds.map(coldSimulationRow) };
@@ -5618,149 +5723,9 @@ const Database = {
         'raid-boss:upsert');
     },
 
-    claimColdSimulationLease(request = {}) {
-        const characterId = Number(request.characterId);
-        const expectedRevision = Number(request.expectedRevision);
-        const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-        const leaseId = String(request.leaseId || '');
-        const timestamp = Number(request.timestamp || now());
-        const leaseUntil = Number(request.leaseUntil || 0);
-        if (!Number.isSafeInteger(characterId) || characterId <= 0) return Promise.resolve({ ok: false, reason: 'invalid_character' });
-        if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return Promise.resolve({ ok: false, reason: 'invalid_revision' });
-        if (ownerId !== COLD_SIMULATION_OWNER || !leaseId || leaseUntil <= timestamp) return Promise.resolve({ ok: false, reason: 'invalid_lease' });
-
-        return inTransaction(() => {
-            const { row, stats } = coldClaimRow(characterId);
-            const partition = coldSimulationPartition(row, request, stats);
-            if (!partition.ok) return partition;
-            if (Number(row.simulationRevision || 0) !== expectedRevision) return { ok: false, reason: 'stale_revision' };
-            const currentOwner = String(row.simulationOwner || LEGACY_SIMULATION_OWNER);
-            const currentLeaseUntil = Number(row.simulationLeaseUntil || 0);
-            if (currentOwner !== LEGACY_SIMULATION_OWNER && currentLeaseUntil > timestamp) {
-                return { ok: false, reason: 'lease_active' };
-            }
-            if (![LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER].includes(currentOwner)) {
-                return { ok: false, reason: 'owner_changed' };
-            }
-            const revision = expectedRevision + 1;
-            const result = write(`UPDATE bot_life_state
-                SET simulationOwner = ?, simulationRevision = ?, simulationLeaseId = ?, simulationLeaseUntil = ?
-                WHERE characterId = ? AND simulationRevision = ? AND simulationOwner = ?`, [
-                ownerId, revision, leaseId, leaseUntil, characterId, expectedRevision, currentOwner
-            ]);
-            if (result.affectedRows !== 1) return { ok: false, reason: 'cas_failed' };
-            return { ok: true, characterId, ownerId, leaseId, revision, leaseUntil, reason: 'claimed' };
-        }, 'bot-life:cold-owner-claim');
-    },
-
-    claimColdSimulationLeases(requests = []) {
-        const batch = Array.isArray(requests) ? requests.slice(0, 64) : [];
-        if (!batch.length) return Promise.resolve([]);
-        return inTransaction(() => batch.map((request) => {
-            const characterId = Number(request.characterId);
-            const expectedRevision = Number(request.expectedRevision);
-            const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-            const leaseId = String(request.leaseId || '');
-            const timestamp = Number(request.timestamp || now());
-            const leaseUntil = Number(request.leaseUntil || 0);
-            if (!Number.isSafeInteger(characterId) || characterId <= 0) return { ok: false, characterId, reason: 'invalid_character' };
-            if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return { ok: false, characterId, reason: 'invalid_revision' };
-            if (ownerId !== COLD_SIMULATION_OWNER || !leaseId || leaseUntil <= timestamp) {
-                return { ok: false, characterId, reason: 'invalid_lease' };
-            }
-            const { row, stats } = coldClaimRow(characterId);
-            const partition = coldSimulationPartition(row, request, stats);
-            if (!partition.ok) return { ...partition, characterId };
-            if (Number(row.simulationRevision || 0) !== expectedRevision) {
-                return {
-                    ok: false,
-                    characterId,
-                    reason: 'stale_revision',
-                    expectedRevision,
-                    actualRevision: Number(row.simulationRevision || 0),
-                    actualOwner: String(row.simulationOwner || LEGACY_SIMULATION_OWNER),
-                    actualLeaseUntil: Number(row.simulationLeaseUntil || 0)
-                };
-            }
-            const currentOwner = String(row.simulationOwner || LEGACY_SIMULATION_OWNER);
-            const currentLeaseUntil = Number(row.simulationLeaseUntil || 0);
-            if (currentOwner !== LEGACY_SIMULATION_OWNER && currentLeaseUntil > timestamp) {
-                return { ok: false, characterId, reason: 'lease_active' };
-            }
-            if (![LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER].includes(currentOwner)) {
-                return { ok: false, characterId, reason: 'owner_changed' };
-            }
-            const revision = expectedRevision + 1;
-            const result = write(`UPDATE bot_life_state
-                SET simulationOwner = ?, simulationRevision = ?, simulationLeaseId = ?, simulationLeaseUntil = ?
-                WHERE characterId = ? AND simulationRevision = ? AND simulationOwner = ?`, [
-                ownerId, revision, leaseId, leaseUntil, characterId, expectedRevision, currentOwner
-            ]);
-            if (result.affectedRows !== 1) {
-                const actual = coldSimulationRow(characterId);
-                return {
-                    ok: false,
-                    characterId,
-                    reason: 'cas_failed',
-                    expectedRevision,
-                    actualRevision: Number(actual?.simulationRevision || 0),
-                    actualOwner: String(actual?.simulationOwner || LEGACY_SIMULATION_OWNER),
-                    actualLeaseUntil: Number(actual?.simulationLeaseUntil || 0)
-                };
-            }
-            return { ok: true, characterId, ownerId, leaseId, revision, leaseUntil, reason: 'claimed' };
-        }), 'bot-life:cold-owner-claim-batch');
-    },
-
-    commitColdSimulationLease(request = {}) {
-        const characterId = Number(request.characterId);
-        const expectedRevision = Number(request.expectedRevision);
-        const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-        const leaseId = String(request.leaseId || '');
-        const timestamp = Number(request.timestamp || now());
-        const leaseUntil = Number(request.leaseUntil || 0);
-        const requestedPatch = { ...(request.patch || {}) };
-        const invalidColumn = Object.keys(requestedPatch).find((column) => !COLD_SIMULATION_PATCH_COLUMNS.has(column));
-        if (!Number.isSafeInteger(characterId) || characterId <= 0) return Promise.resolve({ ok: false, reason: 'invalid_character' });
-        if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return Promise.resolve({ ok: false, reason: 'invalid_revision' });
-        if (ownerId !== COLD_SIMULATION_OWNER || !leaseId || leaseUntil <= timestamp) return Promise.resolve({ ok: false, reason: 'invalid_lease' });
-        if (invalidColumn) return Promise.resolve({ ok: false, reason: 'invalid_patch', column: invalidColumn });
-
-        return inTransaction(() => {
-            const row = coldSimulationRow(characterId);
-            const conflict = coldSimulationConflict(row, { expectedRevision, ownerId, leaseId }, timestamp);
-            if (conflict !== 'cas_failed') return { ok: false, reason: conflict };
-            const patch = preserveColdVersionedStats(row, requestedPatch);
-            const proposed = { ...row, ...patch, phase: patch.phase || row.phase, activity: patch.activity || row.activity };
-            const partition = coldSimulationPartition(proposed, request);
-            if (!partition.ok) return { ok: false, reason: 'partition_rejected', detail: partition.reason };
-            const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
-            const revision = expectedRevision + 1;
-            const assignments = entries.map(([column]) => `${escapeIdentifier(column)} = ?`);
-            assignments.push('simulationRevision = ?', 'simulationLeaseUntil = ?');
-            const params = [
-                ...entries.map(([, value]) => value), revision, leaseUntil,
-                characterId, ownerId, expectedRevision, leaseId, timestamp
-            ];
-            const result = write(`UPDATE bot_life_state SET ${assignments.join(', ')}
-                WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ?
-                  AND simulationLeaseId = ? AND simulationLeaseUntil > ?`, params);
-            if (result.affectedRows !== 1) {
-                return { ok: false, reason: coldSimulationConflict(coldSimulationRow(characterId), { expectedRevision, ownerId, leaseId }, timestamp) };
-            }
-            return {
-                ok: true,
-                characterId,
-                ownerId,
-                leaseId,
-                revision,
-                leaseUntil,
-                reason: 'committed',
-                ...(request.memoryEvents !== undefined ? { memorySnapshots: commitColdInteractionMemoryUnsafe(request) || [] } : {}),
-                row: coldSimulationRow(characterId)
-            };
-        }, 'bot-life:cold-owner-commit');
-    },
+    // A bot's input revisions (bag summary, learned skills, henna slots) from
+    // its bot_life_state row or a state that copied them; 0 = unknown.
+    stateRevisions,
 
     commitAndReleaseColdSimulationLeases(requests = []) {
         const batch = Array.isArray(requests) ? requests.slice(0, 32) : [];
@@ -5777,6 +5742,19 @@ const Database = {
             group.push(request);
             atomicGroups.set(groupId, group);
         });
+        const commitFields = (request) => {
+            const requestedPatch = { ...(request.patch || {}) };
+            return {
+                characterId: Number(request.characterId),
+                expectedRevision: Number(request.expectedRevision),
+                timestamp: Number(request.timestamp || now()),
+                requestedPatch,
+                invalidColumn: Object.keys(requestedPatch).find((column) => !COLD_SIMULATION_PATCH_COLUMNS.has(column))
+            };
+        };
+        // The proposal's columns and the stats object its owner passes: no
+        // row read and no parse.
+        const proposalPartition = (request, fields) => coldSimulationPartition(fields.requestedPatch, request, request.stats || {});
         const validatedRaidKeys = new Set();
         const validateAtomicGroups = () => atomicGroups.forEach((group, groupId) => {
             const expectedIds = new Set((group[0]?.atomicGroup?.memberIds || []).map(Number).filter(Boolean));
@@ -5806,29 +5784,20 @@ const Database = {
                     || pvpContext[0].some(a => pvpContext[1].some(b => a.clanId > 0 && a.clanId === b.clanId));
                 if (failure) reason = 'pvp_context_changed';
             }
+            const memberRows = new Map();
             if (!failure) {
                 for (const request of group) {
-                    const characterId = Number(request.characterId);
-                    const expectedRevision = Number(request.expectedRevision);
-                    const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-                    const leaseId = String(request.leaseId || '');
-                    const timestamp = Number(request.timestamp || now());
-                    const requestedPatch = { ...(request.patch || {}) };
-                    const invalidColumn = Object.keys(requestedPatch)
-                        .find((column) => !COLD_SIMULATION_PATCH_COLUMNS.has(column));
-                    const row = coldSimulationRow(characterId);
-                    const conflict = coldSimulationConflict(row, { expectedRevision, ownerId, leaseId }, timestamp);
-                    const { patch, stats } = preserveColdVersionedStatsParsed(row, requestedPatch);
-                    const proposed = { ...row, ...patch, phase: patch.phase || row?.phase, activity: patch.activity || row?.activity };
-                    const partition = coldSimulationPartition(proposed, request, stats);
-                    if (!Number.isSafeInteger(characterId) || characterId <= 0
-                        || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0
-                        || ownerId !== COLD_SIMULATION_OWNER || !leaseId
-                        || invalidColumn || conflict !== 'cas_failed' || !partition.ok) {
+                    const fields = commitFields(request);
+                    // Only the guard columns and the party: a member's commit
+                    // writes under the same guard.
+                    const row = one(COLD_GROUP_MEMBER_SQL, [fields.characterId]);
+                    const conflict = coldSimulationConflict(row, fields);
+                    memberRows.set(fields.characterId, row);
+                    if (!Number.isSafeInteger(fields.characterId) || fields.characterId <= 0
+                        || !Number.isSafeInteger(fields.expectedRevision) || fields.expectedRevision < 0
+                        || fields.invalidColumn || conflict !== 'cas_failed' || !proposalPartition(request, fields).ok) {
                         failure = true;
-                        reason = conflict !== 'cas_failed'
-                            ? conflict
-                            : invalidColumn || !partition.ok ? 'party_group_invalid' : 'party_group_invalid';
+                        reason = conflict !== 'cas_failed' ? conflict : 'party_group_invalid';
                         break;
                     }
                 }
@@ -5838,14 +5807,21 @@ const Database = {
                 failure = !Array.isArray(changes) || changes.length > 2
                     || new Set(changes.map(change => change.partyId)).size !== changes.length;
                 if (!failure) for (const change of changes) {
-                    const party = one('SELECT status, memberIdsJson, updatedAt FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
+                    const party = one('SELECT status, memberIdsJson, revision FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
                     const ids = party ? JSON.parse(party.memberIdsJson || '[]').map(Number) : [];
                     const expected = change.memberIds || [];
-                    if (party?.status !== 'active' || Number(party.updatedAt) !== Number(change.expectedUpdatedAt)
+                    // A fresh revision-0 party cannot match a missing revision.
+                    if (party && (!Number.isSafeInteger(change.expectedPartyRevision)
+                        || Number(party.revision) !== change.expectedPartyRevision)) {
+                        failure = true;
+                        reason = 'party_revision_stale';
+                        break;
+                    }
+                    if (party?.status !== 'active'
                         || ids.length < 2 || ids.length > 9 || ids.length !== expected.length
                         || new Set(expected).size !== expected.length || ids.some(id => !expected.includes(id) || !presentIds.has(id)
-                            || coldSimulationRow(id)?.partyId !== change.partyId)
-                        || !Number.isSafeInteger(change.updatedAt) || change.updatedAt <= Number(party.updatedAt)
+                            || memberRows.get(id)?.partyId !== change.partyId)
+                        || !Number.isSafeInteger(change.updatedAt)
                         || (change.nextResolveAt !== null && (!Number.isSafeInteger(change.nextResolveAt) || change.nextResolveAt < 0))
                         || (change.spotId !== undefined && (typeof change.spotId !== 'string' || !change.spotId.length || change.spotId.length > 256))
                         || (change.status !== undefined && !['active', 'dissolved'].includes(change.status))
@@ -5854,7 +5830,7 @@ const Database = {
                         break;
                     }
                 }
-                if (failure) reason = 'party_context_changed';
+                if (failure) reason ||= 'party_context_changed';
             }
             if (!failure && raidCommit) {
                 const change = group[0].atomicGroup.partyChanges[0];
@@ -5875,54 +5851,30 @@ const Database = {
                     detail: atomicGroupFailures.get(groupId)
                 };
             }
-            const characterId = Number(request.characterId);
-            const expectedRevision = Number(request.expectedRevision);
-            const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-            const leaseId = String(request.leaseId || '');
-            const timestamp = Number(request.timestamp || now());
-            const requestedPatch = { ...(request.patch || {}) };
-            const invalidColumn = Object.keys(requestedPatch).find((column) => !COLD_SIMULATION_PATCH_COLUMNS.has(column));
+            const fields = commitFields(request);
+            const { characterId, expectedRevision, timestamp, invalidColumn, requestedPatch } = fields;
             if (!Number.isSafeInteger(characterId) || characterId <= 0) return { ok: false, characterId, reason: 'invalid_character' };
             if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return { ok: false, characterId, reason: 'invalid_revision' };
-            if (ownerId !== COLD_SIMULATION_OWNER || !leaseId) return { ok: false, characterId, reason: 'invalid_lease' };
             if (invalidColumn) return { ok: false, characterId, reason: 'invalid_patch', column: invalidColumn };
-            const parts = coldCommitParts();
-            const row = coldSimulationRow(characterId);
-            const conflict = coldSimulationConflict(row, { expectedRevision, ownerId, leaseId }, timestamp);
-            parts?.lap('row_read');
-            if (conflict !== 'cas_failed') return { ok: false, characterId, reason: conflict };
-            const { patch, stats, deathExperience } = preserveColdVersionedStatsParsed(row, requestedPatch);
-            const proposed = { ...row, ...patch, phase: patch.phase || row.phase, activity: patch.activity || row.activity };
-            const partition = coldSimulationPartition(proposed, request, stats);
-            parts?.lap('stats_merge');
+            const parts = Diagnostics.laps('commit_');
+            const partition = proposalPartition(request, fields);
             if (!partition.ok) return { ok: false, characterId, reason: 'partition_rejected', detail: partition.reason };
-            const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? timestamp });
-            const revision = expectedRevision + 1;
-            const assignments = entries.map(([column]) => `${escapeIdentifier(column)} = ?`);
-            assignments.push(
-                'simulationOwner = ?',
-                'simulationRevision = ?',
-                'simulationLeaseId = NULL',
-                'simulationLeaseUntil = 0'
-            );
-            const params = [
-                ...entries.map(([, value]) => value), LEGACY_SIMULATION_OWNER, revision,
-                characterId, ownerId, expectedRevision, leaseId, timestamp
-            ];
-            const result = write(`UPDATE bot_life_state SET ${assignments.join(', ')}
-                WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ?
-                  AND simulationLeaseId = ? AND simulationLeaseUntil > ?`, params);
-            if (result.affectedRows !== 1) {
+            const written = writeColdCommitUnsafe(fields, requestedPatch);
+            if (!written) {
+                // A refusal hands back the row: the worker rebases on it.
+                const current = coldSimulationRow(characterId);
                 return {
                     ok: false,
                     characterId,
-                    reason: coldSimulationConflict(coldSimulationRow(characterId), { expectedRevision, ownerId, leaseId }, timestamp)
+                    reason: coldSimulationConflict(current, fields),
+                    ...(current ? { row: current } : {})
                 };
             }
+            const revision = expectedRevision + 1;
             parts?.lap('row_write');
             const physical = request.physical || null;
             EconomyJournal.detail(request.journalReason || 'resolve');
-            const pkDrops = physical ? applyColdPhysicalStateUnsafe(characterId, physical, parts) : [];
+            const { drops: pkDrops, rewrote } = physical ? applyColdPhysicalStateUnsafe(characterId, physical, parts) : { drops: [], rewrote: false };
             parts?.lap('physical');
             // What deals and closed records left for the bot on the board while
             // the worker held it reaches its bag with this save.
@@ -5930,21 +5882,25 @@ const Database = {
             const settled = pendingSettlementOwners.has(characterId)
                 ? mergeBoardSettlementsUnsafe(characterId, { advance: false }) : null;
             EconomyJournal.detail(null);
-            // Persist the entitlement under the same lease fence and transaction
-            // as EXP. Cold-to-hot resurrection reads this durable record.
-            syncColdDeathExperienceUnsafe(characterId, deathExperience, timestamp);
+            // Persist the entitlement under the same revision fence and
+            // transaction as EXP. Cold-to-hot resurrection reads this durable record.
+            syncColdDeathExperienceUnsafe(characterId, request.stats?.deathExperience, timestamp);
             const memorySnapshots = request.memoryEvents !== undefined ? commitColdInteractionMemoryUnsafe(request) || [] : undefined;
+            // The resolve's life events (BotLifeEvents.resolvePayload) leave
+            // with its save: the outbox row commits or rolls back with it.
+            if (request.lifeEvents) historyOutboxUnsafe('life_events', request.lifeEvents);
             parts?.lap('settle');
-            const committedRow = coldSimulationRow(characterId);
+            // After the UPDATE only a settlement (it returns its read) and the
+            // physical step's PvP tally or PK death drop write this bot's life
+            // state: then the whole row goes back (its stats hold what SQL
+            // wrote into them). Otherwise the UPDATE's own numbers.
+            const committedRow = settled?.row || (settled || rewrote ? coldSimulationRow(characterId) : written);
             parts?.lap('reread');
             parts?.done();
             return {
                 ok: true,
                 characterId,
-                ownerId: LEGACY_SIMULATION_OWNER,
-                leaseId: null,
                 revision,
-                leaseUntil: 0,
                 reason: 'committed_released',
                 ...(pkDrops.length ? { pkDrops } : {}),
                 ...(memorySnapshots !== undefined ? { memorySnapshots } : {}),
@@ -5972,10 +5928,10 @@ const Database = {
                     const payment = partyAgreementUnsafe(previous, { ...previous, ...change });
                     change.statsJson = payment.row.statsJson;
                     const updated = write(`UPDATE bot_background_parties SET nextResolveAt = ?, statsJson = ?, updatedAt = ?, spotId = COALESCE(?, spotId),
-                        status = COALESCE(?, status), cohesion = COALESCE(?, cohesion), risk = COALESCE(?, risk)
-                        WHERE partyId = ? AND status = 'active' AND updatedAt = ?`,
+                        status = COALESCE(?, status), cohesion = COALESCE(?, cohesion), risk = COALESCE(?, risk), revision = revision + 1
+                        WHERE partyId = ? AND status = 'active' AND revision = ?`,
                     [change.nextResolveAt, change.statsJson, change.updatedAt, change.spotId ?? null,
-                        change.status ?? null, change.cohesion ?? null, change.risk ?? null, change.partyId, change.expectedUpdatedAt]);
+                        change.status ?? null, change.cohesion ?? null, change.risk ?? null, change.partyId, change.expectedPartyRevision]);
                     if (updated.affectedRows !== 1) throw new Error('party conflict: party changed during commit');
                     let partyRow, partyRowRead = false;
                     for (const request of group) {
@@ -5983,6 +5939,9 @@ const Database = {
                         result.row = coldSimulationRow(result.characterId);
                         result.revision = Number(result.row.simulationRevision);
                         if (payment.touched.has(result.characterId)) result.partyPayment = true;
+                        // A two-party group: each member gets its own party's row
+                        // (the roster was matched to change.memberIds above).
+                        if (!change.memberIds.includes(result.characterId)) continue;
                         if (!partyRowRead) {
                             partyRow = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [change.partyId]);
                             partyRowRead = true;
@@ -6021,114 +5980,16 @@ const Database = {
         }, 'bot-life:cold-owner-commit-release-batch');
     },
 
-    releaseColdSimulationLeases(requests = []) {
-        const batch = Array.isArray(requests) ? requests.slice(0, 64) : [];
-        if (!batch.length) return Promise.resolve([]);
-        return inTransaction(() => batch.map((request) => {
-            const characterId = Number(request.characterId);
-            let expectedRevision = Number(request.expectedRevision);
-            const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-            const leaseId = String(request.leaseId || '');
-            const timestamp = Number(request.timestamp || now());
-            const row = coldSimulationRow(characterId);
-            // A clan inventory write can advance the row while retaining the
-            // same lease. Its rejected proposal must still relinquish that
-            // lease; otherwise renewal keeps an abandoned owner alive forever.
-            // This opt-in path changes ownership only, never character data.
-            if (request.releaseInvalidated === true && row?.phase === 'cold'
-                && leaseId && row.simulationLeaseId === leaseId
-                && row.simulationOwner === ownerId
-                && Number(row.simulationRevision) > expectedRevision) {
-                expectedRevision = Number(row.simulationRevision);
-            }
-            const conflict = coldSimulationConflict(row, { expectedRevision, ownerId, leaseId }, timestamp);
-            if (conflict !== 'cas_failed') return { ok: false, characterId, reason: conflict };
-            const revision = expectedRevision + 1;
-            const result = write(`UPDATE bot_life_state
-                SET simulationOwner = ?, simulationRevision = ?, simulationLeaseId = NULL, simulationLeaseUntil = 0
-                WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ? AND simulationLeaseId = ?`, [
-                LEGACY_SIMULATION_OWNER, revision, characterId, ownerId, expectedRevision, leaseId
-            ]);
-            if (result.affectedRows !== 1) return { ok: false, characterId, reason: 'cas_failed' };
-            return { ok: true, characterId, ownerId: LEGACY_SIMULATION_OWNER, leaseId: null, revision, leaseUntil: 0, reason: 'released' };
-        }), 'bot-life:cold-owner-release-batch');
-    },
-
-    releaseColdSimulationLease(request = {}) {
-        const characterId = Number(request.characterId);
-        const expectedRevision = Number(request.expectedRevision);
-        const ownerId = String(request.ownerId || COLD_SIMULATION_OWNER);
-        const leaseId = String(request.leaseId || '');
-        const timestamp = Number(request.timestamp || now());
-        return inTransaction(() => {
-            const row = coldSimulationRow(characterId);
-            const conflict = coldSimulationConflict(row, { expectedRevision, ownerId, leaseId }, timestamp);
-            if (conflict !== 'cas_failed') return { ok: false, reason: conflict };
-            const revision = expectedRevision + 1;
-            const result = write(`UPDATE bot_life_state
-                SET simulationOwner = ?, simulationRevision = ?, simulationLeaseId = NULL, simulationLeaseUntil = 0
-                WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ? AND simulationLeaseId = ?`, [
-                LEGACY_SIMULATION_OWNER, revision, characterId, ownerId, expectedRevision, leaseId
-            ]);
-            if (result.affectedRows !== 1) return { ok: false, reason: 'cas_failed' };
-            return { ok: true, characterId, ownerId: LEGACY_SIMULATION_OWNER, leaseId: null, revision, leaseUntil: 0, reason: 'released' };
-        }, 'bot-life:cold-owner-release');
-    },
-
-    renewColdSimulationLeases(tokens = [], {
-        now: clock = Date.now,
-        leaseMs = 30000,
-        canRenew
-    } = {}) {
-        const batch = Array.isArray(tokens) && tokens.length <= ColdProtocol.MAX_BATCH
-            ? tokens.map(ColdProtocol.leaseRenewalToken) : null;
-        const ids = new Set(batch?.filter(Boolean).map(token => token.characterId));
-        if (!batch || batch.length > ColdProtocol.MAX_BATCH || batch.some(token => !token)
-            || ids.size !== batch.length || (batch.length && (typeof clock !== 'function'
-                || typeof canRenew !== 'function' || !Number.isSafeInteger(leaseMs) || leaseMs < 1000))) {
-            return Promise.reject(new Error('invalid_lease_renewal_batch'));
-        }
-        if (!batch.length) return Promise.resolve([]);
-        return withCharacterFlushes([...ids], () => inTransaction(() => batch.map(token => {
-            const cutoff = clock();
-            if (!Number.isSafeInteger(cutoff) || cutoff < 0 || !Number.isSafeInteger(cutoff + leaseMs)) {
-                throw new Error('invalid_lease_renewal_clock');
-            }
-            const refused = reason => ({ ok: false, ...token, reason });
-            if (canRenew(token) !== true) return refused('renewal_source_changed');
-            const current = one(`SELECT phase, simulationOwner, simulationRevision, simulationLeaseId,
-                simulationLeaseUntil FROM bot_life_state WHERE characterId = ?`, [token.characterId]);
-            if (!current) return refused('missing_state');
-            if (current.phase !== 'cold') return refused('not_cold');
-            if (current.simulationOwner !== token.ownerId) return refused('owner_changed');
-            if (Number(current.simulationRevision) !== token.revision) return refused('stale_revision');
-            if (current.simulationLeaseId !== token.leaseId) return refused('lease_changed');
-            if (Number(current.simulationLeaseUntil) <= cutoff) return refused('lease_expired');
-            const leaseUntil = Math.max(Number(current.simulationLeaseUntil), cutoff + leaseMs);
-            const result = write(`UPDATE bot_life_state
-                SET simulationLeaseUntil = ?
-                WHERE characterId = ? AND phase = 'cold' AND simulationOwner = ?
-                  AND simulationRevision = ? AND simulationLeaseId = ?
-                  AND simulationLeaseUntil > ?`, [
-                leaseUntil, token.characterId, token.ownerId, token.revision, token.leaseId, cutoff
-            ]);
-            return result.affectedRows === 1 ? { ok: true, ...token, leaseUntil, reason: 'renewed' }
-                : refused('renewal_cas_failed');
-        }), 'bot-life:cold-owner-renew-batch'));
-    },
-
     endPvpEncounter(key, ids, outcome = 'pvp_expired') {
-        if (typeof key !== 'string' || !Array.isArray(ids) || ids.length > 18) return Promise.resolve({ rows: [], complete: false });
+        if (typeof key !== 'string' || !Array.isArray(ids) || ids.length > 18) return Promise.resolve({ rows: [], parties: [] });
         return inTransaction(() => {
             const rows = [], parties = [], partyIds = new Set(), timestamp = now();
-            let complete = true;
             for (const id of ids) {
                 const row = coldSimulationRow(Number(id));
                 const stats = row && JSON.parse(row.statsJson || '{}');
                 if (row?.partyId) partyIds.add(row.partyId);
                 if (stats?.pvpEncounter?.key !== key && !(stats?.coldCompetition?.key === key
                     && stats.coldCompetition.outcome === 'pvp_fighting' && !stats.pvpEncounter)) continue;
-                if (row.simulationLeaseId) { complete = false; continue; }
                 stats.pvpEncounter = null;
                 if (stats.coldCompetition?.key === key) {
                     stats.coldCompetition = { ...stats.coldCompetition, wait: null, outcome, endedAt: timestamp };
@@ -6141,13 +6002,12 @@ const Database = {
                 const party = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]);
                 const stats = party && JSON.parse(party.statsJson || '{}');
                 if (stats?.coldCompetition?.key !== key) continue;
-                if (JSON.parse(party.memberIdsJson).some(id => coldSimulationRow(id)?.simulationLeaseId)) { complete = false; continue; }
                 stats.coldCompetition = { ...stats.coldCompetition, wait: null, outcome, endedAt: timestamp };
-                write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ? WHERE partyId = ?',
+                write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                     [JSON.stringify(stats), Math.max(timestamp, Number(party.updatedAt) + 1), partyId]);
                 parties.push(one('SELECT * FROM bot_background_parties WHERE partyId = ?', [partyId]));
             }
-            return { rows, parties, complete };
+            return { rows, parties };
         }, 'bot-life:pvp-encounter-end');
     },
 
@@ -6167,8 +6027,6 @@ const Database = {
                 if (!row || row.phase !== request.expectedPhase || encounter?.key !== request.key
                     || declared.length !== ids.length || declared.some(id => !ids.includes(id))
                     || Number(row.simulationRevision) !== m.expectedRevision || Number(row.updatedAt) !== m.expectedUpdatedAt
-                    || ![LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER].includes(row.simulationOwner)
-                    || row.simulationLeaseId
                     || Object.keys(m.patch || {}).some(key => !COLD_SIMULATION_PATCH_COLUMNS.has(key))
                     || (m.patch.partyId || null) !== (row.partyId || null) || m.patch.phase !== request.phase) {
                     return { ok: false, reason: 'encounter_member_changed' };
@@ -6185,14 +6043,13 @@ const Database = {
                 }
             }
             const timestamp = Math.max(now(), ...rows.map(r => Number(r.updatedAt) + 1));
-            for (let i = 0; i < rows.length; i++) {
-                const row = rows[i], m = members[i];
-                const patch = preserveColdVersionedStats(row, { ...m.patch, updatedAt: timestamp });
+            for (const m of members) {
+                const patch = { ...m.patch, updatedAt: timestamp };
                 const entries = Object.entries(patch);
-                const changed = write(`UPDATE bot_life_state SET ${entries.map(([k]) => `${escapeIdentifier(k)} = ?`).join(', ')},
-                    simulationOwner = ?, simulationRevision = simulationRevision + 1, simulationLeaseId = NULL, simulationLeaseUntil = 0
+                const changed = write(`UPDATE bot_life_state SET ${coldPatchAssignments(entries).join(', ')},
+                    simulationRevision = simulationRevision + 1
                     WHERE characterId = ? AND simulationRevision = ?`,
-                [...entries.map(([, v]) => v), LEGACY_SIMULATION_OWNER, m.characterId, m.expectedRevision]);
+                [...entries.map(([, v]) => v), m.characterId, m.expectedRevision]);
                 if (changed.affectedRows !== 1) throw Error('encounter lifecycle CAS failed');
                 // Staged actors must read the same physical resources as the life snapshot.
                 const combat = JSON.parse(patch.statsJson || '{}').coldCombat;
@@ -6203,7 +6060,7 @@ const Database = {
                 const stats = JSON.parse(party.statsJson || '{}');
                 stats.hotLifecycle = request.phase === 'hot' ? { startedAt: timestamp, reason: request.reason } : null;
                 if (stats.coldCompetition) stats.coldCompetition.wait = null;
-                write('UPDATE bot_background_parties SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ? WHERE partyId = ?',
+                write('UPDATE bot_background_parties SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                     [request.phase === 'hot' ? 'hot' : 'active', request.phase === 'hot' ? null : timestamp + 1000,
                         JSON.stringify(stats), timestamp, party.partyId]);
             }
@@ -6220,13 +6077,14 @@ const Database = {
         const members = request.members || [];
         const ids = members.map(m => Number(m.characterId));
         if (ids.length < 2 || ids.length > 9 || new Set(ids).size !== ids.length
-            || !['hot', 'cold'].includes(request.phase) || !['hot', 'cold'].includes(request.expectedPhase)) {
+            || !['hot', 'cold'].includes(request.phase) || !['hot', 'cold'].includes(request.expectedPhase)
+            || !Number.isSafeInteger(request.expectedPartyRevision) || request.expectedPartyRevision < 0) {
             return Promise.resolve({ ok: false, reason: 'invalid_party_transition' });
         }
         return inTransaction(() => {
             const party = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [request.partyId]);
             const declared = party ? JSON.parse(party.memberIdsJson) : [];
-            if (!party || party.status !== request.expectedStatus || Number(party.updatedAt) !== request.expectedUpdatedAt
+            if (!party || party.status !== request.expectedStatus || Number(party.revision) !== request.expectedPartyRevision
                 || declared.length !== ids.length || declared.some(id => !ids.includes(Number(id)))) {
                 return { ok: false, reason: 'party_changed' };
             }
@@ -6239,7 +6097,6 @@ const Database = {
                 const row = rows[i], m = members[i];
                 if (!row || row.phase !== request.expectedPhase || row.partyId !== request.partyId
                     || Number(row.simulationRevision) !== m.expectedRevision || Number(row.updatedAt) !== m.expectedUpdatedAt
-                    || ![LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER].includes(row.simulationOwner)
                     || Object.keys(m.patch || {}).some(key => !COLD_SIMULATION_PATCH_COLUMNS.has(key))
                     || m.patch.partyId !== request.partyId || m.patch.phase !== request.phase) {
                     return { ok: false, reason: 'member_changed' };
@@ -6252,16 +6109,15 @@ const Database = {
                 const reason = raidRosterCommitReason(party, jsonObject(request.statsJson), null, snapshots);
                 if (reason) return { ok: false, reason };
             }
-            for (let i = 0; i < members.length; i++) {
-                const m = members[i], row = rows[i];
-                const entries = Object.entries(preserveColdVersionedStats(row, { ...m.patch, updatedAt: timestamp }));
-                const changed = write(`UPDATE bot_life_state SET ${entries.map(([key]) => `${escapeIdentifier(key)} = ?`).join(', ')},
-                    simulationOwner = ?, simulationRevision = simulationRevision + 1, simulationLeaseId = NULL, simulationLeaseUntil = 0
+            for (const m of members) {
+                const entries = Object.entries({ ...m.patch, updatedAt: timestamp });
+                const changed = write(`UPDATE bot_life_state SET ${coldPatchAssignments(entries).join(', ')},
+                    simulationRevision = simulationRevision + 1
                     WHERE characterId = ? AND simulationRevision = ?`,
-                [...entries.map(([, value]) => value), LEGACY_SIMULATION_OWNER, m.characterId, m.expectedRevision]);
+                [...entries.map(([, value]) => value), m.characterId, m.expectedRevision]);
                 if (changed.affectedRows !== 1) throw Error('party lifecycle CAS failed');
             }
-            write('UPDATE bot_background_parties SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ? WHERE partyId = ?',
+            write('UPDATE bot_background_parties SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                 [request.phase === 'hot' ? 'hot' : 'active', request.nextResolveAt, request.statsJson, timestamp, request.partyId]);
             return { ok: true, rows: ids.map(coldSimulationRow),
                 party: one('SELECT * FROM bot_background_parties WHERE partyId = ?', [request.partyId]) };
@@ -6273,13 +6129,14 @@ const Database = {
         const ids = members.map((member) => Number(member.characterId));
         const playerId = Number(request.playerId || 0);
         if (!request.partyId || !Number.isSafeInteger(playerId) || playerId <= 0
-            || ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length) {
+            || ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length
+            || !Number.isSafeInteger(request.expectedPartyRevision) || request.expectedPartyRevision < 0) {
             return Promise.resolve({ ok: false, reason: 'invalid_party_takeover' });
         }
         return inTransaction(() => {
             const party = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [request.partyId]);
             const declared = party ? JSON.parse(party.memberIdsJson || '[]').map(Number) : [];
-            if (!party || party.status !== 'hot' || Number(party.updatedAt) !== Number(request.expectedUpdatedAt)
+            if (!party || party.status !== 'hot' || Number(party.revision) !== request.expectedPartyRevision
                 || declared.length !== ids.length || declared.some((id) => !ids.includes(id))) {
                 return { ok: false, reason: 'party_changed' };
             }
@@ -6294,9 +6151,7 @@ const Database = {
                 const row = rows[index];
                 if (!row || row.phase !== 'hot' || row.partyId !== request.partyId
                     || Number(row.simulationRevision) !== Number(member.expectedRevision)
-                    || Number(row.updatedAt) !== Number(member.expectedUpdatedAt)
-                    || String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
-                    || row.simulationLeaseId) {
+                    || Number(row.updatedAt) !== Number(member.expectedUpdatedAt)) {
                     return { ok: false, reason: 'member_changed' };
                 }
             }
@@ -6326,14 +6181,13 @@ const Database = {
                 };
                 const changed = write(`UPDATE bot_life_state SET
                     partyId = NULL, activity = 'hunting', activityStartedAt = ?, nextResolveAt = NULL,
-                    lastResolvedAt = ?, statsJson = ?, updatedAt = ?, simulationOwner = ?,
-                    simulationRevision = simulationRevision + 1, simulationLeaseId = NULL, simulationLeaseUntil = 0
+                    lastResolvedAt = ?, statsJson = ?, updatedAt = ?,
+                    simulationRevision = simulationRevision + 1
                     WHERE characterId = ? AND partyId = ? AND phase = 'hot' AND simulationRevision = ?`, [
                     timestamp,
                     timestamp,
                     JSON.stringify(stats),
                     timestamp,
-                    LEGACY_SIMULATION_OWNER,
                     member.characterId,
                     request.partyId,
                     member.expectedRevision
@@ -6350,9 +6204,9 @@ const Database = {
                 at: timestamp
             };
             const changedParty = write(`UPDATE bot_background_parties
-                SET status = 'player_taken_over', nextResolveAt = NULL, statsJson = ?, updatedAt = ?
-                WHERE partyId = ? AND status = 'hot' AND updatedAt = ?`, [
-                JSON.stringify(partyStats), timestamp, request.partyId, request.expectedUpdatedAt
+                SET status = 'player_taken_over', nextResolveAt = NULL, statsJson = ?, updatedAt = ?, revision = revision + 1
+                WHERE partyId = ? AND status = 'hot' AND revision = ?`, [
+                JSON.stringify(partyStats), timestamp, request.partyId, request.expectedPartyRevision
             ]);
             if (changedParty.affectedRows !== 1) throw Error('party takeover party CAS failed');
             return {
@@ -6375,9 +6229,7 @@ const Database = {
             const row = coldSimulationRow(id);
             const stats = parsedObject(row?.statsJson) || {};
             if (!row || row.partyId || Number(stats.playerPartyTakeover?.playerId) !== playerId
-                || stats.playerPartyTakeover?.partyId !== request.partyId
-                || String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
-                || row.simulationLeaseId) return null;
+                || stats.playerPartyTakeover?.partyId !== request.partyId) return null;
             delete stats.playerPartyTakeover;
             stats.leaderId = null;
             write(`UPDATE bot_life_state SET statsJson = ?, updatedAt = ?,
@@ -6413,9 +6265,7 @@ const Database = {
             for (const row of rows) {
                 const stats = parsedObject(row.statsJson) || {};
                 if (row.partyId || Number(stats.playerPartyTakeover?.playerId || 0) !== playerId
-                    || stats.playerPartyTakeover?.partyId !== partyId
-                    || String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
-                    || row.simulationLeaseId) {
+                    || stats.playerPartyTakeover?.partyId !== partyId) {
                     return { ok: false, reason: 'member_changed' };
                 }
             }
@@ -6434,8 +6284,8 @@ const Database = {
                 delete stats.playerPartyTakeover;
                 const changed = write(`UPDATE bot_life_state SET
                     partyId = ?, activity = 'grouped', activityStartedAt = ?, nextResolveAt = ?,
-                    lastResolvedAt = ?, statsJson = ?, updatedAt = ?, simulationOwner = ?,
-                    simulationRevision = simulationRevision + 1, simulationLeaseId = NULL, simulationLeaseUntil = 0
+                    lastResolvedAt = ?, statsJson = ?, updatedAt = ?,
+                    simulationRevision = simulationRevision + 1
                     WHERE characterId = ? AND partyId IS NULL AND simulationRevision = ?`, [
                     partyId,
                     timestamp,
@@ -6443,7 +6293,6 @@ const Database = {
                     timestamp,
                     JSON.stringify(stats),
                     timestamp,
-                    LEGACY_SIMULATION_OWNER,
                     Number(row.characterId),
                     Number(row.simulationRevision)
                 ]);
@@ -6459,18 +6308,21 @@ const Database = {
             partyStats.sessionReview = null;
             partyStats.lastProgressAt = timestamp;
             partyStats.partySpotRisk = null;
+            // The takeover ends the party's competition episode: its avoid
+            // counts the party rounds just reset with partySpotRisk.
+            if (partyStats.coldCompetition?.avoid) partyStats.coldCompetition = { ...partyStats.coldCompetition, avoid: null };
             partyStats.hotLifecycle = phase === 'hot'
                 ? { startedAt: timestamp, reason: 'player_party_released' }
                 : null;
             const changedParty = write(`UPDATE bot_background_parties
-                SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ?
-                WHERE partyId = ? AND status = 'player_taken_over' AND updatedAt = ?`, [
+                SET status = ?, nextResolveAt = ?, statsJson = ?, updatedAt = ?, revision = revision + 1
+                WHERE partyId = ? AND status = 'player_taken_over' AND revision = ?`, [
                 status,
                 nextResolveAt,
                 JSON.stringify(partyStats),
                 timestamp,
                 partyId,
-                Number(party.updatedAt)
+                Number(party.revision)
             ]);
             if (changedParty.affectedRows !== 1) throw Error('party restore party CAS failed');
             return {
@@ -6494,61 +6346,34 @@ const Database = {
             if (!row) return { ok: false, reason: 'missing_state' };
             const revision = Number(row.simulationRevision || 0);
             if (expectedRevision !== null && revision !== expectedRevision) return { ok: false, reason: 'stale_revision' };
-            const ownerId = String(row.simulationOwner || LEGACY_SIMULATION_OWNER);
-            if (!Object.keys(patch).length && ownerId === LEGACY_SIMULATION_OWNER) {
-                return { ok: true, characterId, ownerId, leaseId: null, revision, leaseUntil: 0, reason: 'already_main' };
-            }
-            if (![LEGACY_SIMULATION_OWNER, COLD_SIMULATION_OWNER].includes(ownerId)) return { ok: false, reason: 'owner_changed' };
-            if (Object.keys(patch).length) {
+            // A main thread taking a far bot is a main write: it always moves the
+            // revision, so a worker step begun before it is refused stale_revision.
+            const patched = Object.keys(patch).length > 0;
+            if (patched) {
                 const proposed = { ...row, ...patch, phase: patch.phase || row.phase, activity: patch.activity || row.activity };
                 const partition = coldSimulationPartition(proposed, request);
                 if (!partition.ok) return { ok: false, reason: 'partition_rejected', detail: partition.reason };
             }
             const nextRevision = revision + 1;
-            const entries = Object.entries({ ...patch, updatedAt: patch.updatedAt ?? request.timestamp ?? now() });
+            // Without a patch only the revision moves: updatedAt stays the cached state's.
+            const entries = patched ? Object.entries({ ...patch, updatedAt: patch.updatedAt ?? request.timestamp ?? now() }) : [];
             const assignments = entries.map(([column]) => `${escapeIdentifier(column)} = ?`);
-            assignments.push(
-                'simulationOwner = ?',
-                'simulationRevision = ?',
-                'simulationLeaseId = NULL',
-                'simulationLeaseUntil = 0'
-            );
+            assignments.push('simulationRevision = ?');
             const result = write(`UPDATE bot_life_state
                 SET ${assignments.join(', ')}
-                WHERE characterId = ? AND simulationOwner = ? AND simulationRevision = ?`, [
+                WHERE characterId = ? AND simulationRevision = ?`, [
                 ...entries.map(([, value]) => value),
-                LEGACY_SIMULATION_OWNER, nextRevision, characterId, ownerId, revision
+                nextRevision, characterId, revision
             ]);
             if (result.affectedRows !== 1) return { ok: false, reason: 'cas_failed' };
             return {
                 ok: true,
                 characterId,
-                ownerId: LEGACY_SIMULATION_OWNER,
-                leaseId: null,
                 revision: nextRevision,
-                leaseUntil: 0,
-                reason: Object.keys(patch).length ? 'main_transition' : 'hot_handoff',
+                reason: patched ? 'main_transition' : 'hot_handoff',
                 row: coldSimulationRow(characterId)
             };
         }, 'bot-life:hot-owner-handoff');
-    },
-
-    recoverColdSimulationLeases({ timestamp = now(), includeActive = false } = {}) {
-        const cutoff = Number(timestamp);
-        return inTransaction(() => {
-            const where = `simulationOwner = ?${includeActive ? '' : ' AND simulationLeaseUntil <= ?'}`;
-            const selectParams = includeActive ? [COLD_SIMULATION_OWNER] : [COLD_SIMULATION_OWNER, cutoff];
-            const candidates = all(`SELECT characterId FROM bot_life_state WHERE ${where}`, selectParams);
-            const result = write(`UPDATE bot_life_state
-                SET simulationOwner = ?, simulationRevision = simulationRevision + 1,
-                    simulationLeaseId = NULL, simulationLeaseUntil = 0
-                WHERE ${where}`, [LEGACY_SIMULATION_OWNER, ...selectParams]);
-            const rows = candidates.length
-                ? all(`SELECT characterId, simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil
-                    FROM bot_life_state WHERE characterId IN (${candidates.map(() => '?').join(', ')})`, candidates.map((row) => row.characterId))
-                : [];
-            return { ...result, rows };
-        }, includeActive ? 'bot-life:cold-owner-startup-recovery' : 'bot-life:cold-owner-expired-recovery');
     },
 
     clearRaidBossState(npcId) {
@@ -6619,6 +6444,10 @@ const Database = {
             // A recovered pending intent has no physical commit. Its arguments
             // are not reconstructed; the new step is planned from actual state.
             const command = EconomyCommit.create(kind, sequence, authority);
+            // The pending intent does not move the revision: the command's
+            // authority holds the revision read before this write, and the
+            // step's economyOwnerUnsafe refuses a moved one (economy_owner_changed).
+            // The step's own write moves the row.
             write("UPDATE bot_life_state SET statsJson=json_set(COALESCE(statsJson,'{}'),'$.economyCommit',json(?)) WHERE characterId=?",
                 [JSON.stringify(EconomyCommit.pending(command)), Number(characterId)]);
             return { command, row: normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId=?', [Number(characterId)])),
@@ -6651,6 +6480,7 @@ const Database = {
         // Depth and physical checkpoint outcomes are runtime control sources.
         if (!DiagnosticConfig.developerDiagnostics) return { path: databasePath || null, historyPath: historyPath || null,
             pending: metrics.pending, diagnostics: { enabled: false }, checkpoint: CheckpointCoordinator.snapshot(), history: History.stats() };
+        metrics.snapshots += 1;
         const operations = Object.fromEntries(Array.from(metrics.byOperation?.entries() || []).map(([key, value]) => [key, { ...value }]));
         const snapshot = {
             path: databasePath || null,
@@ -6662,6 +6492,7 @@ const Database = {
             writes: metrics.writes,
             transactions: metrics.transactions,
             failures: metrics.failures,
+            snapshots: metrics.snapshots,
             avgWaitMs: metrics.total ? Math.round(metrics.waitMs / metrics.total) : 0,
             avgRunMs: metrics.total ? Math.round(metrics.runMs / metrics.total) : 0,
             operations,
@@ -6670,6 +6501,18 @@ const Database = {
         };
         if (resetPeak) metrics.maxPending = metrics.pending;
         return snapshot;
+    },
+
+    // Operations waiting on the write queue. The schedulers read this on every
+    // admission; stats() copies every operation counter and is for status.
+    pending() {
+        return metrics.pending;
+    },
+
+    // The physical checkpoint state (inFlight, last, lastReset) without the
+    // operation counters stats() copies.
+    checkpointSnapshot() {
+        return CheckpointCoordinator.snapshot();
     },
 
     checkpoint(options = {}) {
@@ -6707,8 +6550,13 @@ const Database = {
                 const result = syncInventorySummaryUnsafe(characterId, inventory);
                 // A new ordinary cold death consumes its ordered bag once, in
                 // the same transaction that reconciles the physical inventory.
-                if (reason === 'resolve_death') return dropPkDeathItemsUnsafe(characterId);
-                return result;
+                if (reason !== 'resolve_death') return result;
+                const dropped = dropPkDeathItemsUnsafe(characterId);
+                // The drop rewrote the row a worker command is writing; the
+                // command's next write (its publish) checks the row against its
+                // proof, so the proof moves with the row, as the save ROW does.
+                if (dropped.checkpoint && admission.nativeProof) NativeWriteCheckpoint.advance(admission.nativeProof, dropped.checkpoint);
+                return dropped;
             },
             reason ? `inventory:sync-summary:${reason}` : 'inventory:sync-summary'
         ));
@@ -6833,7 +6681,7 @@ const Database = {
             const source = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [details.objectId, sellerId]);
             if (!source || Number(source.selfId) !== Number(details.selfId) || Number(source.amount) < quantity
                 || Number(source.equipped) !== 0 || Number(source.selfId) === 57) throw Error('private_store_stock_changed');
-            const template = ItemTemplateIndex.findStrict(invoke('GameServer/DataCache').items, Number(source.selfId));
+            const template = ItemTemplateIndex.findStrict(DataCache.items, Number(source.selfId));
             if (!template) throw Error('private_store_item_unavailable');
             const sellerAdena = afkTradeAdenaRowsUnsafe(sellerId).reduce((sum, row) => sum + Number(row.amount), 0);
             if (!Number.isSafeInteger(sellerAdena + total)) throw Error('private_store_adena_overflow');
@@ -6977,11 +6825,10 @@ const Database = {
     createColdTrainingGuard(state, validate, nativeBeforeWrite) {
         const Protocol = invoke('GameServer/Bot/Population/ColdSimulationProtocol');
         const expected = Protocol.commandCheckpoint({ characterId: state.characterId, phase: state.phase, activity: state.activity,
-            simulationOwner: state.simulation?.ownerId, simulationRevision: state.simulation?.revision,
-            simulationLeaseId: state.simulation?.leaseId || null,
+            simulationRevision: state.simulation?.revision,
             activityStartedAt: state.timing?.activityStartedAt || 0, nextResolveAt: state.timing?.nextResolveAt || 0,
             lastResolvedAt: state.timing?.lastResolvedAt || 0, lastHotAt: state.timing?.lastHotAt || 0, updatedAt: state.updatedAt });
-        if (!expected || expected.phase !== 'cold' || expected.simulationOwner !== LEGACY_SIMULATION_OWNER
+        if (!expected || expected.phase !== 'cold'
             || typeof validate !== 'function' || (nativeBeforeWrite !== undefined && typeof nativeBeforeWrite !== 'function')) {
             throw Error('invalid_cold_training_source');
         }
@@ -7033,7 +6880,7 @@ const Database = {
             if (Number(known?.level || 0) >= Number(skillLevel)) return { learned: false, reason: 'already_known' };
             const Catalog = invoke('GameServer/Skills/SkillBookCatalog');
             const training = Catalog.nextTraining(character.classId, character.level, skillSelfId, known?.level || 0);
-            const definition = ItemTemplateIndex.findRequired(invoke('GameServer/DataCache').skills, skillSelfId);
+            const definition = ItemTemplateIndex.findRequired(DataCache.skills, skillSelfId);
             if (!training || training.level !== Number(skillLevel)
                 || definition?.levels == null || !require('./GameServer/Skills/SkillRankIndex').has(definition.levels, training.level)) {
                 return { learned: false, reason: 'ineligible_rank' };
@@ -7144,148 +6991,6 @@ const Database = {
             .then(result => { invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').changed(characterId); return result; });
     },
 
-    liquidateWarehouseGear(characterId, selections = [], options = {}) {
-        const id = Number(characterId);
-        const selected = (selections || []).map((item) => ({
-            id: Number(item?.id || 0),
-            selfId: Number(item?.selfId || 0),
-            amount: Math.max(0, Number(item?.amount || 0)),
-            enchant: Math.max(0, Number(item?.enchant || 0)),
-            npcPrice: Math.max(0, Number(item?.npcPrice || 0))
-        }));
-        const selectedIds = new Set(selected.map((item) => item.id));
-        if (!Number.isSafeInteger(id) || id <= 0 || !selected.length || selected.length > 64
-            || selectedIds.size !== selected.length
-            || selected.some((item) => !item.id || !item.selfId || item.amount <= 0 || item.npcPrice <= 0)) {
-            return Promise.reject(new Error('invalid warehouse gear liquidation request'));
-        }
-
-        return withCharacterFlush(id, () => inTransaction(() => {
-            const state = one('SELECT * FROM bot_life_state WHERE characterId = ?', [id]);
-            if (!state) return { ok: false, reason: 'missing_state', characterId: id };
-            if (String(state.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER) {
-                return { ok: false, reason: 'owner_changed', characterId: id };
-            }
-            const partition = coldSimulationPartition(state);
-            if (!partition.ok) return { ok: false, reason: partition.reason, characterId: id };
-            if (!['hunting', 'resting'].includes(String(state.activity || ''))) {
-                return { ok: false, reason: 'active_lifecycle', characterId: id };
-            }
-
-            const stats = parsedObject(state.statsJson);
-            if (!stats) return { ok: false, reason: 'invalid_stats', characterId: id };
-            if (stats.backgroundPartyId) return { ok: false, reason: 'background_party', characterId: id };
-
-            const sources = selected.map((item) => {
-                const source = one(`SELECT id, selfId, amount, enchant
-                    FROM warehouse_items WHERE id = ? AND characterId = ?`, [item.id, id]);
-                if (!source || Number(source.selfId) !== item.selfId
-                    || Number(source.amount || 0) < item.amount
-                    || Math.max(0, Number(source.enchant || 0)) !== item.enchant) {
-                    const error = new Error(`warehouse gear changed for ${id}:${item.id}`);
-                    error.code = 'WAREHOUSE_GEAR_CHANGED';
-                    throw error;
-                }
-                return { ...item, remaining: Number(source.amount) - item.amount };
-            });
-
-            let rowsRemoved = 0;
-            sources.forEach((source) => {
-                if (source.remaining <= 0) {
-                    write('DELETE FROM warehouse_items WHERE id = ? AND characterId = ?', [source.id, id]);
-                    rowsRemoved += 1;
-                } else {
-                    write('UPDATE warehouse_items SET amount = ? WHERE id = ? AND characterId = ?', [source.remaining, source.id, id]);
-                }
-            });
-
-            const inventory = parsedObject(state.inventorySummary);
-            if (!inventory) throw new Error(`invalid inventory summary for ${id}`);
-            const adenaRows = all(`SELECT id, amount FROM items
-                WHERE characterId = ? AND selfId = 57 ORDER BY id`, [id]);
-            const physicalAdena = adenaRows.reduce((sum, item) => sum + Math.max(0, Number(item.amount || 0)), 0);
-            const payout = sources.reduce((sum, item) => sum + (item.amount * item.npcPrice), 0);
-            const currentAdena = Math.max(
-                0,
-                Number(state.adena || 0),
-                Number(inventory['57']?.amount || 0),
-                physicalAdena
-            );
-            const nextAdena = currentAdena + payout;
-            inventory['57'] = {
-                ...(inventory['57'] || {}),
-                selfId: 57,
-                name: 'Adena',
-                amount: nextAdena
-            };
-
-            const soldByItem = new Map();
-            sources.forEach((item) => {
-                const key = `${item.selfId}:${item.npcPrice}`;
-                const previous = soldByItem.get(key) || { selfId: item.selfId, amount: 0, price: item.npcPrice };
-                previous.amount += item.amount;
-                soldByItem.set(key, previous);
-            });
-            const timestamp = now();
-            const units = sources.reduce((sum, item) => sum + item.amount, 0);
-            const nextStats = {
-                ...stats,
-                lastWarehouseCompaction: {
-                    source: String(options.source || 'historical_gear_retention'),
-                    payout,
-                    units,
-                    rowsRemoved,
-                    sold: [...soldByItem.values()].slice(0, 8),
-                    at: timestamp
-                }
-            };
-
-            const adenaRow = adenaRows[0];
-            if (adenaRow) {
-                write('UPDATE items SET name = ?, amount = ? WHERE id = ? AND characterId = ?', ['Adena', nextAdena, adenaRow.id, id]);
-                adenaRows.slice(1).forEach((row) => write('DELETE FROM items WHERE id = ? AND characterId = ?', [row.id, id]));
-            } else {
-                write(`INSERT INTO items (selfId, name, amount, enchant, equipped, slot, characterId)
-                    VALUES (57, 'Adena', ?, 0, 0, 0, ?)`, [nextAdena, id]);
-            }
-
-            const updated = write(`UPDATE bot_life_state
-                SET adena = ?, inventorySummary = ?, statsJson = ?, updatedAt = ?
-                WHERE characterId = ?
-                  AND simulationOwner = ?
-                  AND simulationRevision = ?
-                  AND phase = 'cold'
-                  AND (partyId IS NULL OR partyId = '')
-                  AND activity IN ('hunting', 'resting')`, [
-                nextAdena,
-                JSON.stringify(inventory),
-                JSON.stringify(nextStats),
-                timestamp,
-                id,
-                LEGACY_SIMULATION_OWNER,
-                Number(state.simulationRevision || 0)
-            ]);
-            if (Number(updated.affectedRows || 0) !== 1) {
-                const error = new Error(`warehouse cleanup ownership changed for ${id}`);
-                error.code = 'WAREHOUSE_CLEANUP_FENCE';
-                throw error;
-            }
-
-            return {
-                ok: true,
-                reason: 'compacted',
-                characterId: id,
-                rowsRemoved,
-                units,
-                payout,
-                state: normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId = ?', [id]))
-            };
-        }, 'warehouse:cleanup-gear')).then(result => {
-            if (result.ok) invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').changed(id);
-            return result;
-        });
-    },
-
     transferInventoryToWarehouse(characterId, item, { coldState = null } = {}) {
         if (coldState && Number(coldState.characterId) !== Number(characterId)) return Promise.reject(new Error('economy_state_changed'));
         return withCharacterFlush(characterId, () => inTransaction(() => {
@@ -7322,12 +7027,12 @@ const Database = {
             let life = null;
             if (coldState) {
                 life = one(`SELECT phase, activity, currentRegion, locX, locY, locZ,
-                    simulationOwner, simulationRevision, partyId, inventorySummary,
+                    simulationRevision, partyId, inventorySummary,
                     json_extract(statsJson,'$.equipmentPlan') AS equipmentPlan FROM bot_life_state WHERE characterId=?`, [characterId]);
                 // A queued flush can hand the bot to a worker or add a craft
                 // reservation after the caller planned the withdrawal.
                 if (!life || Number(coldState.characterId) !== Number(characterId)
-                    || life.phase !== 'cold' || life.simulationOwner !== LEGACY_SIMULATION_OWNER
+                    || life.phase !== 'cold'
                     || life.partyId || !['hunting', 'resting', 'shopping', 'merchant'].includes(life.activity)
                     || life.activity !== townIntent.activity || life.currentRegion !== townIntent.currentRegion
                     || Number(life.locX) !== townIntent.locX || Number(life.locY) !== townIntent.locY || Number(life.locZ) !== townIntent.locZ
@@ -7375,7 +7080,7 @@ const Database = {
         return enqueue(() => {
             const row = one(`UPDATE bot_life_state SET statsJson=json_set(COALESCE(statsJson,'{}'),
                 '$.lastWarehouseWithdrawal',json(?)${market ? ", '$.marketSellRetryAfter', NULL" : ''}),
-                nextResolveAt=CASE WHEN activity='hunting' THEN ? ELSE nextResolveAt END WHERE characterId=?
+                nextResolveAt=CASE WHEN activity='hunting' THEN ? ELSE nextResolveAt END, ${MOVE_FAR_REVISION} WHERE characterId=?
                 RETURNING characterId,nextResolveAt,simulationRevision,updatedAt`, [raw, record.at, Number(characterId)]);
             return row ? { ...row, withdrawal: record, market } : null;
         }, { operation: 'warehouse:withdrawal-record' });
@@ -7574,7 +7279,7 @@ const Database = {
             if (!recipe) throw new Error('Invalid dimensional diamond exchange');
             const diamonds = all('SELECT id, amount FROM items WHERE characterId = ? AND selfId = 7562 AND equipped = 0 ORDER BY id', [characterId]);
             if (diamonds.reduce((sum, item) => sum + item.amount, 0) < recipe.cost) throw new Error('Not enough dimensional diamonds');
-            const template = ItemTemplateIndex.findStrictRequired(require('./GameServer/DataCache').items, itemId);
+            const template = ItemTemplateIndex.findStrictRequired(DataCache.items, itemId);
             if (!template?.etc.stackable) throw new Error('Missing teleport scroll template');
             const changed = new Set();
             let remaining = recipe.cost;
@@ -7784,7 +7489,7 @@ const Database = {
             const learned = [];
             for (const recipe of recipes) {
                 if (step) {
-                    const native = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(recipe.recipeId);
+                    const native = C4Recipes.resolveByRecipeId(recipe.recipeId);
                     const skill = one('SELECT level FROM skills WHERE characterId=? AND selfId=?',
                         [Number(characterId), native?.type === 'dwarven' ? 172 : 132]);
                     if (!native || Number(native.recipeItemId) !== Number(recipe.recipeItemId)
@@ -7806,8 +7511,10 @@ const Database = {
             const learning = { learned, at: now() };
             const completedRow = step ? completeEconomyStepUnsafe(characterId, step, receipt,
                 learned.map(recipe => recipe.recipeItemId), null, learning) : syncEconomySnapshotUnsafe(characterId, coldState, learned.map(recipe => recipe.recipeItemId));
-            if (!step) write("UPDATE bot_life_state SET statsJson = json_set(statsJson, '$.lastRecipeBookLearning', json(?)) WHERE characterId = ?",
-                [JSON.stringify(learning), characterId]);
+            // The snapshot sync above moved a cold row already; only a write
+            // without it moves the revision here.
+            if (!step) write(`UPDATE bot_life_state SET statsJson = json_set(statsJson, '$.lastRecipeBookLearning', json(?))${completedRow ? '' : `, ${MOVE_FAR_REVISION}`}
+                WHERE characterId = ?`, [JSON.stringify(learning), characterId]);
             return { learned, committed: true, ...(step ? { economyCommit: jsonObject(completedRow.statsJson).economyCommit } : {}),
                 coldLifeRow: normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId])) };
         }, 'recipe:cold-learn'));
@@ -7838,7 +7545,6 @@ const Database = {
             if (!captured.length || captured.length > 12) throw Error('invalid npc basket');
             const Shop = invoke('GameServer/World/Generics/NpcShopBuyLists');
             const Index = require('./GameServer/Item/ItemTemplateIndex');
-            const Data = invoke('GameServer/DataCache');
             if (seller) {
                 const found = invoke('GameServer/Bot/Economy/TownNpcCatalog').rowsForTown(seller.town).some(row =>
                     Number(row.npcSelfId) === Number(seller.sourceId) && ['locX', 'locY', 'locZ'].every(key =>
@@ -7866,7 +7572,7 @@ const Database = {
                 if (!Number.isSafeInteger(count * price))
                     throw invalidNpcPurchase(characterId, step, line, lines.length, 'invalid_line_total', 'total', count * price, details);
                 seen.add(itemId);
-                const template = Index.find(Data.items, itemId);
+                const template = Index.find(DataCache.items, itemId);
                 if (seller) {
                     const quote = Shop.rowForNpc(Number(seller.sourceId), itemId);
                     if (!quote || Number(quote.price) !== price
@@ -7882,7 +7588,7 @@ const Database = {
                     || slot !== Number(template.etc?.slot || 0))) throw Error('npc_item_template_changed');
                 if (seller && step && slot > 0) {
                     const blocker = invoke('GameServer/Bot/Population/BotLifeState').marketPurchaseBlocker({
-                        level: Number(step.row.level), stats: jsonObject(step.row.statsJson), inventory: jsonObject(step.row.inventorySummary)
+                        level: Number(step.row.level), stats: SavedStats.merge(step.row.statsJson, step.row.mindJson), inventory: jsonObject(step.row.inventorySummary)
                     }, { selfId: itemId }, count);
                     if (blocker) throw Error(blocker);
                 }
@@ -7907,8 +7613,7 @@ const Database = {
                 { requested: units, planned: units, cost: total, npcId: seller ? Number(seller.sourceId) : undefined, town: seller?.town });
             const wallet = one('SELECT id, amount FROM items WHERE characterId=? AND selfId=57 ORDER BY id LIMIT 1', [characterId]);
             let remainingWallet = Number(wallet?.amount || 0);
-            const Funding = require('./GameServer/Bot/Economy/PurchaseFunding');
-            let remainingPacket = step ? jsonObject(step.row.statsJson).money : null;
+            let remainingPacket = step ? SavedStats.merge(step.row.statsJson, step.row.mindJson).money : null;
             const parts = [];
             for (const [index, line] of lines.entries()) {
                 const fundingParts = line.fundingParts || [{ amount: line.amount, funding: line.funding, order: index }];
@@ -7927,7 +7632,7 @@ const Database = {
                 const spent = part.amount * part.unitPrice, funding = { ...part.funding, itemId: part.selfId };
                 checkEconomyFundingUnsafe(characterId, step, spent, funding, remainingWallet, remainingPacket);
                 remainingWallet -= spent;
-                remainingPacket = Funding.packetAfterPurchase(remainingPacket, spent, funding);
+                remainingPacket = PurchaseFunding.packetAfterPurchase(remainingPacket, spent, funding);
             }
             if (!wallet || remainingWallet < 0) {
                 if (Diagnostics.active()) stageNativeDiagnostic(characterId, step, 'npc_basket', 'insufficient_adena',
@@ -8021,7 +7726,7 @@ const Database = {
             validate?.();
             let success = !!product;
             if (step) {
-                const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(recipeId);
+                const recipe = C4Recipes.resolveByRecipeId(recipeId);
                 if (!recipe || !Number.isSafeInteger(batches) || batches < 1 || batches > 64
                     || !one('SELECT recipeId FROM character_recipes WHERE characterId=? AND recipeId=?', [characterId, recipeId])) throw Error('craft_recipe_changed');
                 const skill = one('SELECT level FROM skills WHERE characterId=? AND selfId=?',
@@ -8039,7 +7744,7 @@ const Database = {
                 for (const [id, amount] of required) checkEconomyMaterialProtectionUnsafe(characterId, step, id, amount);
                 if (!product || Number(product.selfId) !== Number(recipe.productId)
                     || Number(product.amount) !== Number(recipe.productCount) * batches) throw Error('craft_product_changed');
-                const template = require('./GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(recipe.productId));
+                const template = ItemTemplateIndex.find(DataCache.items, Number(recipe.productId));
                 if (!template || !!product.stackable !== !!template.etc?.stackable || Number(product.slot || 0) !== Number(template.etc?.slot || 0)) throw Error('craft_product_template_changed');
                 mp = currentMp - recipe.mpCost * batches;
                 success = recipe.successRate >= 100 || Number(random()) * 100 < recipe.successRate;
@@ -8087,7 +7792,7 @@ const Database = {
             validate();
             const catalog = invoke('GameServer/Items/C4WeaponSAExchange');
             const recipe = catalog.resolve(npcId, recipeId);
-            const target = recipe && ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
+            const target = recipe && ItemTemplateIndex.findStrictRequired(DataCache.items, recipe.productId);
             const weapon = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [sourceObjectId, characterId]);
             if (!recipe || !target || !weapon || weapon.selfId !== expectedSelfId || weapon.selfId !== recipe.sourceId
                 || weapon.enchant !== expectedEnchant || weapon.amount !== 1 || weapon.equipped) throw Error('weapon_sa_source_changed');
@@ -8121,7 +7826,7 @@ const Database = {
             validate?.();
             const row = one('SELECT * FROM items WHERE id = ? AND characterId = ?', [sourceId, characterId]);
             const recipe = row && invoke('GameServer/Items/C4Unseal').resolve(row.selfId, productId);
-            const item = recipe && ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
+            const item = recipe && ItemTemplateIndex.findStrictRequired(DataCache.items, recipe.productId);
             if (!item || Number(row.amount) !== 1 || Number(row.equipped) !== 0) throw Error('unseal_source_changed');
             // Update in place: enchant and all other instance metadata survive.
             write('UPDATE items SET selfId = ?, name = ?, slot = ? WHERE id = ? AND characterId = ?',
@@ -8133,7 +7838,7 @@ const Database = {
     exchangeLuxuryItems(characterId, { listId, entryId, amount, validate }) {
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const recipe = invoke('GameServer/World/Generics/NpcExchangeShopLists').resolve(listId, entryId);
-            const product = recipe && require('./GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, recipe.result.selfId);
+            const product = recipe && ItemTemplateIndex.find(DataCache.items, recipe.result.selfId);
             if (!product || !Number.isInteger(amount) || amount < 1 || amount > 5000) throw Error('invalid_multisell_selection');
             validate?.();
             const count = amount * recipe.result.amount;
@@ -8249,8 +7954,8 @@ const Database = {
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const guard = () => {
                 checkCapturedWriteAdmission(admission, characterId);
-                const row = one('SELECT phase,simulationOwner FROM bot_life_state WHERE characterId=?',[characterId]);
-                if (row?.phase !== 'cold' || row.simulationOwner !== LEGACY_SIMULATION_OWNER) throw Error('soul_crystal_owner_changed');
+                const row = one('SELECT phase FROM bot_life_state WHERE characterId=?',[characterId]);
+                if (row?.phase !== 'cold') throw Error('soul_crystal_owner_changed');
             };
             guard(); applySoulCrystalStepsUnsafe(characterId, steps, guard);
             return { changed: steps.length };
@@ -8266,13 +7971,13 @@ const Database = {
                 checkCapturedWriteAdmission(admission, characterId);
                 options.validate?.();
                 if (!state) {
-                    const row = one('SELECT phase, simulationOwner FROM bot_life_state WHERE characterId = ?', [characterId]);
-                    if (row && (row.phase !== 'hot' || row.simulationOwner !== LEGACY_SIMULATION_OWNER)) throw Error('improvement_hot_source_changed');
+                    const row = one('SELECT phase FROM bot_life_state WHERE characterId = ?', [characterId]);
+                    if (row && row.phase !== 'hot') throw Error('improvement_hot_source_changed');
                 }
                 if (state) {
-                    const row = one(`SELECT phase, simulationOwner, simulationRevision, activity, currentRegion, locX, locY, locZ
+                    const row = one(`SELECT phase, simulationRevision, activity, currentRegion, locX, locY, locZ
                         FROM bot_life_state WHERE characterId = ?`, [characterId]);
-                    if (state.characterId !== characterId || row?.phase !== 'cold' || row.simulationOwner !== LEGACY_SIMULATION_OWNER
+                    if (state.characterId !== characterId || row?.phase !== 'cold'
                         || Number(row.simulationRevision) !== Number(state.simulation?.revision || 0)) throw Error('economy_state_changed');
                     // Cold travel lives in the lifecycle row; the offline
                     // character position can still be its previous hunt.
@@ -8327,7 +8032,7 @@ const Database = {
                 const Life = invoke('GameServer/Bot/Population/BotLifeState');
                 const physical = all('SELECT * FROM items WHERE characterId = ? AND amount > 0 ORDER BY id', [characterId]);
                 const source = { characterId, level: Number(character?.level), clanId: Number(character?.clanId),
-                    stats: { ...jsonObject(life?.statsJson), classId: Number(character?.classId) },
+                    stats: { ...SavedStats.merge(life?.statsJson, life?.mindJson), classId: Number(character?.classId) },
                     inventory: Life.inventorySummaryFromItems(physical) };
                 const protectedInventory = jsonObject(life?.inventorySummary);
                 for (const id of Object.keys(source.inventory))
@@ -8346,7 +8051,7 @@ const Database = {
                     throw Error('improvement_source_changed');
                 const claimed = new Set(), selected = []; let total = 0, crystalId = null;
                 for (const input of inputs) {
-                    const id = Number(input.selfId), count = Number(input.amount), template = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, id);
+                    const id = Number(input.selfId), count = Number(input.amount), template = ItemTemplateIndex.findStrictRequired(DataCache.items, id);
                     const reward = Crystals.reward(template);
                     if (claimed.has(id) || !Number.isSafeInteger(count) || count < 1 || !reward
                         || crystalId && crystalId !== reward.crystalId
@@ -8365,7 +8070,7 @@ const Database = {
                 for (const item of selected) mutate('DELETE FROM items WHERE characterId=? AND id=?', [characterId, item.id]);
                 if (target) mutate('UPDATE items SET amount=? WHERE characterId=? AND id=?', [amount, characterId, target.id]);
                 else mutate('INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(?,?,?,0,0,?)',
-                    [crystalId, ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, crystalId).template.name, amount, characterId]);
+                    [crystalId, ItemTemplateIndex.findStrictRequired(DataCache.items, crystalId).template.name, amount, characterId]);
                 changedIds.push(...claimed, crystalId); result = 'crystallize';
             } else if (proposal.kind === 'luxury_exchange') {
                 const Luxury = invoke('GameServer/Bot/Economy/BotLuxuryExchange');
@@ -8374,7 +8079,7 @@ const Database = {
                 const life = one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]);
                 const Life = invoke('GameServer/Bot/Population/BotLifeState');
                 const source = { characterId, level: Number(character?.level), clanId: Number(character?.clanId),
-                    stats: { ...jsonObject(life?.statsJson), classId: Number(character?.classId) },
+                    stats: { ...SavedStats.merge(life?.statsJson, life?.mindJson), classId: Number(character?.classId) },
                     inventory: Life.inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId = ? ORDER BY id', [characterId])) };
                 const protectedInventory = jsonObject(life?.inventorySummary);
                 for (const id of Object.keys(source.inventory))
@@ -8394,7 +8099,7 @@ const Database = {
                         throw Error('improvement_missing_materials');
                     consume(cost.selfId, cost.amount); changedIds.push(cost.selfId);
                 }
-                const product = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.itemId);
+                const product = ItemTemplateIndex.findStrictRequired(DataCache.items, recipe.itemId);
                 for (let count = 0; count < recipe.amount; count++) mutate(
                     'INSERT INTO items(selfId,name,amount,equipped,slot,characterId) VALUES(?,?,1,0,?,?)',
                     [product.selfId, product.template.name, Number(product.etc.slot), characterId]);
@@ -8408,7 +8113,7 @@ const Database = {
                 if (recipe?.station !== 'blacksmith' || recipe.operation !== 'install' || !item || item.amount !== 1
                     || recipe.sourceId !== item.selfId || item.selfId !== proposal.itemId
                     || item.enchant !== proposal.from) throw Error('improvement_source_changed');
-                const product = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, recipe.productId);
+                const product = ItemTemplateIndex.findStrictRequired(DataCache.items, recipe.productId);
                 if (!product) throw Error('improvement_missing_template');
                 for (const cost of SA.costs(recipe)) { consume(cost.selfId, cost.amount); changedIds.push(cost.selfId); }
                 mutate('UPDATE items SET selfId = ?, name = ?, slot = ? WHERE id = ? AND characterId = ?',
@@ -8425,7 +8130,7 @@ const Database = {
                     ON CONFLICT(characterId,questId) DO UPDATE SET state='started',variables=excluded.variables`, [characterId]);
                 if (!held.length || [4662,4663,4664].includes(held[0].selfId)) {
                     if (held[0]) { consume(held[0].selfId, 1); changedIds.push(held[0].selfId); }
-                    const source = ItemTemplateIndex.findStrictRequired(invoke('GameServer/DataCache').items, proposal.starterId);
+                    const source = ItemTemplateIndex.findStrictRequired(DataCache.items, proposal.starterId);
                     mutate('INSERT INTO items(selfId,name,amount,characterId) VALUES(?,?,1,?)', [source.selfId,source.template.name,characterId]);
                     changedIds.push(proposal.starterId);
                 }
@@ -8444,8 +8149,8 @@ const Database = {
             } else throw Error('invalid_bot_improvement');
             guard();
             if (state) {
-                const current = one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId]);
-                const stats = jsonObject(current.statsJson);
+                const current = one('SELECT statsJson, mindJson FROM bot_life_state WHERE characterId = ?', [characterId]);
+                const stats = SavedStats.merge(current.statsJson, current.mindJson);
                 Object.assign(stats, equipmentPatch);
                 stats.lastImprovement = { kind: proposal.kind, result, at: now(), objectId: proposal.objectId || null };
                 if (hennas) stats.hennas = hennas;
@@ -8456,7 +8161,8 @@ const Database = {
                     stats.dormantWishes = [[proposal.key || 'enchant', result, 0, Number(proposal.price || 0), Number(stats.playedHours || 0), 0.5], ...(stats.dormantWishes || [])].slice(0,4);
                     stats.wishFocus = null;
                 }
-                mutate('UPDATE bot_life_state SET statsJson = ? WHERE characterId = ?', [JSON.stringify(stats), characterId]);
+                const columns = SavedStats.statsColumns(stats);
+                mutate('UPDATE bot_life_state SET statsJson = ?, mindJson = ? WHERE characterId = ?', [columns.statsJson, columns.mindJson, characterId]);
             }
             const coldLifeRow = syncEconomySnapshotUnsafe(characterId, state, changedIds);
             return { result, coldLifeRow, hennas, questStarted: result === 'crystal_quest', changedIds, items: all('SELECT * FROM items WHERE characterId = ? ORDER BY id', [characterId]) };
@@ -8583,7 +8289,7 @@ const Database = {
             const live = validate?.();
             if (live?.crafterMp != null) crafterMp = live.crafterMp;
             if (liveWorkshop) {
-                const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(liveWorkshop.recipeId);
+                const recipe = C4Recipes.resolveByRecipeId(liveWorkshop.recipeId);
                 const batches = Number(liveWorkshop.batches), unitPrice = Number(liveWorkshop.unitPrice);
                 if (!recipe || !step || workshop || clanCraft || clanOrder || crafterId === customerId
                     || !Number.isSafeInteger(batches) || batches < 1 || batches > 64
@@ -8614,9 +8320,8 @@ const Database = {
             let clanCrafter = null;
             let workshopCrafter = null;
             if (workshop) {
-                const recipes = invoke('GameServer/Items/C4RecipeItems');
                 const rules = invoke('GameServer/Bot/Economy/CraftShopService');
-                const recipe = recipes.resolveByRecipeId(workshop.recipeId);
+                const recipe = C4Recipes.resolveByRecipeId(workshop.recipeId);
                 const batches = Number(workshop.batches);
                 if (clanCraft || clanOrder || Number(crafterId) === Number(customerId) || !recipe
                     || !Number.isSafeInteger(batches) || batches <= 0 || batches > 64) throw new Error('invalid workshop craft');
@@ -8632,8 +8337,7 @@ const Database = {
                         continue;
                     }
                     if (!row || (row === customer && step ? row.phase !== step.row.phase : row.phase !== 'cold')
-                        || row.simulationOwner !== LEGACY_SIMULATION_OWNER
-                        || row.simulationLeaseId || row.partyId || Number(row.phase === 'hot' ? row.physicalHp : row.hp) <= 0
+                        || row.partyId || Number(row.phase === 'hot' ? row.physicalHp : row.hp) <= 0
                         || ['dead', 'respawning', 'traveling'].includes(row.activity)
                         || Number(row.simulationRevision) !== Number(revision)) throw new Error('workshop ownership changed');
                 }
@@ -8672,7 +8376,7 @@ const Database = {
                     prepareCraftReservationsUnsafe(step, recipe);
                     for (const [id, amount] of required) checkEconomyMaterialProtectionUnsafe(customerId, step, id, amount);
                     checkEconomyFundingUnsafe(customerId, step, Number(price), { ...funding, itemId: Number(recipe.productId) });
-                    const template = require('./GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, Number(recipe.productId));
+                    const template = ItemTemplateIndex.find(DataCache.items, Number(recipe.productId));
                     if (!product || !template || !!product.stackable !== !!template.etc?.stackable
                         || Number(product.slot || 0) !== Number(template.etc?.slot || 0)) throw Error('craft_product_template_changed');
                 }
@@ -8686,7 +8390,7 @@ const Database = {
                 if (!clanCraft || !manualOrder) {
                     throw new Error('clan craft order changed');
                 }
-                const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(clanCraft.recipeId);
+                const recipe = C4Recipes.resolveByRecipeId(clanCraft.recipeId);
                 if (clanOrder.final && Number(recipe?.productId) !== Number(manualOrder.itemId)) throw new Error('clan craft target changed');
                 if (clanOrder.final) {
                     const stock = Number(one('SELECT COALESCE(SUM(amount), 0) AS amount FROM clan_warehouse_items WHERE clanId = ? AND selfId = ?',
@@ -8698,8 +8402,7 @@ const Database = {
                 }
             }
             if (clanCraft) {
-                const recipes = invoke('GameServer/Items/C4RecipeItems');
-                const recipe = recipes.resolveByRecipeId(clanCraft.recipeId);
+                const recipe = C4Recipes.resolveByRecipeId(clanCraft.recipeId);
                 const craftRules = invoke('GameServer/Bot/Economy/CraftShopService');
                 const rows = all(`SELECT life.*, members.clanId, members.classId, members.level AS characterLevel
                     FROM bot_life_state life JOIN characters members ON members.id = life.characterId
@@ -8707,8 +8410,7 @@ const Database = {
                 clanCrafter = rows.find(row => Number(row.characterId) === Number(crafterId));
                 const customer = rows.find(row => Number(row.characterId) === Number(customerId));
                 for (const [row, revision] of [[clanCrafter, clanCraft.crafterRevision], [customer, clanCraft.customerRevision]]) {
-                    if (!row || Number(row.clanId) !== Number(clanCraft.clanId) || row.phase !== 'cold'
-                        || row.simulationOwner !== LEGACY_SIMULATION_OWNER || row.partyId
+                    if (!row || Number(row.clanId) !== Number(clanCraft.clanId) || row.phase !== 'cold' || row.partyId
                         || Number(row.simulationRevision) !== Number(revision)) throw new Error('clan craft ownership changed');
                 }
                 if (!recipe || Number(clanCrafter.hp) <= 0 || Number(customer.hp) <= 0
@@ -8744,7 +8446,7 @@ const Database = {
             // One native roll after validated physical inputs and fees;
             // the saved completion returns before every mutable quote check.
             if (step) {
-                const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId((workshop || liveWorkshop).recipeId);
+                const recipe = C4Recipes.resolveByRecipeId((workshop || liveWorkshop).recipeId);
                 success = recipe.successRate >= 100 || Number(random()) * 100 < recipe.successRate;
                 if (!success) product = null;
             }
@@ -9507,7 +9209,7 @@ const Database = {
             const socialRow = one('SELECT snapshotJson FROM clan_social_memory WHERE clanId = ?', [clan]);
             const snapshot = socialRow && JSON.parse(socialRow.snapshotJson);
             const relation = snapshot?.relations.find(r => r.kind === 'character' && r.targetId === id);
-            const d = relation?.discipline && require('./GameServer/Clan/ClanSocialPolicy').discipline(relation.discipline, 0, now());
+            const d = relation?.discipline && ClanSocialPolicy.discipline(relation.discipline, 0, now());
             if (snapshot?.revision !== expectedRevision || d?.stage !== 'expulsion_pending'
                 || !d.warningAt || !d.probationAt || d.lastOffenseAt <= d.probationAt) return { ok: false, reason: 'discipline_changed' };
             const simulated = one("SELECT s.stateJson, c.leaderId FROM clan_simulation_clans s JOIN clans c ON c.id = s.clanId WHERE s.clanId = ? AND s.mode = 'autonomous'", [clan]);
@@ -9517,7 +9219,7 @@ const Database = {
             if (!simulated || simulated.leaderId === id || !member || Number(member.clanId) !== clan || !generatedBotRow(member)) {
                 return { ok: false, reason: 'discipline_membership_changed' };
             }
-            if (!life || life.simulationLeaseId || jsonObject(life.statsJson).pvpEncounter) return { ok: false, reason: 'member_busy' };
+            if (!life || jsonObject(life.statsJson).pvpEncounter) return { ok: false, reason: 'member_busy' };
             const at = now(), banUntil = at + 7 * 86400000;
             d.stage = 'expelled'; d.stageAt = at; d.banUntil = banUntil;
             relation.discipline = d;
@@ -9712,7 +9414,7 @@ const Database = {
             }
             const social = one('SELECT snapshotJson FROM clan_social_memory WHERE clanId = ?', [targetClanId]);
             const reputation = social && JSON.parse(social.snapshotJson).relations.find(r => r.kind === 'character' && r.targetId === id);
-            const feeling = require('./GameServer/Clan/ClanSocialPolicy').relation(reputation, now());
+            const feeling = ClanSocialPolicy.relation(reputation, now());
             if (Number(reputation?.discipline?.banUntil || 0) > now() || (feeling && (feeling.trust < -3 || feeling.hostility >= 10))) {
                 return { ok: false, code: 'clan_distrust' };
             }
@@ -9778,7 +9480,8 @@ const Database = {
         ownerSection = 'goal',
         recruitmentDemand,
         recruitmentScan,
-        rosterProof = null
+        rosterProof = null,
+        supersededProductionGoalKey = null
     } = {}) {
         const clan = Number(clanId);
         if (!clan) return Promise.resolve({ ok: false, code: 'target_not_autonomous' });
@@ -9802,6 +9505,15 @@ const Database = {
                 || goal.controlledBy === 'player' || goal.goalKey !== state.recruitmentDemand.goalKey
                 || Number(goal.plan?.sourceId) !== Number(state.recruitmentDemand.source?.npcId))) state.recruitmentDemand = null;
             if (recruitmentScan !== undefined) state.recruitmentScan = recruitmentScan;
+            // From level 3 the main planner adopts the production goal as its
+            // previous goal; its saved result replaces that copy, which would
+            // otherwise keep its key, assignments and demand active.
+            if (ownerSection === 'goal' && supersededProductionGoalKey
+                && String(state.productionGoal?.goalKey || '') === String(supersededProductionGoalKey)) {
+                state.productionGoal = null;
+                if (state.recruitmentDemand?.ownerSection === 'productionGoal') state.recruitmentDemand = null;
+                if (state.recruitmentScan?.ownerSection === 'productionGoal') state.recruitmentScan = null;
+            }
             if (!goal || goal.status === 'completed' || goal.controlledBy === 'player') {
                 if (state.recruitmentDemand?.ownerSection === ownerSection) state.recruitmentDemand = null;
                 if (state.recruitmentScan?.ownerSection === ownerSection && (goal || recruitmentScan === undefined)) state.recruitmentScan = null;
@@ -9910,10 +9622,13 @@ const Database = {
             } else {
                 return { ok: true, characterId: Number(leader.characterId), unchanged: true };
             }
-            write('UPDATE bot_life_state SET statsJson = ?, updatedAt = ? WHERE characterId = ?', [
+            // The clan's demand stays in its leader's row (a clan table read by
+            // the market readers is a later change); the write moves the row.
+            write(`UPDATE bot_life_state SET statsJson = ?, updatedAt = ?, ${MOVE_FAR_REVISION} WHERE characterId = ?`, [
                 JSON.stringify(stats), now(), Number(leader.characterId)
             ]);
-            return { ok: true, characterId: Number(leader.characterId), itemId: selfId, status: String(status) };
+            return { ok: true, characterId: Number(leader.characterId), itemId: selfId, status: String(status),
+                row: coldSimulationRow(leader.characterId) };
         }, 'clan-market:signal');
     },
     fetchClanMarketDemands({ clanId = null, itemId = null, status = 'open', limit = 100 } = {}) {
@@ -9988,7 +9703,7 @@ const Database = {
 
             const placeholders = allMembers.map(() => '?').join(', ');
             const rows = all(`SELECT c.id, c.clanId, c.username, life.accountName, life.statsJson,
-                    life.phase, life.simulationOwner, life.simulationRevision, life.partyId
+                    life.phase, life.simulationRevision, life.partyId
                 FROM characters c
                 LEFT JOIN bot_life_state life ON life.characterId = c.id
                 WHERE c.id IN (${placeholders})`, allMembers);
@@ -9996,7 +9711,6 @@ const Database = {
                 (!guestSet.has(Number(row.id)) && Number(row.clanId) !== clan)
                 || !generatedBotRow(row)
                 || String(row.phase || '') !== 'cold'
-                || String(row.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
                 || String(row.partyId || '') !== ''
             ))) return { ok: false, code: 'party_not_ready' };
 
@@ -10202,11 +9916,9 @@ const Database = {
         return inTransaction(() => {
             const row = one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]);
             if (!row || row.phase !== 'cold' || Number(row.simulationRevision) !== Number(expectedRevision)) return false;
-            if (row.simulationOwner === COLD_SIMULATION_OWNER) {
-                const inventory = jsonObject(row.inventorySummary);
-                const supplies = Object.fromEntries(itemIds.slice(0, 128).filter(id => inventory[id]).map(id => [id, inventory[id]]));
-                syncInventorySummaryUnsafe(characterId, supplies);
-            }
+            const inventory = jsonObject(row.inventorySummary);
+            const supplies = Object.fromEntries(itemIds.slice(0, 128).filter(id => inventory[id]).map(id => [id, inventory[id]]));
+            syncInventorySummaryUnsafe(characterId, supplies);
             return true;
         }, 'clan-supplies:materialize');
     },
@@ -10240,14 +9952,13 @@ const Database = {
             const simulation = one('SELECT clanId, stateJson FROM clan_simulation_clans WHERE clanId = ?', [clan]);
             const clanRow = one('SELECT id, level FROM clans WHERE id = ?', [clan]);
             const member = one('SELECT id, clanId FROM characters WHERE id = ?', [character]);
-            const life = one(`SELECT phase, simulationOwner, simulationRevision, partyId, inventorySummary, statsJson, adena
+            const life = one(`SELECT phase, simulationRevision, partyId, inventorySummary, statsJson, adena
                 FROM bot_life_state WHERE characterId = ?`, [character]);
             if (!simulation || !clanRow || !member || Number(member.clanId) !== clan) {
                 return { ok: false, code: 'warehouse_transfer_failed' };
             }
             if (Number(clanRow.level) < 1) return { ok: false, code: 'warehouse_level_unavailable' };
             if (!life || !['cold', 'hot'].includes(expectedPhase) || String(life.phase || '') !== expectedPhase
-                || (!allowParty && String(life.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER)
                 || (!allowParty && String(life.partyId || '') !== '')) {
                 return { ok: false, code: 'stale_snapshot' };
             }
@@ -10288,7 +9999,7 @@ const Database = {
                     return { ok: false, code: 'clan_supplies_filled' };
             }
             if (reward > 0) {
-                const template = invoke('GameServer/Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, selfId);
+                const template = ItemTemplateIndex.find(DataCache.items, selfId);
                 const nativePrice = invoke('GameServer/Items/NpcSellRules').npcBuyPrice(template?.template?.price);
                 if (!Number.isSafeInteger(reward) || Number(rewardUnitPrice) !== nativePrice)
                     return { ok: false, code: 'clan_reward_invalid' };
@@ -10444,7 +10155,6 @@ const Database = {
             const stock = one('SELECT * FROM clan_warehouse_items WHERE id = ? AND clanId = ?', [Number(warehouseId), clan]);
             if (!member || Number(member.clanId) !== clan || !life || !stock) return { ok: false, code: 'stock_or_member_changed' };
             if (life.phase !== expectedPhase || !['cold', 'hot'].includes(life.phase)
-                || String(life.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
                 || life.phase === 'cold' && (!['hunting', 'resting', 'grouped'].includes(life.activity)
                     || validateCold && !validateCold())) {
                 return { ok: false, code: 'member_busy' };
@@ -10541,13 +10251,12 @@ const Database = {
             }
             const simulation = one('SELECT clanId, stateJson FROM clan_simulation_clans WHERE clanId = ?', [clan]);
             const member = one('SELECT id, clanId FROM characters WHERE id = ?', [beneficiary]);
-            const life = one(`SELECT phase, simulationOwner, simulationRevision, partyId
+            const life = one(`SELECT phase, simulationRevision, partyId
                 FROM bot_life_state WHERE characterId = ?`, [beneficiary]);
             if (!simulation || !member || Number(member.clanId) !== clan || !life) {
                 return { ok: false, code: 'warehouse_transfer_failed' };
             }
             if (String(life.phase || '') !== 'cold'
-                || String(life.simulationOwner || LEGACY_SIMULATION_OWNER) !== LEGACY_SIMULATION_OWNER
                 || (!allowParty && String(life.partyId || '') !== '')) {
                 return { ok: false, code: 'stale_snapshot' };
             }
@@ -10871,7 +10580,12 @@ const Database = {
                 warehouseRevision: Number(state.warehouseRevision || 0)
             };
         }, 'clan-simulation:level-up')).then(result => {
-            if (result.ok) require('./GameServer/Clan/ClanReviewEvents').changed(clan, 'level');
+            if (result.ok) {
+                // The level and its SP are paid: stop waking the clan on the leader's
+                // SP crossing the old level's need; the next projection watches the new one.
+                ClanReviewInputs.untrackLeader(clan);
+                ClanReviewInputs.changed(clan, 'level');
+            }
             return result;
         });
     },
@@ -11081,11 +10795,10 @@ const Database = {
         const characterId = Number(id);
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const character = write('UPDATE characters SET name = ? WHERE id = ?', [name, characterId]);
-            const life = write(`UPDATE bot_life_state SET characterName = ?,
-                statsJson = json_set(COALESCE(statsJson, '{}'), '$.nameGeneratorVersion', ?)
-                WHERE characterId = ?`, [name, version, characterId]);
-            if (character.affectedRows !== 1 || life.affectedRows !== 1) throw new Error(`generated name target missing for ${characterId}`);
-            return { ok: true, characterId, name, version };
+            const life = one(`UPDATE bot_life_state SET characterName = ?, nameGeneratorVersion = ?, ${MOVE_FAR_REVISION}
+                WHERE characterId = ? RETURNING simulationRevision`, [name, version, characterId]);
+            if (character.affectedRows !== 1 || !life) throw new Error(`generated name target missing for ${characterId}`);
+            return { ok: true, characterId, name, version, simulationRevision: Number(life.simulationRevision) };
         }, 'bot-life:generated-name'));
     },
     updateGeneratedBotAppearance(id, sex, appearanceVersion) {
@@ -11097,19 +10810,15 @@ const Database = {
         }
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const character = write('UPDATE characters SET sex = ? WHERE id = ?', [normalizedSex, characterId]);
-            const state = write(`UPDATE bot_life_state
-                SET statsJson = json_set(
-                    COALESCE(statsJson, '{}'),
-                    '$.sex', ?,
-                    '$.appearanceVersion', ?
-                )
-                WHERE characterId = ?`, [normalizedSex, version, characterId]);
-            if (character.affectedRows !== 1 || state.affectedRows !== 1) {
+            const state = one(`UPDATE bot_life_state SET appearanceVersion = ?, ${MOVE_FAR_REVISION}
+                WHERE characterId = ? RETURNING simulationRevision`, [version, characterId]);
+            if (character.affectedRows !== 1 || !state) {
                 const error = new Error(`generated appearance target missing for ${characterId}`);
                 error.code = 'BOT_APPEARANCE_TARGET_MISSING';
                 throw error;
             }
-            return { ok: true, characterId, sex: normalizedSex, appearanceVersion: version };
+            return { ok: true, characterId, sex: normalizedSex, appearanceVersion: version,
+                simulationRevision: Number(state.simulationRevision) };
         }, 'bot-life:generated-appearance'));
     },
     updateColdCharacterExperience(id, level, exp, sp, options = {}) {
@@ -11127,19 +10836,6 @@ const Database = {
     fetchCharacterDeathExperience(id) {
         return selectOne('character_death_experience', ['*'], 'characterId = ?', [Number(id)], 'character:death-exp-fetch')
             .then((rows) => rows[0] || null);
-    },
-    updateColdCharacterProgression(id, state) {
-        return withCharacterFlush(id, () => inTransaction(() => {
-            const life = one('SELECT statsJson FROM bot_life_state WHERE characterId = ?', [id]);
-            if (Number(jsonObject(life?.statsJson).clanLevelSpVersion || 0) > Number(state.stats?.clanLevelSpVersion || 0)) {
-                const error = new Error(`stale SP before clan level-up for ${id}`);
-                error.code = 'BOT_LIFE_STATE_OWNERSHIP_CONFLICT';
-                throw error;
-            }
-            write('UPDATE characters SET level = ?, exp = ?, sp = ? WHERE id = ?',
-                [state.level, state.exp, state.sp, id]);
-            syncColdDeathExperienceUnsafe(id, state.stats?.deathExperience, Number(state.updatedAt || now()));
-        }, 'character:cold-progression'));
     },
     applyCharacterDeathExperience(record, options = {}) {
         const id = Number(record.characterId);
@@ -11224,7 +10920,7 @@ const ClanLevelSp = require('./GameServer/Clan/ClanLevelSpRepository')({ one, wr
 Object.assign(Database, require('./GameServer/Clan/ClanAllianceRepository')({ one, all, write, inTransaction, withCharacterFlushes, ClanLevelSp, recordClanGoalEventUnsafe }));
 
 Object.assign(Database, require('./GameServer/ClanHall/Repository')({
-    one, all, write, inTransaction, inPreparedTransaction, inPreparedTransactionBatch, withCharacterFlush, updateColdInventorySnapshotUnsafe, syncInventorySummaryUnsafe,
+    one, all, write, inTransaction, inPreparedTransaction, inPreparedTransactionBatch, withCharacterFlush, updateColdInventorySnapshotUnsafe,
     rememberClanContributionUnsafe
 }));
 
@@ -11239,6 +10935,9 @@ const TradeMeetings = require('./GameServer/AfkTrade/TradeMeeting').create({
     position: tradeMeetingPositionUnsafe,
     canStartTrade: (id, state) => require('./GameServer/Bot/Population/PartyAdmission').partyTradeAllowed(
         'trade', state, invoke('GameServer/World/World').registeredActorById(id)?.session),
+    // stopTrip and startTrip do not move the revision: TradeMeeting's terminal
+    // and leg run them in the transaction whose fence (`snapshot` below) moves
+    // both actors' rows.
     stopTrip: meeting => {
         for (const actor of [meeting.actorA, meeting.actorB]) {
             write("UPDATE bot_life_state SET activity='shopping',statsJson=json_remove(statsJson,'$.travel') WHERE characterId=? AND json_extract(statsJson,'$.travel.meetingId')=?", [actor, meeting.id]);
@@ -11412,8 +11111,7 @@ Object.assign(Database, {
             const slot = TradeMeetings.participant(Number(id)), row = one("SELECT *, json_extract(statsJson,'$.playerPartyTakeover.playerId') playerPartyId FROM bot_life_state WHERE characterId=?", [id]);
             return { sequence: slot.nextSequence, meetingId: slot.meetingId, anchor: TradeMeetings.anchor(Number(id)), revision: Number(row?.simulationRevision || 0),
                 partyId: row?.partyId || null, playerPartyId: row?.playerPartyId || null,
-                phase: row?.phase || 'player', ownerId: row?.simulationOwner || null,
-                leaseId: row?.simulationLeaseId || null, hotAt: Number(row?.lastHotAt || 0),
+                phase: row?.phase || 'player', hotAt: Number(row?.lastHotAt || 0),
                 needRevision: Number(row?.simulationRevision || 0),
                 inventory: afkTradeInventoryUnsafe(id), acceptedIncoming: acceptedTradeIncomingUnsafe(Number(id), row),
                 position: tradeMeetingPositionUnsafe(Number(id)) };

@@ -55,14 +55,20 @@ module.exports = {
     }
     if (id === H && [3, 5].includes(c)) {
       const i = c === 3 ? 1 : 2;
+      if (!(await q.takeItem(s.session, L[i - 1], -1)))
+        return p(
+          "Hatos",
+          `You do not have the ${["Letter to Human", "Letter to Dark Elf"][i - 1]}.`,
+        );
       await q.takeItem(s.session, O[i - 1], -1);
-      await q.takeItem(s.session, L[i - 1], -1);
       await q.giveItem(s.session, O[i], 1);
       await s.set("cond", c + 1);
       s.playSound("ItemSound.quest_middle");
       return p("Hatos", "The next target awaits.");
     }
     if (id === H && c === 7) {
+      if (!(await q.takeItem(s.session, L[2], -1)))
+        return p("Hatos", "You do not have the Letter to Elf.");
       for (const z of [...O, ...L]) await q.takeItem(s.session, z, -1);
       for (const [z, c] of [[W, 1], [HP, 100], ...E.map((z) => [z, 10])])
         await q.giveItem(s.session, z, c);

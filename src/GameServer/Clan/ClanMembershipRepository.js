@@ -1,6 +1,31 @@
 const Policy = require('./ClanMembershipPolicy');
+const EconomyCommit = require('../Bot/Economy/EconomyCommit');
+
+// The row's revision moves in SQL, so no writer between the read and this
+// write can be handed the same number; the cache gets the written one. The
+// economy leaf stays the row's.
+const MEMBER_WRITE = `UPDATE bot_life_state SET activity = ?, statsJson = ${EconomyCommit.preserveLeafSql('?')},
+    simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`;
 
 module.exports = ({ all, write, inTransaction, now }) => {
+    function writeMemberUnsafe(row, activity, statsJson) {
+        const [written] = all(`${MEMBER_WRITE} RETURNING simulationRevision, updatedAt`, [activity, statsJson, now(), row.characterId]);
+        return { ...row, activity, statsJson, ...written };
+    }
+
+    // One member's goal repair built from main's copy (ClanEquipmentService):
+    // the same write, so a proposal built before it is refused on its
+    // revision. The copy was read before this write; a commit that moved the
+    // row in between wins and nothing is written or published here: the next
+    // goal change, or the refused claim's own goal repair, covers that member.
+    function writeGoalMember(characterId, activity, statsJson, expectedRevision) {
+        return inTransaction(() => {
+            const members = all(`${MEMBER_WRITE} AND simulationRevision = ? RETURNING *`,
+                [activity, statsJson, now(), Number(characterId), Number(expectedRevision)]);
+            return { repairedMembers: members.length, repairedParties: 0, membershipRepair: { members, parties: [] } };
+        }, 'clan-goal:member').then(publish);
+    }
+
     function repairUnsafe(characterIds = null) {
         const ids = characterIds && [...new Set(characterIds.map(Number).filter(Boolean))];
         if (ids && !ids.length) return { members: [], parties: [] };
@@ -13,11 +38,7 @@ module.exports = ({ all, write, inTransaction, now }) => {
             const repaired = Policy.reconcileState(previous, Number(row.actualClanId || 0));
             if (repaired === previous) continue;
             repaired.stats.clanMembershipVersion = Math.max(now(), Number(previous.stats.clanMembershipVersion || 0) + 1);
-            const next = { ...row, activity: repaired.activity, statsJson: JSON.stringify(repaired.stats),
-                simulationRevision: Number(row.simulationRevision || 0) + 1, updatedAt: now() };
-            write(`UPDATE bot_life_state SET activity = ?, statsJson = ?, simulationRevision = ?, updatedAt = ?
-                WHERE characterId = ?`, [next.activity, next.statsJson, next.simulationRevision, next.updatedAt, row.characterId]);
-            members.push(next);
+            members.push(writeMemberUnsafe(row, repaired.activity, JSON.stringify(repaired.stats)));
         }
         const parties = [];
         for (const row of all(`SELECT parties.*, members.clanId AS actualClanId FROM bot_background_parties parties
@@ -28,8 +49,8 @@ module.exports = ({ all, write, inTransaction, now }) => {
             const previous = { stats: JSON.parse(row.statsJson || '{}') };
             const repaired = Policy.reconcileParty(previous, row.actualClanId);
             if (repaired === previous) continue;
-            const next = { ...row, statsJson: JSON.stringify(repaired.stats), updatedAt: now() };
-            write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ? WHERE partyId = ?',
+            const next = { ...row, statsJson: JSON.stringify(repaired.stats), updatedAt: now(), revision: Number(row.revision || 0) + 1 };
+            write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                 [next.statsJson, next.updatedAt, next.partyId]);
             parties.push(next);
         }
@@ -66,11 +87,7 @@ module.exports = ({ all, write, inTransaction, now }) => {
                 repaired.stats.clanMembershipVersion = version;
                 repaired.stats.clanGoalInvalidationVersion = version;
                 repaired.stats.lastReason = 'clan_goal_expired';
-                const next = { ...row, activity: repaired.activity, statsJson: JSON.stringify(repaired.stats),
-                    simulationRevision: Number(row.simulationRevision || 0) + 1, updatedAt: now() };
-                write(`UPDATE bot_life_state SET activity = ?, statsJson = ?, simulationRevision = ?, updatedAt = ?
-                    WHERE characterId = ?`, [next.activity, next.statsJson, next.simulationRevision, next.updatedAt, row.characterId]);
-                members.push(next);
+                members.push(writeMemberUnsafe(row, repaired.activity, JSON.stringify(repaired.stats)));
             }
             for (const row of all(`SELECT p.* FROM bot_background_parties p JOIN characters c ON c.id = p.leaderId
                 WHERE c.clanId = ? AND p.status IN ('active', 'hot')
@@ -78,9 +95,9 @@ module.exports = ({ all, write, inTransaction, now }) => {
                 const stats = JSON.parse(row.statsJson || '{}');
                 if (keys.has(stats.objective.clanGoalKey)) continue;
                 const next = { ...row, statsJson: JSON.stringify({ ...stats, objective: null, acquisitionGoal: null,
-                    lastRequirementRefreshAt: 0, clanGoalInvalidationVersion: Math.max(now(),
-                        Number(stats.clanGoalInvalidationVersion || 0) + 1) }), updatedAt: now() };
-                write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ? WHERE partyId = ?',
+                    clanGoalInvalidationVersion: Math.max(now(),
+                        Number(stats.clanGoalInvalidationVersion || 0) + 1) }), updatedAt: now(), revision: Number(row.revision || 0) + 1 };
+                write('UPDATE bot_background_parties SET statsJson = ?, updatedAt = ?, revision = revision + 1 WHERE partyId = ?',
                     [next.statsJson, next.updatedAt, next.partyId]);
                 parties.push(next);
             }
@@ -112,5 +129,5 @@ module.exports = ({ all, write, inTransaction, now }) => {
             return { repairedMembers: membershipRepair.members.length, repairedParties: membershipRepair.parties.length, membershipRepair };
         }, 'clan-membership:reconcile').then(publish);
     }
-    return { repairUnsafe, repairGoalsUnsafe, publish, reconcile, reconcileGoals };
+    return { repairUnsafe, repairGoalsUnsafe, publish, reconcile, reconcileGoals, writeGoalMember };
 };

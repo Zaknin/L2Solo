@@ -14,6 +14,9 @@ class InteractionMemory {
         this.clanSocial = null;
         this.fastLayers = new Map();
         this.playingHours = () => undefined;
+        // Called with the owner id after each accepted snapshot (main's
+        // runtime publishes it; a worker instance keeps none).
+        this.onAccept = null;
     }
 
     accept(snapshot) {
@@ -38,6 +41,7 @@ class InteractionMemory {
         if (snapshot.fast) this.fastLayers.set(copy.ownerId, new Map(snapshot.fast));
         this.snapshots.set(copy.ownerId, copy);
         this.views.set(copy.ownerId, Policy.view(copy, () => this.playingHours(copy.ownerId), this.fastLayers.get(copy.ownerId), copy));
+        this.onAccept?.(copy.ownerId);
         return true;
     }
 
@@ -120,6 +124,24 @@ class InteractionMemory {
     snapshot(ownerId) {
         const snapshot = this.snapshots.get(ownerId);
         return snapshot ? JSON.parse(JSON.stringify({ ...snapshot.plain(), ...(this.fastLayers.has(ownerId) ? { fast: [...this.fastLayers.get(ownerId)] } : {}) })) : null;
+    }
+
+    // The accepted snapshot's relation rows and revision, read-only (a row of
+    // an unusual shape is the kept one), without the deep copy snapshot() makes.
+    relationRows(ownerId) {
+        const snapshot = this.snapshots.get(ownerId);
+        return snapshot ? { revision: snapshot.revision, relations: snapshot.mapRows(row => row) } : null;
+    }
+
+    // The accepted snapshot's revision, without the deep copy snapshot() makes.
+    revision(ownerId) {
+        return this.snapshots.get(ownerId)?.revision;
+    }
+
+    // Derived in the existing packing pass. Order is a native input: the
+    // economy reads the first matching relation, including player rows.
+    contentIdentity(ownerId) {
+        return this.snapshots.get(ownerId)?.contentIdentity ?? null;
     }
 
     assess(source, target, context = {}, now = Date.now()) {

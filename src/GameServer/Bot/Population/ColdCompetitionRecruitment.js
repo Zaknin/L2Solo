@@ -9,7 +9,7 @@ async function recruit({ participants, event, parties, life, memory, composition
     const forecast = [event.actor, event.peer].find(p => p.id === representative.characterId);
     const party = parties.find(partyId);
     if (!party || party.status !== 'active' || party.spotId !== event.spotId
-        || forecast?.partyId !== partyId || forecast.partyUpdatedAt !== party.updatedAt
+        || forecast?.partyId !== partyId || forecast.partyRevision !== party.revision
         || forecast.size !== party.memberIds.length) return { rejected: 'party_changed' };
     const objective = party.stats?.objective;
     if (objective?.clanGoalKey || objective?.clanOperation || participants.some(clanReserved)) return { rejected: 'clan_objective' };
@@ -28,7 +28,6 @@ async function recruit({ participants, event, parties, life, memory, composition
         || members.length < limits.minSize
         || !members.every(s => s && s.phase === 'cold' && ['grouped', 'hunting', 'resting'].includes(s.activity)
             && s.vitals?.hp > 0 && s.party?.partyId === partyId && s.spotId === event.spotId
-            && (s.simulation?.ownerId || 'legacy_main') === 'legacy_main'
             && !s.stats?.travel && !s.stats?.coldCompetition?.wait && !s.stats?.supplyErrand
             && !s.stats?.warehouseWorkflow && !s.stats?.marketReturn && !clanReserved(s)
             && participantAllowed(s.characterId))) return { rejected: 'party_member_busy' };

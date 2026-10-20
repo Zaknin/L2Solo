@@ -7,6 +7,7 @@ const Database = invoke('Database');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Raid = require('../src/GameServer/Bot/Population/ColdRaidEncounter');
 const Authority = require('../src/GameServer/Bot/Population/ColdRaidAuthority');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
@@ -20,25 +21,27 @@ async function createParty(ids) {
         stats: { objective: { sourceKind: 'raid', npcId: 10484, sourceLevel: 40 },
             raidEncounter: { status: 'active' }, raidPreparation: { ready: true } } });
     const assigned = ids.map(id => Life.preparePartyAssignment(state(id), prepared.row.partyId, 'dps', ids[0], at + 45000));
-    assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
-    Life.acceptPartyAssignments(assigned);
-    return Parties.acceptCommit(prepared);
+    const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+    assert(formed.ok);
+    Life.acceptPartyAssignments(assigned, formed.lifeRows);
+    return Parties.acceptRow(formed.partyRow);
 }
 async function proposed(party, id, snapshot) {
     const members = party.memberIds.map(state);
-    const { grants } = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
-    assert.equal(grants.length, 9);
     const atomicGroup = { id, memberIds: party.memberIds,
-        partyChanges: [{ partyId: party.partyId, memberIds: party.memberIds, expectedUpdatedAt: party.updatedAt,
+        partyChanges: [{ partyId: party.partyId, memberIds: party.memberIds, expectedPartyRevision: party.revision,
             updatedAt: Math.max(Date.now(), party.updatedAt + 1), nextResolveAt: null, status: 'dissolved',
             statsJson: JSON.stringify({ ...party.stats, raidEncounter: snapshot }) }],
         raidCommit: { key: snapshot.key, expectedRevision: 0, revision: 1, snapshot,
             worldDefeat: { npcId: 10484, respawnTime: at + 100000 } } };
-    const entries = members.map(member => ({ token: grants.find(g => g.characterId === member.characterId), atomicGroup,
-        options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: member },
-        nextState: { ...member, exp: member.exp + 100, adena: member.adena + 10,
-            inventory: { ...member.inventory, 57: { selfId: 57, amount: 10 } } } }));
-    return { entries, grants };
+    const entries = members.map(member => {
+        const nextState = { ...member, exp: member.exp + 100, adena: member.adena + 10,
+            inventory: { ...member.inventory, 57: { selfId: 57, amount: 10 } } };
+        return { revision: member.simulation.revision, atomicGroup, nextState,
+            options: { allowParty: true, allowLifecycle: true },
+            proposal: InventorySummary.bagChange(member.inventory, nextState.inventory) };
+    });
+    return { entries };
 }
 async function durable() {
     return {
@@ -72,29 +75,28 @@ async function run() {
     assert.equal(Raid.begin(b, spot, 10484, at + 4).hp, 600, 'another clan never sees an uncommitted kill');
     await assert.rejects(win('competing'), /raid_step_pending/);
     const failed = await proposed(a, 'rejected', staged.snapshot);
-    failed.entries[8].token = { ...failed.entries[8].token, revision: failed.entries[8].token.revision - 1 };
-    const rejected = await Owner.commitAndReleaseBatch(failed.entries);
+    failed.entries[8].revision -= 1;
+    const rejected = await Owner.commitBatch(failed.entries);
     assert(rejected.every(row => !row.ok));
     for (const row of rejected.slice(0, 8)) Raid.acknowledge('rejected', row.characterId, row.ok);
     await assert.rejects(win('still-pending'), /raid_step_pending/, 'paged ACKs retain the boss fence');
     Raid.acknowledge('rejected', rejected[8].characterId, false);
     assert.equal(Raid.begin(b, spot, 10484, at + 5).hp, 600);
     assert.deepEqual(await durable(), initial, 'one stale member rolls back party, inventory, rewards and boss');
-    await Owner.releaseBatch(failed.grants);
 
     const crashStage = await win('sql-failure');
     const crash = await proposed(a, 'sql-failure', crashStage.snapshot);
     await Database.execute([`CREATE TRIGGER reject_raid_party BEFORE UPDATE ON bot_background_parties
         BEGIN SELECT RAISE(ABORT, 'synthetic raid party write failure'); END`, []]);
-    await assert.rejects(Owner.commitAndReleaseBatch(crash.entries), /synthetic raid party write failure/);
+    await assert.rejects(Owner.commitBatch(crash.entries), /synthetic raid party write failure/);
     assert.deepEqual(await durable(), initial, 'SQL failure after physical writes rolls back the entire transaction');
     await Database.execute(['DROP TRIGGER reject_raid_party', []]);
-    Raid.abort('sql-failure'); await Owner.releaseBatch(crash.grants);
+    Raid.abort('sql-failure');
 
     const success = await win('winner');
     const first = await proposed(a, 'winner', success.snapshot);
     const second = await proposed(b, 'competitor', { ...success.snapshot, winnerPartyId: b.partyId });
-    const results = await Owner.commitAndReleaseBatch([...first.entries, ...second.entries]);
+    const results = await Owner.commitBatch([...first.entries, ...second.entries]);
     const accepted = results.filter(row => row.ok), refused = results.filter(row => !row.ok);
     assert.equal(accepted.length, 9); assert.equal(refused.length, 9);
     assert(refused.every(row => row.detail === 'raid_revision_changed'));
@@ -107,9 +109,8 @@ async function run() {
     const committed = await durable();
     assert(committed.lives.slice(0, 9).every(row => row.exp === initial.lives[0].exp + 100 && row.adena === 10));
     assert.equal(committed.raids.length, 1); assert.equal(committed.spawns[0].hp, 0);
-    assert((await Owner.commitAndReleaseBatch(first.entries)).every(row => !row.ok));
+    assert((await Owner.commitBatch(first.entries)).every(row => !row.ok));
     assert.deepEqual(await durable(), committed, 'replayed proposals cannot grant rewards twice');
-    await Owner.releaseBatch(second.grants);
     await Database.close(); Database.init(); await Authority.init(); Raid.resetForTests();
     assert.equal(Raid.begin(b, { ...spot, raidAuthority: Authority.get('raid:10484').snapshot }, 10484).status, 'defeated',
         'shared authority survives a process-local reset and database reopen');
@@ -125,23 +126,20 @@ async function run() {
                 memberResults: members.map(state => ({ state, result: { events: [] } })), events: [] };
         } });
     const members = a.memberIds.map(state);
-    const held = new Map(members.map(member => [member.characterId, { characterId: member.characterId,
-        ownerId: Owner.OWNER_ID, leaseId: 'kernel', revision: 1, leaseUntil: at + 30000 }]));
     for (const member of members) {
-        kernel.upsert({ state: member, context: {} });
-        kernel.inFlight.set(member.characterId, { state: member, grant: held.get(member.characterId),
-            partyId: a.partyId, claimRequestId: 'raid-claim' });
+        kernel.upsert({ state: member });
+        kernel.inFlight.set(member.characterId, { state: member, startedAt: at + 100, partyId: a.partyId });
     }
     kernel.partyRuns.set(a.partyId, { party: a, members, spot: { ...spot, raidAuthorityRevision: 0 },
-        requestId: 'raid-claim', grants: held });
-    await kernel.resolvePartyGrant(a.partyId);
+        startedAt: at + 100 });
+    await kernel.resolvePartyStep(a.partyId);
     const proposals = messages.filter(message => message.type === 'proposal_batch').flatMap(message => message.data.proposals);
     assert.equal(proposals.length, 9, JSON.stringify(messages));
-    assert(proposals.every(p => p.raidStepId === 'raid:kernel' && p.atomicGroup.partyChanges.length === 1
+    assert(proposals.every(p => p.raidStepId === `raid:${a.leaderId}:${at + 100}` && p.atomicGroup.partyChanges.length === 1
         && p.atomicGroup.raidCommit.expectedRevision === 0));
     assert.equal(Raid.begin(b, spot, 10484).status, 'active');
     kernel.onCommitAck({ results: proposals.map(p => ({ characterId: p.characterId, raidStepId: p.raidStepId, ok: false,
-        inputToken: p.token, proposalId: p.proposalId })) });
+        proposalId: p.proposalId })) });
     assert.equal(Raid.begin(b, spot, 10484).status, 'active');
     const afterReject = await win('after-kernel-rejection'); Raid.abort('after-kernel-rejection');
     assert.equal(afterReject.snapshot.status, 'defeated');
@@ -171,33 +169,6 @@ async function run() {
     Authority.accept({ raidKey: 'raid:10484', revision: 0, snapshotJson: '{}' });
     assert.equal(Authority.get('raid:10484'), durableRevision, 'late cache deliveries cannot rewind shared authority');
 
-    const Resolver = require('../src/GameServer/Bot/Population/BackgroundPartyResolver');
-    const originalResolve = Resolver.resolve;
-    const originalPrepare = Life.prepareResolve;
-    let projections = 0;
-    try {
-        Resolver.resolve = ({ party, members, spot, timestamp }) => {
-            const snapshot = Raid.record(party, Raid.begin(party, spot, 10485, timestamp), { won: true }, timestamp);
-            return { partyPatch: { status: 'dissolved', stats: { raidEncounter: snapshot, partyBreakReason: 'raid_defeated' } },
-                nextResolveAt: null, events: [], debug: {}, memberResults: members.map(state => ({ state, result: {
-                    patch: {}, materialize: { exp: 100, adena: 10, items: [] }, events: [], nextResolveAt: timestamp + 30000
-                } })) };
-        };
-        Life.prepareResolve = function (state, result, options) {
-            assert.equal(options.projectClassProgression, true, 'fallback must not write class progression before the transaction');
-            assert.equal(options.persist, false); projections++;
-            return originalPrepare.call(this, state, result, options);
-        };
-        const outcome = await require('../src/GameServer/Bot/Population/ColdRaidLegacyCommit').resolve({
-            party: b, members: b.memberIds.map(state), spot: { ...spot, id: 'raid:10485', raidBossTemplateId: 10485 },
-            targetNpcId: 10485, elapsedMs: 60000
-        });
-        assert.equal(outcome.ok, true); assert.equal(projections, 9);
-        assert.equal(outcome.party.status, 'dissolved');
-        assert(b.memberIds.every(id => !state(id).party?.partyId && state(id).adena === 10));
-        const [legacyBoss] = await Database.execute(['SELECT revision FROM bot_raid_encounters WHERE raidKey=?', ['raid:10485']]);
-        assert.equal(legacyBoss.revision, 1);
-    } finally { Resolver.resolve = originalResolve; Life.prepareResolve = originalPrepare; }
     console.log('Cold raid commit: 9-member atomicity, SQL rollback, ACK fencing, clan competition, replay and durable reload passed');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {

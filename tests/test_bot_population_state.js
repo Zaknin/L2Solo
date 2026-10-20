@@ -18,7 +18,6 @@ const originalFetchMarketCounts = Database.fetchBotMarketCounts;
 const DataCache = invoke('GameServer/DataCache');
 const GearPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const BackgroundResolver = invoke('GameServer/Bot/Population/BackgroundResolver');
-const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
 
 DataCache.init();
@@ -41,15 +40,13 @@ const originalFetchSkills = Database.fetchSkills;
 const originalFetchSkill = Database.fetchSkill;
 const originalSetSkill = Database.setSkill;
 const originalUpdateSkillLevel = Database.updateSkillLevel;
+const originalCreateColdTrainingGuard = Database.createColdTrainingGuard;
 const originalUpdateCharacterClassId = Database.updateCharacterClassId;
-const originalRecoverStartupLeases = ColdSimulationOwner.recoverStartupLeases;
 const originalReconcileClanMembership = Database.reconcileBotClanMembership;
 const statements = [];
 const classUpdates = [];
-let marketCandidateRows = [];
 
 try {
-    ColdSimulationOwner.recoverStartupLeases = () => Promise.resolve({ affectedRows: 0 });
     Database.reconcileBotClanMembership = () => Promise.resolve({ repairedMembers: 0, repairedParties: 0 });
     Database.reconcileBotClanGoals = async () => ({ repairedMembers: 0, repairedParties: 0 });
     Database.fetchBotMarketCounts = async () => [];
@@ -69,9 +66,6 @@ try {
             if (String(sql).includes("'$.partyRequest.lastReason'")) return Promise.resolve({ affectedRows: 1 });
             return Promise.resolve({ affectedRows: 2 });
         }
-        if (String(sql).includes('marketSellRetryAfter') && String(sql).includes('FROM bot_life_state states')) {
-            return Promise.resolve(marketCandidateRows);
-        }
         if (String(sql).startsWith('SELECT * FROM bot_life_state')) {
             return Promise.resolve([]);
         }
@@ -88,6 +82,8 @@ try {
     Database.fetchSkill = () => Promise.resolve([]);
     Database.setSkill = () => Promise.resolve();
     Database.updateSkillLevel = () => Promise.resolve();
+    // Skill writes are stubbed above; their row fence would read probes that are not in the table.
+    Database.createColdTrainingGuard = () => () => {};
     Database.updateCharacterClassId = (characterId, classId) => {
         classUpdates.push({ characterId, classId });
         return Promise.resolve();
@@ -305,72 +301,23 @@ try {
             assert(save.sql.includes('nextResolveAt = excluded.nextResolveAt'), 'persisted cold resolve timing must advance after every tick');
             assert(save.sql.includes('lastResolvedAt = excluded.lastResolvedAt'), 'persisted cold resolve history must survive an upsert');
             assert(save.sql.includes('inventorySummary = excluded.inventorySummary'), 'background drop rewards must persist after an upsert');
-            assert(save.sql.includes("WHERE bot_life_state.simulationOwner = 'legacy_main'"), 'legacy saves must not overwrite a cold owner lease');
-            const cleanupStart = statements.length;
-            return BotLifeState.expireStalePartyRequests(100).then((expired) => {
-                assert.strictEqual(expired, 1, 'TTL cleanup should report the physical row it changed');
-                const cleanupUpdate = statements.slice(cleanupStart).find((entry) => entry.sql.startsWith('UPDATE bot_life_state'));
-                assert(cleanupUpdate, 'periodic TTL cleanup must execute its update');
-                assert.strictEqual(cleanupUpdate.params.length, 6, 'bounded TTL cleanup must bind only the predicates present in its subquery');
-                assert.strictEqual(BotLifeState.cachedState(42).stats.partyRequest.status, 'deferred', 'TTL cleanup must refresh the lifecycle cache');
-                assert.strictEqual(BotLifeState.partyRequestSummary().total, 0, 'TTL cleanup must remove expired requests from telemetry');
-            });
         }).then(() => BotLifeState.migrateLegacyClassProgression(1).then((migrated) => {
                 assert.strictEqual(migrated.length, 1, 'legacy cold bots without progression markers must be migrated');
                 const classUpdate = classUpdates.at(-1);
                 assert(classUpdate, 'migration must persist the profession on the physical character');
                 assert.ok([36, 37].includes(classUpdate.classId), 'migration must use the physical character class as its source of truth');
-                marketCandidateRows = [
-                    { characterId: 71, characterName: 'MarketCursorA', phase: 'cold', activity: 'hunting', updatedAt: 10 },
-                    { characterId: 72, characterName: 'MarketCursorB', phase: 'cold', activity: 'hunting', updatedAt: 10 }
-                ];
-                return BotLifeState.dueCold(5, 1000)
-                    .then(() => BotLifeState.marketGoalCandidates(5, 123456))
-                    .then(() => BotLifeState.marketGoalCandidates(5, 123457));
             }))
         .then(() => {
-            const due = statements.find((entry) => entry.sql.includes("WHEN activity IN ('traveling', 'shopping', 'crafting', 'clan_hall') THEN 1"));
-            assert(due.sql.includes('rateModelVersion'), 'due cold states must prioritize persisted plans from an older drop-rate model');
-            assert(due.sql.includes(`< ${GearPlanner.RATE_MODEL_VERSION}`), 'due cold states must prioritize plans from the current model rollout rather than a stale hard-coded version');
-            assert(due.sql.includes("OR (activity = 'hunting' AND (json_extract(statsJson, '$.equipmentPlan.status') = 'active'"), 'only active stale combat plans must bypass their old next-resolve deadline for an immediate safety replan');
-            const stalePlanOrder = due.sql.indexOf("WHEN json_extract(statsJson, '$.equipmentPlan.status') = 'active'");
-            assert(stalePlanOrder >= 0 && stalePlanOrder < due.sql.indexOf("WHEN activity IN ('traveling', 'shopping', 'crafting', 'clan_hall') THEN 1"), 'a stale active plan must outrank ordinary market, travel, and crafting transitions');
-            assert(due.sql.includes("WHEN activity IN ('traveling', 'shopping', 'crafting', 'clan_hall') THEN 1"), 'due cold states must promptly finish market, travel, and crafting transitions after an urgent combat-safety replan');
-            assert(due.sql.includes("json_extract(statsJson, '$.equipmentPlan.next.spotId')"), 'due cold states must prioritize active gear plans whose source spot differs from the saved spot');
-            assert(due.sql.includes("startup_craft_wait_recovery"), 'startup craft recovery must immediately replan before the ordinary hunting backlog');
-            assert(due.sql.includes('COALESCE(nextResolveAt, 0) ASC'), 'due cold states must remain fair by schedule within each lifecycle bucket');
-            const marketCandidateQueries = statements.filter((entry) => entry.sql.includes("FROM bot_life_state states")
-                && entry.sql.includes("marketSellRetryAfter"));
-            const marketCandidates = marketCandidateQueries[0];
-            assert(marketCandidates, 'market reconciliation must query current lifecycle market state');
-            assert.strictEqual(marketCandidates.queryOptions?.read, true,
-                'the candidate CTE must return rows through the database read path');
-            assert(!marketCandidates.sql.includes('goalJson LIKE'), 'market reconciliation must not trust stale goal metadata');
-            assert(marketCandidates.sql.includes("'$.marketSellRetryAfter'"), 'market reconciliation must exclude sellers whose retry cooldown is still active');
-            assert(marketCandidates.sql.includes('INDEXED BY bot_life_state_market_page'),
-                'market reconciliation must use its keyset-compatible lifecycle index');
-            assert(!marketCandidates.sql.includes('COALESCE(states.updatedAt'),
-                'a redundant updatedAt expression must not force a temporary sort');
-            assert(marketCandidates.sql.includes('states.characterId > ?'), 'market reconciliation must advance with a stable keyset cursor');
-            assert.deepStrictEqual(marketCandidates.params, [123456, 0, 0, 0], 'the first market pass must start at the beginning of the rotation');
-            assert.deepStrictEqual(marketCandidateQueries[1].params, [123457, 10, 10, 72],
-                'the next market pass must continue after the last projected lifecycle row');
-            return BotLifeState.staleGoalCandidates(5, 123456).then(() => {
-                const staleGoals = statements.at(-1);
-                assert(staleGoals.sql.includes('INNER JOIN bot_goal_state goals'), 'goal metadata review must read persisted goal rows');
-                assert(staleGoals.sql.includes("'$.nextReviewAt'"), 'goal metadata review must select rows whose review deadline is due');
-                assert.deepStrictEqual(staleGoals.params, [123456], 'goal metadata review must bind the current review cutoff');
-                const current = BotLifeState.cachedState(42);
-                return BotLifeState.upsertState({ ...current,
-                    stats: { ...current.stats, partyRequest: { ...current.stats.partyRequest, status: 'open' } }
-                }, 'reopened_party_request').then(() =>
-                    BotLifeState.deferUnformablePartyRequests([42], 'no_compatible_level_match')
-                ).then((deferred) => {
-                    const deferUpdate = statements.at(-1);
-                    assert.strictEqual(deferred, 1, 'an unformable required group must close its active requests as a batch');
-                    assert(deferUpdate.sql.includes("'$.partyRequest.lastReason'"), 'unformable party cleanup must persist its reason');
-                    assert.strictEqual(deferUpdate.params[3], 'no_compatible_level_match', 'unformable party cleanup must persist the classification');
-                });
+            const current = BotLifeState.cachedState(42);
+            return BotLifeState.upsertState({ ...current,
+                stats: { ...current.stats, partyRequest: { ...current.stats.partyRequest, status: 'open' } }
+            }, 'reopened_party_request').then(() =>
+                BotLifeState.deferUnformablePartyRequests([42], 'no_compatible_level_match')
+            ).then((deferred) => {
+                const deferUpdate = statements.at(-1);
+                assert.strictEqual(deferred, 1, 'an unformable required group must close its active requests as a batch');
+                assert(deferUpdate.sql.includes("'$.partyRequest.lastReason'"), 'unformable party cleanup must persist its reason');
+                assert.strictEqual(deferUpdate.params[3], 'no_compatible_level_match', 'unformable party cleanup must persist the classification');
             }).then(() => BotLifeState.assignParty({
                 characterId: 43,
                 name: 'PartyWaitAssignmentProbe',
@@ -410,7 +357,6 @@ try {
                         const populationRank = candidates.sql.indexOf('party_spots.candidateCount DESC');
                         assert(requiredRank >= 0 && requiredRank < preferredRank, 'required requests must rank ahead of preferred requests');
                         assert(preferredRank < generalRank && generalRank < populationRank, 'all open requests must rank ahead of crowded general candidate grounds');
-                        assert(candidates.sql.includes("simulationOwner = 'legacy_main'"), 'party spot counts must exclude cold-worker-owned rows');
                         assert(candidates.sql.includes('partyObjectiveSpot AS candidateSpot'), 'party formation must use the indexed objective projection');
                         assert(!candidates.sql.includes('json_extract'), 'party formation must not parse full JSON state while ranking candidates');
                         assert(candidates.sql.indexOf('LIMIT 5') < candidates.sql.indexOf('SELECT states.*'), 'party formation must rank lightweight ids before loading full state blobs');
@@ -423,20 +369,18 @@ try {
                 return BotLifeState.coldPartyCandidateCount(true).then(() => {
                     const count = statements.find((entry) => entry.sql.includes('COUNT(*) AS candidateCount'));
                     assert(count, 'party capacity planning must be able to measure the full wait backlog');
-                    assert(count.sql.includes("simulationOwner = 'legacy_main'"), 'party capacity counts must exclude cold-worker-owned rows');
                     return BotLifeState.coldPartyCandidatesForSpots(['cruma', 'dion'], 3, true);
                 }).then(() => {
                     const fairCandidates = statements.find((entry) => entry.sql.includes('ROW_NUMBER() OVER') && entry.sql.includes('PARTITION BY'));
                     assert(fairCandidates, 'party recruitment must load a bounded fair sample per active spot');
-                    assert(fairCandidates.sql.includes("simulationOwner = 'legacy_main'"), 'party recruitment must exclude cold-worker-owned rows');
                     assert(fairCandidates.sql.includes('PARTITION BY partyObjectiveSpot'), 'party recruitment must rank the indexed objective projection');
                     assert(!fairCandidates.sql.includes('json_extract'), 'party recruitment must not parse JSON while ranking candidates');
                     const clearPartyStart = statements.length;
                     return BotLifeState.clearParty('bgp_cleanup_probe', 'ownership_aware_cleanup').then(() => {
                         const clearPartyQuery = statements.slice(clearPartyStart)
-                            .find((entry) => entry.sql.includes('AND partyId = ?') && entry.sql.includes('simulationOwner = ?'));
-                        assert(clearPartyQuery, 'party cleanup must query only rows owned by the main lifecycle');
-                        assert.deepStrictEqual(clearPartyQuery.params, ['bgp_cleanup_probe', 'legacy_main']);
+                            .find((entry) => entry.sql.includes('AND partyId = ?'));
+                        assert(clearPartyQuery, 'party cleanup must query the far members of the party');
+                        assert.deepStrictEqual(clearPartyQuery.params, ['bgp_cleanup_probe']);
                     });
                 }).then(() => {
                     const member = {
@@ -444,6 +388,8 @@ try {
                         name: 'PartyTelemetryProbe',
                         level: 20,
                         phase: 'cold',
+                        simulation: { revision: 0 },
+                        updatedAt: 1000,
                         activity: 'grouped',
                         party: { partyId: 'bgp_probe' },
                         timing: { nextResolveAt: 9000 },
@@ -505,6 +451,8 @@ try {
                         name: 'DeadPartyRequestProbe',
                         level: 20,
                         phase: 'cold',
+                        simulation: { revision: 0 },
+                        updatedAt: 1000,
                         activity: 'hunting',
                         exp: 500,
                         sp: 50,
@@ -572,16 +520,33 @@ try {
         }, 'summary_probe').then(() => {
             const summary = BotLifeState.coldDueSummary(1000);
             assert(summary.due >= 1, 'cold due telemetry must include stale hunting plans before their persisted deadline');
-        })).then(async () => {
-            const config = invoke('GameServer/Bot/Population/PopulationConfig');
-            config.developerDiagnostics = false;
-            const diagnosticOptions = {};
-            for (const field of ['onTiming', 'onStage']) Object.defineProperty(diagnosticOptions, field,
-                { get() { throw Error('optional lifecycle timing callback read off'); } });
-            try {
-                await BotLifeState.marketGoalCandidates(5, 123458, diagnosticOptions);
-                await BotLifeState.staleGoalCandidates(5, 123458, diagnosticOptions);
-            } finally { config.developerDiagnostics = true; }
+        })).then(() => BotLifeState.upsertState({
+            characterId: 72,
+            name: 'LevelLessHistogramProbe',
+            phase: 'cold',
+            activity: 'hunting',
+            timing: { nextResolveAt: 999999 },
+            stats: {},
+            vitals: {},
+            inventory: {}
+        }, 'histogram_probe')).then(() => Promise.all([
+            BotLifeState.levelHistogram(),
+            // The query the histogram replaced; its NULL level and phase merge
+            // into level 1 and the cold phase.
+            originalExecute(['SELECT phase, level, COUNT(*) AS count FROM bot_life_state GROUP BY phase, level', []])
+        ])).then(([histogram, rows]) => {
+            const expected = new Map();
+            for (const row of rows) {
+                const key = `${row.phase || 'cold'}:${Number(row.level || 1)}`;
+                expected.set(key, (expected.get(key) || 0) + Number(row.count));
+            }
+            const counted = new Map(histogram.levels.map((row) => [`${row.phase}:${row.level}`, row.count]));
+            assert.deepStrictEqual([...counted].sort(), [...expected].sort(), 'the cache histogram must count what the table groups');
+            assert.strictEqual(histogram.total, [...expected.values()].reduce((sum, count) => sum + count, 0));
+            assert(counted.get('cold:1') >= 1, 'a state without a level must count as level 1');
+            assert.deepStrictEqual(histogram.levels.map((row) => row.level), histogram.levels.map((row) => row.level).sort((x, y) => x - y),
+                'levels must come ascending');
+        }).then(() => {
             console.log('Bot population state checks passed');
         });
     }).catch((err) => {
@@ -601,8 +566,8 @@ try {
         Database.fetchSkill = originalFetchSkill;
         Database.setSkill = originalSetSkill;
         Database.updateSkillLevel = originalUpdateSkillLevel;
+        Database.createColdTrainingGuard = originalCreateColdTrainingGuard;
         Database.updateCharacterClassId = originalUpdateCharacterClassId;
-        ColdSimulationOwner.recoverStartupLeases = originalRecoverStartupLeases;
         Database.reconcileBotClanMembership = originalReconcileClanMembership;
         Database.reconcileBotClanGoals = originalReconcileClanGoals;
         Database.fetchBotMarketCounts = originalFetchMarketCounts;
@@ -623,8 +588,8 @@ try {
     Database.fetchSkill = originalFetchSkill;
     Database.setSkill = originalSetSkill;
     Database.updateSkillLevel = originalUpdateSkillLevel;
+    Database.createColdTrainingGuard = originalCreateColdTrainingGuard;
     Database.updateCharacterClassId = originalUpdateCharacterClassId;
-    ColdSimulationOwner.recoverStartupLeases = originalRecoverStartupLeases;
     Database.reconcileBotClanMembership = originalReconcileClanMembership;
     Database.reconcileBotClanGoals = originalReconcileClanGoals;
     Database.fetchBotMarketCounts = originalFetchMarketCounts;

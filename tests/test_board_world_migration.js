@@ -4,7 +4,8 @@
 // is cancelled (its stock and money never left the bag); players' AFK shops
 // stay as they are, without a deadline. Totals over every owner do not move,
 // and a second start does nothing. A world that ran with the 12-hour lifetime
-// loses its deadlines once (migration 56).
+// loses its deadlines once (migration 56). A world whose stats still hold the
+// mind moves it to its own column once and reads back the same (migration 71).
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -15,6 +16,7 @@ const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const World = invoke('GameServer/World/World');
+const SavedStats = invoke('GameServer/Bot/SavedStats');
 
 const databasePath = path.join(process.cwd(), 'tmp', 'test-board-world-migration.sqlite');
 
@@ -132,8 +134,18 @@ async function run() {
     await Database.execute(['UPDATE afk_trade_shops SET expiresAt = ?', [Date.now() - 1000]]);
     await Database.execute(["INSERT INTO world_meta (key, value) VALUES ('boardAliveAt', '1')"]);
     await Database.execute(['DELETE FROM schema_migrations WHERE version = 56']);
+    // A row saved before the mind column: the packet, a cleared focus and
+    // nested nulls inside the stock targets all sit in the stats.
+    const oldStats = { ...(await lifeRow(orderer)).stats, decisionSeq: 12, activityLeaf: 3, wishFocus: null,
+        money: [5000, 1.5, 200, 7], stockTargets: { 1864: { want: 20, seen: null }, 1867: null }, wishDirty: true };
+    await Database.execute(["UPDATE bot_life_state SET statsJson = ?, mindJson = '{}' WHERE characterId = ?", [JSON.stringify(oldStats), orderer]]);
+    await Database.execute(['DELETE FROM schema_migrations WHERE version = 71']);
     await Database.close();
     Database.init();
+    const [moved] = await Database.execute(['SELECT statsJson, mindJson FROM bot_life_state WHERE characterId = ?', [orderer]]);
+    assert.deepStrictEqual(SavedStats.merge(moved.statsJson, moved.mindJson), oldStats, 'the bot reads back the same stats');
+    assert.deepStrictEqual(Object.keys(JSON.parse(moved.statsJson)).filter((key) => SavedStats.MIND_KEYS.includes(key)), [],
+        'and its body no longer holds the mind');
     const [deadlines] = await Database.execute(['SELECT COUNT(*) AS count FROM afk_trade_shops WHERE expiresAt > 0']);
     assert.strictEqual(Number(deadlines.count), 0, 'migration 56 clears every deadline');
     assert.strictEqual(await AfkTrade.init(), 1, 'the record stays open');

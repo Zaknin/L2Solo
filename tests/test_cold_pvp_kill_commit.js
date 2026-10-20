@@ -6,6 +6,7 @@ require('../src/Global');
 
 const Database = invoke('Database');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Karma = invoke('GameServer/Karma');
 const databasePath = path.join(process.cwd(), 'tmp', 'test-cold-pvp-kill-commit.sqlite');
@@ -32,7 +33,7 @@ async function createProbe(index) {
         vitals: { hp: 100, maxHp: 100, mp: 50, maxMp: 50 },
         timing: { activityStartedAt: 100, nextResolveAt: 1000, lastResolvedAt: 500, lastHotAt: null },
         party: { partyId: null }, stats: {}, inventory: {},
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: 0, leaseId: null, leaseUntil: 0 },
+        simulation: { revision: 0 },
         updatedAt: 1000
     };
     await Database.execute([
@@ -52,14 +53,11 @@ async function createProbe(index) {
 }
 
 async function commitKills(state, pvpKills, timestamp) {
-    const claimed = await Owner.claimBatch([{ state, leaseId: `pvp-lease-${state.characterId}-${timestamp}` }],
-        { timestamp, leaseMs: 10000 });
-    assert.strictEqual(claimed.grants.length, 1);
     const current = LifeState.cachedState(state.characterId);
-    const [result] = await Owner.commitAndReleaseBatch([{
-        token: claimed.grants[0],
+    const [result] = await Owner.commitBatch([{
+        revision: current.simulation.revision,
         nextState: { ...current, timing: { ...current.timing, lastResolvedAt: timestamp + 500 }, updatedAt: timestamp + 500 },
-        proposal: { baseState: current, durable: { pvpKills } }
+        proposal: { ...InventorySummary.bagChange(current.inventory, current.inventory), durable: { pvpKills } }
     }], { timestamp: timestamp + 500 });
     return result;
 }

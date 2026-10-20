@@ -185,7 +185,7 @@ function attention(state, line, ctx, observed) {
     const hours = lastAt > 0 ? Math.max(0, ctx.timestamp - lastAt) / HOUR_MS : 1;
     const understanding = Math.max(0, Math.min(1, finite(ctx.understanding, 0.3)));
     const value = Math.max(0, finite(line.price) * finite(line.count))
-        * Math.abs(Counters.moveOf(counter.key || Counters.counterOf(line.selfId), ctx.timestamp))
+        * Math.abs(Counters.moveOf(counter.key || Counters.counterOf(line.selfId)))
         * hours * understanding * (1 + SpotEconomics.moneyWeight(state));
     const cost = Math.max(0, finite(ctx.hour)) / 60;
     return { value, cost, probability: value + cost > 0 ? value / (value + cost) : 0,

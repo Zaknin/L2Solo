@@ -45,6 +45,11 @@ module.exports = {
           )
         : p("Asterios", "Only elves of level 12 or higher.");
     if (c === 2) {
+      if (!n(s, D) || !n(s, C1))
+        return p(
+          "Asterios",
+          "You do not have the Plague Dust and the Hyacinth Charm.",
+        );
       await q.takeItem(s.session, D, -1);
       await q.takeItem(s.session, C1);
       await q.giveItem(s.session, C2, 1);
@@ -53,6 +58,11 @@ module.exports = {
       return p("Asterios", "The source is not clean yet.");
     }
     if (c === 4) {
+      if (n(s, D) < 5 || !n(s, C2))
+        return p(
+          "Asterios",
+          "You do not have five Plague Dust and the Hyacinth Charm.",
+        );
       await q.takeItem(s.session, C2);
       await q.takeItem(s.session, D, -1);
       await q.rewardAdena(s.session, 18250);

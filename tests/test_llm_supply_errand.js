@@ -278,16 +278,12 @@ async function exhaustedSupplyRouteReturnsVisibly() {
     const Chatter = invoke('GameServer/Bot/AI/TownChatter');
     const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
     const HotBoard = invoke('GameServer/Bot/Economy/HotBoardReviewService');
-    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    const Improvements = invoke('GameServer/Bot/Economy/BotImprovementService');
-    const WishProviders = require('../src/GameServer/Bot/Economy/WishProviders');
     const Response = invoke('GameServer/Network/Response');
     const originals = {
         charInfo: Response.charInfo, relationChanged: Response.relationChanged,
         move: Recovery.move, resolveTargetActor: Recovery.resolveTargetActor, refreshTarget: Recovery.refreshTarget,
         approachPlan: Approach.plan, say: Chatter.say, markHot: PopulationService.markHot,
-        naturalBreak: HotBoard.naturalBreak, forActor: Economy.forActor, chosen: Improvements.chosen,
-        personalCraftPlan: WishProviders.personalCraftPlan, setTimeout: global.setTimeout
+        naturalBreak: HotBoard.naturalBreak, setTimeout: global.setTimeout
     };
     const timers = [];
     const hot = [];
@@ -303,9 +299,6 @@ async function exhaustedSupplyRouteReturnsVisibly() {
         Chatter.say = (_session, _ai, key) => { said.push(key); };
         PopulationService.markHot = async (_session, reason) => { hot.push(reason); };
         HotBoard.naturalBreak = () => {};
-        Economy.forActor = () => ({ state: {} });
-        Improvements.chosen = () => null;
-        WishProviders.personalCraftPlan = () => null;
         Response.charInfo = () => 'charInfo';
         Response.relationChanged = () => 'relationChanged';
         global.setTimeout = (callback, delay) => { timers.push({ callback, delay }); return timers.length; };
@@ -329,6 +322,8 @@ async function exhaustedSupplyRouteReturnsVisibly() {
             shoppingWarehouseDone: true,
             supplyErrandHidden: true,
             supplyErrandPhase: 'shopping',
+            // The decision the body holds (DecisionEvents.held): no craft, no improvement.
+            heldEconomy: { network: { activity: null }, personalCraft: null },
             dataSendToOthers: (packet) => { sent.push(packet); }
         };
         const ai = {
@@ -370,9 +365,6 @@ async function exhaustedSupplyRouteReturnsVisibly() {
         Chatter.say = originals.say;
         PopulationService.markHot = originals.markHot;
         HotBoard.naturalBreak = originals.naturalBreak;
-        Economy.forActor = originals.forActor;
-        Improvements.chosen = originals.chosen;
-        WishProviders.personalCraftPlan = originals.personalCraftPlan;
         Response.charInfo = originals.charInfo;
         Response.relationChanged = originals.relationChanged;
         global.setTimeout = originals.setTimeout;

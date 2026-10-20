@@ -9,6 +9,7 @@ require('../src/Global');
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Agreement = require('../src/GameServer/Bot/Population/PartyAgreement');
 const Goals = require('../src/GameServer/Bot/Population/PartyGoalPolicy');
 const Composition = invoke('GameServer/Bot/Population/BackgroundPartyComposition');
@@ -45,12 +46,11 @@ async function fund(states, suffix) {
     if (result.ok) { result.lifeRows.forEach(row => Life.acceptNewerLifecycleRow(row)); Parties.acceptRow(result.partyRow); }
     return { result, prepared: party, members, party: result.partyRow && Parties.acceptRow(result.partyRow) };
 }
+let loots = 0;
 async function loot(party, units, { stale = false } = {}) {
     const members = party.memberIds.map(id => Life.cachedState(id));
-    const { grants } = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
-    assert.equal(grants.length, members.length);
-    const atomicGroup = { id: `help:${grants[0].leaseId}`, memberIds: party.memberIds,
-        partyChanges: [{ partyId: party.partyId, memberIds: party.memberIds, expectedUpdatedAt: party.updatedAt,
+    const atomicGroup = { id: `help:${party.partyId}:${++loots}`, memberIds: party.memberIds,
+        partyChanges: [{ partyId: party.partyId, memberIds: party.memberIds, expectedPartyRevision: party.revision,
             updatedAt: Math.max(Date.now(), party.updatedAt + 1), nextResolveAt: Date.now() + 60000,
             statsJson: JSON.stringify({ ...party.stats, agreement: { ...party.stats.agreement,
                 help: { ...party.stats.agreement.help, remaining: 99999999 } } }) }] };
@@ -61,14 +61,13 @@ async function loot(party, units, { stale = false } = {}) {
     const entries = rewards.memberResults.map(({ state, result }) => {
         const inventory = { ...state.inventory };
         for (const item of result.materialize.items) inventory[item.selfId] = { ...item, amount: Number(inventory[item.selfId]?.amount || 0) + item.amount };
-        return { token: grants.find(grant => grant.characterId === state.characterId), atomicGroup,
-            options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: state }, nextState: { ...state, inventory } };
+        return { revision: state.simulation.revision, atomicGroup,
+            options: { allowParty: true, allowLifecycle: true }, proposal: InventorySummary.bagChange(state.inventory, inventory), nextState: { ...state, inventory } };
     });
-    if (stale) entries[1].token = { ...entries[1].token, revision: entries[1].token.revision - 1 };
+    if (stale) entries[1].revision -= 1;
     const before = await images(party.memberIds);
-    const results = await Owner.commitAndReleaseBatch(entries);
-    if (stale) { assert(results.every(result => !result.ok)); assert.deepEqual(await images(party.memberIds), before);
-        await Owner.releaseBatch(grants); }
+    const results = await Owner.commitBatch(entries);
+    if (stale) { assert(results.every(result => !result.ok)); assert.deepEqual(await images(party.memberIds), before); }
     else { assert(results.every(result => result.ok)); assert(results.every(result => result.row.simulationRevision === result.revision));
         Parties.acceptRow(results[0].partyRow); }
     return { results, entries };
@@ -114,6 +113,13 @@ async function run() {
             assert.deepEqual(split.map(entry => entry.amount), [334, 334, 333]);
             sessions[2].actor.setIsOnline(false);
             assert(!Party.lootMembersForLeader(sessions[0]).includes(sessions[2]));
+            // Need mode reads each bot's value from its held decision; the player scores 0.
+            Parties.find('hot-loot-policy').stats.agreement = { mode: 'need' };
+            sessions[0].accountId = 'player_leader'; // not a bot session
+            sessions[0].heldEconomy = { itemUsefulness: () => 99 };
+            sessions[1].heldEconomy = { itemUsefulness: id => id === 1869 ? 5 : 0 };
+            assert.equal(Party.resolveLootSession(sessions[0], 1869, null), sessions[1],
+                'the bot whose held values rank the item takes it; the player holds no bot decision');
             // Actual player companion distribution remains Finder/Turn, without an autonomous agreement.
             sessions[0].hotBackgroundPartyId = null; sessions[1].hotBackgroundPartyId = null;
             sessions[1].partyCompanion = true; sessions[1].followPlayerSession = sessions[0];
@@ -180,7 +186,7 @@ async function run() {
     assert.equal(held(await DB.fetchItems(b.characterId), 57), 10250);
     assert.equal(held(await DB.fetchItems(c.characterId), 57), 10250);
     const conserved = await images(partial.memberIds);
-    assert((await Owner.commitAndReleaseBatch(first.entries)).every(result => !result.ok));
+    assert((await Owner.commitBatch(first.entries)).every(result => !result.ok));
     assert.deepEqual(await images(partial.memberIds), conserved);
     console.log('PASS actual ordered drop pays proportionally/equally; replay cannot pay twice');
     await loot(partial, 1);
@@ -197,13 +203,6 @@ async function run() {
     await Parties.setStatus(closed.partyId, 'dissolved');
     assert.equal(held(await DB.fetchItems(d.characterId), 57), 10000);
     console.log('PASS existing party ending refunds held money exactly once');
-    const g = await seed(), h = await seed(), i = await seed();
-    const token = await Owner.claim(g); assert(token.ok);
-    const before = await images([g.characterId, h.characterId, i.characterId]);
-    const refused = await fund([g, h, i], 'busy'); assert(!refused.result.ok);
-    assert.deepEqual(await images([g.characterId, h.characterId, i.characterId]), before);
-    await Owner.release(token);
-    console.log('PASS native active owner blocks help funding without partial membership/payment');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
     await DB.close(); fs.rmSync(directory, { recursive: true, force: true });

@@ -213,7 +213,20 @@ function select(bot, target, role, policy = {}) {
         .sort((a, b) => b.score - a.score)[0] || null;
 }
 
+// The offensive pick and the charge plan that competes with it, from one
+// select: { ready, charge }. ready is the select result in every case.
+function selectAttackAndChargePlan(bot, target, role, policy = {}) {
+    const ready = select(bot, target, role, policy);
+    return { ready, charge: chargePlanAgainst(bot, role, policy, target, ready) };
+}
+
 function selectChargePlan(bot, role, policy = {}, target = null) {
+    return chargePlanAgainst(bot, role, policy, target, undefined);
+}
+
+// ready: the select result already computed by the caller, or undefined to
+// compute it here only when the bot has a charge preparation skill.
+function chargePlanAgainst(bot, role, policy, target, ready) {
     const skills = bot?.skillset?.skills || [];
     const current = Math.max(0, Number(bot.fetchCharges?.() ?? bot.charges ?? 0) || 0);
     const weaponMask = Attack.weaponMaskFor(bot);
@@ -231,14 +244,16 @@ function selectChargePlan(bot, role, policy = {}, target = null) {
                 && (!allowed || (allowed & weaponMask) !== 0);
         });
     if (!preparation.length) return null;
-    const ready = select(bot, target, role, policy);
+    if (ready === undefined) ready = select(bot, target, role, policy);
     let best = null;
     for (const spender of skills) {
         const needed = Math.max(0, Number(spender?.fetchSemantic?.()?.requires?.charges) || 0);
         if (needed <= current) continue;
         // Reuse the offensive gates against this target, substituting only
         // the charges the plan intends to build. Never mutate the actor.
-        const decision = evaluateCandidate(bot, target, spender, role, { ...policy, classProfile: profile }, needed);
+        // A planned spender's rejections are not the bot's rejected alternatives.
+        const decision = evaluateCandidate(bot, target, spender, role,
+            { ...policy, classProfile: profile, rejectedAlternatives: undefined }, needed);
         if (!decision) continue;
         const casts = needed - current; // C4 Focus Force/Sonic Focus add one.
         for (const skill of preparation) {
@@ -271,6 +286,7 @@ module.exports = {
     select,
     selectChargeSkill,
     selectChargePlan,
+    selectAttackAndChargePlan,
     policyAdjustment,
     basicAttackDamageEstimate,
     mageMeleeFinishOpportunity

@@ -1,11 +1,10 @@
 'use strict';
 const DiagnosticConfig = require('./PopulationConfig');
+const Diagnostics = require('../Economy/EconomyDiagnostics');
 
 const { performance } = require('node:perf_hooks');
 const { unknownWorkshop } = require('./ColdEconomyDecision');
 const MAX_CONTEXTS = 64, MAX_OWNERS = 8, OWNER_UNITS = 4, MAX_UNITS = 32, SLICE_MS = 4;
-const CURSOR_FIELDS = ['stage', 'row', 'ingredient', 'quote', 'edge', 'recipe', 'route', 'price',
-    'batch', 'low', 'high', 'outcome', 'segment', 'source', 'reason', 'units'];
 
 // Incomplete contexts stay in slots through yield. Only completed derived
 // entries are evictable. Waiting owners carry references to their existing
@@ -44,11 +43,6 @@ class ColdOccupationPlanner {
         this.waiting.set(id, entry);
         this.kick();
         return awaitResult ? promise : null;
-    }
-
-    valueFor(id, state) {
-        const entry = this.slots.get(Number(id));
-        return entry?.done && !entry.dirty && entry.input.mode !== 'action' && entry.input.state === state ? entry.value : null;
     }
 
     kick() {
@@ -147,13 +141,28 @@ class ColdOccupationPlanner {
         }
         this.kick();
     }
-    resetSources() {
+    markReset(entry) {
+        entry.dirty = true; entry.cursor[14] = 2; DiagnosticConfig.developerDiagnostics && (this.stats.invalidations++);
+        if (entry.done) this.publish(entry.id, entry.input, unknownWorkshop(), { stale: true });
+    }
+    // After a whole source table was replaced and its full copy applied: only
+    // the slots whose read items or admission scope moved are marked, as
+    // sourceChanged/scopeChanged mark them per row; a row the copy no longer
+    // has reads as a moved token. Not during the copy: the table reads empty.
+    recheckSources() {
+        let moved = 0, kept = 0;
         for (const entry of this.slots.values()) {
-            if (entry.input.mode === 'wish') continue; // Route-only work has no board/market dependencies.
-            if (entry.dirty) continue;
-            entry.dirty = true; entry.cursor[14] = 2; DiagnosticConfig.developerDiagnostics && (this.stats.invalidations++);
-            if (entry.done) this.publish(entry.id, entry.input, unknownWorkshop(), { stale: true });
+            if (entry.input.mode === 'wish' || entry.dirty || !entry.reads) continue;
+            let changed = entry.admissionScope != null && entry.admissionToken !== this.sourceScopeToken(entry.admissionScope);
+            if (!changed) {
+                for (const [id, token] of entry.reads) {
+                    if (this.sourceToken(id, entry.input) !== token) { changed = true; break; }
+                }
+            }
+            if (changed) { this.markReset(entry); moved++; } else kept++;
         }
+        if (moved) Diagnostics.count('occupation', 'source_reset', 'moved', moved);
+        if (kept) Diagnostics.count('occupation', 'source_reset', 'kept', kept);
     }
 
     admit() {
@@ -215,12 +224,9 @@ class ColdOccupationPlanner {
             }
             this.finish(entry, this.result(entry.work)); return;
         }
+        // The cursor keeps the validation, invalidation and unit marks only:
+        // nothing reads a per-unit copy of the work's own position fields.
         const done = this.step(entry.work);
-        const state = entry.work.cursor || entry.work.position || entry.work;
-        for (let i = 0; i < CURSOR_FIELDS.length; i++) {
-            const value = Number(state[CURSOR_FIELDS[i]]);
-            if (Number.isFinite(value)) entry.cursor[i] = value;
-        }
         entry.cursor[15]++;
         if (done) entry.validation = (function* () {
             yield* entry.reads.entries();
@@ -231,7 +237,9 @@ class ColdOccupationPlanner {
     portion() {
         if (this.stopped) return { units: 0, deferred: true };
         this.admit();
-        const started = this.now(); let units = 0, owners = 0;
+        // One clock read per unit: the end of a unit is the slice check of
+        // the next one and, with diagnostics, the unit's own duration.
+        let clock = this.now(); const started = clock; let units = 0, owners = 0;
         // Set insertion order supplies round-robin fairness across portions.
         for (const id of [...this.ready].slice(0, MAX_OWNERS)) {
             const entry = this.slots.get(id);
@@ -239,19 +247,20 @@ class ColdOccupationPlanner {
             if (!entry || entry.done) continue;
             owners++;
             for (let count = 0; count < OWNER_UNITS && units < MAX_UNITS; count++) {
-                if (units && this.now() - started >= SLICE_MS) break;
-                const unitStarted = DiagnosticConfig.developerDiagnostics ? this.now() : 0;
+                if (units && clock - started >= SLICE_MS) break;
+                const unitStarted = clock;
                 try { this.unit(entry); }
                 catch (error) { entry.error = String(error?.message || error); this.finish(entry, entry.input.mode === 'meeting'
                     ? { refused: true, reason: entry.error } : unknownWorkshop()); }
-                const duration = DiagnosticConfig.developerDiagnostics ? this.now() - unitStarted : 0;
+                clock = this.now();
+                const duration = clock - unitStarted;
                 DiagnosticConfig.developerDiagnostics && (this.stats.maxUnitMs = Math.max(this.stats.maxUnitMs, duration));
                 if (duration > SLICE_MS) DiagnosticConfig.developerDiagnostics && (this.stats.overBudgetUnits++);
                 units++; DiagnosticConfig.developerDiagnostics && (this.stats.units++);
                 if (entry.done || this.slots.get(id) !== entry) break;
             }
             if (!entry.done && this.slots.get(id) === entry) this.ready.add(id);
-            if (units >= MAX_UNITS || this.now() - started >= SLICE_MS) break;
+            if (units >= MAX_UNITS || clock - started >= SLICE_MS) break;
         }
         DiagnosticConfig.developerDiagnostics && (this.stats.portions++); DiagnosticConfig.developerDiagnostics && (this.stats.maxPortionUnits = Math.max(this.stats.maxPortionUnits, units));
         if (this.ready.size || this.waiting.size) { DiagnosticConfig.developerDiagnostics && (this.stats.yields++); this.kick(); }

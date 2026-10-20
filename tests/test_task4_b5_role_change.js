@@ -3,7 +3,8 @@
 // craft step. A committed role loss (level 30 -> 20, Artisan craft level 3 -> 2)
 // landing before the step makes it stale: no recipe check, no write, one
 // refresh, goal kept. A card on the lowered state for a recipe above the new
-// craft level stops at the craft-skill check: no write, no penalty, goal kept.
+// craft level stops at the craft-skill check: no craft write (only the source
+// raise), no penalty, goal kept.
 const assert = require('node:assert/strict');
 const { createWorld, Database } = require('./helpers/c4QuestHarness');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
@@ -15,6 +16,7 @@ const CraftShop = invoke('GameServer/Bot/Economy/CraftShopService');
 const Recipes = invoke('GameServer/Items/C4RecipeItems');
 const Commit = require('../src/GameServer/Bot/Economy/EconomyCommit');
 const Decision = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
+const Sections = require('../src/GameServer/Bot/Economy/DecisionSections');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const owner = 730271, ARTISAN = 56, RECIPE = 46, epoch = 'b5-role', restore = [];
@@ -54,7 +56,7 @@ const lifeRow = async (patch) => ({ ...(await Database.execute(['SELECT * FROM b
         let serial = 0;
         const card = state => Protocol.envelope('ready', epoch, { phase: 'economy_plan_ready', characterId: owner,
             authority: Commit.authority(state), economyPlan: { shot: [RECIPE, 1] },
-            economyDecision: { updatedAt: Number(state.updatedAt || 0), key: Decision.stateKey(state) } }, `b5-role-${++serial}`);
+            economyDecision: { updatedAt: Number(state.updatedAt || 0), echo: Decision.stateEcho(state) } }, `b5-role-${++serial}`);
         const kept = () => {
             assert.deepEqual(Goals.snapshot(owner).current, goal, 'the goal is kept');
             assert.equal(Life.cachedState(owner).stats?.marketRetryAfter, undefined, 'no retry penalty');
@@ -65,6 +67,10 @@ const lifeRow = async (patch) => ({ ...(await Database.execute(['SELECT * FROM b
         assert.equal(rechecks, 1, 'the control card reaches the craft step');
         assert.deepEqual(skill, [true], 'the unchanged role passes the craft-skill check');
         const [beforeRefresh, beforeExecutes] = [refreshes.length, executes];
+        // The control's source rejection raised a section; the worker's next
+        // decision consumes it (a card holds only while none is raised).
+        const settled = Life.cachedState(owner);
+        if (settled.stats?.wishDirty) await Life.upsertState({ ...settled, stats: { ...settled.stats, wishDirty: 0 } }, 'fixture');
         writes = 0;
 
         // 1. The level drops by a commit after the card, before the craft step.
@@ -87,7 +93,8 @@ const lifeRow = async (patch) => ({ ...(await Database.execute(['SELECT * FROM b
         assert.equal(rechecks, 2, 'the card on the new state reaches the recipe check');
         assert.deepEqual(skill, [true, false], 'the lowered craft skill refuses the recipe');
         assert.equal(executes, beforeExecutes, 'a recipe above the craft level is not crafted');
-        assert.equal(writes, 0, 'no state write');
+        assert.equal(writes, 1, 'the one write raises the refused source, no craft write');
+        assert(Life.cachedState(owner).stats.wishDirty & Sections.sectionMask(['sources']), 'the refused recipe raises sources');
         assert.equal(refreshes.length, beforeRefresh + 1, 'a refused recipe is no stale card: no extra refresh');
         kept();
         console.log('PASS Task 4 B5 role change: stale role step writes nothing and refreshes once, lowered skill crafts nothing, goal kept');

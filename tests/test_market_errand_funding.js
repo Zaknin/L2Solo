@@ -125,20 +125,20 @@ async function noSpend(state, itemId, message) {
             money: 985000, maxPrice: npc.price, purpose: 'craft_input', at: Date.now() } });
         await noSpend(await arrive(legacy), npc.selfId, 'a legacy errand without its rate uses the current conservative item gate');
 
-        const clanZero = await stateFor(CHANGED, { marketErrand: { selfId: npc.selfId, amount: 1, town: 'Giran',
+        const clanZero = await stateFor(CHANGED, { clanId: 42, marketErrand: { selfId: npc.selfId, amount: 1, town: 'Giran',
             money: npc.price, maxPrice: npc.price, purpose: 'clan', tag: { clanId: 42, clanPart: 0 }, at: Date.now() } });
         await noSpend(await arrive(clanZero), npc.selfId, 'a clan errand with no treasury part cannot spend newly reserved personal money');
         const clanPart = 10000;
         const reserved = WALLET - 15000 - npc.price + 1000;
         const clanDouble = await stateFor([77000, 1.3e-5, 15000, 0, 4e-5, reserved, 999999], {
-            marketErrand: { selfId: npc.selfId, amount: 1, town: 'Giran', money: npc.price, maxPrice: npc.price,
+            clanId: 42, marketErrand: { selfId: npc.selfId, amount: 1, town: 'Giran', money: npc.price, maxPrice: npc.price,
                 purpose: 'clan', tag: { clanId: 42, clanPart }, at: Date.now() } });
         assert.equal(Funding.spendable({ ...clanDouble, adena: WALLET - clanPart }, 0,
             { free: true, ownClanErrand: { clanId: 42, selfId: npc.selfId } }) + clanPart, npc.price - 1000);
         assert.equal(Funding.spendable({ ...clanDouble, adena: WALLET - clanPart }, 0, { free: true }), npc.price - 1000 - 2 * clanPart,
             'another purchase cannot spend the credit the errand carries (E193)');
         await noSpend(await arrive(clanDouble), npc.selfId, 'the treasury credit cannot also be counted as personal free money');
-        const clanFunded = await stateFor(CHANGED, { marketErrand: { selfId: npc.selfId, amount: 1, town: 'Giran',
+        const clanFunded = await stateFor(CHANGED, { clanId: 42, marketErrand: { selfId: npc.selfId, amount: 1, town: 'Giran',
             money: npc.price, maxPrice: npc.price, purpose: 'clan', tag: { clanId: 42, clanPart: npc.price }, at: Date.now() } });
         const clanBought = await Market.tryPurchase(await arrive(clanFunded), { type: 'market_errand' });
         assert.equal(clanBought.purchased, true, 'the existing treasury credit still pays when personal free money is zero');
