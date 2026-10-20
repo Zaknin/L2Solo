@@ -279,6 +279,8 @@ if (process.argv[2] === '--bootstrap') {
         });
         ['bot_party_candidate_insert', 'bot_party_candidate_metadata', 'bot_party_candidate_ordinary', 'bot_party_candidate_stats'].forEach((name) => assert(
             db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(name), `migrations must leave ${name}`));
+        ['bot_party_candidate_payload', 'bot_party_candidate_identity'].forEach((name) => assert(
+            !db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(name), `v74 must merge ${name} into the stats trigger`));
         const projectionColumns = db.prepare('PRAGMA table_xinfo(bot_life_state)').all();
         partyProjectionColumns.forEach((name) => {
             assert.strictEqual(projectionColumns.filter((column) => column.name === name).length, 1, `${name} must exist exactly once`);
@@ -521,6 +523,11 @@ if (process.argv[2] === '--bootstrap') {
     const freshPath = path.join(outputDir, 'fresh.sqlite');
     bootstrap(freshPath);
     const fresh = open(freshPath);
+    const partyTriggers = (db) => db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'bot_party_candidate_%' ORDER BY name").all()
+        .map((row) => [row.name, row.sql.replace(/\s+/g, ' ')]);
+    const migrated = open(version9Path);
+    assert.deepStrictEqual(partyTriggers(fresh), partyTriggers(migrated), 'fresh and migrated worlds keep the same party candidate triggers');
+    migrated.close();
     const freshColumns = fresh.prepare('PRAGMA table_xinfo(bot_life_state)').all().map((column) => column.name);
     assert(freshColumns.includes('simulationRevision'), 'fresh bootstrap must include simulationRevision');
     loanColumns.forEach((name) => assert(!freshColumns.includes(name), `fresh bootstrap must not keep ${name}`));

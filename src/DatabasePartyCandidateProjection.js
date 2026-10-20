@@ -93,8 +93,8 @@ function createAvailabilityTriggers(connection) {
 
 const statsTrigger = 'bot_party_candidate_stats';
 // The payload and the identity flags of a candidate from its new stats, in one
-// statement: separate trigger statements cannot share SQLite's JSON parse of
-// the large document. classId, level and clanId stay with the other triggers.
+// statement: separate triggers cannot share SQLite's JSON parse of the large
+// document. classId, level and clanId stay with the other triggers.
 function createStatsTrigger(connection) {
     connection.exec(`
         CREATE TRIGGER ${statsTrigger} AFTER UPDATE OF statsJson ON bot_life_state
