@@ -2299,11 +2299,15 @@ class ColdSimulationKernel {
             if (this.states.get(id)?.state.phase !== 'cold') return;
             if (active.pendingRaidStepId) require('./ColdRaidEncounter').acknowledge(active.pendingRaidStepId, id, result.ok);
             this.inFlight.delete(id);
-            // A committed step's start -> ack time sets the lead; a party's
-            // members share one start, so their acks are one sample.
+            // A committed step's start -> ack time sets the lead, excluding
+            // main's wait for its future events: that wait is the lead's own
+            // output, not work. A party's shared start and wait are one sample.
             if (result.ok && !(active.partyId && sampledParties.has(active.partyId))) {
                 if (active.partyId) sampledParties.add(active.partyId);
-                this.measureStepLead(this.now() - active.startedAt);
+                const elapsedMs = Math.max(0, this.now() - active.startedAt);
+                const eventWaitMs = Number.isFinite(result.eventWaitMs)
+                    && result.eventWaitMs >= 0 && result.eventWaitMs <= elapsedMs ? result.eventWaitMs : 0;
+                this.measureStepLead(elapsedMs - eventWaitMs);
             }
             // An ok ack without the state carries the commit's numbers: main's
             // cache is the proposal's state with them.
@@ -2354,7 +2358,7 @@ class ColdSimulationKernel {
         return accepted;
     }
 
-    // One-sided average of the step's start -> commit ack time (STEP_LEAD_*).
+    // One-sided average of start -> commit ack, excluding event waits (STEP_LEAD_*).
     measureStepLead(sampleMs) {
         if (!Number.isFinite(sampleMs)) return;
         const rate = sampleMs > this.stepLeadMs ? STEP_LEAD_RISE : STEP_LEAD_FALL;

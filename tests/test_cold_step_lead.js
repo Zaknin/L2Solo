@@ -58,21 +58,21 @@ function world() {
     };
     // The step's proposal leaves after the flush target; main commits it
     // `ackAfterMs` after the step's start and answers with the row it wrote.
-    const commit = (id, ackAfterMs, startedAt) => {
+    const commit = (id, ackAfterMs, startedAt, eventWaitMs) => {
         clock.at = startedAt + Math.max(FLUSH_MS, ackAfterMs);
         kernel.flushDue();
         const proposal = proposals.get(id);
         assert(proposal, 'the step sent its proposal');
         proposals.delete(id);
         const state = { ...proposal.nextState, simulation: { revision: proposal.revision + 1 } };
-        kernel.onCommitAck({ results: [{ ok: true, characterId: id, proposalId: proposal.proposalId, state }] });
+        kernel.onCommitAck({ results: [{ ok: true, characterId: id, proposalId: proposal.proposalId, state, eventWaitMs }] });
         return state;
     };
     // One round of bot `id` started at its due, committed `ackAfterMs` later.
-    const round = async (id, ackAfterMs) => {
+    const round = async (id, ackAfterMs, eventWaitMs) => {
         const due = kernel.states.get(id).state.timing.nextResolveAt;
         assert.deepStrictEqual(await tickAt(due), [id]);
-        return commit(id, ackAfterMs, due);
+        return commit(id, ackAfterMs, due, eventWaitMs);
     };
     // A due between now and the measuring bot's next round.
     const gap = () => kernel.states.get(1).state.timing.nextResolveAt - 10000;
@@ -122,6 +122,42 @@ function world() {
         kernel.upsert({ state: soloState(4, V) });
         assert.deepStrictEqual(await tickAt(V - 1000), [], 'many fast commits bring the lead down to them');
         assert.deepStrictEqual(await tickAt(V), [4]);
+    }
+
+    {
+        // Main waits until the prepared round's events happen before writing
+        // them. Repeated waits must not make later rounds start ever earlier;
+        // the work before and after that wait still needs preparation time.
+        const { kernel, resolvedAt, tickAt, commit, round, gap } = world();
+        kernel.upsert({ state: soloState(1, 10000) });
+        for (let i = 0; i < 20; i++) await round(1, 1500);
+        for (let i = 0; i < 180; i++) {
+            const due = kernel.states.get(1).state.timing.nextResolveAt;
+            const startedAt = Math.ceil(kernel.nextWakeAt());
+            assert.deepStrictEqual(await tickAt(startedAt), [1]);
+            const queuedAt = startedAt + FLUSH_MS;
+            const eventWaitMs = Math.max(0, due - queuedAt);
+            const ackAt = Math.max(queuedAt, due) + FLUSH_MS;
+            const row = commit(1, ackAt - startedAt, startedAt, eventWaitMs);
+            assert.strictEqual(row.timing.lastResolvedAt, due, 'waiting to persist does not move the lived round');
+        }
+        const T = gap();
+        kernel.upsert({ state: soloState(2, T) });
+        assert.deepStrictEqual(await tickAt(T - 1000), [], 'waiting for events does not make later rounds start seconds early');
+        assert.deepStrictEqual(await tickAt(T - 150), [2], 'the work outside the event wait still starts before the due');
+        assert.strictEqual(resolvedAt.get(2), T);
+    }
+
+    {
+        // Malformed wait metadata cannot erase measured preparation time.
+        for (const eventWaitMs of [-1, NaN, Infinity, '1500', 1501]) {
+            const { kernel, tickAt, round, gap } = world();
+            kernel.upsert({ state: soloState(1, 10000) });
+            for (let i = 0; i < 20; i++) await round(1, 1500, eventWaitMs);
+            const T = gap();
+            kernel.upsert({ state: soloState(2, T) });
+            assert.deepStrictEqual(await tickAt(T - 1000), [2], 'invalid event waits cannot prevent timely preparation');
+        }
     }
 
     {

@@ -25,6 +25,27 @@ function pushSample(samples, durationMs) {
     if (samples.length > 256) samples.shift();
 }
 
+// An early calculation keeps its social episode's original clock. Invalid
+// event clocks still reach SQL validation instead of parking work forever.
+function memoryReadyAt(proposal) {
+    const events = proposal.result?.memoryEvents;
+    if (!Array.isArray(events)) return 0;
+    let at = 0;
+    for (const event of events) {
+        if (!Number.isSafeInteger(event?.at) || event.at < 0) return 0;
+        at = Math.max(at, event.at);
+    }
+    return at;
+}
+
+const groupReadyAt = group => group.reduce((at, entry) => Math.max(at, entry.memoryReadyAt), 0);
+
+function stampEventWait(group) {
+    const queuedAt = group.reduce((at, entry) => Math.max(at, entry.queuedAt), 0);
+    const eventWaitMs = Math.max(0, groupReadyAt(group) - queuedAt);
+    for (const entry of group) entry.eventWaitMs = eventWaitMs;
+}
+
 class ColdCommitQueue {
     constructor(options = {}) {
         if (typeof options.prepare !== 'function') throw new Error('prepare callback is required');
@@ -107,15 +128,41 @@ class ColdCommitQueue {
         this.arm();
     }
 
-    // The first instant a flush has something to take. Every term is O(1): the
-    // lanes are in queuedAt order (see oldest()).
-    nextDueAt() {
-        let dueAt = Infinity;
-        if (this.p0.length) dueAt = 0;
-        if (this.p1.length) dueAt = Math.min(dueAt, this.oldest(this.p1) + this.p1TargetMs);
-        if (this.p2.size) dueAt = Math.min(dueAt, this.oldest(this.p2) + Math.min(this.targetMs, this.overdueMs));
-        if (this.capacityPressure && this.size()) dueAt = Math.min(dueAt, this.nextEarlyAttemptAt);
-        return dueAt;
+    // Visit only the bounded queued proposals. Held groups neither hide ready
+    // neighbours nor make the timer keep waking for an already reached age.
+    scheduleState() {
+        const groups = this.groupIndex(), seen = new Set();
+        const lanes = Object.fromEntries(['P0', 'P1', 'P2'].map(priority => [priority,
+            { readyAt: Infinity, dueAt: Infinity }]));
+        const ages = [['P0', 1, 0], ['P1', 2, this.p1TargetMs], ['P2', 4, this.targetMs]];
+        let overdueAt = Infinity;
+        for (const lane of [this.p0, this.p1, this.p2]) for (const entry of lane.values()) {
+            const id = entry.atomicGroup?.id;
+            if (id && seen.has(id)) continue;
+            if (id) seen.add(id);
+            const group = id ? groups.get(id) : [entry];
+            let readyAt = 0, queuedAt = Infinity, priorities = 0;
+            for (const member of group) {
+                readyAt = Math.max(readyAt, member.memoryReadyAt);
+                queuedAt = Math.min(queuedAt, member.queuedAt);
+                priorities |= member.priority === 'P0' ? 1 : member.priority === 'P1' ? 2 : 4;
+            }
+            for (const [priority, bit, ageMs] of ages) {
+                if (!(priorities & bit)) continue;
+                const timing = lanes[priority];
+                timing.readyAt = Math.min(timing.readyAt, readyAt);
+                timing.dueAt = Math.min(timing.dueAt, Math.max(readyAt, queuedAt + ageMs));
+            }
+            if (priorities & 4) overdueAt = Math.min(overdueAt, Math.max(readyAt, queuedAt + this.overdueMs));
+        }
+        return { groups, lanes, overdueAt, readyAt: Math.min(lanes.P0.readyAt, lanes.P1.readyAt, lanes.P2.readyAt) };
+    }
+
+    nextDueAt(force = false) {
+        const { lanes, overdueAt, readyAt } = this.scheduleState();
+        if (force) return readyAt;
+        return Math.min(lanes.P0.dueAt, lanes.P1.dueAt, lanes.P2.dueAt, overdueAt,
+            this.capacityPressure ? Math.max(readyAt, this.nextEarlyAttemptAt) : Infinity);
     }
 
     // Sleeps until the next due entry. Called wherever the due set can change:
@@ -130,7 +177,7 @@ class ColdCommitQueue {
         if (this.timer && this.timerFireAt <= fireAt) return;
         clearTimeout(this.timer);
         this.timerFireAt = fireAt;
-        this.timer = setTimeout(() => this.onTimer(), Math.max(1, fireAt - now));
+        this.timer = setTimeout(() => this.onTimer(), Math.min(2147483647, Math.max(1, fireAt - now)));
         this.timer.unref?.();
         DiagnosticConfig.developerDiagnostics && (this.counters.timerArms += 1);
     }
@@ -166,7 +213,7 @@ class ColdCommitQueue {
         const bytes = this.proposalBytes(proposal, measuredBytes);
         if (!Number.isFinite(bytes) || bytes > Protocol.MAX_MESSAGE_BYTES) return { ok: false, reason: 'proposal_too_large' };
         const priority = ['P0', 'P1', 'P2'].includes(proposal.priority) ? proposal.priority : 'P2';
-        const queued = { ...proposal, priority, bytes, queuedAt: this.now() };
+        const queued = { ...proposal, priority, bytes, queuedAt: this.now(), memoryReadyAt: memoryReadyAt(proposal) };
 
         if (priority === 'P2') {
             const previous = this.p2.get(Number(proposal.characterId));
@@ -222,11 +269,11 @@ class ColdCommitQueue {
         return lane.length ? Number(lane[0].queuedAt || this.now()) : this.now();
     }
 
-    // One atomic group's entries, in lane order, for every group in the lane:
-    // one pass, built only when a batch meets its first grouped entry.
-    groupIndex(lane) {
+    // Share an atomic group's readiness across priorities and handoff paths.
+    // This index exists only for the bounded queue's current selection pass.
+    groupIndex() {
         const groups = new Map();
-        for (const entry of lane.values()) {
+        for (const lane of [this.p0, this.p1, this.p2]) for (const entry of lane.values()) {
             const groupId = entry.atomicGroup?.id;
             if (!groupId) continue;
             const group = groups.get(groupId);
@@ -237,25 +284,44 @@ class ColdCommitQueue {
         return groups;
     }
 
+    *laneGroups(lane, groups) {
+        const seen = new Set();
+        for (const entry of lane.values()) {
+            const id = entry.atomicGroup?.id;
+            if (id && seen.has(id)) continue;
+            if (id) seen.add(id);
+            yield id ? groups.get(id) : [entry];
+        }
+    }
+
+    removeBatch(batch) {
+        const selected = new Set(batch);
+        for (const lane of [this.p0, this.p1]) {
+            let kept = 0;
+            for (const entry of lane) if (!selected.has(entry)) lane[kept++] = entry;
+            lane.length = kept;
+        }
+        for (const entry of batch) {
+            if (this.p2.get(Number(entry.characterId)) === entry) this.p2.delete(Number(entry.characterId));
+        }
+    }
+
     // Takes the batch out of the lane itself: an array lane (P0, P1) or the P2
     // Map keyed by characterId, both read in queuedAt order without a copy.
-    takeLaneBatch(lane, limit) {
+    takeLaneBatch(lane, limit, groups = this.groupIndex()) {
         const selected = [];
-        const selectedEntries = new Set();
-        let groups = null;
         let memoryEvents = 0;
-        for (const entry of lane.values()) {
-            if (selectedEntries.has(entry)) continue;
-            const groupId = entry.atomicGroup?.id;
-            const group = groupId ? (groups ||= this.groupIndex(lane)).get(groupId) : [entry];
+        const timestamp = this.now();
+        for (const group of this.laneGroups(lane, groups)) {
+            if (groupReadyAt(group) > timestamp) continue;
             if (selected.length && selected.length + group.length > limit) break;
             if (!selected.length && group.length > limit) break;
             const groupMemoryEvents = group.reduce((count, candidate) =>
                 count + (candidate.result?.memoryEvents?.length || 0), 0);
             if (selected.length && memoryEvents + groupMemoryEvents > MAX_MEMORY_EVENTS) break;
+            stampEventWait(group);
             group.forEach((candidate) => {
                 selected.push(candidate);
-                selectedEntries.add(candidate);
             });
             memoryEvents += groupMemoryEvents;
             // An oversized group cannot be split. Submit it alone so database
@@ -264,40 +330,35 @@ class ColdCommitQueue {
             if (selected.length >= limit) break;
         }
         if (!selected.length) return [];
-        if (lane instanceof Map) {
-            for (const entry of selected) lane.delete(Number(entry.characterId));
-        } else {
-            let kept = 0;
-            for (const entry of lane) if (!selectedEntries.has(entry)) lane[kept++] = entry;
-            lane.length = kept;
-        }
+        this.removeBatch(selected);
         return selected;
     }
 
     takeBatch(force = false, rowLimit = this.maxRows) {
         const timestamp = this.now();
+        const { groups, lanes, overdueAt } = this.scheduleState();
         this.lastBatchReason = null;
-        if (this.p0.length) {
+        if (lanes.P0.readyAt <= timestamp) {
             this.lastBatchReason = force ? 'forced' : 'p0';
-            return this.takeLaneBatch(this.p0, Math.min(16, rowLimit));
+            return this.takeLaneBatch(this.p0, Math.min(16, rowLimit), groups);
         }
-        const p2Overdue = this.p2.size > 0 && timestamp - this.oldest(this.p2) >= this.overdueMs;
-        const p1Ready = this.p1.length > 0 && (force || timestamp - this.oldest(this.p1) >= this.p1TargetMs);
-        const p2Ready = this.p2.size > 0 && (force || timestamp - this.oldest(this.p2) >= this.targetMs);
+        const p2Overdue = overdueAt <= timestamp;
+        const p1Ready = (force ? lanes.P1.readyAt : lanes.P1.dueAt) <= timestamp;
+        const p2Ready = (force ? lanes.P2.readyAt : lanes.P2.dueAt) <= timestamp;
         if (p2Overdue || (p2Ready && (this.p1Credit >= 4 || !p1Ready))) {
             this.lastBatchReason = force ? 'forced' : p2Overdue ? 'p2_overdue' : 'p2_target';
-            const batch = this.takeLaneBatch(this.p2, rowLimit);
+            const batch = this.takeLaneBatch(this.p2, rowLimit, groups);
             this.p1Credit = 0;
             return batch;
         }
         if (p1Ready) {
             this.lastBatchReason = force ? 'forced' : 'p1';
             this.p1Credit += 1;
-            return this.takeLaneBatch(this.p1, Math.min(16, rowLimit));
+            return this.takeLaneBatch(this.p1, Math.min(16, rowLimit), groups);
         }
         if (p2Ready) {
             this.lastBatchReason = force ? 'forced' : 'p2_target';
-            const batch = this.takeLaneBatch(this.p2, rowLimit);
+            const batch = this.takeLaneBatch(this.p2, rowLimit, groups);
             this.p1Credit = 0;
             return batch;
         }
@@ -307,7 +368,7 @@ class ColdCommitQueue {
     async retryBusy(work) {
         const waits = [10, 25, 50, 100, 200];
         let attempt = 0;
-        while (true) {
+        for (;;) {
             try {
                 return await work();
             } catch (error) {
@@ -324,7 +385,8 @@ class ColdCommitQueue {
         if (this.flushing) return false;
         let batch = this.takeBatch(force);
         let earlyLease = null;
-        if (!batch.length && this.capacityBlocked && this.size() && this.now() >= this.nextEarlyAttemptAt) {
+        if (!batch.length && this.capacityBlocked && this.size()
+            && this.now() >= Math.max(this.nextEarlyAttemptAt, this.nextDueAt(true))) {
             DiagnosticConfig.developerDiagnostics && (this.counters.earlyAttempts += 1);
             this.nextEarlyAttemptAt = this.now() + 100;
             earlyLease = this.admitEarlyFlush();
@@ -344,12 +406,20 @@ class ColdCommitQueue {
             this.arm();
             return false;
         }
+        await this.flushBatch(batch, earlyLease);
+        if (this.size() && (force || this.p0.length) && this.nextDueAt(true) <= this.now())
+            setImmediate(() => this.flushDue(force));
+        return true;
+    }
+
+    async flushBatch(batch, earlyLease = null, settleDeferred = false) {
         this.flushing = true;
         const reason = this.lastBatchReason || 'unknown';
         if (DiagnosticConfig.developerDiagnostics) this.flushReasons[reason] = Number(this.flushReasons[reason] || 0) + 1;
         batch.forEach((entry) => { this.bytes = Math.max(0, this.bytes - entry.bytes); });
         const startedAt = this.now();
         let results = [];
+        let handoffError = null;
         let afterCommitMs = 0;
         // The afterCommit callback adds each step's time here (entry.stepMs).
         const stepMs = DiagnosticConfig.developerDiagnostics ? {} : null;
@@ -365,6 +435,7 @@ class ColdCommitQueue {
                     prepared.push({ proposal, revision: proposal.revision, nextState, options: proposal.options || {},
                         atomicGroup: proposal.atomicGroup || null, ...(stepMs ? { stepMs } : {}) });
                 } catch (error) {
+                    handoffError ||= error;
                     results.push({ ok: false, characterId: proposal.characterId, reason: error?.message || 'prepare_error', proposal });
                 }
             }
@@ -406,6 +477,7 @@ class ColdCommitQueue {
             }
             DiagnosticConfig.developerDiagnostics && (this.counters.flushes += 1);
         } catch (error) {
+            handoffError ||= error;
             DiagnosticConfig.developerDiagnostics && (this.counters.errors += 1);
             results.push(...batch.map((proposal) => ({
                 ok: false,
@@ -428,60 +500,37 @@ class ColdCommitQueue {
             this.maybeResume();
             this.arm();
         }
+        // A fence hands the bot over only after the entire group's party work.
+        if (settleDeferred) for (const result of results) {
+            await result.deferred?.();
+            delete result.deferred;
+        }
+        results = results.map(result => ({ ...result, eventWaitMs: result.proposal?.eventWaitMs || 0 }));
         this.onResults(results);
-        if (this.size() && (force || this.p0.length)) setImmediate(() => this.flushDue(force));
-        return true;
+        if (settleDeferred && handoffError) throw handoffError;
+        return results;
     }
 
     async flushCharacter(characterId) {
         const id = Number(characterId);
-        while (this.flushing) await delay(5);
-        let proposal = this.p2.get(id);
-        if (!proposal) {
-            let index = this.p0.findIndex((entry) => Number(entry.characterId) === id);
-            if (index >= 0) proposal = this.p0.splice(index, 1)[0];
-            if (!proposal) {
-                index = this.p1.findIndex((entry) => Number(entry.characterId) === id);
-                if (index >= 0) proposal = this.p1.splice(index, 1)[0];
+        for (;;) {
+            while (this.flushing) await delay(5);
+            const proposal = this.p2.get(id)
+                || this.p0.find(entry => Number(entry.characterId) === id)
+                || this.p1.find(entry => Number(entry.characterId) === id);
+            if (!proposal) return null;
+            const group = proposal.atomicGroup?.id ? this.groupIndex().get(proposal.atomicGroup.id) : [proposal];
+            const waitMs = groupReadyAt(group) - this.now();
+            if (waitMs > 0) {
+                await delay(Math.min(waitMs, 2147483647));
+                continue;
             }
+            stampEventWait(group);
+            this.removeBatch(group);
+            this.lastBatchReason = 'forced';
+            const results = await this.flushBatch(group, null, true);
+            return results.find(result => Number(result.characterId) === id) || null;
         }
-        if (!proposal) return null;
-        this.p2.delete(id);
-        this.bytes = Math.max(0, this.bytes - proposal.bytes);
-        let nextState;
-        try { nextState = await this.prepare(proposal); }
-        catch (error) {
-            this.onResults([{ ok: false, characterId: id, reason: error?.message || 'prepare_error', proposal }]);
-            throw error;
-        }
-        if (!nextState) {
-            const rejected = { ok: false, characterId: id, reason: 'prepare_rejected', proposal };
-            this.onResults([rejected]);
-            return rejected;
-        }
-        let results;
-        try {
-            results = await this.retryBusy(() => this.commit([{
-                proposal,
-                revision: proposal.revision,
-                nextState,
-                atomicGroup: proposal.atomicGroup || null,
-                options: proposal.options || {}
-            }]));
-        } catch (error) {
-            this.onResults([{ ok: false, characterId: id, reason: error?.message || 'commit_error', proposal }]);
-            throw error;
-        }
-        const result = results?.[0] || { ok: false, characterId: id, reason: 'missing_commit_result' };
-        const entry = { proposal, revision: proposal.revision, nextState };
-        if (result.ok) {
-            try { await this.afterCommit(entry, result); }
-            catch (error) { DiagnosticConfig.developerDiagnostics && (this.counters.errors += 1); result.afterCommitError = error?.message || 'after_commit_error'; }
-        }
-        // A fence hands the bot over after this returns: its party work runs first.
-        await entry.deferred?.();
-        this.onResults([{ ...result, proposal, nextState }]);
-        return { ...result, proposal, nextState };
     }
 
     async drain(timeoutMs = 10000) {
@@ -490,8 +539,10 @@ class ColdCommitQueue {
         this.timer = null;
         const deadline = this.now() + Math.max(100, Number(timeoutMs) || 10000);
         while ((this.size() || this.flushing) && this.now() < deadline) {
-            if (!this.flushing) await this.flushDue(true);
-            else await delay(10);
+            if (!this.flushing) {
+                if (!await this.flushDue(true) && this.size())
+                    await delay(Math.max(1, Math.min(deadline - this.now(), this.nextDueAt(true) - this.now())));
+            } else await delay(10);
         }
         return { drained: this.size() === 0 && !this.flushing, ...this.snapshot() };
     }
