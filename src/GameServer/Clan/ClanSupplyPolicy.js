@@ -1,7 +1,9 @@
 'use strict';
 const { isMainThread } = require('node:worker_threads');
 const { createHash } = require('node:crypto');
-const ClanCraftingPolicy = require('./ClanCraftingPolicy');
+let ClanCraftingPolicyModule = null;
+// lazy: order ClanCraftingPolicy reads the item catalogs at load; tests load this file before them. Resolved once.
+const craftingPolicy = () => ClanCraftingPolicyModule ??= require('./ClanCraftingPolicy');
 const ClanHallPolicy = require('../ClanHall/Policy');
 const CONTENT_IDENTITY = Symbol('clan_supply_content_identity');
 const NO_CLAN_IDENTITY = createHash('sha256').update('[0,[]]').digest('hex');
@@ -35,7 +37,7 @@ function requirements(clan, warehouse = null) {
         if (goal.policy?.strategy === 'craft' && goal.plan?.craft?.materials?.length) materials = goal.plan.craft.materials
             .map(row => [Number(row.selfId), positive(row.required ?? row.amount)]);
         else if (plan?.strategy === 'craft' && plan.clanGoal?.goalKey === goal.goalKey) {
-            materials = [...ClanCraftingPolicy.requirements(ClanCraftingPolicy.resolveRecipe(plan.recipeId), beneficiary.inventory,
+            materials = [...craftingPolicy().requirements(craftingPolicy().resolveRecipe(plan.recipeId), beneficiary.inventory,
                 null, 1, plan.craftProviders, plan.componentRecipes)].map(([id, amount]) =>
                 [id, Math.max(0, amount - positive(beneficiary.inventory?.[id]?.amount))]);
         } else if (goal.policy?.strategy !== 'craft' && (goal.type === 'item' || goal.type === 'equipment')) {
