@@ -1,10 +1,11 @@
 const assert = require('assert');
 
-const { createWorld } = require('./helpers/c4QuestHarness');
+const { createWorld, Database } = require('./helpers/c4QuestHarness');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const ColdSimulationOwner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
 
@@ -43,7 +44,7 @@ const fightResult = () => ({
 
 (async () => {
     // Main commits over the state it holds: the bots are in its cache.
-    const world = await createWorld([{ id: 7301, level: 40 }], 'cold-cleanup-keeps-resolve');
+    const world = await createWorld([{ id: 7301, level: 40 }, { id: 7303, level: 40 }], 'cold-cleanup-keeps-resolve');
     try {
         await LifeState.init();
         // Resolver path: the worker's projected state already holds the fight.
@@ -96,6 +97,35 @@ const fightResult = () => ({
         });
         assert.strictEqual(died.activity, 'dead');
         assert(!died.stats?.forcedMarketCleanup);
+
+        // The trip pays on main (the bot's last Scroll of Escape, a gatekeeper
+        // fee) over a step that left the bag as it was: the commit still writes
+        // what the trip took from the bag.
+        const payerId = 7303;
+        await Database.setItem(payerId, { selfId: 736, amount: 1, slot: 0 });
+        await Database.setItem(payerId, { selfId: 57, amount: 5000, slot: 0 });
+        const payerBag = LifeState.inventorySummaryFromItems(await Database.fetchItems(payerId));
+        const payer = await LifeState.upsertState({ ...hunter(payerId), adena: Number(payerBag[57].amount),
+            inventory: payerBag }, 'cleanup_resolve_fixture');
+        const walletBefore = await world.amount(payerId, 57);
+        const paying = {
+            characterId: payerId,
+            revision: payer.simulation.revision,
+            enqueuedAt: Date.now(),
+            ...InventorySummary.bagChange(payer.inventory, payer.inventory),
+            nextState: { ...payer, exp: payer.exp + 500 },
+            cleanupNeed: { reason: 'market_surplus_inventory', slots: 40, npcOnlySlots: 0 },
+            result: fightResult(),
+            options: { allowLifecycle: true }
+        };
+        const trip = await coordinator.prepareProposal(paying);
+        assert.strictEqual(trip?.stats?.travel?.paid?.scroll, 736, 'fixture: the cleanup trip reads the bot\'s last scroll');
+        // The commit queue's prepared entry (ColdCommitQueue) to the owner.
+        const [paid] = await ColdSimulationOwner.commitBatch([{ proposal: paying, revision: paying.revision,
+            nextState: trip, options: paying.options }], { timestamp: Date.now() });
+        assert(paid.ok, 'the paid trip commits');
+        assert.strictEqual(await world.amount(payerId, 736), 0, 'the read scroll leaves the physical bag');
+        assert.strictEqual(await world.amount(payerId, 57), walletBefore - tripFee(trip), 'the fee leaves the physical wallet');
 
         // Command path: the worker's precomputed fight is applied before the
         // trip; main decides the cleanup there, on a bag over the threshold.
