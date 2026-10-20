@@ -7,6 +7,7 @@ const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const TownNpcCatalog = require('./TownNpcCatalog');
 const OfferOrder = require('./OfferOrder');
 const OfferQuery = require('./OfferQuery');
+const ProductionPolicy = require('./ProductionPolicy');
 const SHOT_IDS = new Set([
     1835, 1463, 1464, 1465, 1466, 1467,
     2509, 2510, 2511, 2512, 2513, 2514,
@@ -105,12 +106,12 @@ function npcTownOffers(selfId, town, held) {
 }
 
 function npcOffers(selfId, town) {
-    if (!require('./ProductionPolicy').allowsNpcShot(selfId)) return [];
+    if (!ProductionPolicy.allowsNpcShot(selfId)) return [];
     return npcTownOffers(selfId, town, npcOfferCache(selfId)).map(offer => ({ ...offer }));
 }
 
 function npcOffersAll(selfId) {
-    if (!require('./ProductionPolicy').allowsNpcShot(selfId)) return [];
+    if (!ProductionPolicy.allowsNpcShot(selfId)) return [];
     const held = npcOfferCache(selfId);
     held.all ||= Object.freeze(npcOfferTowns.flatMap(town => npcTownOffers(selfId, town, held)));
     // Preserve callers' ownership of the returned array and rows.
@@ -124,8 +125,8 @@ function botCanBuy(offer) {
     if (!offer) return false;
     const fixed = offer.sourceType === 'configured_store' || offer.sellerKind === 'fixed'
         || (offer.sourceType === 'private_store' && MerchantStoreConfigs[offer.sourceName]);
-    if (offer.sourceType === 'npc' && !require('./ProductionPolicy').allowsNpcShot(offer.selfId)) return false;
-    return !fixed || (SHOT_IDS.has(Number(offer.selfId)) && require('./ProductionPolicy').allowsFixedShot(offer.selfId));
+    if (offer.sourceType === 'npc' && !ProductionPolicy.allowsNpcShot(offer.selfId)) return false;
+    return !fixed || (SHOT_IDS.has(Number(offer.selfId)) && ProductionPolicy.allowsFixedShot(offer.selfId));
 }
 
 // A live private store's line as an offer: a configured city merchant is

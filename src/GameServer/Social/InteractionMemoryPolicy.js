@@ -118,6 +118,7 @@ function event(input) {
         ...(input.playedHours !== undefined ? { playedHours: input.playedHours } : {}),
         ...(input.player === true ? { player: true } : {}),
         ...(input.traits ? { traits: { loyalty: Number(input.traits.loyalty ?? 0.5), resilience: Number(input.traits.resilience ?? 0.5) } } : {}),
+        // lazy: cycle ClanSocialPolicy loads InteractionMemoryPolicy at its top.
         ...(input.clan ? { clan: require('../Clan/ClanSocialPolicy').evidence(input.clan) } : {}) };
 }
 

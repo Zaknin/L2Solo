@@ -9,6 +9,12 @@ const { seeded } = require('../AI/TendencyRoll');
 const partyIdOf = state => state?.party?.partyId || state?.partyId || null;
 
 const { reaction, select } = require('../../Social/ConflictParticipationPolicy');
+const RevengePolicy = require('../../Social/RevengePolicy');
+const ColdRevengeMonitor = require('./ColdRevengeMonitor');
+const ColdPvpResolver = require('./ColdPvpResolver');
+const RelationshipContext = require('../../Social/RelationshipContext');
+const CombatHelpPolicy = require('../../Social/CombatHelpPolicy');
+const ClanSocialEvidence = require('../../Clan/ClanSocialEvidence');
 
 async function apply({ event, life, owner, memory, parties, personaFor, participantAllowed,
     contestContextAllowed, onState, now, waitMs, cooldownMs, disputeCooldownMs = cooldownMs, pvpEnabled = () => false,
@@ -16,7 +22,6 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
     if (!parties) return { ok: false, reason: 'party_conflicts_unavailable' };
     const timestamp = now();
     const revenge = (resume?.reason || event.action) === 'revenge';
-    const Revenge = require('../../Social/RevengePolicy');
     const sides = [];
     for (const participant of [event.actor, event.peer]) {
         const principal = life.cachedState(participant.id);
@@ -45,14 +50,14 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
         if (!revenge || resume) return true;
         const [a, b] = sides.map(s => s.principal);
         const identity = s => ({ id: s.characterId, clanId: Number(s.stats?.clanId || 0), partyId: partyIdOf(s) });
-        const social = Revenge.evaluate(memory.assess(identity(a), identity(b), {}, now()), personaFor(a));
+        const social = RevengePolicy.evaluate(memory.assess(identity(a), identity(b), {}, now()), personaFor(a));
         return Number.isFinite(event.revengeRoll) && event.revengeRoll >= 0 && event.revengeRoll < social.chance
-            && states.every(s => require('./ColdRevengeMonitor').available(s, now()))
-            && require('./ColdRevengeMonitor').nearby(a, b)
+            && states.every(s => ColdRevengeMonitor.available(s, now()))
+            && ColdRevengeMonitor.nearby(a, b)
             && sides.every(side => side.members.every(s => nearby(s, side.principal)));
     };
     if (!revengeAllowed()) return { ok: false, reason: 'revenge_no_longer_wanted' };
-    if (resume && (!require('./ColdPvpResolver').allowed(sides) || (resume.materialized
+    if (resume && (!ColdPvpResolver.allowed(sides) || (resume.materialized
         && (!nearby(sides[0].principal, sides[1].principal) || sides.some(side => side.members.some(s => !nearby(s, side.principal))))))) {
         return { ok: false, reason: 'encounter_separated_or_protected' };
     }
@@ -67,7 +72,7 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
     const willing = event.willing || [];
     const combatAt = resume ? Math.max(resume.stepAt, timestamp - 1000) : timestamp;
     const pvp = !deescalated && event.pvpIntent === true && pvpEnabled()
-        ? require('./ColdPvpResolver').resolve({ sides, roles, timestamp: combatAt,
+        ? ColdPvpResolver.resolve({ sides, roles, timestamp: combatAt,
             rng, personaFor, step, openingSide: opener, key: event.key }) : null;
     // A refused revenge forecast cannot displace hunters or fabricate a resource offense.
     if (revenge && !pvp?.started) return { ok: false, reason: deescalated ? 'revenge_deescalated' : pvp?.reason || 'pvp_disabled' };
@@ -107,7 +112,7 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
         const delayed = pvp?.started || !deescalated && index === losingIndex;
         const result = pvp?.updates?.get(state.characterId) || state;
         return { ...result, stats: { ...result.stats,
-            ...(revenge ? { revengeUntil: Math.max(Number(state.stats?.revengeUntil || 0), (resume?.startedAt || timestamp) + Revenge.RETRY_MS) } : {}),
+            ...(revenge ? { revengeUntil: Math.max(Number(state.stats?.revengeUntil || 0), (resume?.startedAt || timestamp) + RevengePolicy.RETRY_MS) } : {}),
             ...(incrementalPvp ? { pvpEncounter: encounter } : {}), coldCompetition: Episode.begin(state.stats?.coldCompetition, { ...episode,
             peerId: sides[1 - index].principal.characterId, role: roles.get(state.characterId),
             ...(delayed ? { wait } : {}) }) }, timing: delayed ? { ...state.timing,
@@ -145,11 +150,11 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
     }
     for (let i = 0; i < events.length; i++) {
         const source = states.find(s => s.characterId === events[i].sourceId);
-        const e = require('../../Social/RelationshipContext').enrich(events[i], source);
-        const positive = require('../../Social/CombatHelpPolicy').TYPES.includes(e.type);
+        const e = RelationshipContext.enrich(events[i], source);
+        const positive = CombatHelpPolicy.TYPES.includes(e.type);
         const aggressor = sides[revenge ? 0 : 1].members.some(s => s.characterId === e.targetId);
         const relation = memory.assess({ id: e.sourceId }, { id: e.targetId }, {}, timestamp);
-        events[i] = require('../../Clan/ClanSocialEvidence').attach(e,
+        events[i] = ClanSocialEvidence.attach(e,
             relation.sourceClanId !== undefined ? { clanId: relation.sourceClanId } : states.find(s => s.characterId === e.sourceId),
             relation.targetClanId !== undefined ? { clanId: relation.targetClanId } : states.find(s => s.characterId === e.targetId), event.key,
             positive ? 'cooperation' : e.type === 'mob_contested' ? 'aggression'

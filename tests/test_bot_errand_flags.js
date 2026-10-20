@@ -53,7 +53,7 @@ const sellGoal = {
 };
 const competition = (retreat) => (state) => CompetitionValidation.member(state, state.characterId,
     { id: state.characterId, partyId: null }, { spotId: 'home', npcId: 1 }, {
-        party: true, retreat, at: now, memory: { snapshot: () => ({ revision: 1 }) },
+        party: true, retreat, at: now, memory: { revision: () => 1 },
         participantAllowed: () => true, contestContextAllowed: () => true
     }) !== null;
 
