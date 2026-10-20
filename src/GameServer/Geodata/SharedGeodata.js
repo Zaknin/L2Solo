@@ -6,23 +6,7 @@ const INDEX_LENGTH = 256 * 256;
 const INDEX_BYTES = INDEX_LENGTH * Int32Array.BYTES_PER_ELEMENT;
 const INDEX_READY = 1;
 const RAW_READY = 2;
-const INDEX_WINDOW_BYTES = 1024 * 1024;
 const align = value => Math.ceil(value / 4) * 4;
-
-function readExact(fd, buffer, length, position, key) {
-    let offset = 0;
-    while (offset < length) {
-        const read = fs.readSync(fd, buffer, offset, length - offset, position + offset);
-        if (read === 0) throw new Error(`Unexpected end of geodata region ${key}`);
-        offset += read;
-    }
-}
-
-function checkFileSize(fd, region) {
-    if (fs.fstatSync(fd).size !== region.byteLength) {
-        throw new Error(`Geodata region ${region.key} changed size; restart required`);
-    }
-}
 
 function validateDescriptor(descriptor) {
     if (descriptor?.version !== 1 || typeof descriptor.directory !== 'string'
@@ -62,35 +46,15 @@ class SharedGeodata {
         const fd = fs.openSync(path.join(this.descriptor.directory, `${region.key}.l2j`), 'r');
         try {
             // Full reads verify the catalog size; block reads rely on immutable files.
-            if (buffer.length === region.byteLength) checkFileSize(fd, region);
-            readExact(fd, buffer, buffer.length, position, region.key);
-        } finally {
-            fs.closeSync(fd);
-        }
-    }
-
-    buildIndex(region, index, buildOffsetIndex) {
-        const fd = fs.openSync(path.join(this.descriptor.directory, `${region.key}.l2j`), 'r');
-        try {
-            checkFileSize(fd, region);
-            const scratch = Buffer.allocUnsafe(Math.min(INDEX_WINDOW_BYTES, region.byteLength));
-            let windowStart = 0;
-            let windowEnd = 0;
-            const source = {
-                length: region.byteLength,
-                readUInt8(offset) {
-                    // Preserve Buffer's RangeError for truncated multilevel blocks.
-                    if (offset < 0 || offset >= region.byteLength) return scratch.readUInt8(scratch.length);
-                    if (offset < windowStart || offset >= windowEnd) {
-                        const length = Math.min(scratch.length, region.byteLength - offset);
-                        readExact(fd, scratch, length, offset, region.key);
-                        windowStart = offset;
-                        windowEnd = offset + length;
-                    }
-                    return scratch.readUInt8(offset - windowStart);
-                }
-            };
-            buildOffsetIndex(source, index);
+            if (buffer.length === region.byteLength && fs.fstatSync(fd).size !== region.byteLength) {
+                throw new Error(`Geodata region ${region.key} changed size; restart required`);
+            }
+            let offset = 0;
+            while (offset < buffer.length) {
+                const read = fs.readSync(fd, buffer, offset, buffer.length - offset, position + offset);
+                if (read === 0) throw new Error(`Unexpected end of geodata region ${region.key}`);
+                offset += read;
+            }
         } finally {
             fs.closeSync(fd);
         }
@@ -118,8 +82,10 @@ class SharedGeodata {
         if (!region) return null;
         const index = cachedIndex || new Int32Array(this.descriptor.arena, region.indexOffset, INDEX_LENGTH);
         if (!(Atomics.load(this.ready, region.readyIndex) & INDEX_READY)) {
-            // The existing parser reads through one bounded window; only the index stays.
-            this.buildIndex(region, index, buildOffsetIndex);
+            // Build offsets without touching the reserved raw span; only the index stays.
+            const temporary = Buffer.allocUnsafe(region.byteLength);
+            this.readInto(region, temporary);
+            buildOffsetIndex(temporary, index);
             Atomics.or(this.ready, region.readyIndex, INDEX_READY);
         }
         const blockOffset = index[blockId];
