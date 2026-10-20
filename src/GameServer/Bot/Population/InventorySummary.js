@@ -47,7 +47,20 @@ function canonicalize(inventory = {}) {
     }, {});
 }
 
+// The selfIds a step emptied: stacks in the base bag that the next bag no
+// longer holds. The commit deletes their physical rows (ColdSimulationOwner).
+function removedItemIds(baseInventory = {}, nextInventory = {}) {
+    const removed = [];
+    for (const [key, item] of Object.entries(baseInventory || {})) {
+        if (!item || !(Number(item.amount) > 0)) continue;
+        if (Number(nextInventory?.[key]?.amount) > 0) continue;
+        removed.push(Number(item.selfId || key));
+    }
+    return removed;
+}
+
 module.exports = {
     canonicalize,
-    completeInstances
+    completeInstances,
+    removedItemIds
 };

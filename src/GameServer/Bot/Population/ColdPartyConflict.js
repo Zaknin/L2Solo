@@ -1,4 +1,5 @@
 const Validation = require('./ColdCompetitionValidation');
+const InventorySummary = require('./InventorySummary');
 const Episode = require('./ColdCompetitionEpisode');
 const EncounterBudget = require('./PvpEncounterBudget');
 const Journal = require('../../../PvpJournal');
@@ -166,6 +167,7 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
     const results = await owner.commitBatch(next.map((state, index) => ({
         revision: Number(states[index].simulation?.revision || 0), nextState: state, atomicGroup: group,
         options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: states[index],
+            removedItemIds: InventorySummary.removedItemIds(states[index].inventory, state.inventory),
             ...(pvp?.started ? { durable: { pvpKills: pvp.fighters.find(f => f.id === state.characterId)?.kills || [] } } : {}),
             result: { memoryEvents: events.filter(e => e.sourceId === state.characterId) } }
     })), { timestamp: now(), journalReason: pvp?.started ? 'pvp' : 'party_conflict' });
