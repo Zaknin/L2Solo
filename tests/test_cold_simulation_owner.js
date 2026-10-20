@@ -208,6 +208,58 @@ function state(characterId, revision, activity = 'hunting') {
     assert.strictEqual(afterRace.inventorySummary, inventoryAfterClanWrite, 'a refused commit preserves the new inventory');
     assert.strictEqual(JSON.parse(afterRace.statsJson).clanInventoryRevision, raceRevision + 1);
 
+    // A lifecycle job may retain a snapshot while the generated name/look
+    // migrations run. Its later ordinary save must keep their newer metadata
+    // in SQLite, its returned snapshot and the lifecycle cache.
+    const metadataId = Number((await Database.createCharacter('owner_probe', {
+        name: 'MetadataOld', race: 0, classId: 0, maxHp: 100, maxMp: 50,
+        sex: 0, face: 0, hair: 0, hairColor: 0, locX: 10, locY: 20, locZ: -30
+    })).insertId);
+    const metadataBefore = await BotLifeState.upsertState({
+        ...state(metadataId, 0), name: 'MetadataOld', nameGeneratorVersion: 1, appearanceVersion: 1
+    }, 'metadata_race_fixture');
+    assert(metadataBefore);
+    const appearanceWrite = BotLifeState.acceptAppearanceMetadata(metadataId, 1, 3);
+    const nameWrite = BotLifeState.acceptNameMetadata(metadataId, 'MetadataNew', 4);
+    const lateMetadataSave = BotLifeState.upsertState({
+        ...metadataBefore, activity: 'resting', stats: { restUntil: 12000 }
+    }, 'stale_metadata_snapshot');
+    const [, , metadataSaved] = await Promise.all([appearanceWrite, nameWrite, lateMetadataSave]);
+    assert(metadataSaved, 'a stale metadata snapshot can still save unrelated lifecycle changes');
+    const metadata = snapshot => [snapshot.name, snapshot.nameGeneratorVersion, snapshot.appearanceVersion];
+    assert.deepStrictEqual(metadata(metadataSaved), ['MetadataNew', 4, 3],
+        'the returned save must not roll back a migrated name or appearance version');
+    assert.deepStrictEqual(metadata(BotLifeState.cachedState(metadataId)), ['MetadataNew', 4, 3],
+        'the lifecycle cache must keep the latest metadata after a stale save');
+    const [metadataRow] = await Database.execute([
+        'SELECT characterName, nameGeneratorVersion, appearanceVersion, simulationRevision FROM bot_life_state WHERE characterId = ?',
+        [metadataId]
+    ]);
+    assert.deepStrictEqual([metadataRow.characterName, metadataRow.nameGeneratorVersion, metadataRow.appearanceVersion],
+        ['MetadataNew', 4, 3], 'the durable row must keep the latest metadata');
+    assert.strictEqual(metadataSaved.activity, 'resting');
+    assert.strictEqual(metadataSaved.stats.restUntil, 12000, 'the unrelated lifecycle update must land');
+    assert.strictEqual(Number(metadataRow.simulationRevision), metadataBefore.simulation.revision + 3,
+        'both migrations and the accepted lifecycle save advance the revision once');
+    assert.deepStrictEqual(metadata(metadataBefore), ['MetadataOld', 1, 1],
+        'preserving current metadata must not mutate the caller\'s old snapshot');
+    const [physicalMetadata] = await Database.execute(['SELECT name, sex FROM characters WHERE id = ?', [metadataId]]);
+    assert.deepStrictEqual([physicalMetadata.name, physicalMetadata.sex], ['MetadataNew', 1],
+        'the life row must agree with the migrated physical character');
+
+    const sameVersionSave = await BotLifeState.upsertState({
+        ...metadataSaved, name: 'StaleActorName', appearanceVersion: undefined
+    }, 'same_version_stale_name');
+    assert(sameVersionSave);
+    assert.deepStrictEqual(metadata(sameVersionSave), ['MetadataNew', 4, 3],
+        'a stale actor name with the same version and an omitted look version cannot undo metadata');
+    await BotLifeState.acceptNameMetadata(metadataId, 'MetadataNewest', 5);
+    await BotLifeState.acceptAppearanceMetadata(metadataId, 0, 4);
+    const newerMetadataSave = await BotLifeState.upsertState(sameVersionSave, 'metadata_migrated_again');
+    assert(newerMetadataSave);
+    assert.deepStrictEqual(metadata(newerMetadataSave), ['MetadataNewest', 5, 4],
+        'subsequent migrations must still advance and survive later saves');
+
     // Developer diagnostics: an item read counts under its call-site tag.
     await Database.fetchItems(characterId, 'owner_probe');
     assert.strictEqual(invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics().counts['item_list:call:owner_probe'], 1);

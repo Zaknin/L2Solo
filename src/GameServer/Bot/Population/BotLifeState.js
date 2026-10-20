@@ -882,6 +882,16 @@ function save(row, options = {}) {
         error.code = 'BOT_LIFE_STATE_OWNERSHIP_CONFLICT';
         return Promise.reject(error);
     }
+    // A job can retain its old snapshot across a serialized name/look
+    // migration. Keep the latest metadata on the row also used to rebuild
+    // the cache, while allowing the job's unrelated lifecycle update.
+    const current = cache.get(Number(row.characterId));
+    const nameVersion = Number(current?.nameGeneratorVersion || 0);
+    if (nameVersion > 0 && nameVersion >= Number(row.nameGeneratorVersion || 0)) {
+        row.characterName = current.name;
+        row.nameGeneratorVersion = nameVersion;
+    }
+    row.appearanceVersion = Math.max(Number(row.appearanceVersion || 0), Number(current?.appearanceVersion || 0));
     const beforeWrite = Object.getOwnPropertyDescriptor(options, 'beforeWrite');
     const databaseOptions = beforeWrite ? Object.defineProperty({}, 'beforeWrite', beforeWrite) : undefined;
     const statement = [
