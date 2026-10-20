@@ -140,6 +140,15 @@ try {
     assert.strictEqual(reloadingBow.actor.backpack.fetchItemFromSelfId(17), undefined,
         'the queued attack should consume and remove its last arrow only after bow reload completes');
 
+    const repeated = fixture('Weapon.DualFist', 40);
+    repeated.attack.meleeHit(repeated.session, repeated.target);
+    repeated.attack.meleeHit(repeated.session, repeated.target);
+    assert.strictEqual(repeated.packets.length, 1, 'a repeated melee request during a swing must not swing again');
+    assert.strictEqual(repeated.timers.length, 2, 'a repeated melee request during a swing must not start a second loop');
+    repeated.timers[0]();
+    repeated.timers[1]();
+    assert.strictEqual(repeated.packets.length, 2, 'the running loop still swings again after the swing ends');
+
     const missed = fixture('Weapon.Bow', 600);
     Formulas.calcHitChance = () => false;
     missed.attack.meleeHit(missed.session, missed.target);
