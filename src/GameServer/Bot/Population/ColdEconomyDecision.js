@@ -557,7 +557,8 @@ function readAdvisoryCard(record) {
         if (!data || data.byteLength < 28 || data.byteLength > MAX_BYTES) return null;
         const card = compact({ echo: record.echo.slice(), data });
         const activity = card.activity;
-        if (card.counts & ~131071 || (card.counts & 63) > 40 || ((card.counts >>> 8) & 15) > 8
+        // Bits 0-18: compact() keeps the watch count's high bits at 17-18.
+        if (card.counts & ~0x7ffff || (card.counts & 63) > 40 || ((card.counts >>> 8) & 15) > 8 || watchCount(card.counts) > 8
             || card.flags || activity !== null && !activity?.activity) return null;
         // Validate all binary ranges before this becomes retained native data.
         void card.usefulness; void card.watch; void card.materials; void card.workshop; void card.feasibility; void card.shot;
