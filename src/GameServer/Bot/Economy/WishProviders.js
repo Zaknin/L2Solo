@@ -793,8 +793,10 @@ function buildProjection(state, ctx, deps) {
     // Missing materials inherit that value; only a genuinely ready leaf applies.
     blocks?.lap('sources');
     for (const improvement of invoke('GameServer/Bot/Economy/BotImprovementPolicy').opportunities(state, ctx)) {
-        const materials = improvement.materials.map(material => ({ ...material, missing: Math.max(0,
-            material.amount - physical(material.selfId)) }));
+        const materials = improvement.materials.map(material => {
+            quantityInputs?.atLeast('physical', material.selfId, material.amount);
+            return { ...material, missing: Math.max(0, material.amount - physical(material.selfId)) };
+        });
         const requirements = materials.filter(material => material.missing > 0)
             .map(material => ({ key: itemNode(material.selfId), amount: material.missing }));
         if (requirements.some(row => !row.key)) continue;

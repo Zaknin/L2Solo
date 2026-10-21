@@ -19,7 +19,7 @@ const Network = require('./WishNetwork');
 const PurchaseEvidence = require('./WishPurchaseEvidence');
 const OccupationSources = invoke('GameServer/Bot/Population/ColdOccupationSources');
 const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge,
-    createQuantityInputs, quantityInputsHold, eachQuantityRow } = Network;
+    createQuantityInputs, quantityInputsHold, quantityRowKey, eachQuantityRow } = Network;
 const { isMainThread } = require('node:worker_threads');
 const { createHash } = require('node:crypto');
 const RecomputeGeneration = require('../Population/RecomputeGeneration');
@@ -237,6 +237,41 @@ function captureEventProof(state, deps = {}, options = {}) {
             && deps.sourceReady === true });
 }
 
+// Shadow, sampled owners (open item 'hold:economy decision_seq and
+// quantity'): the thresholds a build compared its count rows with
+// (createQuantityInputs withThresholds), by the proof it captured. In
+// process only: a saved, restored or sent proof has none and is not classed.
+const quantityThresholds = new WeakMap();
+// A row kept exact whatever its drift: incoming and presence.
+const EXACT_QUANTITY_ROWS = new Set(['incoming', 'present', 'freePresent']);
+// The class of a held build's quantity refusal under the decided bands, read
+// over every moved row as the verdict reads it (its readers and stock
+// normalisation): a row kept exact, a row the build compared with no
+// threshold (or a stock row whose incoming moved) is exact; a row on another
+// side of a threshold it was compared with is a crossing; the rest would
+// hold while their drift (sum |delta| x buyback) stays within the bot's
+// error on an hour's income (hourAdena x incomeError), else budget.
+// { kind, class } of the first row of the worst class (crossing, exact,
+// budget, band); null when no row moved.
+function quantityShadow(proof, readers, stockAmount, ownRow, baseline) {
+    const thresholds = quantityThresholds.get(proof);
+    let crossing = null, exact = null, banded = null, drift = 0;
+    quantityInputsHold(proof.quantities, readers, stockAmount, ownRow, null, (row, value, incoming) => {
+        const rooted = row[0] === 'stock' || row[0] === 'stockPhysical';
+        const id = rooted ? row[2] : row[1], original = rooted ? row[3] : row[2];
+        const sides = thresholds.get(quantityRowKey(row));
+        if (!sides || EXACT_QUANTITY_ROWS.has(row[0]) || row[0] === 'stock' && incoming !== row[4]) {
+            exact ||= { kind: row[0], class: 'exact' };
+            return;
+        }
+        for (const at of sides) if ((value >= at) !== (original >= at)) { crossing ||= { kind: row[0], class: 'crossing' }; return; }
+        banded ||= { kind: row[0], class: 'band' };
+        drift += Math.abs(value - original) * positive(buyback(id));
+    });
+    if (crossing || exact) return crossing || exact;
+    return banded && drift > positive(proof.hourAdena) * positive(baseline?.incomeError) ? { ...banded, class: 'budget' } : banded;
+}
+
 // options.collect (the decision point, forState): a refusal that names
 // sections ORs them into touchedSections and the checks go on; one that
 // names none stops with every section. Otherwise (every other caller) the
@@ -253,9 +288,14 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // firstSections: the sections the first refusal named, what a run that
     // stops there answers (eventProofHolds); leaf: the identity of the leaf
     // it judged, unset when it stopped before.
-    const out = { valid: false, reason: '', touchedSections: 0, movedSections: 0, firstSections: 0, leaf: undefined };
+    // refused: how many refusals the run made (one = the first alone);
+    // quantityShadow: the class of a first refusal 'quantity' on a sampled
+    // owner's proof (quantityShadow above), diagnostics only.
+    const out = { valid: false, reason: '', touchedSections: 0, movedSections: 0, firstSections: 0, leaf: undefined,
+        refused: 0, quantityShadow: null };
     const refuse = (reason, names) => {
         const first = !out.reason;
+        out.refused++;
         out.reason ||= reason;
         if (!names) {
             if (collect) out.touchedSections = Sections.COMPUTED.weighing;
@@ -342,7 +382,10 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // It holds while the bot keeps what it held at the decision; the order's
     // completion is the activity check below, a loss is a quantity event.
     const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits) ? leaf.itemId : null;
-    if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits && refuse('quantity', ['sources', 'money']) && !collect) return out;
+    if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits) {
+        if (!out.reason && quantityThresholds.has(proof)) out.quantityShadow = { kind: 'own', class: 'exact' };
+        if (refuse('quantity', ['sources', 'money']) && !collect) return out;
+    }
     // The proof is held packed and read as a stream: no rows array.
     const ownRow = own === null ? null : row => ownQuantityRow(row, leaf.rootKey, own);
     const stock = stockReader(state, key => roots.get(key));
@@ -351,9 +394,12 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         const current = stock(id, rootKey);
         return isReserved(id) && current.owned + current.incoming >= row[3] + row[4] ? { owned: row[3], incoming: row[4] } : current;
     };
-    const moved = [];
-    if (!quantityInputsHold(proof.quantities, { ...Providers.quantityReaders(state), stockFor }, stockAmount, ownRow, moved)
-        && (moved.length ? refuse('quantity', ['sources', 'money']) && !collect : refuse('unproved'))) return out;
+    const moved = [], readers = { ...Providers.quantityReaders(state), stockFor };
+    if (!quantityInputsHold(proof.quantities, readers, stockAmount, ownRow, moved)) {
+        if (!moved.length) return refuse('unproved');
+        if (!out.reason && quantityThresholds.has(proof)) out.quantityShadow = quantityShadow(proof, readers, stockAmount, ownRow, baseline);
+        if (refuse('quantity', ['sources', 'money']) && !collect) return out;
+    }
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
     // The leaf's own item and a craft's reserved inputs are not sales: their
     // count moves with the leaf's progress, held above by the quantity check.
@@ -1178,6 +1224,15 @@ function forState(state = {}, deps = {}) {
     if (diagnosticReason === 'held_refused') {
         Diagnostics.count('context', deps.rememberContext === false ? 'held_refusal_unkept' : 'held_refusal', eventVerdict.reason || 'none');
     }
+    // Shadow, sampled owners (open item 'hold:economy decision_seq and
+    // quantity'): a quantity refusal by its class under the decided bands
+    // (quantityShadow). A band refusal beside another refusal or other moved
+    // sections rebuilds anyway (band_other); a band one alone is the rebuild
+    // the bands would skip, and its rebuild below answers same or new.
+    const shadow = diagnosticReason === 'held_refused' ? eventVerdict.quantityShadow : null;
+    const shadowAlone = shadow?.class === 'band' && eventVerdict.refused === 1 && mask === eventVerdict.touchedSections;
+    if (shadow) Diagnostics.count('context', 'held_refusal:quantity',
+        `${shadow.kind}:${shadow.class === 'band' && !shadowAlone ? 'band_other' : shadow.class}`);
     let elapsed = 0;
     // The items the review read, each reported once (deps.onSourceRead, the
     // occupation planner's dependencies) and kept with the held entry
@@ -1240,7 +1295,7 @@ function forState(state = {}, deps = {}) {
         : foundation(state, deps, persona, timestamp, price, record => { incomeRecord = record; });
     // These facts still belong to the reused foundation: its items stay read.
     if (keptBase) for (const id of held.readIds) read(id);
-    const quantityInputs = createQuantityInputs();
+    const quantityInputs = createQuantityInputs(diagnostic && Diagnostics.enabled(state.characterId));
     const context = { inputKey: key, actorKey, state, timestamp, gearThreatMask: gearThreat.mask, persona, board, hunt: base.hunt, price, buyback,
         quantityInputs,
         // The gear nomination's basis (the equipment plan's target, the power
@@ -1310,7 +1365,17 @@ function forState(state = {}, deps = {}) {
     // build; the projection is read lazily once it exists (stock roots).
     context.wallet = Funding.budget(state, deps.buyOrderEscrow);
     const nativeStock = stockReader(state, rootKey => context.projection?.nodes.find(node => node.key === rootKey)?.object?.itemId);
-    context.stockFor = (id, rootKey) => quantityInputs.stock(id, rootKey, nativeStock(id, rootKey));
+    // prior, requested (the allocation's reading, WishNetwork solve): its
+    // owned count is compared with prior (the incoming it leaves), prior + 1
+    // (free stock) and prior + requested (all owned).
+    context.stockFor = (id, rootKey, prior, requested) => {
+        const stock = quantityInputs.stock(id, rootKey, nativeStock(id, rootKey));
+        if (requested !== undefined && quantityInputs.thresholds()) {
+            quantityInputs.atLeast('stock', id, prior, rootKey); quantityInputs.atLeast('stock', id, prior + 1, rootKey);
+            quantityInputs.atLeast('stock', id, prior + requested, rootKey);
+        }
+        return stock;
+    };
     context.completionKey = Crystallization.completionKey(state, quantityInputs);
     const extra = [...extensions.values()].flatMap(provider => provider(state, context) || []);
     const sourceSections = keptSources ? held.sourceSections : null;
@@ -1442,6 +1507,10 @@ function forState(state = {}, deps = {}) {
         heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key });
     const plan = planOf(context, base, { key, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
+    // The skipped rebuild's answer: the held decision (its leaf by the
+    // proof's identity, its focus) or a new one.
+    if (shadowAlone) Diagnostics.count('context', 'quantity_would_hold', activityIdentity(plan.network?.activity)
+        === held.plan.eventProof.activity && plan.network?.focus?.[0] === held.plan.network.focus?.[0] ? 'same' : 'new');
     // Source memo and ground verdict belong only to the held build entry
     // (bounded by RETAIN_LIMIT, each memo by WishProviders' cap, each ground
     // by 2 bits per planning spot). A planning view or a group closure must
@@ -1457,6 +1526,8 @@ function forState(state = {}, deps = {}) {
         // Its own activity: the later reuse verdict reads the held build
         // with it.
         plan.eventProof = captureEventProof(state, deps, { plan });
+        const thresholds = quantityInputs.thresholds();
+        if (thresholds && plan.eventProof) quantityThresholds.set(plan.eventProof, thresholds);
         // What the card stamps on its leaf, read once for the held verdict: the
         // own item's bag+incoming at the decision (heldAtDecision) and a
         // craft's reserved inputs (craftReservations).

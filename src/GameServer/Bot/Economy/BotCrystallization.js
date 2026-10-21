@@ -151,12 +151,18 @@ function ready(state, quantityInputs = null) {
     const plan = invoke('GameServer/Bot/Economy/ItemDisposition').equipmentInputPlan(state);
     if (plan?.crystalPreparation && plan.status === 'active') {
         const prep = plan.crystalPreparation, reader = freeReader(state);
-        const readFree = id => { const amount = reader(id); quantityInputs?.crystalFree(id, amount); return amount; };
+        // atLeast: the count each read is compared with (its threshold).
+        const readFree = (id, atLeast) => {
+            const amount = reader(id);
+            quantityInputs?.crystalFree(id, amount); quantityInputs?.atLeast('crystalFree', id, atLeast);
+            return amount;
+        };
         const held = Number(state.inventory?.[1459]?.amount);
-        quantityInputs?.physical(1459, Math.max(0, held || 0));
+        const crystals = Number(plan.materials?.find(row => Number(row.selfId) === 1459)?.amount);
+        quantityInputs?.physical(1459, Math.max(0, held || 0)); quantityInputs?.atLeast('physical', 1459, crystals);
         return (prep.materials || []).some(row => reward(Index.find(invoke('GameServer/DataCache').items, row.selfId))
-            && readFree(row.selfId) > 0) || prep.exchange?.materials?.length > 0 && prep.exchange.materials.every(row => readFree(row.selfId) >= row.amount)
-            || held >= Number(plan.materials?.find(row => Number(row.selfId) === 1459)?.amount);
+            && readFree(row.selfId, 1) > 0) || prep.exchange?.materials?.length > 0 && prep.exchange.materials.every(row => readFree(row.selfId, row.amount) >= row.amount)
+            || held >= crystals;
     }
     if (plan?.strategy !== 'luxury_exchange' || plan.status !== 'active'
         || !invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(state)) return false;
@@ -180,14 +186,15 @@ function completionKey(state, quantityInputs = null) {
     if (plan?.strategy !== 'luxury_exchange' || plan.status !== 'active' || !plan.target?.slot) return null;
     const Luxury = require('./BotLuxuryExchange'), exchange = Luxury.resolve(plan.exchange);
     if (!exchange || Number(plan.target.selfId) !== exchange.itemId || !Luxury.eligible(state, exchange)) return null;
-    const freeOf = id => {
+    // atLeast: the count each read is compared with (its threshold).
+    const freeOf = (id, atLeast) => {
         const amount = invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {});
-        quantityInputs?.free(id, amount);
+        quantityInputs?.free(id, amount); quantityInputs?.atLeast('free', id, atLeast);
         return amount;
     };
-    const crystalsReady = exchange.materials.every(row => freeOf(row.selfId) >= row.amount);
+    const crystalsReady = exchange.materials.every(row => freeOf(row.selfId, row.amount) >= row.amount);
     const receivedInputs = (plan.materials || []).some(row => reward(Index.find(invoke('GameServer/DataCache').items, row.selfId))
-        && freeOf(row.selfId) > 0);
+        && freeOf(row.selfId, 1) > 0);
     if (!crystalsReady && !receivedInputs) return null;
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     if (Planner.equipmentTargetFulfilled(state, plan)) return null;
