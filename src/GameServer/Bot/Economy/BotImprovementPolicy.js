@@ -130,7 +130,8 @@ function opportunities(state, ctx) {
                     price: price * cost.count, riskHours: ctx.hunt.perHour > 0 ? loss / ctx.hunt.perHour : Infinity }];
             }).filter(row => {
                 const held = positive(state.inventory?.[row.scrollId]?.amount);
-                ctx.quantityInputs?.physical(row.scrollId, held);
+                // Priced against the wallet, no threshold noted: untracked.
+                ctx.quantityInputs?.physical(row.scrollId, held); ctx.quantityInputs?.untracked('physical', row.scrollId);
                 const cash = row.price - held * ctx.price(row.scrollId);
                 ctx.walletBoundary?.(cash);
                 return cash <= positive(state.adena);
@@ -193,7 +194,8 @@ function crystalPath(state, id, ctx, spots = []) {
     if (!target || target.stage <= 0 || target.stage > 10 || state.level < 40) return null;
     const held = Object.values(state.inventory || {}).filter(row => {
         if (!Native.catalog.crystals[row.selfId] && ![4662,4663,4664].includes(Number(row.selfId))) return false;
-        ctx.quantityInputs?.physical(row.selfId, positive(row.amount));
+        // Compared with 1 and 2 below, not noted: untracked.
+        ctx.quantityInputs?.physical(row.selfId, positive(row.amount)); ctx.quantityInputs?.untracked('physical', row.selfId);
         return row.amount > 0;
     });
     if (held.length > 1 || held[0]?.amount > 1) return null;

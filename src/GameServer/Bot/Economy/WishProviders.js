@@ -267,9 +267,10 @@ function buildProjection(state, ctx, deps) {
         const value = nativeQuantities.physical(id);
         quantityInputs?.present(id, value); return value > 0;
     };
+    // Read as an amount (an offer's old units): no threshold, untracked.
     const free = id => {
         const value = nativeQuantities.free(id);
-        quantityInputs?.free(id, value); return value;
+        quantityInputs?.free(id, value); quantityInputs?.untracked('free', id); return value;
     };
     const hasFree = id => {
         const value = nativeQuantities.free(id);

@@ -160,10 +160,32 @@ const quantityRowKey = row => row[0] === 'stock' || row[0] === 'stockPhysical'
 // a decision compared the row's value with, each as "value >= t" (a strict
 // "> t" on a count is t + 1). Kept beside the rows, never packed, saved or
 // sent: only the verdict's diagnostics read them, in process
-// (EconomyContext quantityShadow). A row past the cap is no proof (null).
+// (EconomyContext quantityShadow). Every read of a row either notes the
+// thresholds it compares with (atLeast) or marks the row untracked (a read
+// used as an amount, or a compare not noted): an untracked row, or one past
+// the cap, is no proof (null), whatever else noted it.
 const QUANTITY_THRESHOLDS = 32;
+// Without withThresholds every build shares these: no per-build closures.
+const noThreshold = () => {}, noThresholds = () => null;
+// The thresholds a build noted, by row key (quantityRowKey).
+function thresholdRecorder() {
+    const thresholds = new Map();
+    const keyOf = (kind, id, rootKey) => quantityRowKey(kind === 'stock' ? [kind, String(rootKey), Number(id)] : [kind, Number(id)]);
+    return {
+        atLeast(kind, id, threshold, rootKey = null) {
+            if (!Number.isFinite(threshold)) return;
+            const key = keyOf(kind, id, rootKey);
+            const sides = thresholds.has(key) ? thresholds.get(key) : new Set();
+            if (!sides) return;
+            sides.add(threshold);
+            thresholds.set(key, sides.size > QUANTITY_THRESHOLDS ? null : sides);
+        },
+        untracked(kind, id, rootKey = null) { thresholds.set(keyOf(kind, id, rootKey), null); },
+        thresholds: () => thresholds
+    };
+}
 function createQuantityInputs(withThresholds = false) {
-    const rows = [], seen = new Map(), thresholds = withThresholds ? new Map() : null;
+    const rows = [], seen = new Map(), recorder = withThresholds ? thresholdRecorder() : null;
     // invalid: '' or the first reason the proof is void (diagnostics name it).
     let invalid = '', finished = false, packed = null;
     const record = row => {
@@ -199,18 +221,12 @@ function createQuantityInputs(withThresholds = false) {
         physical: scalar('physical'), present: scalar('present'), freePresent: scalar('freePresent'),
         incoming: scalar('incoming'), free: scalar('free'), crystalFree: scalar('crystalFree'),
         unsupported() { invalid ||= 'unsupported'; },
-        // A threshold the build compared the row (kind, id; a stock row also
-        // its root) with; nothing without withThresholds.
-        atLeast(kind, id, threshold, rootKey = null) {
-            if (!thresholds || finished || !Number.isFinite(threshold)) return;
-            const key = quantityRowKey(kind === 'stock' ? [kind, String(rootKey), Number(id)] : [kind, Number(id)]);
-            const sides = thresholds.has(key) ? thresholds.get(key) : new Set();
-            if (!sides) return;
-            sides.add(threshold);
-            thresholds.set(key, sides.size > QUANTITY_THRESHOLDS ? null : sides);
-        },
-        // The noted thresholds by row key (quantityRowKey), or null without withThresholds.
-        thresholds() { return thresholds; },
+        // atLeast(kind, id, threshold, rootKey): a threshold the build
+        // compared the row (a stock row also by its root) with;
+        // untracked(kind, id, rootKey): a read that notes none; thresholds():
+        // the noted thresholds by row key, null without withThresholds.
+        atLeast: recorder?.atLeast || noThreshold, untracked: recorder?.untracked || noThreshold,
+        thresholds: recorder?.thresholds || noThresholds,
         // The packed proof (eachQuantityRow reads it) or null.
         finish() {
             if (!finished) {

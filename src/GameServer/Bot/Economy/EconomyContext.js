@@ -133,6 +133,13 @@ function activityIdentity(leaf) {
     delete value.heldAtDecision; delete value.r; delete value.craftReservations;
     return proofDigest(value);
 }
+// What a leaf acts on, without its amount and price (diagnostics: the
+// quantity shadow's same_target).
+function activityTarget(leaf) {
+    if (!leaf) return null;
+    const value = new ColdEconomyDecision.CompactActivity(leaf);
+    return JSON.stringify([value.activity, value.itemId, value.rootKey ?? null, value.kind ?? null, value.spotId, value.npcId]);
+}
 // L70: the bot's own hunting/resting/travelling is not an economic event.
 // Only this kind is equalised. One trip is the plan itself: leaving for the
 // held leaf's own hunting spot or its own town (Sections.occupationPlanned);
@@ -360,6 +367,8 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     if (!bandsHold(state, proof.bands, options.leaf) && refuse('bands', ['supply', 'sources']) && !collect) return out;
     const roots = new Map(proof.stockRoots);
     const leaf = options.leaf;
+    // The quantity shadow classes a refusal of a sampled owner whose proof noted thresholds.
+    const shadowed = () => Diagnostics.active() && Diagnostics.enabled(state.characterId) && quantityThresholds.has(proof);
     // A held build passes its entry's fields; a card carries them on its leaf.
     const heldUnits = options.heldUnits ?? leaf?.heldAtDecision;
     const craftReservations = options.craftReservations ?? leaf?.craftReservations;
@@ -383,7 +392,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // completion is the activity check below, a loss is a quantity event.
     const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits) ? leaf.itemId : null;
     if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits) {
-        if (!out.reason && quantityThresholds.has(proof)) out.quantityShadow = { kind: 'own', class: 'exact' };
+        if (!out.reason && shadowed()) out.quantityShadow = { kind: 'own', class: 'exact' };
         if (refuse('quantity', ['sources', 'money']) && !collect) return out;
     }
     // The proof is held packed and read as a stream: no rows array.
@@ -397,7 +406,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const moved = [], readers = { ...Providers.quantityReaders(state), stockFor };
     if (!quantityInputsHold(proof.quantities, readers, stockAmount, ownRow, moved)) {
         if (!moved.length) return refuse('unproved');
-        if (!out.reason && quantityThresholds.has(proof)) out.quantityShadow = quantityShadow(proof, readers, stockAmount, ownRow, baseline);
+        if (!out.reason && shadowed()) out.quantityShadow = quantityShadow(proof, readers, stockAmount, ownRow, baseline);
         if (refuse('quantity', ['sources', 'money']) && !collect) return out;
     }
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
@@ -1365,14 +1374,21 @@ function forState(state = {}, deps = {}) {
     // build; the projection is read lazily once it exists (stock roots).
     context.wallet = Funding.budget(state, deps.buyOrderEscrow);
     const nativeStock = stockReader(state, rootKey => context.projection?.nodes.find(node => node.key === rootKey)?.object?.itemId);
-    // prior, requested (the allocation's reading, WishNetwork solve): its
-    // owned count is compared with prior (the incoming it leaves), prior + 1
-    // (free stock) and prior + requested (all owned).
+    // prior, requested (the allocation's reading, WishNetwork solve): where
+    // its answer flips on the owned count o, the incoming i exact: free stock
+    // (o >= prior + 1), all owned (o >= prior + requested), nothing to order
+    // (o >= prior + requested - i) and, with incoming, the incoming kept
+    // (o >= prior - i + 1) and its shrinking (o >= prior). Any other read
+    // (a crystallize batch, a gear witness) notes none: untracked.
     context.stockFor = (id, rootKey, prior, requested) => {
         const stock = quantityInputs.stock(id, rootKey, nativeStock(id, rootKey));
-        if (requested !== undefined && quantityInputs.thresholds()) {
-            quantityInputs.atLeast('stock', id, prior, rootKey); quantityInputs.atLeast('stock', id, prior + 1, rootKey);
-            quantityInputs.atLeast('stock', id, prior + requested, rootKey);
+        if (!quantityInputs.thresholds()) return stock;
+        if (requested === undefined) { quantityInputs.untracked('stock', id, rootKey); return stock; }
+        const incoming = positive(stock?.incoming);
+        quantityInputs.atLeast('stock', id, prior + 1, rootKey); quantityInputs.atLeast('stock', id, prior + requested, rootKey);
+        if (incoming > 0) {
+            quantityInputs.atLeast('stock', id, prior + requested - incoming, rootKey);
+            quantityInputs.atLeast('stock', id, prior - incoming + 1, rootKey); quantityInputs.atLeast('stock', id, prior, rootKey);
         }
         return stock;
     };
@@ -1507,10 +1523,12 @@ function forState(state = {}, deps = {}) {
         heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key });
     const plan = planOf(context, base, { key, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
-    // The skipped rebuild's answer: the held decision (its leaf by the
-    // proof's identity, its focus) or a new one.
-    if (shadowAlone) Diagnostics.count('context', 'quantity_would_hold', activityIdentity(plan.network?.activity)
-        === held.plan.eventProof.activity && plan.network?.focus?.[0] === held.plan.network.focus?.[0] ? 'same' : 'new');
+    // The skipped rebuild's answer with the same focus: the held decision
+    // (its leaf by the proof's identity), the same target at another amount
+    // or price (same_target), else new.
+    if (shadowAlone) Diagnostics.count('context', 'quantity_would_hold', plan.network?.focus?.[0] !== held.plan.network.focus?.[0] ? 'new'
+        : activityIdentity(plan.network?.activity) === held.plan.eventProof.activity ? 'same'
+        : activityTarget(plan.network?.activity) === activityTarget(held.plan.network.activity) ? 'same_target' : 'new');
     // Source memo and ground verdict belong only to the held build entry
     // (bounded by RETAIN_LIMIT, each memo by WishProviders' cap, each ground
     // by 2 bits per planning spot). A planning view or a group closure must

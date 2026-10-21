@@ -62,7 +62,8 @@ function choices(state, purchase, trip, incomePerHour = 0, rank = 'd', quantityI
         // These are the exact native questions for its existing physical rows.
         if (held) {
             quantityInputs?.present(id, Number(held.amount) || 0);
-            quantityInputs?.crystalFree(id, own);
+            // Read as a batch amount below, no threshold noted: untracked.
+            quantityInputs?.crystalFree(id, own); quantityInputs?.untracked('crystalFree', id);
         }
         // A bought copy of worn/useful gear could be reconciled into the kit.
         // Prefer a different type or an already free physical spare.
@@ -158,11 +159,16 @@ function ready(state, quantityInputs = null) {
             return amount;
         };
         const held = Number(state.inventory?.[1459]?.amount);
-        const crystals = Number(plan.materials?.find(row => Number(row.selfId) === 1459)?.amount);
-        quantityInputs?.physical(1459, Math.max(0, held || 0)); quantityInputs?.atLeast('physical', 1459, crystals);
+        quantityInputs?.physical(1459, Math.max(0, held || 0));
+        // The crystals' threshold is noted only when its compare runs.
+        const crystalsHeld = () => {
+            const crystals = Number(plan.materials?.find(row => Number(row.selfId) === 1459)?.amount);
+            quantityInputs?.atLeast('physical', 1459, crystals);
+            return held >= crystals;
+        };
         return (prep.materials || []).some(row => reward(Index.find(invoke('GameServer/DataCache').items, row.selfId))
             && readFree(row.selfId, 1) > 0) || prep.exchange?.materials?.length > 0 && prep.exchange.materials.every(row => readFree(row.selfId, row.amount) >= row.amount)
-            || held >= crystals;
+            || crystalsHeld();
     }
     if (plan?.strategy !== 'luxury_exchange' || plan.status !== 'active'
         || !invoke('GameServer/Bot/AI/PersonalGearProgression').allowsCGradeAcquisition(state)) return false;
