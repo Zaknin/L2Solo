@@ -244,8 +244,8 @@ const EXACT_QUANTITY_ROWS = new Set(['incoming', 'present', 'freePresent', 'stoc
 // and quantity'), the tolerate walker of quantityInputsHold for one verdict:
 // a moved count row holds while it stays on the same side of every
 // threshold the build compared it with (proof.thresholds, WishNetwork
-// createQuantityInputs) and the drift of the rows so held (sum |delta| x
-// buyback) stays within the verdict's one drift budget (charge, shared
+// createQuantityInputs) and the drift of the rows so held (|delta| x
+// buyback, an item's largest drift once) stays within the verdict's one drift budget (charge, shared
 // with the old bands: heldBuildVerdict). A row kept exact or never noted
 // (untracked), a stock row whose incoming moved, a crossing or a drift past
 // the budget refuses, and so does a malformed list.
@@ -373,14 +373,17 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // keeps charges its drift (|delta| x buyback) to it, so together they
     // never tolerate more. A band without an upper bound (stock at or above
     // its target) is sale capacity, not noise: it charges nothing.
-    // An item charges once per verdict: its stock, physical and sale rows
-    // read the same bag count, so one drift is one charge.
+    // An item charges its largest drift once per verdict: its stock,
+    // physical and sale rows read one bag count (one drift, one charge),
+    // a free row reads the bag minus its reserves and may move further.
     const budget = positive(proof.hourAdena) * positive(baseline.incomeError);
     let spent = 0, charged = null;
     const charge = (id, delta) => {
-        if (!delta || charged?.has(id)) return spent <= budget;
-        (charged ||= new Set()).add(id);
-        spent += Math.abs(delta) * positive(buyback(id));
+        const units = Math.abs(delta || 0), prior = charged?.get(id) || 0;
+        if (units > prior) {
+            (charged ||= new Map()).set(id, units);
+            spent += (units - prior) * positive(buyback(id));
+        }
         return spent <= budget;
     };
     const stockAmount = (kind, key, id, currentOwned, originalOwned) => {
