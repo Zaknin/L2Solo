@@ -515,90 +515,36 @@ function restartEventProof(proof, accepted) {
     const quantities = proof.quantities;
     if (!(quantities instanceof Uint8Array)) return null;
     try {
-        // Version, the recompute generation's key (a restore under another
-        // one is refused), the soft facts in the shared exact byte form, the
+        // Version, the recompute generation (a restore under another one is
+        // refused), the soft facts in the shared exact byte form, the
         // quantity rows' thresholds, then the quantity owner's opaque bytes
         // to the end.
         const write = Bytes.writer();
-        write.byte(9); write.raw(generationKey(proof.generation));
+        write.byte(8); write.raw(Buffer.from(proof.generation, 'hex'));
         if (!Providers.packLiquidationInputs(proof.liquidation, write)) return null;
         write.list(proof.stockRoots, row => {
             if (!Array.isArray(row) || row.length !== 2) throw Error('restart stock root');
             write.text(row[0]); write.uint(row[1]);
         });
-        write.list(proof.bands, row => writeBand(write, row));
+        write.list(proof.bands, row => {
+            if (!Array.isArray(row) || row.length !== 4) throw Error('restart band');
+            write.uint(row[0]); write.number(row[1]); write.number(row[2], true); write.number(row[3]);
+        });
         write.number(proof.hourAdena);
+        // The thresholds' length, then per noted row its index, its count and its thresholds.
         const thresholds = proof.thresholds;
-        if (!Array.isArray(thresholds) || !writeThresholds(write, thresholds)) return null;
+        if (!Array.isArray(thresholds)) return null;
+        write.uint(thresholds.length);
+        for (let at = 0, count; at < thresholds.length; at += 2 + count) {
+            count = thresholdCount(thresholds, at);
+            if (count < 0) return null;
+            write.uint(thresholds[at]); write.uint(count);
+            for (let side = at + 2; side < at + 2 + count; side++) write.number(thresholds[side]);
+        }
         write.raw(quantities);
         const bytes = write.finish();
         return bytes.byteLength <= PROOF_RAW_BYTES ? bytes : null;
     } catch (_) { return null; }
-}
-// The saved key of a recompute generation (a sha256): its first 8 bytes,
-// enough to tell one deploy, config or rate profile from another.
-const generationKey = generation => Buffer.from(generation.slice(0, 16), 'hex');
-// A band [id, low, high|null, original] (quantityBands): an integer band
-// as the original and its two gaps (one is 0 in the usual band: the original
-// is its low or its high); any other band as its exact numbers. The id's low
-// bit tells which.
-function writeBand(write, row) {
-    const uint = Bytes.exactUint;
-    if (!Array.isArray(row) || row.length !== 4 || !uint(row[0]) || !Number.isSafeInteger(row[0] * 2 + 1)) throw Error('restart band');
-    const [id, low, high, original] = row;
-    if (uint(low) && uint(original) && low <= original
-        && (high === null || uint(high) && high >= original && Number.isSafeInteger(high - original + 1))) {
-        write.uint(id * 2 + 1); write.uint(original); write.uint(original - low);
-        write.uint(high === null ? 0 : high - original + 1);
-    } else {
-        write.uint(id * 2); write.number(low); write.number(high, true); write.number(original);
-    }
-}
-function readBand(read) {
-    const head = read.uint(), id = Math.floor(head / 2);
-    if (head % 2 === 0) return Object.freeze([id, read.number(), read.number(true), read.number()]);
-    const original = read.uint(), low = original - read.uint(), gap = read.uint();
-    const high = gap ? original + gap - 1 : null;
-    if (low < 0 || high !== null && !Number.isSafeInteger(high)) throw Error('restart band');
-    return Object.freeze([id, low, high, original]);
-}
-// The thresholds (WishNetwork createQuantityInputs: per noted row its index,
-// its count, its ascending thresholds): the flat length, then per row the
-// index as its step from the last one, the count with a mark for integer
-// thresholds, written as their steps, or else as exact numbers. A list out
-// of row order is refused (a restore would refuse it).
-function writeThresholds(write, list) {
-    write.uint(list.length);
-    for (let at = 0, last = -1, count; at < list.length; at += 2 + count) {
-        count = thresholdCount(list, at);
-        const index = list[at];
-        if (count < 0 || !Number.isSafeInteger(index) || index <= last) return false;
-        const sides = list.slice(at + 2, at + 2 + count);
-        const steps = sides.every((side, i) => Number.isSafeInteger(side) && side > (i ? sides[i - 1] : 0));
-        write.uint(index - last - 1); write.uint(count * 2 + (steps ? 1 : 0));
-        sides.forEach((side, i) => steps ? write.uint(side - (i ? sides[i - 1] : 0) - 1) : write.number(side));
-        last = index;
-    }
-    return true;
-}
-function readThresholds(read, maxLength) {
-    const length = read.uint();
-    // Each entry takes a byte at least: a longer list is malformed.
-    if (length > maxLength) return null;
-    const list = [];
-    let last = -1;
-    while (list.length < length) {
-        const index = last + 1 + read.uint(), mark = read.uint(), count = Math.floor(mark / 2);
-        if (!Number.isSafeInteger(index) || list.length + 2 + count > length) return null;
-        list.push(index, count);
-        for (let side = 0, value = 0; side < count; side++) {
-            value = mark % 2 ? value + read.uint() + 1 : read.number();
-            if (!Number.isSafeInteger(value) && mark % 2) return null;
-            list.push(value);
-        }
-        last = index;
-    }
-    return list;
 }
 function restoreEventProof(prefix, accepted) {
     const generation = RecomputeGeneration.current();
@@ -607,20 +553,27 @@ function restoreEventProof(prefix, accepted) {
         || prefix.byteLength > PROOF_RAW_BYTES || !accepted?.card) return null;
     try {
         const read = Bytes.reader(prefix);
-        // A prefix of format 8 (a whole generation, unpacked bands and thresholds) is refused once.
-        const key = generationKey(generation);
-        if (read.byte() !== 9 || !read.raw(key.length).equals(key)) return null;
+        // A prefix of format 7 (it carried no quantity thresholds) is refused once.
+        if (read.byte() !== 8 || read.raw(32).toString('hex') !== generation) return null;
         const liquidation = Providers.unpackLiquidationInputs(read);
         const stockRoots = Object.freeze(read.list(() => Object.freeze([read.text(), read.uint()])));
-        const bands = Object.freeze(read.list(() => readBand(read)));
+        const bands = Object.freeze(read.list(() => Object.freeze([read.uint(), read.number(), read.number(true), read.number()])));
         const hourAdena = read.number();
-        const list = readThresholds(read, prefix.byteLength);
-        if (!list) return null;
+        // The thresholds (each entry takes a byte at least: a longer list is malformed).
+        const length = read.uint();
+        if (length > prefix.byteLength) return null;
+        const list = [];
+        while (list.length < length) {
+            const index = read.uint(), count = read.uint();
+            if (list.length + 2 + count > length) return null;
+            list.push(index, count);
+            for (let side = 0; side < count; side++) list.push(read.number());
+        }
         // The packed quantity proof stays packed; a prefix it cannot read is refused here.
         const packed = Uint8Array.from(read.rest());
         let rows = 0;
         const quantities = eachQuantityRow(packed, () => { rows++; }) ? packed : null;
-        const thresholds = quantities && checkedThresholds(list, rows) && (list.length ? Object.freeze(list) : Network.NO_THRESHOLDS);
+        const thresholds = quantities && checkedThresholds(list, rows) && (length ? Object.freeze(list) : Network.NO_THRESHOLDS);
         if (!thresholds || !Number.isSafeInteger(accepted.characterId)
             || accepted.card.activity === null && accepted.activityLeaf !== 0
             || !Number.isFinite(accepted.baseline?.at)) return null;
@@ -629,6 +582,32 @@ function restoreEventProof(prefix, accepted) {
             activity: activityIdentity(accepted.card.activity), generation,
             quantities, liquidation, stockRoots, thresholds, bands, hourAdena });
     } catch (_) { return null; }
+}
+function wireEventProof(proof) {
+    if (!proof || proof.version !== 2
+        || (proof.activity === null ? proof.decision?.[1] !== 0 : typeof proof.activity !== 'string')) return null;
+    try {
+        if (!(proof.quantities instanceof Uint8Array)) return null;
+        // Packed quantities cross as canonical base64 (receiveEventProof), so
+        // this JSON size is the wire's.
+        const wire = { ...proof, quantities: Buffer.from(proof.quantities).toString('base64') };
+        return Buffer.byteLength(JSON.stringify(wire)) <= PROOF_RAW_BYTES ? wire : null;
+    } catch (_) { return null; }
+}
+// The proof from its wire form or in process; null when its packed
+// quantities are malformed or above their bound.
+function receiveEventProof(proof) {
+    const value = proof?.quantities, cap = Network.QUANTITY_INPUT_BYTES;
+    const quantities = value instanceof Uint8Array ? value.byteLength <= cap ? value : null : Bytes.fromBase64(value, cap);
+    if (!quantities) return null;
+    // A built list is frozen (WishNetwork createQuantityInputs); one from
+    // the wire is checked against its rows and frozen.
+    const list = proof.thresholds;
+    if (Array.isArray(list) && Object.isFrozen(list)) return { ...proof, quantities };
+    let rows = 0;
+    const thresholds = Array.isArray(list) && eachQuantityRow(quantities, () => { rows++; })
+        && checkedThresholds(list, rows) && (list.length ? Object.freeze(list.slice()) : Network.NO_THRESHOLDS);
+    return thresholds ? { ...proof, quantities, thresholds } : null;
 }
 // A proof's thresholds list (WishNetwork createQuantityInputs) when it fits
 // its `rows` packed rows: rows by ascending index below `rows`, each with
@@ -2067,5 +2046,5 @@ function reset() {
 }
 function size() { return { context: cache.size, engine: engine.cache.size, groups: groups.size }; }
 
-module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, restoreEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, shotDemand, stateForActor, preparedRouteRows, heldWorkshop, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
+module.exports = { FIELD_ACTIVITIES, captureEventProof, heldBuildVerdict, eventProofHolds, restartEventProof, receiveEventProof, restoreEventProof, wireEventProof, size, forState, forGroup, forgetGroup, basics, stockFor, keptTargets, shotDemand, stateForActor, preparedRouteRows, heldWorkshop, RETAIN_LIMIT, leafCheck, survivalReserve, forgetContext, forget, reset, configure, registerProvider,
     craftIncome };

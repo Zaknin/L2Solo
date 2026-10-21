@@ -110,4 +110,4 @@ function fromBase64(text, maxBytes) {
     const bytes = Buffer.from(text, 'base64');
     return bytes.toString('base64') === text && bytes.byteLength <= maxBytes ? Uint8Array.from(bytes) : null;
 }
-module.exports = { writer, reader, fromBase64, exactUint };
+module.exports = { writer, reader, fromBase64 };
