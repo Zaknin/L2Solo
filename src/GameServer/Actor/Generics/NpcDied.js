@@ -180,7 +180,9 @@ function npcDied(session, actor, npc) {
         actor.abortCombatState(session);
         return;
     }
-    Generics.abortCombatState(session, actor);
+    // End the completed attack/chase, but retain the player's combat stance
+    // until its last-event timeout, as Lisvus clientStopAutoAttack does.
+    actor.automation.abortAll(actor);
 
     if (actor.isDead()) return;
 

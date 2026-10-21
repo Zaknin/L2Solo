@@ -67,6 +67,7 @@ const PopulationStatus = {
             coldQueue,
             targetCombat,
             partyRequests,
+            raidSearch: invoke('GameServer/Bot/Population/PopulationService').opportunisticRaids?.searchCounters.snapshot() || null,
             marketState: MarketSnapshot.snapshot()
         };
     },
@@ -241,6 +242,7 @@ const PopulationStatus = {
             metrics,
             governor,
             backgroundJobs,
+            opportunisticRaids: invoke('GameServer/Bot/Population/PopulationService').opportunisticRaids?.snapshot() || null,
             clanSimulation,
             director: Director.snapshot(),
             market,

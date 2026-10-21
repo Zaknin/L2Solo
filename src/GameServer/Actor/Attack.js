@@ -548,6 +548,11 @@ class Attack {
         delete actor.activeSkillChargeCount;
         this.clearLoadedShot(actor, magicSkill);
         actor.state.setCasts(false);
+        // Lisvus onMagicFinalizer starts/renews stance after an offensive
+        // cast completes, including a resisted spell, rather than at acceptance.
+        if (!actor.fetchKind && skill.fetchTargetKind?.() === 'enemy') {
+            invoke(path.actor).enterCombatState(session, actor);
+        }
         invoke('GameServer/Bot/AI/BotSupportPlanner').finishSupportCast(session, actor, skill);
 
         // Start replenish
@@ -1325,7 +1330,8 @@ class Attack {
             src.state.setHits (false);
             src.state.setCasts(false);
             if (src.session) {
-                invoke(path.actor).abortCombatState(src.session, src);
+                if (src.state.fetchDead()) invoke(path.actor).abortCombatState(src.session, src);
+                else src.automation.abortAll(src);
             }
             return true;
         }
@@ -1394,6 +1400,9 @@ class Attack {
 
             if (ArenaCombatRules.suppressConsequences(actor, creature)) {
                 invoke(path.actor).receivedHit(session, creature, hit, { source: actor });
+                if (!context.skill && hit > 0 && !actor.state.fetchDead?.()) {
+                    invoke(path.actor).enterCombatState(session, actor);
+                }
                 return;
             }
 
@@ -1407,6 +1416,11 @@ class Attack {
         }
 
         this.applyReflectedDamage(session, actor, creature, hit);
+        // A landed normal attack is the stance event. A skill renews stance
+        // in finishRemoteCast; a missed or cancelled swing does not renew it.
+        if (!actor.fetchKind && !context.skill && hit > 0 && !actor.state.fetchDead?.()) {
+            invoke(path.actor).enterCombatState(session, actor);
+        }
     }
 
     tryBreakCast(creature, damage, rng = Math.random) {

@@ -1,6 +1,7 @@
 const Actor = invoke('GameServer/Actor/Actor');
 const World = invoke('GameServer/World/World');
 const NpcVisibility = invoke('GameServer/World/NpcVisibility');
+const GroundItemVisibility = invoke('GameServer/World/GroundItemVisibility');
 
 class BotSession {
     constructor(username) {
@@ -50,6 +51,8 @@ class BotSession {
                     user.recordOutboundPacket(data);
                 }
                 user.socket.write(packet);
+                GroundItemVisibility.trackPacket(user, data);
+                NpcVisibility.sendNpcMotionAfterInfo(user, data);
             }
         });
         HotActorLodPolicy.recordPacketBroadcast(recipients.length, packet.length);

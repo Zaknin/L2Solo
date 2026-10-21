@@ -263,6 +263,8 @@ function sameRosterRequirement(left, right) {
         && JSON.stringify(fullRosterIdentity(left?.fullRoster)) === JSON.stringify(fullRosterIdentity(right?.fullRoster));
 }
 function startedRaidParty(party) {
+    if (party?.stats?.objective?.opportunisticRaid === true)
+        return require('../Bot/Population/BackgroundPartyLifecycle').raidStarted(party);
     return !!party && ClanMembershipPolicy.activeRaidGoalKeys([party]).size > 0;
 }
 function stateHasSameClanObjective(state, objective) {

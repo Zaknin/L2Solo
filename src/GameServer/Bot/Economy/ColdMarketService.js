@@ -200,6 +200,7 @@ function tripFrom(state, timestamp = Date.now()) {
 // must not fall back to an unrelated funded item in the current packet.
 function fundingTerms(options = {}) {
     const terms = {};
+    if (typeof options.raidPreparationId === 'string') terms.raidPreparationId = options.raidPreparationId;
     for (const name of ['r', 'valueHours', 'survivalCost']) {
         if (options[name] !== undefined && options[name] !== null && Number.isFinite(Number(options[name]))) {
             terms[name] = Number(options[name]);
@@ -287,6 +288,10 @@ function planPurchase(state, selfId, amount, options = {}) {
     let fundingContext;
     const accept = line => {
         if (options.npcOnly) return false;
+        // A raid's reserved supply is an explicit purchase, rather than a
+        // personal wish certificate for a bilateral conditional advertisement.
+        // Use backed shops and NPC stock; do not keep restaging an ineligible meeting.
+        if (options.purpose === 'raid_supply' && (line?.conditional || line?.custodyPolicy === 1)) return false;
         const allowed = personalOfferAllowed(line, state);
         if (line?.conditional || line?.custodyPolicy === 1) {
             options.onAdmissionRead?.(Number(line.ownerId ?? line.sourceId), allowed);
@@ -334,6 +339,11 @@ function planPurchase(state, selfId, amount, options = {}) {
         // partial buy or expand to the full public market.
         if (options.quoteDepth && !plan?.whole) plan = null;
     }
+    // A reserved raid needs its whole missing stock. Check the actual mixed
+    // quote plus the trip, rather than pricing every unit at the ceiling.
+    // Reuse this planning pass at departure and arrival, with no second scan.
+    if (options.purpose === 'raid_supply' && plan
+        && (plan.units < amount || !Number.isFinite(plan.landed) || plan.landed > money)) plan = null;
     if (Diagnostics.active()) purchaseObservation(state, selfId, amount, money, 'purchase_plan', plan ? 'source_selected' : 'no_affordable_source',
         Diagnostics.enabled(state.characterId) ? { planned: Number(plan?.units || 0), remaining: Math.max(0, amount - Number(plan?.units || 0)),
             cost: Number(plan?.cost), town: plan?.town, source: plan?.npc > 0 ? 'npc_and_board' : 'board', unitPrice: Number(plan?.npcPrice),
@@ -347,6 +357,7 @@ function planPurchase(state, selfId, amount, options = {}) {
 // not cancel them or charge an already justified town visit twice.
 function worthwhileTravel(state, plan, options = {}) {
     if (!plan || !(plan.units > 0)) return false;
+    if (options.purpose === 'raid_supply' && require('../Population/RaidSupplyPolicy').held(state)?.id === options.raidPreparationId) return true;
     if (options.purpose === 'clan') return true;
     const context = options.economy || require('../Population/ColdEconomyDecision').economyFor(state);
     const route = context.trip?.details ? context.trip.details(plan.town)
@@ -380,6 +391,7 @@ function worthwhileTravel(state, plan, options = {}) {
 const deniedTrips = new WeakMap();
 const ADMISSION_OWNER_LIMIT = 8;
 function canTravelForPurchase(state, request, options = {}) {
+    if (request?.purpose === 'raid_supply' && require('../Population/RaidSupplyPolicy').held(state)?.id === request.raidPreparationId) return true;
     if (request?.purpose === 'clan') return true;
     const id = Number(request?.selfId), amount = Number(request?.amount);
     if (!(id > 0) || !(amount > 0)) return false;
@@ -480,8 +492,9 @@ async function buyHere(state, plan, options = {}) {
             const offer = realSeller;
             const basics = invoke('GameServer/Bot/Economy/EconomyContext').basics(current);
             const baskets = NpcRestock.collect(current, { town: plan.town, seller: offer,
-                shots: basics.stock('shots').itemId !== Number(plan.selfId),
-                potions: basics.stock('potions').itemId !== Number(plan.selfId), scrolls: Number(plan.selfId) !== 736,
+                shots: !plan.raidPreparationId && basics.stock('shots').itemId !== Number(plan.selfId),
+                potions: !plan.raidPreparationId && basics.stock('potions').itemId !== Number(plan.selfId),
+                scrolls: !plan.raidPreparationId && Number(plan.selfId) !== 736,
                 extras: [{ selfId: plan.selfId, amount: rest, offer, funding: purchaseTerms(current, plan, spent),
                     goal: options.goal, errand: options.errand, autoEquip: options.autoEquip === true }] });
             if (baskets[0]) {
@@ -877,7 +890,7 @@ const ColdMarketService = {
             if (next?.pending || next?.reason === 'bot_went_hot') return current;
         }
         // E314: a visit already ended plans no shot purchase again (the NPC basket below still runs).
-        if (current.stats?.townVisit?.completed !== true) {
+        if (!options.raidSupplyOnly && current.stats?.townVisit?.completed !== true) {
             const plan = ShotStock.planForState(current);
             const localPrices = staticOffers(plan.selfId).filter(offer => offer.town === current.currentRegion);
             const unitPrice = localPrices.length ? Math.min(...localPrices.map(offer => Number(offer.price))) : 0;
@@ -917,7 +930,8 @@ const ColdMarketService = {
                 goal: goalForErrand(current, errand), money: errand.money,
                 funding: purchaseTerms(current, { ...errand, npcPrice: offer.price }) });
         }
-        const bought = await NpcRestock.purchase(current, { town: current.currentRegion, extras });
+        const bought = await NpcRestock.purchase(current, { town: current.currentRegion, extras,
+            ...(options.raidSupplyOnly ? { shots: false, potions: false, scrolls: false } : {}) });
         current = bought.state;
         if (LifeState.hotRow(current.characterId)) return current;
         return endVisit(current);

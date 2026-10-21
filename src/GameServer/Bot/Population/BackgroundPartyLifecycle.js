@@ -6,6 +6,7 @@ const DEFAULT_SESSION_JITTER_MS = 5 * 60 * 1000;
 function raidStarted(party) {
     const objective = party?.stats?.objective;
     if (party?.status === 'dissolved' || party?.stats?.raidEncounter?.status === 'failed') return false;
+    if (party?.stats?.objective?.opportunisticRaid === true) return true;
     return (objective?.sourceKind === 'raid' || objective?.raidBoss === true)
         && (['preparing', 'ready'].includes(party?.stats?.raidPreparation?.status)
             || party?.stats?.raidEncounter?.status === 'active');

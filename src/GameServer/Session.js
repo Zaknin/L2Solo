@@ -2,6 +2,7 @@ const Opcodes = invoke('GameServer/Network/Opcodes');
 const Actor   = invoke('GameServer/Actor/Actor');
 const World   = invoke('GameServer/World/World');
 const NpcVisibility = invoke('GameServer/World/NpcVisibility');
+const GroundItemVisibility = invoke('GameServer/World/GroundItemVisibility');
 
 const TRACE_LIMIT = 40;
 const MOVEMENT_TRACE_LIMIT = 160;
@@ -217,6 +218,8 @@ class Session {
         this.recordOutboundPacket(data);
         const packet = this.packData(data);
         this.socket.write(packet);
+        GroundItemVisibility.trackPacket(this, data);
+        NpcVisibility.sendNpcMotionAfterInfo(this, data);
     }
 
     dataSendToOthers(data, creature) {
@@ -230,6 +233,8 @@ class Session {
                 user.recordOutboundPacket(data);
             }
             user.socket.write(packet);
+            GroundItemVisibility.trackPacket(user, data);
+            NpcVisibility.sendNpcMotionAfterInfo(user, data);
         });
     }
 

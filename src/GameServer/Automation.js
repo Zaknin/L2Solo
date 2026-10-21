@@ -216,6 +216,7 @@ class Automation extends SelectedModel {
             locY: Math.round(move.from.locY + (move.to.locY - move.from.locY) * ratio),
             locZ: Math.round(move.from.locZ + (move.to.locZ - move.from.locZ) * ratio)
         });
+        move.onPosition?.();
     }
 
     stopMoveInterpolation() {
@@ -227,7 +228,7 @@ class Automation extends SelectedModel {
         this.moveInterpolation = null;
     }
 
-    startMoveInterpolation(session, actor, to, duration) {
+    startMoveInterpolation(session, actor, to, duration, onPosition) {
         this.stopMoveInterpolation();
         // NPCs and summons borrow a recipient's session to broadcast. Keep
         // their movement on their own automation, never on that recipient.
@@ -239,7 +240,7 @@ class Automation extends SelectedModel {
         const move = this.moveInterpolation = {
             actor, session: ownSession, to: { ...to },
             from: { locX: actor.fetchLocX(), locY: actor.fetchLocY(), locZ: actor.fetchLocZ() },
-            startedAt: Date.now(), duration: Math.max(1, duration), timer: null
+            startedAt: Date.now(), duration: Math.max(1, duration), timer: null, onPosition
         };
         const advance = () => {
             if (this.moveInterpolation !== move) return;
@@ -422,7 +423,7 @@ class Automation extends SelectedModel {
         this.schedulePlayerAttackArrival(approach, ticks);
     }
 
-    scheduleMoveToCoords(session, src, to, callback = () => {}) {
+    scheduleMoveToCoords(session, src, to, callback = () => {}, options = {}) {
         this.clearPlayerAttackApproach();
         const from = {
             locX: src.fetchLocX(),
@@ -438,6 +439,8 @@ class Automation extends SelectedModel {
         if (!Object.values(destination).every(Number.isFinite)) {
             return false;
         }
+        const speed = options.speed ?? src.fetchCollectiveRunSpd();
+        if (!Number.isFinite(speed) || speed <= 0) return false;
         this.stopMoveInterpolation();
         Object.assign(from, { locX: src.fetchLocX(), locY: src.fetchLocY(), locZ: src.fetchLocZ() });
 
@@ -457,21 +460,22 @@ class Automation extends SelectedModel {
             ServerResponse.moveToLocation(src.fetchId(), { from, to: destination }),
             src
         );
-        src.state.setTowards('path');
+        src.state.setTowards(options.towards || 'path');
 
         const ticks = this.ticksToMove(
             from.locX, from.locY, from.locZ,
             destination.locX, destination.locY, destination.locZ,
             0,
-            src.fetchCollectiveRunSpd()
+            speed
         );
 
-        this.startMoveInterpolation(session, src, destination, ticks);
+        this.startMoveInterpolation(session, src, destination, ticks, options.onPosition);
 
         Timer.start(this.timer.action, () => {
             this.stopMoveInterpolation();
             src.state.setTowards(false);
             src.setLocXYZ(destination);
+            options.onPosition?.();
             callback(destination);
         }, ticks);
         return true;

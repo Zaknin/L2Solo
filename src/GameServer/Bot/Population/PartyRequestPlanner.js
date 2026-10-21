@@ -30,6 +30,7 @@ function expire(request, now = Date.now()) {
 // fixed bounds, any other party uses the defaults (the configured sizes
 // unless the caller gives its own).
 function limitsForObjective(objective = null, defaults = {}) {
+    if (objective?.opportunisticRaid === true) return { minSize: 9, maxSize: 9, levelRange: 7 };
     const maxSize = Number(defaults.maxSize ?? Config.partyMaxSize);
     const minSize = Number(defaults.minSize ?? Config.partyMinSize);
     if (objective?.fullRoster) return { maxSize: 9, minSize: 9, levelRange: defaults.levelRange ?? 99 };
@@ -89,7 +90,7 @@ function partyObjectiveForPlan(plan) {
 }
 
 function partyRequestEligible(state) {
-    return !state?.party?.partyId
+    return !require('./RaidSupplyPolicy').held(state) && !state?.party?.partyId
         && ['hunting', 'resting', 'party_wait'].includes(state?.activity);
 }
 

@@ -31,7 +31,8 @@ function actor(id = 2000001) {
         fetchCollectiveCritical: () => 1000, fetchDex: () => 30,
         fetchLocX: () => 0, fetchLocY: () => 0, fetchLocZ: () => 0, fetchHead: () => 0,
         statusUpdateVitals() {}, isDead() { return this.hp <= 0; },
-        state: { fetchDead: () => false, setHits() {}, setCasts() {}, setTowards() {} },
+        state: { fetchDead: () => false, setHits() {}, setCasts() {}, setTowards() {},
+            fetchCombats() { return !!this.combats; }, setCombats(value) { this.combats = value; } },
         backpack: { fetchTotalWeaponPAtkRnd: () => 0 }
     };
 }

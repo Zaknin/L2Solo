@@ -222,6 +222,11 @@ function select(session, actor, data) {
                     Generics.attackRequest(session, actor, data);
                 }
             }).catch(() => {
+                if (session.actor !== actor) return;
+                // C4 keeps a clicked object's Action pending until the server
+                // answers. A stale ground object must not lock client input.
+                session.dataSendToMe(ServerResponse.actionFailed());
+                session.dataSendToMe(ServerResponse.deleteOb(data.id));
                 utils.infoWarn('GameServer', 'unknown World Id %d', data.id);
             });
         });

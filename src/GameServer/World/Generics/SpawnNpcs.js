@@ -36,6 +36,7 @@ function notifyNearby(world, npc, response = ServerResponse) {
 function createNpc(world, npc, coords, spawnDefinition = null) {
     const instance = new Npc(world.npc.nextId++, { ...utils.crushOb(npc), ...coords });
     instance.spawnDefinition = spawnDefinition;
+    instance.spawnOrigin = { locX: coords.locX, locY: coords.locY, locZ: coords.locZ };
     if (npc.template?.raidBoss === true) instance.raidInstanceId = `${Date.now()}:${instance.fetchId()}`;
     NpcAggro.armSpawnGrace(instance);
     world.npc.spawns.push(instance);

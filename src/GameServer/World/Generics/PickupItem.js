@@ -2,6 +2,7 @@ const ServerResponse = invoke('GameServer/Network/Response');
 const ConsoleText    = invoke('GameServer/ConsoleText');
 const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
 const PickupCapacity = require('../../Inventory/PickupCapacity');
+const GroundItemVisibility = require('../GroundItemVisibility');
 
 function pickupItem(session, actor, item) {
     if (!actor || session?.actor !== actor || !actor.backpack ||
@@ -47,6 +48,9 @@ function pickupItem(session, actor, item) {
     let scheduled = 0;
     try {
         session.dataSendToMeAndOthers(ServerResponse.deleteOb(id), claimedItem);
+        // Nearby clients were cleared by the normal broadcast. Also remove
+        // the object from clients that saw its spawn and have since left.
+        GroundItemVisibility.deleteKnownItem(this, id);
         allocations.forEach((entry, index) => {
             const award = this.purchaseItem(entry.session, selfId, entry.amount, selfId === 57 ? {} : {
                 enchant: claimedItem.fetchEnchantLevel?.() ?? 0,

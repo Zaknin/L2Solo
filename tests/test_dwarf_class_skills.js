@@ -79,6 +79,7 @@ function actor(overrides = {}) {
             hits: true,
             casts: true,
             combats: true,
+            fetchCombats() { return this.combats; },
             inMotion: () => false,
             fetchWalkin: () => false,
             fetchSeated: () => false,

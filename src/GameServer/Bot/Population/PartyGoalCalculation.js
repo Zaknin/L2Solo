@@ -38,6 +38,20 @@ function validMembers(party, members, partial = false) {
 }
 
 async function calculate(party, members, prepare, timestamp, current = () => true, { spots } = {}) {
+    if (require('./OpportunisticRaidPolicy').isObjective(party.stats?.objective)) {
+        if (!current()) throw new Error('party_goal_expired');
+        const objective = party.stats.objective;
+        const wall = performance.now(), cpu = process.threadCpuUsage?.();
+        const raidAssessment = require('./OpportunisticRaidPolicy').assessment(members,
+            invoke('GameServer/RaidBoss/RaidBossSourceCatalog').findById(objective.spotId), {
+                timestamp, maxFightSeconds: objective.maxFightSeconds, reserve: objective.shotReserve,
+                fundSupplies: objective.fundRaidSupplies === true });
+        const used = cpu && process.threadCpuUsage(cpu);
+        // Charge only synchronous forecast work on this worker thread. Queue
+        // waits and other server threads must not inflate the search budget.
+        raidAssessment.workMs = used ? (used.user + used.system) / 1000 : performance.now() - wall;
+        return { ...require('./PartyGoalPolicy').pending(party, members), raidAssessment };
+    }
     // Declared material needs do not require personal or group wish rebuilds.
     if (require('./CraftMaterialParty').isObjective(party.stats?.objective)) {
         if (!current()) throw new Error('party_goal_expired');

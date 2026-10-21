@@ -417,6 +417,7 @@ function requiresClanEquipmentParty(state) {
 
 async function jointPartyGoals(party, members, timestamp, options = {}) {
     const Policy = invoke('GameServer/Bot/Population/PartyGoalPolicy');
+    if (party.stats?.objective?.opportunisticRaid === true) return Policy.pending(party, members);
     if (!members.some(member => member.phase === 'cold') && CraftMaterialParty.isObjective(party.stats?.objective))
         return Policy.joint(party, members, { timestamp, spots: SpotProfiles.ensure() });
     if (!members.some(member => member.phase === 'cold'))
@@ -763,6 +764,10 @@ function joinPartyRecruits(party, members, recruits, joint) {
 function commitPartyMembership(party, members = [], event = null, options = {}) {
     const selected = (members || []).filter(Boolean);
     if (!party || !selected.length) return Promise.resolve({ party: null, assigned: [], failed: selected });
+    if (selected.some(member => {
+        const held = require('./RaidSupplyPolicy').held(LifeState.cachedState(member.characterId) || member);
+        return held && held.id !== party.stats?.objective?.preparationId;
+    })) return Promise.resolve({ party: null, assigned: [], failed: selected, reason: 'raid_supply_reserved' });
     if (selected.some(member => !member.party?.partyId && !member.partyId
         && !invoke('GameServer/AfkTrade/TradeMeetingService').canJoinParty(member.characterId, member))) {
         return Promise.resolve({ party: null, assigned: [], failed: selected, reason: 'party_trade_busy' });
@@ -885,6 +890,8 @@ async function createBackgroundParty(members = [], objectiveOverride = null, opt
         && member.stats?.partyRequest?.priority === 'required'
     )) || members.find((member) => partyObjectiveForState(member)) || leader;
     const objective = objectiveOverride || partyObjectiveForState(objectiveMember);
+    if (objective?.preparationId) members = members.map(s => s.stats?.raidSupplyPreparation?.id === objective.preparationId
+        ? { ...s, stats: { ...s.stats, raidSupplyPreparation: null } } : s);
     const partySpot = partySpotForLeader(leader, objective?.spotId || null, members);
     const timestamp = Date.now();
     const partyId = `bgp_${timestamp.toString(36)}_${leader.characterId}`;
@@ -1113,6 +1120,8 @@ const PopulationService = {
         this.startHotBoardReviews();
         this.startLifecycleSafetySweep();
         this.startPartyAssemblyEvents();
+        Promise.resolve(this.lifeReadyPromise).then(() => this.startOpportunisticRaids())
+            .catch(error => utils.infoWarn('BotRaid', 'startup failed: %s', error.message));
 
         Promise.resolve(this.lifeReadyPromise).then(() => {
             if (!this.started) return;
@@ -1156,6 +1165,8 @@ const PopulationService = {
     },
 
     stop() {
+        this.opportunisticRaids?.stop();
+        this.opportunisticRaids = null;
         ClanActionService.stopEvents();
         this.stopPartyAssemblyEvents();
         this.stopLifecycleSafetySweep();
@@ -1434,6 +1445,11 @@ const PopulationService = {
             }
         });
 
+        registry.register({ name: 'opportunistic_raids', intervalMs: 11000, offsetMs: 45000,
+            run: () => this.opportunisticRaids?.pulse() });
+        registry.register({ name: 'opportunistic_raid_combat', intervalMs: 4000, offsetMs: 45000,
+            run: () => this.opportunisticRaids?.maintain() });
+
         if (ClanSimulationConfig.enabled !== false) {
             const clanIntervalMs = Math.max(1000, Number(ClanSimulationConfig.resolveIntervalMs) || 60000);
             const clanContinuationMs = Math.max(
@@ -1460,6 +1476,81 @@ const PopulationService = {
         this.backgroundJobRegistry = registry;
         registry.start();
         return registry;
+    },
+
+    async startOpportunisticRaids() {
+        if (!this.started || this.opportunisticRaids || Config.opportunisticRaidsEnabled === false
+            || Config.backgroundPartyEnabled === false) return;
+        const Policy = require('./OpportunisticRaidPolicy');
+        const Catalog = invoke('GameServer/RaidBoss/RaidBossSourceCatalog');
+        const World = invoke('GameServer/World/World');
+        const Index = invoke('GameServer/World/RaidEntityIndex');
+        const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
+        const bossFor = id => Index.bossByTemplateId(World, id);
+        const bossFree = (spot, exceptPartyId = null, excludedIds = []) => {
+            const boss = bossFor(spot.raidBossTemplateId);
+            return !!boss && !boss.isDead() && boss.fetchHp() === boss.fetchMaxHp()
+                && !boss.fetchDestId?.() && ['active', 'hot'].every(status =>
+                    !BackgroundPartyState.raidCompetitors(spot.raidBossTemplateId, status, exceptPartyId, 'opportunity').length)
+                && !invoke('GameServer/RaidBoss/RaidEncounterScope').otherParticipants(World, boss, excludedIds);
+        };
+        const assess = async (members, spot, timestamp = Date.now(), { fundSupplies = false } = {}) => {
+            const party = { partyId: 'raid_assessment', leaderId: members[0].characterId,
+                memberIds: members.map(s => s.characterId), spotId: spot.id,
+                stats: { objective: { sourceKind: 'raid', opportunisticRaid: true, spotId: spot.id,
+                    maxFightSeconds: Config.opportunisticRaidMaxFightSeconds,
+                    shotReserve: Config.opportunisticRaidShotReserve,
+                    fundRaidSupplies: fundSupplies } } };
+            const result = await ColdSimulationCoordinator.requestPartyGoals(party, members, { timestamp });
+            return result.ok && result.joint?.raidAssessment
+                || { ready: false, reason: result.reason || 'raid_assessment_unavailable' };
+        };
+        const service = new (require('./OpportunisticRaidDirector').OpportunisticRaidDirector)({
+            config: Config, life: LifeState, database: Database, parties: BackgroundPartyState, memory: Memory,
+            catalog: Catalog, assembly: require('./PartyHuntingAssembly'), bossFor, bossFree, assess,
+            raidEntities: boss => Index.entitiesForRaid(World,
+                { bossId: boss.fetchId(), bossTemplateId: boss.fetchSelfId() }),
+            hot: invoke('GameServer/Bot/Population/HotPartyLifecycle'),
+            sessions: () => invoke('GameServer/Bot/BotManager').sessions,
+            ai: invoke('GameServer/Bot/BotAI'), lod: invoke('GameServer/Bot/AI/HotActorLodPolicy'),
+            canFinish: sessions => sessions.every(s => Cooldown.canCooldown(s, { ignoreVisibility: true }).ok
+                && !invoke('GameServer/Bot/AI/PartyAwareness').npcThreateningActor(s)),
+            defeated: id => invoke('GameServer/World/RaidBossState').get(id),
+            // Presence subscribers open ordinary formation on the same clock
+            // tick. Discovery is read-only worker advice, so only the actual
+            // membership commit below shares that formation fence.
+            canWork: () => this.started && !this.resolving
+                && Number(Database.pending()) < 4
+                && Number(Metrics.currentEventLoopLag()) < 40,
+            dissolve: async (party, reason) => {
+                const current = BackgroundPartyState.find(party.partyId);
+                if (!current || current.status !== 'active') return;
+                await dissolveBackgroundParty(current, reason, current.memberIds.length);
+                await LifeState.releaseDissolvedPartyMembers(current.partyId, reason);
+            },
+            form: async (members, objective) => {
+                if (!this.started || this.partyFormationRunning || !bossFree(Catalog.findById(objective.spotId))) return null;
+                const current = await LifeState.statesByIds(members.map(s => s.characterId));
+                if (current.length !== 9 || current.some(s => !Policy.available(s, Date.now(), objective.preparationId))
+                    || !current.every(s => Policy.recruitLevelAllowed(s, objective.sourceLevel))
+                    || !Policy.composition(current).ready) return null;
+                const checked = await assess(current, Catalog.findById(objective.spotId));
+                if (!checked.ready || !current.every((s, i) => current.slice(i + 1).every(peer =>
+                    Policy.compatible(s, peer, Memory.assess.bind(Memory))))) return null;
+                if (!this.started || this.partyFormationRunning || this.resolving) return null;
+                this.partyFormationRunning = true;
+                try { return await createAndCommitBackgroundParty(current, { ...objective, assessment: checked }); }
+                finally { this.partyFormationRunning = false; }
+            }
+        });
+        service.preparations = new (require('./RaidSupplyPreparation').RaidSupplyPreparation)({
+            life: LifeState, coordinator: ColdSimulationCoordinator, memory: Memory,
+            market: ColdMarketService, catalog: Catalog, assess, bossFree, form: service.form,
+            onReleased: ids => service.remember(ids, Date.now())
+        });
+        this.opportunisticRaids = service;
+        await BackgroundPartyState.init();
+        await service.start();
     },
 
     // One deadline on the shared background heap instead of a fixed interval.
@@ -2418,6 +2509,10 @@ const PopulationService = {
     expirePartyRequestForState,
 
     async applyWorkerPartyRequirements(party, resolution) {
+        if (require('./OpportunisticRaidPolicy').isObjective(party.stats?.objective)) {
+            this.clearPartyRequirementDue(party.partyId);
+            return [];
+        }
         // Material completion is checked against the physical bag by the
         // native resolver. A generic gear refresh must not evict its core.
         if (CraftMaterialParty.isObjective(party.stats?.objective)) {
@@ -2790,6 +2885,25 @@ const PopulationService = {
         }
         if (workerRequest?.precomputedPlan?.statsPacket) options = { ...options, statsPacket: workerRequest.precomputedPlan.statsPacket };
         const startedAt = Date.now();
+        if (require('./RaidSupplyPolicy').held(state, startedAt)) {
+            const result = workerRequest?.precomputedResult || BackgroundResolver.resolveSolo({ state, timestamp: startedAt });
+            return LifeState.applyResolve(state, result, options).then(async saved => {
+                if (!saved) return { ok: false, reason: 'state_write_rejected', state };
+                let current = saved;
+                if (current.activity === 'shopping') {
+                    const purchase = await ColdMarketService.tryPurchase(current, null);
+                    current = purchase.state || current;
+                    if (!purchase.pending && !LifeState.hotRow(current.characterId)
+                        && !invoke('GameServer/AfkTrade/TradeMeetingService').hasPreparation(current.characterId)) {
+                        current = await ColdMarketService.finishTownErrands(current, { raidSupplyOnly: true });
+                        const returning = GoalExecutor.finishMarketVisit(current);
+                        if (returning) current = await LifeState.upsertState(returning, 'raid_supply_return') || current;
+                    }
+                }
+                await LifeEvents.recordMany(state.characterId, result.events || []);
+                return { ok: true, state: current, debug: result.debug };
+            });
+        }
         const entryResult = this.resolveColdEntryBranch(state, options, startedAt, workerRequest?.hallVisit === true);
         if (entryResult !== COLD_RESOLVE_NEXT) return entryResult;
         const precomputedResult = workerRequest?.precomputedResult || null;
@@ -3371,6 +3485,7 @@ const PopulationService = {
             if (!request.precomputedResult) {
                 return Promise.resolve({ ok: false, reason: 'worker_result_required', state });
             }
+            if (require('./RaidSupplyPolicy').held(state)) return await this.resolveColdState(state, request, options);
             const card = request.precomputedPlan?.economyDecision;
             const acquisitionLeaf = card && invoke('GameServer/Bot/Population/ColdEconomyDecision').compact(card).activity;
             const acquisitionTravel = invoke('GameServer/Bot/Economy/BotImprovementService')

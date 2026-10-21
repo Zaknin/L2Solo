@@ -19,13 +19,23 @@ function pickupExec(session, actor, data, onComplete, canContinue = () => true) 
             session.dataSendToMeAndOthers(ServerResponse.pickupItem(actor.fetchId(), item), actor);
             // Lisvus awards on arrival; GetItem's client animation does not
             // impose a server-side pickup cooldown.
-            World.pickupItem(session, actor, item);
+            const pickedUp = World.pickupItem(session, actor, item);
+            if (pickedUp === false && !World.items.spawns.some(spawn => spawn.fetchId() === data.id)) {
+                // Another collector may have claimed it during our approach.
+                session.dataSendToMe(ServerResponse.deleteOb(data.id));
+            }
             onComplete?.();
         });
         if (scheduled === false) {
             session.dataSendToMe(ServerResponse.actionFailed());
             onComplete?.();
         }
+    }, () => {
+        if (isCurrent()) {
+            session.dataSendToMe(ServerResponse.actionFailed());
+            session.dataSendToMe(ServerResponse.deleteOb(data.id));
+        }
+        onComplete?.();
     }).catch((err) => {
         if (isCurrent()) session.dataSendToMe(ServerResponse.actionFailed());
         utils.infoWarn(
