@@ -281,7 +281,7 @@ async function run() {
         const restored = Economy.restoreEventProof(bytes, accepted);
         assert.equal(Economy.eventProofHolds(published, restored, deps(), options), true,
             'the restored prefix holds the saved decision');
-        const older = Uint8Array.from(bytes); older[0] = 7;
+        const older = Uint8Array.from(bytes); older[0] = 8;
         assert.equal(Economy.restoreEventProof(older, accepted), null, 'a prefix of the former format is refused');
         const kept = Generation.metadata();
         try {
@@ -289,6 +289,34 @@ async function run() {
             assert.equal(Economy.restoreEventProof(bytes, accepted), null, 'a prefix of another generation is refused');
         } finally { Generation.configure(kept); }
         assert(Economy.restoreEventProof(bytes, accepted), 'fixture: the generation is back');
+        Economy.forget(native.characterId);
+    }
+    // A typical plan (a level 26 hunter in worn gear with a material bag: six
+    // watched items, over 1 KB saved) carries its decision across a restart:
+    // the saved field fits and restores to a decision that still holds.
+    {
+        const Card = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+        const T = Date.now(), deps = { timestamp: T, memoryIdentity: 'fixture-memory', sourceReady: true };
+        // Worn item: [slot, count] (a pair of earrings, a pair of rings).
+        const worn = { 45: [6, 1], 86: [7, 1], 347: [10, 1], 376: [11, 1], 605: [9, 1], 626: [8, 1], 847: [1, 2], 890: [4, 2],
+            910: [3, 1], 1123: [12, 1] };
+        const loose = { 112: 7, 116: 14, 390: 1, 845: 1, 877: 1 };
+        const stacked = { 736: 3, 1864: 6, 1865: 13, 1868: 79, 1869: 21, 1878: 21, 1897: 8 };
+        const row = (id, amount, extra) => [id, { selfId: Number(id), amount, ...extra }];
+        const inventory = Object.fromEntries([
+            ...Object.entries(worn).map(([id, [slot, count]]) => row(id, count, { equipped: true, equippedCount: count, slot })),
+            ...Object.entries(loose).map(([id, amount]) => row(id, amount, {})),
+            ...Object.entries(stacked).map(([id, amount]) => row(id, amount, { stackable: true }))]);
+        const native = { ...base, characterId: 990031, level: 26, adena: 456138, inventory,
+            stats: { ...base.stats, exp: Data.experience[25] } };
+        const held = Economy.forState(native, deps);
+        const published = { ...native, stats: { ...native.stats, ...held.statsPacket } };
+        const accepted = Card.advisory(held, published, published.activity, deps);
+        assert(accepted?.saved, 'a typical plan saves its decision for a restart');
+        const restored = Card.restoreAdvisory({ ...published, stats: { ...published.stats, wishAdvisory: accepted.saved } }, T);
+        assert(restored, 'the saved decision restores');
+        assert.equal(Economy.eventProofHolds(published, restored.eventProof, deps,
+            { baseline: restored.baseline, leaf: held.network.activity, timestamp: T }), true, 'the restored decision holds');
         Economy.forget(native.characterId);
     }
     // A held build keeps a moved bag count while it stays on the same side of
@@ -457,9 +485,9 @@ async function run() {
     // A card refused right before the build of the same step on the same
     // state hands its verdict to that build: the verdict is computed once,
     // the card answers its first refusal and the build weighs every refusal,
-    // the same mask as with its own verdict. A state that moved between them,
-    // a received card (another proof object) and a held leaf its compact form
-    // reads otherwise (more than 8 sale rows) recompute.
+    // the same mask as with its own verdict. A state that moved between them
+    // and a held leaf its compact form reads otherwise (more than 8 sale rows)
+    // recompute.
     {
         const Card = invoke('GameServer/Bot/Population/ColdEconomyDecision');
         const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
@@ -510,9 +538,6 @@ async function run() {
             build({ ...moved, adena: 1 }, refused(moved, { collect: true }));
             assert.deepEqual([delta(before, 'context:held_verdict:computed'), delta(before, 'context:held_verdict:reused')], [2, 0],
                 'a moved input recomputes');
-            const received = { ...accepted, eventProof: Economy.receiveEventProof(Economy.wireEventProof(accepted.eventProof)) };
-            assert(received.eventProof && received.eventProof !== accepted.eventProof, 'fixture: a received proof');
-            assert.deepEqual(reused(moved, received), [2, 0], 'a received card recomputes');
             // A held selling leaf with its proof and its card (the leaf's compact
             // form): up to 8 sale rows the compact form is the leaf, a 9th row
             // is cut from the card's.

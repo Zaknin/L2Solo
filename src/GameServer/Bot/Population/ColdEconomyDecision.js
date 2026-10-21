@@ -530,7 +530,6 @@ function restoreAdvisory(state, timestamp = Date.now()) {
     const decoded = RestartDecision.decode(state.stats?.wishAdvisory, timestamp, MAX_BYTES, Number(state.characterId),
         baseline, Sections.baselineIdentity(baseline));
     if (!decoded) return null;
-    if (Buffer.byteLength(JSON.stringify({ wishAdvisory: decoded.saved })) > RestartDecision.MAX_BYTES) return null;
     if (Sections.decisionRefusal(state, decoded.decisionSeq, decoded.activityLeaf, decoded.focus)) return null;
     const { data, ...accepted } = decoded;
     const card = readAdvisoryCard({ echo: [decoded.decisionSeq, decoded.activityLeaf, decoded.focus], data });
