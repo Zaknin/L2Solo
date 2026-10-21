@@ -49,7 +49,7 @@ async function run() {
     let reserved = null;
     const forecasts = [];
     const targets = catalog.all().filter(s => s.avgLevel >= 43 && s.avgLevel <= 48);
-    const service = new OpportunisticRaidDirector({
+    const dependencies = {
         config: { opportunisticRaidSearchIntervalMs: 60000, opportunisticRaidIntervalMs: 900000,
             opportunisticRaidMemberCooldownMs: 1800000, opportunisticRaidAliveFraction: .5,
             opportunisticRaidMaxParties: 2, opportunisticRaidExpeditionMs: 2700000 },
@@ -70,7 +70,8 @@ async function run() {
             return { ...Policy.assessment(members, spot, { timestamp: at, fundSupplies: true }), workMs: 30 };
         },
         form: async () => assert.fail('this roster must purchase physical supplies first')
-    });
+    };
+    const service = new OpportunisticRaidDirector(dependencies);
     await service.start();
     try {
         service.rosterCursor = 5;
@@ -85,6 +86,35 @@ async function run() {
         assert.equal(report.cpuBudget.debtMs, 18, 'the priority forecast pays the same 12 ms token budget, including overrun debt');
         assert.deepEqual(LIMITS, { rosters: 8, hydratedBots: 72, forecasts: 12, socialChecks: 288, sliceMs: 2, forecastCpuMs: 12 });
     } finally { service.stop(); }
+    // These bosses have identical boss-only hints. The native forecast rejects
+    // Kraven's guards but admits the golem for exactly the same frozen nine.
+    const kraven = catalog.findById('raid:10418'), golem = catalog.findById('raid:10431');
+    assert(Policy.assessment(planned.proposals[0], kraven, { timestamp: at, fundSupplies: true })
+        .reasons.includes('raid_tank_survival'));
+    assert(Policy.assessment(planned.proposals[0], golem, { timestamp: at, fundSupplies: true }).ready);
+    targets.splice(0, targets.length, kraven, golem);
+    reserved = null; forecasts.length = 0;
+    for (const pass of [0, 1]) {
+        reserved = null; forecasts.length = 0;
+        const guarded = new OpportunisticRaidDirector(dependencies);
+        const score = Priority.targetScore, scoreCalls = new Map();
+        await guarded.start();
+        try {
+            Priority.targetScore = spot => {
+                const id = spot.raidBossTemplateId;
+                scoreCalls.set(id, (scoreCalls.get(id) || 0) + 1);
+                return score(spot);
+            };
+            guarded.coverage.passes = pass;
+            guarded.deferredRosters = [fixture.expected];
+            await guarded.pulse(at);
+            assert.deepEqual(forecasts, [{ ids: fixture.expected, boss: 10431 }],
+                `both priority and coverage pass ${pass} reach the feasible guarded boss before CPU debt stops the search`);
+            assert(reserved && reserved.objective.assessment.ready);
+            assert.equal(guarded.snapshot().search.cpuBudget.debtMs, 18);
+            assert.deepEqual([...scoreCalls.values()], [1, 1], 'all roster queues share one score per boss per search');
+        } finally { Priority.targetScore = score; guarded.stop(); }
+    }
     console.log('Frozen-world priority recruitment, real x50 funding, learned buff coverage and unchanged admission budgets passed');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; });

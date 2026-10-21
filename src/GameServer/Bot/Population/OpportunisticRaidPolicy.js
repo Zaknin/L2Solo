@@ -11,6 +11,7 @@ const Rewards = require('../../Actor/PartyRewardMath');
 const Minions = require('../../../../data/Npcs/Minions/c4_raid_bosses.json');
 const Supply = require('./RaidSupplyPolicy');
 const Priority = require('./RaidRosterPriority');
+const Healing = require('./RaidHealingEstimate');
 const GRADE = { none: 0, d: 1, c: 2, b: 3, a: 4, s: 5 };
 const BASE_CLASSES = new Set([0, 10, 18, 25, 31, 38, 44, 53]);
 const id = s => Number(s?.characterId);
@@ -165,36 +166,47 @@ function* candidateSteps(candidates, cooldowns, tankCursor, timestamp, coverage 
         let priorityKey = null;
         const pick = members => {
             const key = members.map(id).sort((a, b) => a - b).join(':');
-            if (seen.has(key)) return;
+            if (seen.has(key)) return false;
             seen.add(key); proposals.push(members);
             for (const member of members) selected.set(id(member), member);
+            return true;
         };
         if (priorityTank) {
             const upper = coverage.window(id(priorityTank), u => count(healingLevels, priorityTank.level + u - 7, priorityTank.level + u) >= 2
                 && count(damageLevels, priorityTank.level + u - 7, priorityTank.level + u) >= 6);
             if (upper !== null) {
-                const healing = [], fighters = [], low = priorityTank.level + upper - 7, high = priorityTank.level + upper;
-                for (const [list, target] of [[healers, healing], [damage, fighters]]) for (const state of list) {
-                    if (state.level >= low && state.level <= high) target.push(state);
-                    yield;
-                }
-                const pair = yield* Priority.supportPair(healing, hints);
-                fighters.sort((a, b) => hints.get(id(b)).score - hints.get(id(a)).score || id(a) - id(b)); yield;
-                if (pair) {
-                    const members = [priorityTank, ...pair, ...fighters.slice(0, 6)];
-                    pick(members); priorityKey = members.map(id).join(':');
+                // One nearby cohort can unlock a stronger learned buff without
+                // replacing the tank's equipment. Both variants replace ordinary
+                // slots inside the same eight-roster/72-member search budget.
+                for (const window of [upper, upper === 7 ? 6 : upper + 1]) {
+                    const healing = [], fighters = [], low = priorityTank.level + window - 7, high = priorityTank.level + window;
+                    for (const [list, target] of [[healers, healing], [damage, fighters]]) for (const state of list) {
+                        if (state.level >= low && state.level <= high) target.push(state);
+                        yield;
+                    }
+                    const pair = yield* Priority.supportPair(healing, hints);
+                    fighters.sort((a, b) => hints.get(id(b)).score - hints.get(id(a)).score || id(a) - id(b)); yield;
+                    if (pair && fighters.length >= 6) {
+                        const members = [priorityTank, ...pair, ...fighters.slice(0, 6)];
+                        if (pick(members) && priorityKey === null) priorityKey = members.map(id).join(':');
+                    }
                 }
             }
         }
+        const freshCount = proposals.length;
         for (const ids of deferred) {
             const members = [];
             for (const key of ids) { members.push(byId.get(key)); yield; }
             if (members.length === 9 && members.every(Boolean)) pick(members);
             if (proposals.length === 8) break;
         }
+        // Drain surviving combinations before filling spare slots with more
+        // ordinary ones. This also leaves room for both priority cohorts on
+        // the next alternating pass, rather than dropping an untested tail.
+        const draining = proposals.length > freshCount;
         let examined = 0;
         for (const tank of anchors) {
-            if (proposals.length === 8) break;
+            if (proposals.length === 8 || draining) break;
             examined++;
             const upper = coverage.window(id(tank), u => count(healingLevels, tank.level + u - 7, tank.level + u) >= 2
                 && count(damageLevels, tank.level + u - 7, tank.level + u) >= 6);
@@ -452,11 +464,8 @@ function assessment(members, spot, { timestamp = Date.now(), maxFightSeconds = 7
         return { id: id(f.state), selfId: plan.selfId, stock, required, perAction: plan.perAction };
     });
     if (shotPlans.some(s => !s.perAction || !fundSupplies && s.stock < s.required)) fail('raid_shot_reserve');
-    const healing = fighters.filter(f => f.role === 'healer').reduce((sum, f) => {
-        const efficient = f.profile.skills.filter(s => Capabilities.healingSkill(s) && s.power > 0 && s.mp > 0)
-            .map(s => F.calcHealAmount(s.power) / s.mp);
-        return sum + Math.max(0, ...efficient) * (f.state.vitals.mp + f.profile.maxMp * seconds / 600);
-    }, 0);
+    const healing = Healing.capacity(fighters.filter(f => f.role === 'healer'),
+        { ...tank.state, vitals: { ...tank.state.vitals, maxHp: tank.profile.maxHp } }, seconds, prep.at);
     // Preserve the native 25% healing margin and the same respawning guards.
     const healingRequired = (Math.max(bossIncoming, skillPressure) * seconds
         + addIncoming * addSeconds * Math.max(1, Math.ceil(seconds / 300))) * 1.25;
