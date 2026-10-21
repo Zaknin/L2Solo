@@ -133,12 +133,21 @@ function activityIdentity(leaf) {
     delete value.heldAtDecision; delete value.r; delete value.craftReservations;
     return proofDigest(value);
 }
-// What a leaf acts on, without its amount and price (diagnostics: the
-// quantity shadow's same_target).
+// The leaf's identity (activityIdentity) without its amounts and prices:
+// every CompactActivity field but amount, price, unitPrice, an
+// improvement's amount, price and fee and its materials' amounts
+// (diagnostics: the quantity shadow's same_target).
 function activityTarget(leaf) {
     if (!leaf) return null;
     const value = new ColdEconomyDecision.CompactActivity(leaf);
-    return JSON.stringify([value.activity, value.itemId, value.rootKey ?? null, value.kind ?? null, value.spotId, value.npcId]);
+    delete value.heldAtDecision; delete value.r; delete value.craftReservations;
+    delete value.amount; delete value.price; delete value.unitPrice;
+    if (value.improvement) {
+        const improvement = value.improvement = { ...value.improvement };
+        delete improvement.amount; delete improvement.price; delete improvement.fee;
+        if (Array.isArray(improvement.materials)) improvement.materials = improvement.materials.map(row => row?.selfId);
+    }
+    return proofDigest(value);
 }
 // L70: the bot's own hunting/resting/travelling is not an economic event.
 // Only this kind is equalised. One trip is the plan itself: leaving for the
@@ -249,6 +258,9 @@ function captureEventProof(state, deps = {}, options = {}) {
 // (createQuantityInputs withThresholds), by the proof it captured. In
 // process only: a saved, restored or sent proof has none and is not classed.
 const quantityThresholds = new WeakMap();
+// The quantity shadow classes a refusal of a sampled owner whose proof noted thresholds.
+const quantityShadowed = (state, proof) => Diagnostics.active() && Diagnostics.enabled(state.characterId)
+    && quantityThresholds.has(proof);
 // A row kept exact whatever its drift: incoming and presence.
 const EXACT_QUANTITY_ROWS = new Set(['incoming', 'present', 'freePresent']);
 // The class of a held build's quantity refusal under the decided bands, read
@@ -367,8 +379,6 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     if (!bandsHold(state, proof.bands, options.leaf) && refuse('bands', ['supply', 'sources']) && !collect) return out;
     const roots = new Map(proof.stockRoots);
     const leaf = options.leaf;
-    // The quantity shadow classes a refusal of a sampled owner whose proof noted thresholds.
-    const shadowed = () => Diagnostics.active() && Diagnostics.enabled(state.characterId) && quantityThresholds.has(proof);
     // A held build passes its entry's fields; a card carries them on its leaf.
     const heldUnits = options.heldUnits ?? leaf?.heldAtDecision;
     const craftReservations = options.craftReservations ?? leaf?.craftReservations;
@@ -392,7 +402,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // completion is the activity check below, a loss is a quantity event.
     const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits) ? leaf.itemId : null;
     if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits) {
-        if (!out.reason && shadowed()) out.quantityShadow = { kind: 'own', class: 'exact' };
+        if (!out.reason && quantityShadowed(state, proof)) out.quantityShadow = { kind: 'own', class: 'exact' };
         if (refuse('quantity', ['sources', 'money']) && !collect) return out;
     }
     // The proof is held packed and read as a stream: no rows array.
@@ -406,7 +416,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     const moved = [], readers = { ...Providers.quantityReaders(state), stockFor };
     if (!quantityInputsHold(proof.quantities, readers, stockAmount, ownRow, moved)) {
         if (!moved.length) return refuse('unproved');
-        if (!out.reason && shadowed()) out.quantityShadow = quantityShadow(proof, readers, stockAmount, ownRow, baseline);
+        if (!out.reason && quantityShadowed(state, proof)) out.quantityShadow = quantityShadow(proof, readers, stockAmount, ownRow, baseline);
         if (refuse('quantity', ['sources', 'money']) && !collect) return out;
     }
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
