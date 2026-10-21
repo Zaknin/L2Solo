@@ -26,6 +26,8 @@ async function run() {
     const Config = invoke('GameServer/Bot/Population/PopulationConfig');
     Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     const Network = invoke('GameServer/Bot/Economy/WishNetwork');
+    const Sell = invoke('GameServer/Items/NpcSellRules');
+    const ItemIndex = invoke('GameServer/Item/ItemTemplateIndex');
     // A build holds only by its event proof, which needs the warehouse rows
     // and a recompute generation.
     invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(() => null, () => true);
@@ -295,43 +297,85 @@ async function run() {
     // every threshold its decision compared it with and the drift stays within
     // the bot's error on an hour's income; a crossing, a drift past that
     // budget or a moved incoming count refuses it, and a saved decision
-    // restored after a restart keeps the same bands.
+    // restored after a restart keeps the same bands. The budget is one per
+    // verdict: a count an old band keeps (shots-like, up to its count) and a
+    // count its thresholds keep share it.
     {
-        const T = Date.now(), potion = 728, native = { ...base, characterId: 990029,
-            inventory: { ...base.inventory, [potion]: { selfId: potion, amount: 20, stackable: true } } };
+        const T = Date.now(), potion = 728, quick = 1540, healing = 1061;
+        const counts = { [potion]: 20, [quick]: 10, [healing]: 5 };
+        const stacks = amounts => Object.fromEntries(Object.entries(amounts)
+            .map(([id, amount]) => [id, { selfId: Number(id), amount, stackable: true }]));
+        const native = { ...base, characterId: 990029, inventory: { ...base.inventory, ...stacks(counts) } };
         const deps = () => ({ timestamp: T, memoryIdentity: 'fixture-memory', sourceReady: true });
         const errorsBefore = Config.knowledgeErrorsEnabled;
         Config.knowledgeErrorsEnabled = true;
         try {
             const held = Economy.forState(native, deps());
             const packet = held.statsPacket, published = { ...native, stats: { ...native.stats, ...packet } };
+            const plan = held.plan, builtRoots = plan.stockRoots, builtBands = plan.quantityBands || [];
+            // A proof of the held plan over the rows `note` records.
+            const proofOf = (note, roots = builtRoots, bands = builtBands) => {
+                const quantities = Network.createQuantityInputs();
+                note(quantities);
+                plan.quantityInputs = quantities.finish(); plan.quantityThresholds = quantities.thresholds();
+                plan.stockRoots = roots; plan.quantityBands = bands;
+                return Economy.captureEventProof(published, deps(), { plan });
+            };
             // The decision compared its 20 mana potions with 10 and read no incoming.
-            const quantities = Network.createQuantityInputs();
-            quantities.physical(potion, 20); quantities.atLeast('physical', potion, 10); quantities.incoming(potion, 0);
-            const plan = held.plan;
-            plan.quantityInputs = quantities.finish(); plan.quantityThresholds = quantities.thresholds();
-            const proof = plan.eventProof = Economy.captureEventProof(published, deps(), { plan });
+            const proof = plan.eventProof = proofOf(rows => {
+                rows.physical(potion, 20); rows.atLeast('physical', potion, 10); rows.incoming(potion, 0);
+            });
             const options = { baseline: packet.wishSections, leaf: held.network.activity, timestamp: T };
             const budget = proof.hourAdena * options.baseline.incomeError;
-            assert(budget > 11 * 1000 && budget < 40 * 1000,
-                'fixture: the drift budget lies between 11 and 40 mana potions (1000 adena each to the NPC)');
-            const bag = (amount, incoming = 0) => ({ ...published, acceptedIncoming: incoming ? { [potion]: incoming } : {},
-                inventory: { ...published.inventory, [potion]: { selfId: potion, amount, stackable: true } } });
+            const sell = id => Sell.npcBuyPrice(ItemIndex.find(Data.items, id)?.template?.price);
+            assert(budget > 11 * sell(potion) && budget < 40 * sell(potion) && budget < 10 * sell(quick),
+                'fixture: the drift budget lies between 11 and 40 mana potions and below 10 quick healing potions');
+            const bag = (amounts = {}, incoming = 0) => ({ ...published, acceptedIncoming: incoming ? { [potion]: incoming } : {},
+                inventory: { ...published.inventory, ...stacks(amounts) } });
             const reason = (state, value = proof) => Economy.heldBuildVerdict(state, value,
                 { ...deps(), gearThreatMask: held.gearThreatMask }, options).reason || 'valid';
-            assert.equal(reason(bag(20)), 'valid', 'fixture: the published decision holds');
-            assert.equal(reason(bag(18)), 'valid', 'a drift inside the thresholds and the budget holds');
-            assert.equal(reason(bag(9)), 'quantity', 'a count crossing a threshold the decision compared refuses');
-            assert.equal(reason(bag(60)), 'quantity', 'a drift past the budget refuses');
-            assert.equal(reason(bag(20, 3)), 'quantity', 'a moved incoming count refuses');
+            assert.equal(reason(bag()), 'valid', 'fixture: the published decision holds');
+            assert.equal(reason(bag({ [potion]: 18 })), 'valid', 'a drift inside the thresholds and the budget holds');
+            assert.equal(reason(bag({ [potion]: 9 })), 'quantity', 'a count crossing a threshold the decision compared refuses');
+            assert.equal(reason(bag({ [potion]: 60 })), 'quantity', 'a drift past the budget refuses');
+            assert.equal(reason(bag({}, 3)), 'quantity', 'a moved incoming count refuses');
             const accepted = { card: { activity: held.network.activity }, characterId: native.characterId,
                 decisionSeq: packet.decisionSeq, activityLeaf: packet.activityLeaf, focus: packet.wishFocus?.[0] ?? null,
                 baseline: packet.wishSections };
-            const restored = Economy.restoreEventProof(Economy.restartEventProof(proof, accepted), accepted);
+            const restore = value => Economy.restoreEventProof(Economy.restartEventProof(value, accepted), accepted);
+            const restored = restore(proof);
             assert(restored, 'fixture: the decision saves and restores its prefix');
-            assert.equal(reason(bag(18), restored), 'valid', 'a restored decision holds a drift inside its bands');
-            assert.equal(reason(bag(9), restored), 'quantity', 'a restored decision refuses a crossing');
-            console.log('PASS quantity bands: drift holds / crossing, budget, incoming refuse / restored bands');
+            assert.equal(reason(bag({ [potion]: 18 }), restored), 'valid', 'a restored decision holds a drift inside its bands');
+            assert.equal(reason(bag({ [potion]: 9 }), restored), 'quantity', 'a restored decision refuses a crossing');
+            // Its quick healing potions are a stock the decision kept from 0 up
+            // to its 10 (an old band); each drift alone fits the budget, both do not.
+            assert(!builtBands.some(row => row[0] === quick), 'fixture: the build has no band of its own on quick potions');
+            const shared = proofOf(rows => {
+                rows.physical(potion, 20); rows.atLeast('physical', potion, 10); rows.incoming(potion, 0);
+                rows.stock(quick, 'stock:fixture', { owned: 10, incoming: 0 });
+            }, new Map([...builtRoots, ['stock:fixture', quick]]), [...builtBands, [quick, 0, 10, 10]]);
+            const used = Math.floor(.6 * budget / sell(quick)), bought = Math.floor((budget - used * sell(quick)) / sell(potion)) + 1;
+            assert(used >= 1 && bought * sell(potion) <= budget, 'fixture: each drift alone fits the budget');
+            assert.equal(reason(bag(), shared), 'valid', 'fixture: the published decision with its stock holds');
+            assert.equal(reason(bag({ [quick]: 10 - used }), shared), 'valid', 'a stock drift inside its band and the budget holds');
+            assert.equal(reason(bag({ [potion]: 20 + bought }), shared), 'valid', 'a count drift inside its thresholds and the budget holds');
+            assert.equal(reason(bag({ [quick]: 10 - used, [potion]: 20 + bought }), shared), 'quantity',
+                'two drifts that each fit the budget refuse together');
+            // Three noted rows: the healing potions between the two moved ones
+            // stay put; each moved row is judged by its own thresholds.
+            const three = proofOf(rows => {
+                rows.physical(potion, 20); rows.atLeast('physical', potion, 10);
+                rows.physical(healing, 5); rows.atLeast('physical', healing, 3);
+                rows.physical(quick, 10); rows.atLeast('physical', quick, 10);
+            });
+            for (const [value, label] of [[three, ''], [restore(three), 'restored: ']]) {
+                assert(value, `fixture: ${label}the three-row decision`);
+                assert.equal(reason(bag({ [potion]: 18, [quick]: 11 }), value), 'valid',
+                    `${label}moved rows on their own sides around an unmoved one hold`);
+                assert.equal(reason(bag({ [potion]: 18, [quick]: 9 }), value), 'quantity',
+                    `${label}the last row crossing its own threshold refuses`);
+            }
+            console.log('PASS quantity bands: drift holds / crossing, budget, incoming refuse / one shared budget / rows by index / restored bands');
         } finally {
             Config.knowledgeErrorsEnabled = errorsBefore;
             Economy.forget(native.characterId);

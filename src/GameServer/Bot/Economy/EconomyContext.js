@@ -230,7 +230,7 @@ function captureEventProof(state, deps = {}, options = {}) {
         activity: activityIdentity(leaf),
         quantities: plan.quantityInputs, liquidation: plan.liquidationInputs,
         stockRoots: Object.freeze([...plan.stockRoots]),
-        thresholds: plan.quantityThresholds || [], bands: plan.quantityBands || [], hourAdena: plan.hourAdena,
+        thresholds: plan.quantityThresholds || Network.NO_THRESHOLDS, bands: plan.quantityBands || [], hourAdena: plan.hourAdena,
         // A restored prefix currently excludes process-local owner versions.
         // Unsupported owners abstain; an empty numeric revision is not proof.
         restartable: !!RecomputeGeneration.current() && typeof deps.memoryIdentity === 'string'
@@ -245,14 +245,13 @@ const EXACT_QUANTITY_ROWS = new Set(['incoming', 'present', 'freePresent', 'stoc
 // a moved count row holds while it stays on the same side of every
 // threshold the build compared it with (proof.thresholds, WishNetwork
 // createQuantityInputs) and the drift of the rows so held (sum |delta| x
-// buyback) stays within the bot's error on an hour's income (hourAdena x
-// incomeError). A row kept exact or never noted (untracked), a stock row
-// whose incoming moved, a crossing or a drift past the budget refuses, and
-// so does a malformed list.
-function quantityBand(proof, baseline) {
-    const list = Array.isArray(proof.thresholds) ? proof.thresholds : [];
-    const budget = positive(proof.hourAdena) * positive(baseline?.incomeError);
-    let cursor = 0, drift = 0;
+// buyback) stays within the verdict's one drift budget (charge, shared
+// with the old bands: heldBuildVerdict). A row kept exact or never noted
+// (untracked), a stock row whose incoming moved, a crossing or a drift past
+// the budget refuses, and so does a malformed list.
+function quantityBand(proof, charge) {
+    const list = proof.thresholds;
+    let cursor = 0;
     return (row, index, value, incoming) => {
         // Rows come in ascending index: the cursor only moves on.
         let count = thresholdCount(list, cursor);
@@ -264,8 +263,7 @@ function quantityBand(proof, baseline) {
             const side = list[at];
             if (!(side > 0) || (value >= side) !== (original >= side)) return false;
         }
-        drift += Math.abs(value - original) * positive(buyback(row[0] === 'stock' ? row[2] : row[1]));
-        return drift <= budget;
+        return charge(row[0] === 'stock' ? row[2] : row[1], value - original);
     };
 }
 // The threshold count of the entry at `at` of a proof's flat thresholds
@@ -314,7 +312,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
             && typeof row[0] === 'string' && Number.isSafeInteger(row[1]) && row[1] > 0)
         || !(proof.activity === null ? options.leaf === null && proof.decision[1] === 0
             : typeof proof.activity === 'string' && !!options.leaf?.activity)
-        || !Array.isArray(proof.bands) || !Array.isArray(proof.liquidation?.rows)
+        || !Array.isArray(proof.bands) || !(proof.thresholds instanceof Float64Array) || !Array.isArray(proof.liquidation?.rows)
         || proof.liquidation.rows.length > 8 || !proof.liquidation.rows.every(row => Array.isArray(row)
             && row.length === 2 && Number.isSafeInteger(row[0]) && row[0] > 0 && Number.isFinite(row[1]) && row[1] > 0)
         || !Number.isFinite(proof.hourAdena) || proof.hourAdena < 0) return refuse('unproved');
@@ -370,12 +368,30 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // A loss below what the decision reserved stays a quantity event.
     const reserved = leaf?.activity === 'crafting' && Array.isArray(craftReservations) ? craftReservations : null;
     const isReserved = id => reserved?.some(row => row[0] === id) === true;
+    // The verdict's one drift budget, the bot's error on an hour's income:
+    // every count a finite band (shots, unused loot) or a quantity band
+    // keeps charges its drift (|delta| x buyback) to it, so together they
+    // never tolerate more. A band without an upper bound (stock at or above
+    // its target) is sale capacity, not noise: it charges nothing.
+    const budget = positive(proof.hourAdena) * positive(baseline.incomeError);
+    let spent = 0, banded = null;
+    const charge = (id, delta) => {
+        if (delta) spent += Math.abs(delta) * positive(buyback(id));
+        return spent <= budget;
+    };
+    // A stock band charges its item once: the root's stock and physical rows
+    // read the same bag count.
+    const chargeBand = (id, delta) => {
+        if (!delta || banded?.has(id)) return spent <= budget;
+        (banded ||= new Set()).add(id);
+        return charge(id, delta);
+    };
     const stockAmount = (kind, key, id, currentOwned, originalOwned) => {
         if (kind === 'stockPhysical' && isReserved(id) && currentOwned >= originalOwned) return originalOwned;
         if (roots.get(key) !== id) return currentOwned;
         const band = proof.bands?.find(row => row[0] === id);
         return band && originalOwned === band[3] && currentOwned >= band[1]
-            && (band[2] === null || currentOwned <= band[2]) ? originalOwned : currentOwned;
+            && (band[2] === null || currentOwned <= band[2] && chargeBand(id, currentOwned - originalOwned)) ? originalOwned : currentOwned;
     };
     // Own outputs are not inputs: the leaf's own item moves with its progress.
     // It holds while the bot keeps what it held at the decision; the order's
@@ -393,7 +409,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // A moved count row inside its thresholds and the drift budget holds (quantityBand).
     const moved = [];
     if (!quantityInputsHold(proof.quantities, { ...Providers.quantityReaders(state), stockFor }, stockAmount, ownRow, moved,
-        quantityBand(proof, baseline))
+        quantityBand(proof, charge))
         && (moved.length ? refuse('quantity', ['sources', 'money']) && !collect : refuse('unproved'))) return out;
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
     // The leaf's own item and a craft's reserved inputs are not sales: their
@@ -413,7 +429,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
             // Only the existing finite unused-loot error band. Unlimited
             // surplus stock is sale capacity, not economic noise.
             return band && band[2] !== null && /^Other\.(Material|Arrow)/.test(String(item?.template?.kind || ''))
-                && count - original[1] === positive(state.inventory?.[id]?.amount) - band[3];
+                && count - original[1] === positive(state.inventory?.[id]?.amount) - band[3] && charge(id, count - original[1]);
         });
     if ((!sameSales || changedLoot && !choiceBagValueHolds(state, proof.bands, baseline, proof.hourAdena))
         && refuse('liquidation', ['sources', 'money']) && !collect) return out;
@@ -517,7 +533,7 @@ function restartEventProof(proof, accepted) {
         write.number(proof.hourAdena);
         // The thresholds' length, then per noted row its index, its count and its thresholds.
         const thresholds = proof.thresholds;
-        if (!Array.isArray(thresholds)) return null;
+        if (!(thresholds instanceof Float64Array)) return null;
         write.uint(thresholds.length);
         for (let at = 0, count; at < thresholds.length; at += 2 + count) {
             count = thresholdCount(thresholds, at);
@@ -543,25 +559,22 @@ function restoreEventProof(prefix, accepted) {
         const stockRoots = Object.freeze(read.list(() => Object.freeze([read.text(), read.uint()])));
         const bands = Object.freeze(read.list(() => Object.freeze([read.uint(), read.number(), read.number(true), read.number()])));
         const hourAdena = read.number();
-        // Rows by ascending index, each with ascending finite positive thresholds.
-        const length = read.uint(), list = [];
-        let last = -1;
-        while (list.length < length) {
+        // The thresholds (each entry takes a byte at least: a longer list is malformed).
+        const length = read.uint();
+        if (length > prefix.byteLength) return null;
+        const list = length ? new Float64Array(length) : Network.NO_THRESHOLDS;
+        for (let at = 0; at < length;) {
             const index = read.uint(), count = read.uint();
-            if (index <= last || count > Network.QUANTITY_THRESHOLDS || list.length + 2 + count > length) return null;
-            list.push(last = index, count);
-            for (let at = 0; at < count; at++) {
-                const side = read.number();
-                if (!(side > 0) || side === Infinity || at && side <= list[list.length - 1]) return null;
-                list.push(side);
-            }
+            if (at + 2 + count > length) return null;
+            list[at++] = index; list[at++] = count;
+            for (let side = 0; side < count; side++) list[at++] = read.number();
         }
-        const thresholds = Object.freeze(list);
         // The packed quantity proof stays packed; a prefix it cannot read is refused here.
         const packed = Uint8Array.from(read.rest());
         let rows = 0;
         const quantities = eachQuantityRow(packed, () => { rows++; }) ? packed : null;
-        if (!quantities || last >= rows || !Number.isSafeInteger(accepted.characterId)
+        const thresholds = quantities && checkedThresholds(list, rows);
+        if (!thresholds || !Number.isSafeInteger(accepted.characterId)
             || accepted.card.activity === null && accepted.activityLeaf !== 0
             || !Number.isFinite(accepted.baseline?.at)) return null;
         return Object.freeze({ version: 2, restartable: true, owner: accepted.characterId, at: accepted.baseline.at,
@@ -577,7 +590,10 @@ function wireEventProof(proof) {
         if (!(proof.quantities instanceof Uint8Array)) return null;
         // Packed quantities cross as canonical base64 (receiveEventProof), so
         // this JSON size is the wire's.
-        const wire = { ...proof, quantities: Buffer.from(proof.quantities).toString('base64') };
+        // The thresholds cross as a plain list (JSON writes a typed array as an object).
+        if (!(proof.thresholds instanceof Float64Array)) return null;
+        const wire = { ...proof, quantities: Buffer.from(proof.quantities).toString('base64'),
+            thresholds: Array.from(proof.thresholds) };
         return Buffer.byteLength(JSON.stringify(wire)) <= PROOF_RAW_BYTES ? wire : null;
     } catch (_) { return null; }
 }
@@ -586,7 +602,28 @@ function wireEventProof(proof) {
 function receiveEventProof(proof) {
     const value = proof?.quantities, cap = Network.QUANTITY_INPUT_BYTES;
     const quantities = value instanceof Uint8Array ? value.byteLength <= cap ? value : null : Bytes.fromBase64(value, cap);
-    return quantities ? { ...proof, quantities } : null;
+    if (!quantities) return null;
+    const list = proof.thresholds;
+    if (list instanceof Float64Array) return { ...proof, quantities };
+    let rows = 0;
+    const thresholds = Array.isArray(list) && eachQuantityRow(quantities, () => { rows++; })
+        && checkedThresholds(list.length ? Float64Array.from(list) : Network.NO_THRESHOLDS, rows);
+    return thresholds ? { ...proof, quantities, thresholds } : null;
+}
+// A proof's thresholds list (WishNetwork createQuantityInputs) when it fits
+// its `rows` packed rows: rows by ascending index below `rows`, each with
+// at most QUANTITY_THRESHOLDS ascending finite thresholds > 0; else null.
+function checkedThresholds(list, rows) {
+    for (let at = 0, last = -1, count; at < list.length; at += 2 + count) {
+        count = thresholdCount(list, at);
+        const index = list[at];
+        if (count < 0 || count > Network.QUANTITY_THRESHOLDS || !Number.isSafeInteger(index)
+            || index <= last || index >= rows) return null;
+        last = index;
+        for (let side = at + 2; side < at + 2 + count; side++)
+            if (!(list[side] > 0) || list[side] === Infinity || side > at + 2 && list[side] <= list[side - 1]) return null;
+    }
+    return list;
 }
 function quantityBands(state, context, projection) {
     const bands = [], stock = new Map();
