@@ -163,8 +163,8 @@ const quantityRowKey = row => row[0] === 'stock' || row[0] === 'stockPhysical'
 // used as an amount, or a compare not noted): an untracked row, one past
 // the cap or one never noted stays exact, whatever else noted it.
 const QUANTITY_THRESHOLDS = 32;
-// A build that noted none shares this one (an empty typed array freezes).
-const NO_THRESHOLDS = Object.freeze(new Float64Array(0));
+// A build that noted none shares this one.
+const NO_THRESHOLDS = Object.freeze([]);
 const ascending = (a, b) => a - b;
 function createQuantityInputs() {
     // seen: row key -> row index; noted: row key -> thresholds or null (untracked).
@@ -198,12 +198,10 @@ function createQuantityInputs() {
         }
         return lastKey;
     };
-    // The noted thresholds, one flat Float64Array (8 bytes a number, kept
-    // in every held entry; a threshold may be fractional, so no integer
-    // type): [row index, count, t1 < ... < t_count, ...] by ascending row
-    // index (seen keeps the rows' order); a threshold <= 0 is dropped (a
-    // count is never below it). Not frozen (a typed array cannot be): no
-    // reader writes it.
+    // The noted thresholds, one flat frozen list (no array per row; integer
+    // entries stay unboxed in a packed frozen array): [row index, count,
+    // t1 < ... < t_count, ...] by ascending row index (seen keeps the rows'
+    // order); a threshold <= 0 is dropped (a count is never below it).
     const compact = () => {
         const list = [];
         for (const [key, index] of seen) {
@@ -214,7 +212,7 @@ function createQuantityInputs() {
             for (const side of sides.sort(ascending)) if (side > 0) list.push(side);
             list[at + 1] = list.length - at - 2;
         }
-        return list.length ? Float64Array.from(list) : NO_THRESHOLDS;
+        return list.length ? Object.freeze(list) : NO_THRESHOLDS;
     };
     return {
         stock(id, rootKey, value) {

@@ -26,8 +26,6 @@ async function run() {
     const Config = invoke('GameServer/Bot/Population/PopulationConfig');
     Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     const Network = invoke('GameServer/Bot/Economy/WishNetwork');
-    const Sell = invoke('GameServer/Items/NpcSellRules');
-    const ItemIndex = invoke('GameServer/Item/ItemTemplateIndex');
     // A build holds only by its event proof, which needs the warehouse rows
     // and a recompute generation.
     invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(() => null, () => true);
@@ -299,10 +297,10 @@ async function run() {
     // budget or a moved incoming count refuses it, and a saved decision
     // restored after a restart keeps the same bands. The budget is one per
     // verdict: a count an old band keeps (shots-like, up to its count) and a
-    // count its thresholds keep share it.
+    // count its thresholds keep share it; one item's drift charges it once.
     {
-        const T = Date.now(), potion = 728, quick = 1540, healing = 1061;
-        const counts = { [potion]: 20, [quick]: 10, [healing]: 5 };
+        const T = Date.now(), potion = 728, quick = 1540, healing = 1061, bone = 1872;
+        const counts = { [potion]: 20, [quick]: 10, [healing]: 5, [bone]: 10 };
         const stacks = amounts => Object.fromEntries(Object.entries(amounts)
             .map(([id, amount]) => [id, { selfId: Number(id), amount, stackable: true }]));
         const native = { ...base, characterId: 990029, inventory: { ...base.inventory, ...stacks(counts) } };
@@ -327,7 +325,8 @@ async function run() {
             });
             const options = { baseline: packet.wishSections, leaf: held.network.activity, timestamp: T };
             const budget = proof.hourAdena * options.baseline.incomeError;
-            const sell = id => Sell.npcBuyPrice(ItemIndex.find(Data.items, id)?.template?.price);
+            // The price the verdict charges a drift at: the context's own NPC buyback.
+            const sell = held.buyback;
             assert(budget > 11 * sell(potion) && budget < 40 * sell(potion) && budget < 10 * sell(quick),
                 'fixture: the drift budget lies between 11 and 40 mana potions and below 10 quick healing potions');
             const bag = (amounts = {}, incoming = 0) => ({ ...published, acceptedIncoming: incoming ? { [potion]: incoming } : {},
@@ -375,7 +374,22 @@ async function run() {
                 assert.equal(reason(bag({ [potion]: 18, [quick]: 9 }), value), 'quantity',
                     `${label}the last row crossing its own threshold refuses`);
             }
-            console.log('PASS quantity bands: drift holds / crossing, budget, incoming refuse / one shared budget / rows by index / restored bands');
+            // Its animal bones are unused loot (a finite band, a sale row) the
+            // decision also compared with their own count: a gain whose one
+            // charge fits the budget holds, though two charges would not.
+            const loot = builtBands.find(row => row[0] === bone);
+            const gain = Math.floor(budget / sell(bone));
+            assert(loot && loot[2] !== null && plan.liquidationInputs.rows.some(row => row[0] === bone),
+                'fixture: the bones are a loot band and a sale row');
+            assert(gain >= 1 && 10 + gain <= loot[2] && 2 * gain * sell(bone) > budget,
+                'fixture: the gain fits the band and one charge, not two');
+            const noted = proofOf(rows => {
+                rows.physical(potion, 20); rows.atLeast('physical', potion, 10); rows.incoming(potion, 0);
+                rows.physical(bone, 10); rows.atLeast('physical', bone, 10);
+            });
+            assert.equal(reason(bag({ [bone]: 10 + gain }), noted), 'valid',
+                'a noted loot row and its sale row charge one drift once');
+            console.log('PASS quantity bands: drift holds / crossing, budget, incoming refuse / one shared budget / one charge per item / rows by index / restored bands');
         } finally {
             Config.knowledgeErrorsEnabled = errorsBefore;
             Economy.forget(native.characterId);
