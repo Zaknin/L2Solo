@@ -19,7 +19,7 @@ const Network = require('./WishNetwork');
 const PurchaseEvidence = require('./WishPurchaseEvidence');
 const OccupationSources = invoke('GameServer/Bot/Population/ColdOccupationSources');
 const { WishNetwork, remember, admitRoots, remainingQuantity, moneyQueue, cashCharge,
-    createQuantityInputs, quantityInputsHold, quantityRowKey, eachQuantityRow } = Network;
+    createQuantityInputs, quantityInputsHold, eachQuantityRow } = Network;
 const { isMainThread } = require('node:worker_threads');
 const { createHash } = require('node:crypto');
 const RecomputeGeneration = require('../Population/RecomputeGeneration');
@@ -133,22 +133,6 @@ function activityIdentity(leaf) {
     delete value.heldAtDecision; delete value.r; delete value.craftReservations;
     return proofDigest(value);
 }
-// The leaf's identity (activityIdentity) without its amounts and prices:
-// every CompactActivity field but amount, price, unitPrice, an
-// improvement's amount, price and fee and its materials' amounts
-// (diagnostics: the quantity shadow's same_target).
-function activityTarget(leaf) {
-    if (!leaf) return null;
-    const value = new ColdEconomyDecision.CompactActivity(leaf);
-    delete value.heldAtDecision; delete value.r; delete value.craftReservations;
-    delete value.amount; delete value.price; delete value.unitPrice;
-    if (value.improvement) {
-        const improvement = value.improvement = { ...value.improvement };
-        delete improvement.amount; delete improvement.price; delete improvement.fee;
-        if (Array.isArray(improvement.materials)) improvement.materials = improvement.materials.map(row => row?.selfId);
-    }
-    return proofDigest(value);
-}
 // L70: the bot's own hunting/resting/travelling is not an economic event.
 // Only this kind is equalised. One trip is the plan itself: leaving for the
 // held leaf's own hunting spot or its own town (Sections.occupationPlanned);
@@ -246,49 +230,50 @@ function captureEventProof(state, deps = {}, options = {}) {
         activity: activityIdentity(leaf),
         quantities: plan.quantityInputs, liquidation: plan.liquidationInputs,
         stockRoots: Object.freeze([...plan.stockRoots]),
-        bands: plan.quantityBands || [], hourAdena: plan.hourAdena,
+        thresholds: plan.quantityThresholds || [], bands: plan.quantityBands || [], hourAdena: plan.hourAdena,
         // A restored prefix currently excludes process-local owner versions.
         // Unsupported owners abstain; an empty numeric revision is not proof.
         restartable: !!RecomputeGeneration.current() && typeof deps.memoryIdentity === 'string'
             && deps.sourceReady === true });
 }
 
-// Shadow, sampled owners (open item 'hold:economy decision_seq and
-// quantity'): the thresholds a build compared its count rows with
-// (createQuantityInputs withThresholds), by the proof it captured. In
-// process only: a saved, restored or sent proof has none and is not classed.
-const quantityThresholds = new WeakMap();
-// The quantity shadow classes a refusal of a sampled owner whose proof noted thresholds.
-const quantityShadowed = (state, proof) => Diagnostics.active() && Diagnostics.enabled(state.characterId)
-    && quantityThresholds.has(proof);
-// A row kept exact whatever its drift: incoming and presence.
-const EXACT_QUANTITY_ROWS = new Set(['incoming', 'present', 'freePresent']);
-// The class of a held build's quantity refusal under the decided bands, read
-// over every moved row as the verdict reads it (its readers and stock
-// normalisation): a row kept exact, a row the build compared with no
-// threshold (or a stock row whose incoming moved) is exact; a row on another
-// side of a threshold it was compared with is a crossing; the rest would
-// hold while their drift (sum |delta| x buyback) stays within the bot's
-// error on an hour's income (hourAdena x incomeError), else budget.
-// { kind, class } of the first row of the worst class (crossing, exact,
-// budget, band); null when no row moved.
-function quantityShadow(proof, readers, stockAmount, ownRow, baseline) {
-    const thresholds = quantityThresholds.get(proof);
-    let crossing = null, exact = null, banded = null, drift = 0;
-    quantityInputsHold(proof.quantities, readers, stockAmount, ownRow, null, (row, value, incoming) => {
-        const rooted = row[0] === 'stock' || row[0] === 'stockPhysical';
-        const id = rooted ? row[2] : row[1], original = rooted ? row[3] : row[2];
-        const sides = thresholds.get(quantityRowKey(row));
-        if (!sides || EXACT_QUANTITY_ROWS.has(row[0]) || row[0] === 'stock' && incoming !== row[4]) {
-            exact ||= { kind: row[0], class: 'exact' };
-            return;
+// A row kept exact whatever its drift: incoming, presence and a physical
+// stock row (no threshold is noted on it).
+const EXACT_QUANTITY_ROWS = new Set(['incoming', 'present', 'freePresent', 'stockPhysical']);
+// The quantity bands of a held build (open item 'hold:economy decision_seq
+// and quantity'), the tolerate walker of quantityInputsHold for one verdict:
+// a moved count row holds while it stays on the same side of every
+// threshold the build compared it with (proof.thresholds, WishNetwork
+// createQuantityInputs) and the drift of the rows so held (sum |delta| x
+// buyback) stays within the bot's error on an hour's income (hourAdena x
+// incomeError). A row kept exact or never noted (untracked), a stock row
+// whose incoming moved, a crossing or a drift past the budget refuses, and
+// so does a malformed list.
+function quantityBand(proof, baseline) {
+    const list = Array.isArray(proof.thresholds) ? proof.thresholds : [];
+    const budget = positive(proof.hourAdena) * positive(baseline?.incomeError);
+    let cursor = 0, drift = 0;
+    return (row, index, value, incoming) => {
+        // Rows come in ascending index: the cursor only moves on.
+        let count = thresholdCount(list, cursor);
+        while (count >= 0 && list[cursor] < index) count = thresholdCount(list, cursor += 2 + count);
+        if (count < 0 || list[cursor] !== index || EXACT_QUANTITY_ROWS.has(row[0])
+            || row[0] === 'stock' && incoming !== row[4]) return false;
+        const original = row[0] === 'stock' ? row[3] : row[2];
+        for (let at = cursor + 2; at < cursor + 2 + count; at++) {
+            const side = list[at];
+            if (!(side > 0) || (value >= side) !== (original >= side)) return false;
         }
-        for (const at of sides) if ((value >= at) !== (original >= at)) { crossing ||= { kind: row[0], class: 'crossing' }; return; }
-        banded ||= { kind: row[0], class: 'band' };
-        drift += Math.abs(value - original) * positive(buyback(id));
-    });
-    if (crossing || exact) return crossing || exact;
-    return banded && drift > positive(proof.hourAdena) * positive(baseline?.incomeError) ? { ...banded, class: 'budget' } : banded;
+        drift += Math.abs(value - original) * positive(buyback(row[0] === 'stock' ? row[2] : row[1]));
+        return drift <= budget;
+    };
+}
+// The threshold count of the entry at `at` of a proof's flat thresholds
+// list (WishNetwork createQuantityInputs: row index, count, thresholds),
+// -1 past the end or when malformed.
+function thresholdCount(list, at) {
+    const count = list[at + 1];
+    return Number.isSafeInteger(count) && count >= 0 && at + 2 + count <= list.length ? count : -1;
 }
 
 // options.collect (the decision point, forState): a refusal that names
@@ -307,14 +292,9 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // firstSections: the sections the first refusal named, what a run that
     // stops there answers (eventProofHolds); leaf: the identity of the leaf
     // it judged, unset when it stopped before.
-    // refused: how many refusals the run made (one = the first alone);
-    // quantityShadow: the class of a first refusal 'quantity' on a sampled
-    // owner's proof (quantityShadow above), diagnostics only.
-    const out = { valid: false, reason: '', touchedSections: 0, movedSections: 0, firstSections: 0, leaf: undefined,
-        refused: 0, quantityShadow: null };
+    const out = { valid: false, reason: '', touchedSections: 0, movedSections: 0, firstSections: 0, leaf: undefined };
     const refuse = (reason, names) => {
         const first = !out.reason;
-        out.refused++;
         out.reason ||= reason;
         if (!names) {
             if (collect) out.touchedSections = Sections.COMPUTED.weighing;
@@ -401,10 +381,7 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
     // It holds while the bot keeps what it held at the decision; the order's
     // completion is the activity check below, a loss is a quantity event.
     const own = ColdEconomyDecision.ownItem(leaf) !== null && Number.isFinite(heldUnits) ? leaf.itemId : null;
-    if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits) {
-        if (!out.reason && quantityShadowed(state, proof)) out.quantityShadow = { kind: 'own', class: 'exact' };
-        if (refuse('quantity', ['sources', 'money']) && !collect) return out;
-    }
+    if (own !== null && ColdEconomyDecision.heldFor(state, own) < heldUnits && refuse('quantity', ['sources', 'money']) && !collect) return out;
     // The proof is held packed and read as a stream: no rows array.
     const ownRow = own === null ? null : row => ownQuantityRow(row, leaf.rootKey, own);
     const stock = stockReader(state, key => roots.get(key));
@@ -413,12 +390,11 @@ function heldBuildVerdict(state, proof, deps = {}, options = {}) {
         const current = stock(id, rootKey);
         return isReserved(id) && current.owned + current.incoming >= row[3] + row[4] ? { owned: row[3], incoming: row[4] } : current;
     };
-    const moved = [], readers = { ...Providers.quantityReaders(state), stockFor };
-    if (!quantityInputsHold(proof.quantities, readers, stockAmount, ownRow, moved)) {
-        if (!moved.length) return refuse('unproved');
-        if (!out.reason && quantityShadowed(state, proof)) out.quantityShadow = quantityShadow(proof, readers, stockAmount, ownRow, baseline);
-        if (refuse('quantity', ['sources', 'money']) && !collect) return out;
-    }
+    // A moved count row inside its thresholds and the drift budget holds (quantityBand).
+    const moved = [];
+    if (!quantityInputsHold(proof.quantities, { ...Providers.quantityReaders(state), stockFor }, stockAmount, ownRow, moved,
+        quantityBand(proof, baseline))
+        && (moved.length ? refuse('quantity', ['sources', 'money']) && !collect : refuse('unproved'))) return out;
     const liquidation = Providers.liquidationInputs(state, proof.liquidation?.basis);
     // The leaf's own item and a craft's reserved inputs are not sales: their
     // count moves with the leaf's progress, held above by the quantity check.
@@ -512,7 +488,7 @@ function handedVerdict(handed, state, held, deps) {
 function restartEventProof(proof, accepted) {
     if (proof?.version !== 2 || proof.restartable !== true || !accepted?.card
         || Object.keys(proof).some(key => !['version', 'owner', 'at', 'generation', 'decision', 'activity',
-            'quantities', 'liquidation', 'stockRoots', 'bands', 'hourAdena', 'restartable'].includes(key))
+            'quantities', 'liquidation', 'stockRoots', 'thresholds', 'bands', 'hourAdena', 'restartable'].includes(key))
         || !RecomputeGeneration.current() || proof.generation !== RecomputeGeneration.current()
         || !/^[a-f0-9]{64}$/.test(proof.generation)
         || proof.owner !== accepted.characterId || proof.at !== accepted.baseline?.at
@@ -524,10 +500,11 @@ function restartEventProof(proof, accepted) {
     if (!(quantities instanceof Uint8Array)) return null;
     try {
         // Version, the recompute generation (a restore under another one is
-        // refused), the soft facts in the shared exact byte form, then the
-        // quantity owner's opaque bytes to the end.
+        // refused), the soft facts in the shared exact byte form, the
+        // quantity rows' thresholds, then the quantity owner's opaque bytes
+        // to the end.
         const write = Bytes.writer();
-        write.byte(7); write.raw(Buffer.from(proof.generation, 'hex'));
+        write.byte(8); write.raw(Buffer.from(proof.generation, 'hex'));
         if (!Providers.packLiquidationInputs(proof.liquidation, write)) return null;
         write.list(proof.stockRoots, row => {
             if (!Array.isArray(row) || row.length !== 2) throw Error('restart stock root');
@@ -538,6 +515,16 @@ function restartEventProof(proof, accepted) {
             write.uint(row[0]); write.number(row[1]); write.number(row[2], true); write.number(row[3]);
         });
         write.number(proof.hourAdena);
+        // The thresholds' length, then per noted row its index, its count and its thresholds.
+        const thresholds = proof.thresholds;
+        if (!Array.isArray(thresholds)) return null;
+        write.uint(thresholds.length);
+        for (let at = 0, count; at < thresholds.length; at += 2 + count) {
+            count = thresholdCount(thresholds, at);
+            if (count < 0) return null;
+            write.uint(thresholds[at]); write.uint(count);
+            for (let side = at + 2; side < at + 2 + count; side++) write.number(thresholds[side]);
+        }
         write.raw(quantities);
         const bytes = write.finish();
         return bytes.byteLength <= PROOF_RAW_BYTES ? bytes : null;
@@ -550,22 +537,37 @@ function restoreEventProof(prefix, accepted) {
         || prefix.byteLength > PROOF_RAW_BYTES || !accepted?.card) return null;
     try {
         const read = Bytes.reader(prefix);
-        // A prefix of format 6 (it carried the deleted recipe producers' scope) is refused once.
-        if (read.byte() !== 7 || read.raw(32).toString('hex') !== generation) return null;
+        // A prefix of format 7 (it carried no quantity thresholds) is refused once.
+        if (read.byte() !== 8 || read.raw(32).toString('hex') !== generation) return null;
         const liquidation = Providers.unpackLiquidationInputs(read);
         const stockRoots = Object.freeze(read.list(() => Object.freeze([read.text(), read.uint()])));
         const bands = Object.freeze(read.list(() => Object.freeze([read.uint(), read.number(), read.number(true), read.number()])));
         const hourAdena = read.number();
+        // Rows by ascending index, each with ascending finite positive thresholds.
+        const length = read.uint(), list = [];
+        let last = -1;
+        while (list.length < length) {
+            const index = read.uint(), count = read.uint();
+            if (index <= last || count > Network.QUANTITY_THRESHOLDS || list.length + 2 + count > length) return null;
+            list.push(last = index, count);
+            for (let at = 0; at < count; at++) {
+                const side = read.number();
+                if (!(side > 0) || side === Infinity || at && side <= list[list.length - 1]) return null;
+                list.push(side);
+            }
+        }
+        const thresholds = Object.freeze(list);
         // The packed quantity proof stays packed; a prefix it cannot read is refused here.
         const packed = Uint8Array.from(read.rest());
-        const quantities = eachQuantityRow(packed, () => true) ? packed : null;
-        if (!quantities || !Number.isSafeInteger(accepted.characterId)
+        let rows = 0;
+        const quantities = eachQuantityRow(packed, () => { rows++; }) ? packed : null;
+        if (!quantities || last >= rows || !Number.isSafeInteger(accepted.characterId)
             || accepted.card.activity === null && accepted.activityLeaf !== 0
             || !Number.isFinite(accepted.baseline?.at)) return null;
         return Object.freeze({ version: 2, restartable: true, owner: accepted.characterId, at: accepted.baseline.at,
             decision: Object.freeze([accepted.decisionSeq, accepted.activityLeaf, accepted.focus]),
             activity: activityIdentity(accepted.card.activity), generation,
-            quantities, liquidation, stockRoots, bands, hourAdena });
+            quantities, liquidation, stockRoots, thresholds, bands, hourAdena });
     } catch (_) { return null; }
 }
 function wireEventProof(proof) {
@@ -1243,15 +1245,6 @@ function forState(state = {}, deps = {}) {
     if (diagnosticReason === 'held_refused') {
         Diagnostics.count('context', deps.rememberContext === false ? 'held_refusal_unkept' : 'held_refusal', eventVerdict.reason || 'none');
     }
-    // Shadow, sampled owners (open item 'hold:economy decision_seq and
-    // quantity'): a quantity refusal by its class under the decided bands
-    // (quantityShadow). A band refusal beside another refusal or other moved
-    // sections rebuilds anyway (band_other); a band one alone is the rebuild
-    // the bands would skip, and its rebuild below answers same or new.
-    const shadow = diagnosticReason === 'held_refused' ? eventVerdict.quantityShadow : null;
-    const shadowAlone = shadow?.class === 'band' && eventVerdict.refused === 1 && mask === eventVerdict.touchedSections;
-    if (shadow) Diagnostics.count('context', 'held_refusal:quantity',
-        `${shadow.kind}:${shadow.class === 'band' && !shadowAlone ? 'band_other' : shadow.class}`);
     let elapsed = 0;
     // The items the review read, each reported once (deps.onSourceRead, the
     // occupation planner's dependencies) and kept with the held entry
@@ -1314,7 +1307,7 @@ function forState(state = {}, deps = {}) {
         : foundation(state, deps, persona, timestamp, price, record => { incomeRecord = record; });
     // These facts still belong to the reused foundation: its items stay read.
     if (keptBase) for (const id of held.readIds) read(id);
-    const quantityInputs = createQuantityInputs(diagnostic && Diagnostics.enabled(state.characterId));
+    const quantityInputs = createQuantityInputs();
     const context = { inputKey: key, actorKey, state, timestamp, gearThreatMask: gearThreat.mask, persona, board, hunt: base.hunt, price, buyback,
         quantityInputs,
         // The gear nomination's basis (the equipment plan's target, the power
@@ -1392,7 +1385,6 @@ function forState(state = {}, deps = {}) {
     // (a crystallize batch, a gear witness) notes none: untracked.
     context.stockFor = (id, rootKey, prior, requested) => {
         const stock = quantityInputs.stock(id, rootKey, nativeStock(id, rootKey));
-        if (!quantityInputs.thresholds()) return stock;
         if (requested === undefined) { quantityInputs.untracked('stock', id, rootKey); return stock; }
         const incoming = positive(stock?.incoming);
         quantityInputs.atLeast('stock', id, prior + 1, rootKey); quantityInputs.atLeast('stock', id, prior + requested, rootKey);
@@ -1533,12 +1525,6 @@ function forState(state = {}, deps = {}) {
         heldLeaf: held?.plan.network.activity?.key, freshLeaf: network.activity?.key });
     const plan = planOf(context, base, { key, tripHour, projection, knowledgeEnabled, prices });
     plan.quantityBands = choiceBands;
-    // The skipped rebuild's answer with the same focus: the held decision
-    // (its leaf by the proof's identity), the same target at another amount
-    // or price (same_target), else new.
-    if (shadowAlone) Diagnostics.count('context', 'quantity_would_hold', plan.network?.focus?.[0] !== held.plan.network.focus?.[0] ? 'new'
-        : activityIdentity(plan.network?.activity) === held.plan.eventProof.activity ? 'same'
-        : activityTarget(plan.network?.activity) === activityTarget(held.plan.network.activity) ? 'same_target' : 'new');
     // Source memo and ground verdict belong only to the held build entry
     // (bounded by RETAIN_LIMIT, each memo by WishProviders' cap, each ground
     // by 2 bits per planning spot). A planning view or a group closure must
@@ -1554,8 +1540,6 @@ function forState(state = {}, deps = {}) {
         // Its own activity: the later reuse verdict reads the held build
         // with it.
         plan.eventProof = captureEventProof(state, deps, { plan });
-        const thresholds = quantityInputs.thresholds();
-        if (thresholds && plan.eventProof) quantityThresholds.set(plan.eventProof, thresholds);
         // What the card stamps on its leaf, read once for the held verdict: the
         // own item's bag+incoming at the decision (heldAtDecision) and a
         // craft's reserved inputs (craftReservations).
@@ -1668,6 +1652,8 @@ function planOf(context, base, { key, tripHour, projection = null, knowledgeEnab
         watchList: context.watchList, intentPending: context.intentPending, statsPacket: context.statsPacket,
         wallet: context.wallet, horizonHours: context.horizonHours, values: projection?.values, stockRoots, knowledgeEnabled,
         quantityInputs: projection ? context.quantityInputs?.finish() : null, nominationBasis: context.nominationBasis,
+        // The thresholds of those rows, set by finish() above.
+        quantityThresholds: projection ? context.quantityInputs?.thresholds() : null,
         liquidationInputs: context.liquidationInputs,
         prices: planPrices(prices, base.kit, context), gearPlanMemo: undefined };
 }

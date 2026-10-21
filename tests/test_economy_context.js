@@ -25,6 +25,7 @@ async function run() {
     const Valuation = invoke('GameServer/Bot/Economy/EconomicValuation');
     const Config = invoke('GameServer/Bot/Population/PopulationConfig');
     Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    const Network = invoke('GameServer/Bot/Economy/WishNetwork');
     // A build holds only by its event proof, which needs the warehouse rows
     // and a recompute generation.
     invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(() => null, () => true);
@@ -280,7 +281,7 @@ async function run() {
         const restored = Economy.restoreEventProof(bytes, accepted);
         assert.equal(Economy.eventProofHolds(published, restored, deps(), options), true,
             'the restored prefix holds the saved decision');
-        const older = Uint8Array.from(bytes); older[0] = 6;
+        const older = Uint8Array.from(bytes); older[0] = 7;
         assert.equal(Economy.restoreEventProof(older, accepted), null, 'a prefix of the former format is refused');
         const kept = Generation.metadata();
         try {
@@ -289,6 +290,52 @@ async function run() {
         } finally { Generation.configure(kept); }
         assert(Economy.restoreEventProof(bytes, accepted), 'fixture: the generation is back');
         Economy.forget(native.characterId);
+    }
+    // A held build keeps a moved bag count while it stays on the same side of
+    // every threshold its decision compared it with and the drift stays within
+    // the bot's error on an hour's income; a crossing, a drift past that
+    // budget or a moved incoming count refuses it, and a saved decision
+    // restored after a restart keeps the same bands.
+    {
+        const T = Date.now(), potion = 728, native = { ...base, characterId: 990029,
+            inventory: { ...base.inventory, [potion]: { selfId: potion, amount: 20, stackable: true } } };
+        const deps = () => ({ timestamp: T, memoryIdentity: 'fixture-memory', sourceReady: true });
+        const errorsBefore = Config.knowledgeErrorsEnabled;
+        Config.knowledgeErrorsEnabled = true;
+        try {
+            const held = Economy.forState(native, deps());
+            const packet = held.statsPacket, published = { ...native, stats: { ...native.stats, ...packet } };
+            // The decision compared its 20 mana potions with 10 and read no incoming.
+            const quantities = Network.createQuantityInputs();
+            quantities.physical(potion, 20); quantities.atLeast('physical', potion, 10); quantities.incoming(potion, 0);
+            const plan = held.plan;
+            plan.quantityInputs = quantities.finish(); plan.quantityThresholds = quantities.thresholds();
+            const proof = plan.eventProof = Economy.captureEventProof(published, deps(), { plan });
+            const options = { baseline: packet.wishSections, leaf: held.network.activity, timestamp: T };
+            const budget = proof.hourAdena * options.baseline.incomeError;
+            assert(budget > 11 * 1000 && budget < 40 * 1000,
+                'fixture: the drift budget lies between 11 and 40 mana potions (1000 adena each to the NPC)');
+            const bag = (amount, incoming = 0) => ({ ...published, acceptedIncoming: incoming ? { [potion]: incoming } : {},
+                inventory: { ...published.inventory, [potion]: { selfId: potion, amount, stackable: true } } });
+            const reason = (state, value = proof) => Economy.heldBuildVerdict(state, value,
+                { ...deps(), gearThreatMask: held.gearThreatMask }, options).reason || 'valid';
+            assert.equal(reason(bag(20)), 'valid', 'fixture: the published decision holds');
+            assert.equal(reason(bag(18)), 'valid', 'a drift inside the thresholds and the budget holds');
+            assert.equal(reason(bag(9)), 'quantity', 'a count crossing a threshold the decision compared refuses');
+            assert.equal(reason(bag(60)), 'quantity', 'a drift past the budget refuses');
+            assert.equal(reason(bag(20, 3)), 'quantity', 'a moved incoming count refuses');
+            const accepted = { card: { activity: held.network.activity }, characterId: native.characterId,
+                decisionSeq: packet.decisionSeq, activityLeaf: packet.activityLeaf, focus: packet.wishFocus?.[0] ?? null,
+                baseline: packet.wishSections };
+            const restored = Economy.restoreEventProof(Economy.restartEventProof(proof, accepted), accepted);
+            assert(restored, 'fixture: the decision saves and restores its prefix');
+            assert.equal(reason(bag(18), restored), 'valid', 'a restored decision holds a drift inside its bands');
+            assert.equal(reason(bag(9), restored), 'quantity', 'a restored decision refuses a crossing');
+            console.log('PASS quantity bands: drift holds / crossing, budget, incoming refuse / restored bands');
+        } finally {
+            Config.knowledgeErrorsEnabled = errorsBefore;
+            Economy.forget(native.characterId);
+        }
     }
     // The sections mask decides which held piece a rebuild reuses: a source
     // raise keeps the foundation (hunt, kit) and rebuilds the source walk; a

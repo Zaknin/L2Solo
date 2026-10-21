@@ -78,7 +78,7 @@ function packQuantityInputs(proof) {
         return bytes.length <= QUANTITY_INPUT_BYTES ? bytes : null;
     } catch (_) { return null; }
 }
-// The one decoder: calls visit(row) for each row in order. False on a
+// The one decoder: calls visit(row, index) for each row in order. False on a
 // malformed or over-cap stream, or when visit returns false; a reader
 // error inside visit is not a codec refusal and propagates.
 function eachQuantityRow(value, visit) {
@@ -136,7 +136,7 @@ function eachQuantityRow(value, visit) {
                     : [QUANTITY_KINDS[kind], roots[index], id, number(first)];
             } else row = [QUANTITY_KINDS[kind], id, number(first)];
             visiting = true;
-            if (visit(row) === false) return false;
+            if (visit(row, i) === false) return false;
             visiting = false;
         }
         return read.done();
@@ -155,55 +155,62 @@ function unpackQuantityInputs(value) {
 // scalar row by its item.
 const quantityRowKey = row => row[0] === 'stock' || row[0] === 'stockPhysical'
     ? `${row[0]}:${row[1]}:${row[2]}` : `${row[0]}:${row[1]}`;
-// Shadow, sampled owners (open item 'hold:economy decision_seq and
-// quantity'): with withThresholds the build also notes, per row, the counts
-// a decision compared the row's value with, each as "value >= t" (a strict
-// "> t" on a count is t + 1). Kept beside the rows, never packed, saved or
-// sent: only the verdict's diagnostics read them, in process
-// (EconomyContext quantityShadow). Every read of a row either notes the
+// The build also notes, per row, the counts a decision compared the row's
+// value with, each as "value >= t" (a strict "> t" on a count is t + 1):
+// a held build keeps a moved row while it stays on the same side of each
+// (EconomyContext heldBuildVerdict). Every read of a row either notes the
 // thresholds it compares with (atLeast) or marks the row untracked (a read
-// used as an amount, or a compare not noted): an untracked row, or one past
-// the cap, is no proof (null), whatever else noted it.
+// used as an amount, or a compare not noted): an untracked row, one past
+// the cap or one never noted stays exact, whatever else noted it.
 const QUANTITY_THRESHOLDS = 32;
-// Without withThresholds every build shares these: no per-build closures.
-const noThreshold = () => {}, noThresholds = () => null;
-// The thresholds a build noted, by row key (quantityRowKey).
-function thresholdRecorder() {
-    const thresholds = new Map();
-    const keyOf = (kind, id, rootKey) => quantityRowKey(kind === 'stock' ? [kind, String(rootKey), Number(id)] : [kind, Number(id)]);
-    return {
-        atLeast(kind, id, threshold, rootKey = null) {
-            if (!Number.isFinite(threshold)) return;
-            const key = keyOf(kind, id, rootKey);
-            const sides = thresholds.has(key) ? thresholds.get(key) : new Set();
-            if (!sides) return;
-            sides.add(threshold);
-            thresholds.set(key, sides.size > QUANTITY_THRESHOLDS ? null : sides);
-        },
-        untracked(kind, id, rootKey = null) { thresholds.set(keyOf(kind, id, rootKey), null); },
-        thresholds: () => thresholds
-    };
-}
-function createQuantityInputs(withThresholds = false) {
-    const rows = [], seen = new Map(), recorder = withThresholds ? thresholdRecorder() : null;
+const ascending = (a, b) => a - b;
+function createQuantityInputs() {
+    // seen: row key -> row index; noted: row key -> thresholds or null (untracked).
+    const rows = [], seen = new Map(), noted = new Map();
     // invalid: '' or the first reason the proof is void (diagnostics name it).
-    let invalid = '', finished = false, packed = null;
+    let invalid = '', finished = false, packed = null, thresholds = null;
     const record = row => {
         if (invalid || finished) return;
         const key = quantityRowKey(row);
         const previous = seen.get(key);
-        if (previous) {
-            for (let at = 0; at < row.length; at++) if (previous[at] !== row[at]) invalid ||= 'conflict';
+        if (previous !== undefined) {
+            for (let at = 0; at < row.length; at++) if (rows[previous][at] !== row[at]) invalid ||= 'conflict';
             return;
         }
         if (rows.length >= QUANTITY_INPUT_LIMIT) { invalid = 'rows'; return; }
-        seen.set(key, row); rows.push(row);
+        seen.set(key, rows.length); rows.push(row);
     };
     const scalar = kind => (id, value) => {
         if (!Number.isSafeInteger(Number(id)) || Number(id) <= 0 || !Number.isFinite(nonnegative(value))) invalid ||= 'value';
         if (kind === 'incoming' && Number(value || 0) < 0) invalid ||= 'value';
         record([kind, Number(id), kind === 'present' || kind === 'freePresent' ? Number(nonnegative(value) > 0) : nonnegative(value)]);
         return value;
+    };
+    // A row's key (quantityRowKey) by its reader's arguments; the last one
+    // is kept: a reader notes its thresholds in a run of calls on one row.
+    let lastKind = '', lastId = 0, lastRoot = null, lastKey = '';
+    const keyOf = (kind, id, rootKey) => {
+        if (kind !== lastKind || id !== lastId || rootKey !== lastRoot) {
+            lastKind = kind; lastId = id; lastRoot = rootKey;
+            lastKey = kind === 'stock' ? `stock:${rootKey}:${Number(id)}` : `${kind}:${Number(id)}`;
+        }
+        return lastKey;
+    };
+    // The noted thresholds, one flat frozen list (no array per row):
+    // [row index, count, t1 < ... < t_count, ...] by ascending row index
+    // (seen keeps the rows' order); a threshold <= 0 is dropped (a count is
+    // never below it).
+    const compact = () => {
+        const list = [];
+        for (const [key, index] of seen) {
+            const sides = noted.get(key);
+            if (!sides) continue;
+            const at = list.length;
+            list.push(index, 0);
+            for (const side of sides.sort(ascending)) if (side > 0) list.push(side);
+            list[at + 1] = list.length - at - 2;
+        }
+        return Object.freeze(list);
     };
     return {
         stock(id, rootKey, value) {
@@ -221,24 +228,35 @@ function createQuantityInputs(withThresholds = false) {
         physical: scalar('physical'), present: scalar('present'), freePresent: scalar('freePresent'),
         incoming: scalar('incoming'), free: scalar('free'), crystalFree: scalar('crystalFree'),
         unsupported() { invalid ||= 'unsupported'; },
-        // atLeast(kind, id, threshold, rootKey): a threshold the build
-        // compared the row (a stock row also by its root) with;
-        // untracked(kind, id, rootKey): a read that notes none; thresholds():
-        // the noted thresholds by row key, null without withThresholds.
-        atLeast: recorder?.atLeast || noThreshold, untracked: recorder?.untracked || noThreshold,
-        thresholds: recorder?.thresholds || noThresholds,
+        // A threshold the build compared the row (kind, id; a stock row also
+        // its root) with.
+        atLeast(kind, id, threshold, rootKey = null) {
+            if (finished || !Number.isFinite(threshold)) return;
+            const key = keyOf(kind, id, rootKey), sides = noted.get(key);
+            if (sides === null) return;
+            if (sides === undefined) { noted.set(key, [threshold]); return; }
+            if (sides.includes(threshold)) return;
+            if (sides.length >= QUANTITY_THRESHOLDS) noted.set(key, null);
+            else sides.push(threshold);
+        },
+        // A read of the row that notes no threshold: the row stays exact.
+        untracked(kind, id, rootKey = null) { if (!finished) noted.set(keyOf(kind, id, rootKey), null); },
         // The packed proof (eachQuantityRow reads it) or null.
         finish() {
             if (!finished) {
                 finished = true;
                 if (!invalid) packed = packQuantityInputs({ version: 1, rows });
                 if (!invalid && !packed) invalid = 'bytes';
+                if (!invalid) thresholds = compact();
                 // Diagnostics: why a completed build has no quantity proof.
                 if (invalid && Diagnostics.active()) Diagnostics.count('context', 'quantity_invalid', invalid);
-                seen.clear(); rows.length = 0;
+                seen.clear(); noted.clear(); rows.length = 0;
             }
             return packed;
-        }
+        },
+        // The noted thresholds of the packed rows (compact above) after
+        // finish, null before or without a proof.
+        thresholds: () => thresholds
     };
 }
 // Whether every row of the packed proof still answers the same; skip(row)
@@ -246,39 +264,37 @@ function createQuantityInputs(withThresholds = false) {
 // values are already valid; a missing reader is never quiet. A moved
 // answer pushes 'quantity' to why; false without it is a stream the
 // codec refuses (or a missing reader). stockFor gets the row it answers.
-// onMoved(row, value, incoming) (diagnostics) walks every row: each moved
-// one is handed its current comparable value (a stock row also its
-// incoming) and the walk goes on; the answer is the same.
-function quantityInputsHold(packed, readers, normalizeStock = null, skip = null, why = null, onMoved = null) {
-    let anyMoved = false;
-    const moved = (row, value, incoming) => {
+// tolerate(row, index, value, incoming) is handed each moved row (its index
+// in the stream, its current comparable value, a stock row also its
+// incoming): true keeps it, as if it had not moved.
+function quantityInputsHold(packed, readers, normalizeStock = null, skip = null, why = null, tolerate = null) {
+    const moved = (row, index, value, incoming) => {
+        if (tolerate?.(row, index, value, incoming)) return true;
         why?.push('quantity');
-        if (!onMoved) return false;
-        anyMoved = true; onMoved(row, value, incoming);
-        return true;
+        return false;
     };
-    return eachQuantityRow(packed, row => {
+    return eachQuantityRow(packed, (row, index) => {
         if (skip?.(row)) return true;
         if (row[0] === 'stock') {
             if (typeof readers?.stockFor !== 'function') return false;
             const stock = readers.stockFor(row[2], row[1], row);
             const owned = nonnegative(stock?.owned), incoming = nonnegative(stock?.incoming);
             const comparable = normalizeStock ? normalizeStock('stock', row[1], row[2], owned, row[3]) : owned;
-            return comparable === row[3] && incoming === row[4] || moved(row, comparable, incoming);
+            return comparable === row[3] && incoming === row[4] || moved(row, index, comparable, incoming);
         }
         if (row[0] === 'stockPhysical') {
             if (typeof readers?.physical !== 'function') return false;
             const owned = nonnegative(readers.physical(row[2]));
             const comparable = normalizeStock ? normalizeStock('stockPhysical', row[1], row[2], owned, row[3]) : owned;
-            return comparable === row[3] || moved(row, comparable);
+            return comparable === row[3] || moved(row, index, comparable);
         }
         const read = row[0] === 'present' ? readers?.physical : row[0] === 'freePresent' ? readers?.free : readers?.[row[0]];
         if (typeof read !== 'function') return false;
         const raw = read(row[1]);
-        if (row[0] === 'incoming' && (!Number.isFinite(Number(raw || 0)) || Number(raw || 0) < 0)) return moved(row, NaN);
+        if (row[0] === 'incoming' && (!Number.isFinite(Number(raw || 0)) || Number(raw || 0) < 0)) return moved(row, index, NaN);
         const value = nonnegative(raw), comparable = row[0] === 'present' || row[0] === 'freePresent' ? Number(value > 0) : value;
-        return comparable === row[2] || moved(row, comparable);
-    }) && !anyMoved;
+        return comparable === row[2] || moved(row, index, comparable);
+    });
 }
 // Native commands for `batches`: a path without perCommand runs one batch each.
 const commands = (batches, perCommand) => Math.ceil(batches / (Number(perCommand) >= 1 ? Number(perCommand) : 1));
@@ -1076,4 +1092,4 @@ class WishNetwork {
     }
 }
 
-module.exports = { WishNetwork, createSolver, createQuantityInputs, quantityInputsHold, quantityRowKey, eachQuantityRow, packQuantityInputs, unpackQuantityInputs, admitRoots, moneyQueue, remainingQuantity, craftMaterialLoss, fundable, cashCharge, remember, NEEDS, MAX_NODES, MAX_ROOTS, MAX_DEPTH, ACTOR_LIMIT, QUANTITY_INPUT_LIMIT, QUANTITY_INPUT_BYTES };
+module.exports = { WishNetwork, createSolver, createQuantityInputs, quantityInputsHold, eachQuantityRow, packQuantityInputs, unpackQuantityInputs, admitRoots, moneyQueue, remainingQuantity, craftMaterialLoss, fundable, cashCharge, remember, NEEDS, MAX_NODES, MAX_ROOTS, MAX_DEPTH, ACTOR_LIMIT, QUANTITY_INPUT_LIMIT, QUANTITY_INPUT_BYTES, QUANTITY_THRESHOLDS };
