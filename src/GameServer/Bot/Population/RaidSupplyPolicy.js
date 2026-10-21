@@ -1,7 +1,6 @@
 'use strict';
 
-const Shots = invoke('GameServer/Inventory/ShotStock');
-const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
+const Funding = require('../Economy/PurchaseFunding');
 
 function held(state, now = Date.now()) {
     const value = state?.stats?.raidSupplyPreparation;
@@ -11,6 +10,7 @@ function held(state, now = Date.now()) {
 function cash(state) { return Funding.spendable(state, 0, { upperBound: true }); }
 
 function supplies(members, shotPlans) {
+    const Shots = invoke('GameServer/Inventory/ShotStock');
     return shotPlans.map(plan => {
         const state = members.find(s => s.characterId === plan.id);
         const shot = Shots.planForState(state);
