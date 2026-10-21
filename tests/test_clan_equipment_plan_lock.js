@@ -466,7 +466,13 @@ async function main() {
             { partyId: 'same-clean', spotId: 'test-spot', memberIds: [1001, 1002], stats: { objective: { clanGoalKey: clanPlan.clanGoal.goalKey, objectiveKey: 'direct_drop:test-spot:701', npcId: 701 } } },
             { partyId: 'same-wrong-route', spotId: 'old-spot', memberIds: [1001, 1002], stats: { objective: { clanGoalKey: clanPlan.clanGoal.goalKey, objectiveKey: 'direct_drop:old-spot:700', npcId: 700 } } },
             { partyId: 'same-mixed', spotId: 'test-spot', memberIds: [1001, 9999], stats: { objective: { clanGoalKey: clanPlan.clanGoal.goalKey, objectiveKey: 'direct_drop:test-spot:701', npcId: 701 } } },
-            { partyId: 'wrong-goal', memberIds: [1002, 1003], stats: { objective: { clanGoalKey: 'clan-equipment:78:1002:9202:7' } } }
+            { partyId: 'wrong-goal', memberIds: [1002, 1003], stats: { objective: { clanGoalKey: 'clan-equipment:78:1002:9202:7' } } },
+            // A mixed-clan expedition has no clanGoalKey. Protect its agreed
+            // roster from formation onward, including travel before combat.
+            { partyId: 'opportunistic-travelling', status: 'active', memberIds: [1001, 1002],
+                stats: { objective: { sourceKind: 'raid', opportunisticRaid: true }, travel: { arrivalAt: 12345 } } },
+            { partyId: 'opportunistic-failed', status: 'active', memberIds: [1001, 1002],
+                stats: { objective: { sourceKind: 'raid', opportunisticRaid: true }, raidEncounter: { status: 'failed' } } }
         ];
         PartyState.setStatus = async (partyId, status) => {
             dissolved.push({ partyId, status });
@@ -478,8 +484,9 @@ async function main() {
             { goalKey: clanPlan.clanGoal.goalKey },
             { spotId: 'test-spot', objectiveKey: 'direct_drop:test-spot:701', npcId: 701 }
         );
-        assert.deepStrictEqual(dissolved.map((entry) => entry.partyId), ['same-wrong-route', 'same-mixed', 'wrong-goal']);
-        assert.deepStrictEqual(reformed, { parties: 3, releasedMembers: 6 },
+        assert.deepStrictEqual(dissolved.map((entry) => entry.partyId),
+            ['same-wrong-route', 'same-mixed', 'wrong-goal', 'opportunistic-failed']);
+        assert.deepStrictEqual(reformed, { parties: 4, releasedMembers: 8 },
             'a clan equipment review must dissolve wrong-route, mixed, or foreign parties before rebuilding its roster');
 
         console.log('Clan equipment plan lock checks passed');

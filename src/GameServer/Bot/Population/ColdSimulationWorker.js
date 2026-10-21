@@ -1345,7 +1345,8 @@ function startKernel(config = {}) {
             const owner = kernel.states.get(Number(state.characterId));
             // Room at arrival, before the projection: a full spot's mark rides
             // the patch, its sections join the step's one raise.
-            const crowded = soloArrival(state, result);
+            const raidPreparing = require('./RaidSupplyPolicy').held(state, timestamp);
+            const crowded = !raidPreparing && soloArrival(state, result);
             if (crowded) result = crowded;
             // The step's one decision, taken before the round (planLifecycle):
             // the round's consequences run on it, no second ask. A step
@@ -1369,7 +1370,8 @@ function startKernel(config = {}) {
                 // the bot's memory rows, read only when its bond is compared.
                 softInputFor: (projected, at) => softInputFor(projected.characterId, at)
             };
-            const resolved = await LifeStateProjector.prepareResolve(state, result, stepEconomy
+            const resolved = await LifeStateProjector.prepareResolve(state, result, raidPreparing
+                ? { ...base, statsPacket: {}, statsPacketBeforeResolve: true } : stepEconomy
                 // Merged before the event check, whose dirty bits follow it.
                 ? { ...base, statsPacket: lifecyclePlan.statsPacket, statsPacketBeforeResolve: true }
                 : { ...base,
@@ -1426,7 +1428,7 @@ function startKernel(config = {}) {
             // Accepted custody owns the next physical transition. Resume the
             // original economic plan after the meeting releases the actor.
             const kitMoved = DecisionSections.kitMoved(state, projected);
-            if (state.stats?.tradeMeeting) return { state: projected,
+            if (raidPreparing || state.stats?.tradeMeeting) return { state: projected,
                 durable: Object.keys(durable).length ? durable : null, kitMoved };
             const preparedAction = economyEdges && economy ? await occupationFor(projected, timestamp,
                 { stock: economy.stock('shots'), economy }, 'action') : null;

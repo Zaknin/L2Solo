@@ -420,7 +420,11 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
             const pulls = World.fetchNpcsInRadius(owner.actor.fetchLocX(), owner.actor.fetchLocY(), radius)
                 .filter(allowedHunt).filter(n => Math.abs(n.fetchLocZ() - owner.actor.fetchLocZ()) < 500)
                 .map(npc => ({ npc, size: Spots.pullSizeFor(npc) }))
-                .filter(({ npc, size }) => TargetMatchup.soloSurvival(profiles,
+                // Raid admission already accounts for tanking, healing,
+                // regeneration and supplies. The ordinary no-healing pull
+                // estimate would reject its boss after accepting the adds.
+                // allowedHunt still enforces ownership of this raid only.
+                .filter(({ npc, size }) => raidObjective || TargetMatchup.soloSurvival(profiles,
                     BotPullEstimate.pullView(TargetMatchup.targetView(npc), size)).eligible);
             pulls.sort((a, b) => Number(b.npc.fetchSelfId() === npcId) - Number(a.npc.fetchSelfId() === npcId)
                 || Math.round(a.size) - Math.round(b.size)

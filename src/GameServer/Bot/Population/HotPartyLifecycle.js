@@ -143,7 +143,7 @@ function raidDeathDisposition(value, options = {}) {
     return require('./RaidCasualtyPolicy').disposition(value, options);
 }
 
-async function failRaidOnDeath(session, timestamp = Date.now()) {
+async function failRaidOnDeath(session, timestamp = Date.now(), options = {}) {
     const partyId = session?.hotBackgroundPartyId;
     if (!partyId || raidFailures.has(partyId)) return { ok: false, reason: 'not_hot_raid_or_pending' };
     const current = Parties.find(partyId);
@@ -163,7 +163,7 @@ async function failRaidOnDeath(session, timestamp = Date.now()) {
     const previousDamageCasualties = sessions.filter((member) => (
         member !== session && member.hotRaidCasualtyAt
     )).length;
-    const disposition = raidDeathDisposition(session.actor || session.coldLifeState, {
+    const disposition = options.reason ? 'abort' : raidDeathDisposition(session.actor || session.coldLifeState, {
         previousDamageCasualties,
         remainingHpRatio
     });
@@ -202,8 +202,8 @@ async function failRaidOnDeath(session, timestamp = Date.now()) {
                     ...snapshot,
                     status: 'failed',
                     remainingHpRatio: Math.max(0, Math.min(1, Number(snapshot.hp || 0) / maxHp)),
-                    failureReason: disposition === 'fail_attrition'
-                        ? 'damage_attrition' : 'critical_role_death',
+                    failureReason: options.reason || (disposition === 'fail_attrition'
+                        ? 'damage_attrition' : 'critical_role_death'),
                     failedAt: timestamp,
                     failedPartyId: partyId,
                     updatedAt: timestamp,
@@ -243,6 +243,10 @@ function readinessReason(party, states, timestamp = Date.now()) {
         && !Roster.exact(states.map(state => state.characterId), Roster.markerFor(party).memberIds)) return 'raid_roster_incomplete';
     if (party.stats?.travel) return 'party_traveling';
     const objective = party.stats?.objective;
+    if (require('./OpportunisticRaidPolicy').isObjective(objective)) {
+        const refused = require('./OpportunisticRaidPolicy').pullAdmission(states, objective);
+        if (refused) return refused;
+    }
     const unsafeRaidMember = states.find((state) => (
         !require('./ClanEquipmentPartyPolicy').raidLevelAllowed(state, objective)
     ));
@@ -637,6 +641,7 @@ async function confirmMarkedRaidStart(party) {
 }
 
 module.exports = {
+    abandonRaid: (session, reason, timestamp) => failRaidOnDeath(session, timestamp, { reason }),
     openMarkedRaid,
     openMarkedRaidAtImpact,
     markedAttackReady,

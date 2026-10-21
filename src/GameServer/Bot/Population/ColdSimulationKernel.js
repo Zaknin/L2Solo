@@ -360,6 +360,9 @@ function lifecycleKind(state = {}, facts = NO_FACTS) {
     if (leads) return 'party';
     if (state.activity === 'crafting' && state.stats?.craftShop) return 'event_driven';
     const stats = state.stats || {};
+    if (require('./RaidSupplyPolicy').held(state)) {
+        return ['shopping', 'merchant'].includes(state.activity) ? 'command' : 'resolver';
+    }
     const plan = stats.equipmentPlan || {};
     if (stats.clanHallVisit || facts.hallNeeded(state)) return 'command';
     // Finite travel/rest/death transitions are completely represented by the
@@ -1427,8 +1430,9 @@ class ColdSimulationKernel {
             const elapsedMs = current.state.timing?.lastResolvedAt
                 ? Math.max(1000, timestamp - Number(current.state.timing.lastResolvedAt))
                 : 60000;
-            const hallVisit = !!current.state.stats?.clanHallVisit || this.hallNeeded(current.state);
-            const lifecyclePlan = !hallVisit && this.planLifecycle
+            const raidPreparing = require('./RaidSupplyPolicy').held(current.state, timestamp);
+            const hallVisit = !raidPreparing && (!!current.state.stats?.clanHallVisit || this.hallNeeded(current.state));
+            const lifecyclePlan = !hallVisit && !raidPreparing && this.planLifecycle
                 ? await this.planLifecycle({ state: current.state, timestamp })
                 : null;
             if (!this.currentCommand(id, attempt)) return;
@@ -1919,8 +1923,13 @@ class ColdSimulationKernel {
             // step raised its build section (its kit moved, below), and
             // closes when every member is planned or the party ends.
             let requirementProgress = this.partyRequirementProgress.get(String(run.party.partyId));
+            const nativeExpedition = run.party.stats?.objective?.opportunisticRaid === true;
+            if (nativeExpedition) {
+                this.partyRequirementProgress.delete(String(run.party.partyId));
+                requirementProgress = null;
+            }
             const openRequirements = reason => {
-                if (requirementProgress || meetingPending || materialHunt) return;
+                if (nativeExpedition || requirementProgress || meetingPending || materialHunt) return;
                 requirementProgress = new Set();
                 this.partyRequirementProgress.set(String(run.party.partyId), requirementProgress);
                 EconomyDiagnostics.count('party_replan', 'opened', reason);
@@ -1931,7 +1940,7 @@ class ColdSimulationKernel {
             // it (the row's next due) and reviews the party's goals.
             const leaderResolution = {
                 partyId: run.party.partyId,
-                reviewGoals: !meetingPending,
+                reviewGoals: !meetingPending && !nativeExpedition,
                 party: resolvedParty,
                 ...(recruitCheck ? { recruitCheck } : {})
             };
@@ -2066,7 +2075,7 @@ class ColdSimulationKernel {
             const elapsedMs = active.state.timing?.lastResolvedAt
                 ? Math.max(1000, timestamp - Number(active.state.timing.lastResolvedAt))
                 : 60000;
-            const lifecyclePlan = this.planLifecycle
+            const lifecyclePlan = !require('./RaidSupplyPolicy').held(active.state, timestamp) && this.planLifecycle
                 ? await this.planLifecycle({ state: active.state, timestamp })
                 : null;
             if (!this.resolverSourceCurrent(source)) return;
@@ -2094,7 +2103,7 @@ class ColdSimulationKernel {
             const projectedState = projection?.state || projection;
             // The forced cleanup on the fight's result, over a trip this step
             // started (main starts the cleanup trip).
-            const cleanupNeed = projectedState ? PartyMarketBreak.forcedCleanupNeed(
+            const cleanupNeed = projectedState && !require('./RaidSupplyPolicy').held(active.state, timestamp) ? PartyMarketBreak.forcedCleanupNeed(
                 PartyMarketBreak.withoutStartedTrip(active.state, projectedState), timestamp) : null;
             const priority = playerWaitingTransition(active.state, null, this) ? 'P0'
                 : projection?.durable ? 'P1' : priorityForResult(active.state, result);

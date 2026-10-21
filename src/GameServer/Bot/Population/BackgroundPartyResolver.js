@@ -303,7 +303,8 @@ const BackgroundPartyResolver = {
         }
 
         const raid = raidObjective;
-        const raidComposition = raid ? ClanRaidPolicy.composition(members) : null;
+        const raidComposition = raid ? (party.stats?.objective?.opportunisticRaid
+            ? require('./OpportunisticRaidPolicy').composition(members) : ClanRaidPolicy.composition(members)) : null;
         const understaffed = !admission?.held && party.stats?.objective?.clanGoalKey
             && members.length < Math.max(2, Number(party.stats.objective.minPartySize) || 3);
         const raidRosterIncomplete = raid && !admission?.held && !raidComposition.ready;
@@ -332,6 +333,14 @@ const BackgroundPartyResolver = {
             };
         }
 
+        if (party.stats?.objective?.opportunisticRaid) {
+            // Travel/rest are simulated; this roster opens its encounter only
+            // as native actors, including actual adds, healing and shot use.
+            return { memberResults: members.map(state => ({ state, result: { patch: {}, events: [],
+                materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: timestamp + 10000 } })),
+                atomic: true, events: [], partyPatch: {}, nextResolveAt: timestamp + 10000,
+                debug: { reason: 'raid_wait_native_activation', fights: 0, wins: 0 } };
+        }
         if (raid && !raidCombatActive) {
             const preparation = BackgroundResolver.prepareRaidParty(members, timestamp);
             const previous = party.stats?.raidPreparation || {};

@@ -56,6 +56,46 @@ function byteLength(value) {
 
 const INCOME_REVIEW_KEYS = new Set(['characterId', 'accept', 'reason', 'soloIncome', 'partyIncome',
     'soloHours', 'partyHours', 'fee', 'soloSpotId', 'soloBuffPrice', 'at', 'soloSource', 'partySource']);
+function validRaidAssessment(joint, sources) {
+    const a = joint.raidAssessment;
+    if (joint.objective?.opportunisticRaid !== true || joint.objective.sourceKind !== 'raid'
+        || !a || typeof a !== 'object' || Array.isArray(a) || typeof a.ready !== 'boolean'
+        || typeof a.reason !== 'string' || !/^[a-z_]{1,80}$/.test(a.reason)
+        || Object.keys(a).some(key => !['ready', 'reason', 'seconds', 'grossDps', 'regen', 'healing', 'shotPlans', 'kits', 'supplies',
+            'reasons', 'unchecked', 'defense', 'healingRequired', 'workMs'].includes(key))) return false;
+    if (['seconds', 'grossDps', 'regen', 'healing', 'healingRequired', 'workMs'].some(key => a[key] !== undefined
+        && (typeof a[key] !== 'number' || !Number.isFinite(a[key]) || a[key] < 0))) return false;
+    const ids = new Set(sources.map(s => Number(s.characterId)));
+    for (const key of ['reasons', 'unchecked']) {
+        const list = a[key];
+        if (list !== undefined && (!Array.isArray(list) || list.length > 16
+            || new Set(list).size !== list.length || list.some(r => typeof r !== 'string' || !/^[a-z_]{1,80}$/.test(r)))) return false;
+    }
+    if (a.reasons !== undefined && (a.ready ? a.reasons.length !== 0
+        : a.reasons[0] !== a.reason)) return false;
+    if (a.ready && a.unchecked?.length) return false;
+    if (a.defense !== undefined) {
+        const d = a.defense, keys = ['tankId', 'pDef', 'maxHp', 'requiredHp', 'bossDps', 'guardDps'];
+        if (!d || typeof d !== 'object' || Array.isArray(d) || Object.keys(d).length !== keys.length
+            || Object.keys(d).some(k => !keys.includes(k)) || !ids.has(d.tankId)
+            || keys.slice(1).some(k => typeof d[k] !== 'number' || !Number.isFinite(d[k]) || d[k] < 0)) return false;
+    }
+    if (a.shotPlans !== undefined && (!Array.isArray(a.shotPlans) || a.shotPlans.length > 9
+        || a.shotPlans.some(p => !p || !ids.has(p.id) || !Number.isSafeInteger(p.selfId) || p.selfId <= 0
+            || ['stock', 'required', 'perAction'].some(key => !Number.isSafeInteger(p[key]) || p[key] < 0)))) return false;
+    if (a.supplies !== undefined && (!Array.isArray(a.supplies) || a.supplies.length > 9
+        || new Set(a.supplies.map(p => p?.id)).size !== a.supplies.length
+        || a.supplies.some(p => !p || !ids.has(p.id) || !Number.isSafeInteger(p.selfId) || p.selfId <= 0
+            || ['target', 'missing'].some(key => !Number.isSafeInteger(p[key]) || p[key] < 0)
+            || ['price', 'cost', 'cash'].some(key => typeof p[key] !== 'number' || !Number.isFinite(p[key]) || p[key] < 0)
+            || Object.keys(p).some(key => !['id', 'selfId', 'target', 'missing', 'price', 'cost', 'cash'].includes(key))))) return false;
+    if (a.kits !== undefined && (!Array.isArray(a.kits) || a.kits.length !== sources.length
+        || new Set(a.kits.map(row => row?.[0])).size !== sources.length
+        || a.kits.some(row => !Array.isArray(row) || row.length !== 2 || !ids.has(row[0])
+            || typeof row[1] !== 'string' || row[1].length > 256))) return false;
+    return !a.ready || a.seconds > 0 && a.grossDps > a.regen && a.shotPlans?.length >= 6 && !!a.kits;
+}
+
 function validPartyIncomeReviews(joint, sources) {
     if (joint.lastIncomeReviewAt === undefined && joint.incomeReviews === undefined) return true;
     if (!Number.isSafeInteger(joint.lastIncomeReviewAt) || joint.lastIncomeReviewAt <= 0
@@ -184,7 +224,8 @@ function validateEnvelope(message, direction, options = {}) {
                 || !payload.joint || typeof payload.joint !== 'object' || Array.isArray(payload.joint)
                 || !Array.isArray(payload.joint.memberGoals) || payload.joint.memberGoals.length !== payload.sources.length
                 || Object.keys(payload.joint).some(key => !['objective', 'memberGoals', 'wishFocus', 'dormantWishes',
-                    'lastIncomeReviewAt', 'incomeReviews'].includes(key))
+                    'lastIncomeReviewAt', 'incomeReviews', 'raidAssessment'].includes(key))
+                || payload.joint.raidAssessment !== undefined && !validRaidAssessment(payload.joint, payload.sources)
                 || !validPartyIncomeReviews(payload.joint, payload.sources)
             : typeof payload.reason !== 'string')) return { ok: false, reason: 'invalid_party_goal_result' };
     }

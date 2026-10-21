@@ -1719,6 +1719,12 @@ const BackgroundResolver = {
             if (travelResult) return travelResult;
         }
 
+        if (require('./RaidSupplyPolicy').held(state, timestamp) && state.activity !== 'dead' && Number(state.vitals?.hp) > 0) {
+            return { patch: { activity: ['shopping', 'merchant'].includes(state.activity) ? 'shopping' : 'party_wait' }, events: [],
+                materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: timestamp + 30000,
+                debug: { reason: 'raid_supply_preparing', fights: 0, wins: 0 } };
+        }
+
         if (state.stats?.supplyErrand) {
             const expiresAt = Number(state.stats.supplyErrand.expiresAt || 0);
             // A native accepted obligation has no lateness deadline. Its
