@@ -1,4 +1,5 @@
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
+const Material = require('./CraftMaterialParty');
 
 // How long an open party request may wait for a group, by its priority.
 function maxAgeMs(priority) {
@@ -103,7 +104,6 @@ function clanPartyObjectiveForState(state) {
 // thread; required, no build here) and memo (the bot's worker record).
 function partyRequestForPlan(state, plan, timestamp = Date.now(), options = {}) {
     const previous = state?.stats?.partyRequest;
-    const Material = require('./CraftMaterialParty');
     const supplyPause = Material.supplyPause(state, plan, { ...options, timestamp });
     if (supplyPause) return supplyPause;
     // Travel and recovery are part of returning to solo hunting. Neither may

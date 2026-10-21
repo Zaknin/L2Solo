@@ -1,6 +1,10 @@
 'use strict';
 
 const BuffPolicy = invoke('GameServer/Bot/Economy/BuffServicePolicy');
+const Rewards = require('../Economy/SpotRewardExpectation');
+const GameDataCatalogue = require('../../Knowledge/GameDataCatalogue');
+const Material = require('./CraftMaterialParty');
+const SpotEconomics = require('../Economy/SpotEconomics');
 const HOUR_MS = 3600000;
 const REVIEW_MS = 5 * 60000;
 const MAX_SOLO_CHECKS = 12;
@@ -152,7 +156,6 @@ function prepare(members, { objective, party, spots, memberContexts, timestamp =
     if (!spot || spot.raidBoss || !members.length || members.length > 9) return { rows: new Map(), spots, timestamp, spot };
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Table = invoke('GameServer/Bot/AI/SpotValueTable');
-    const Rewards = require('../Economy/SpotRewardExpectation');
     const Match = invoke('GameServer/Bot/AI/BotTargetMatchup');
     const key = rosterKey(members);
     const spoilerIndex = members.findIndex(member => invoke('GameServer/Bot/AI/BotRoles').isSpoiler(member));
@@ -216,13 +219,12 @@ function prepare(members, { objective, party, spots, memberContexts, timestamp =
 function itemHours(state, spot, kills, goal, members, agreement) {
     const npcId = Number(goal?.npcId), itemId = Number(goal?.itemId);
     if (!spot || !npcId || !itemId || !(kills > 0)) return null;
-    const Catalogue = require('../../Knowledge/GameDataCatalogue').native();
+    const Catalogue = GameDataCatalogue.native();
     const reward = Catalogue.rewardForNpc(npcId), npc = Catalogue.npc(npcId);
     if (!reward || !npc) return null;
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const next = state.stats?.equipmentPlan?.next;
     const spoil = goal.sourceKind === 'spoil' || goal.strategy === 'spoil' || Number(next?.itemId) === itemId && next.kind === 'spoil';
-    const Material = require('./CraftMaterialParty');
     const owners = agreement?.materialNeeds ? Material.needs(members, { spotId: spot.id }, agreement)
         .filter(row => Number(row.itemId) === itemId) : [];
     const ownNeed = owners.find(row => row.characterId === Number(state.characterId));
@@ -256,7 +258,7 @@ function soloItemRouteHours(state, spots, goal, timestamp) {
     if (!Routes.isSpotAllowedForState(spot, standalone, { timestamp, mode: 'solo',
         matchupProfiles: Match.stateProfiles(standalone, { timestamp }) })) return null;
     const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
-    const evaluateSpot = require('../Economy/SpotEconomics').create(standalone, { timestamp, moneyWeight: 1 });
+    const evaluateSpot = SpotEconomics.create(standalone, { timestamp, moneyWeight: 1 });
     const choices = [true, false].map(shots => evaluateSpot(spot, shots)).filter(row => row?.income > 0)
         .map(row => itemHours(state, spot, row.kills * Hunt.onSpotShare(state), goal, [state]))
         .filter(hours => hours !== null);
@@ -279,7 +281,6 @@ function compare(state, peers, options = {}) {
     }
     const party = prepared.rows.get(state.characterId) || null;
     const focus = state.stats?.wishFocus;
-    const Material = require('./CraftMaterialParty');
     const materialParty = Material.isObjective(options.objective);
     const agreement = materialParty ? options.party?.stats?.agreement || Material.agreement(members, options.objective)
         : options.party?.stats?.agreement;

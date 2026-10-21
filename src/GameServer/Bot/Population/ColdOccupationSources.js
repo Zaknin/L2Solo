@@ -11,6 +11,7 @@ const Production = require('../Economy/ProductionPolicy');
 const { personalOfferAllowed } = require('./PartyAdmission');
 const Price = require('../Economy/PriceDecision');
 const OfferQuery = require('../Economy/OfferQuery');
+const ShotSalePolicy = require('../Economy/ShotSalePolicy');
 const { QUOTE_DEPTH } = Price;
 const EMPTY = Object.freeze([]);
 let fixedBuy, npcOfferView, mpRates, townByName, townOrdinal, gearByRank;
@@ -248,7 +249,7 @@ function* prepare(state, { board, timestamp, read = () => {}, readScope = () => 
             yield 'exit';
         }
         const own = ownStock.get(Number(recipe.productId));
-        result.push(...yield* require('../Economy/ShotSalePolicy').exits(state, recipe, { board, timestamp,
+        result.push(...yield* ShotSalePolicy.exits(state, recipe, { board, timestamp,
             trip, prepareTrip: ensureTrip, npcOffersFor, read,
             reserve: Number(stock?.itemId) === Number(recipe.productId)
                 ? Math.max(0, Number(stock.target || 0) - Number(state.inventory?.[recipe.productId]?.amount || 0)

@@ -1,3 +1,4 @@
+const TendencyRoll = require('../Bot/AI/TendencyRoll');
 const episodes = new WeakMap();
 function statsAfter(stats = {}, episode) {
     const Learning = invoke('GameServer/Bot/AI/KnowledgeLearning');
@@ -17,7 +18,7 @@ function estimate(value, source, persona, key) {
     const error = uncertainty(source, persona);
     if (!error) return value;
     const id = source?.characterId ?? source?.actor?.fetchId?.() ?? source?.id;
-    const roll = require('../Bot/AI/TendencyRoll').roll('people_estimate', id, key);
+    const roll = TendencyRoll.roll('people_estimate', id, key);
     return value * (1 + (roll * 2 - 1) * error);
 }
 function recordActor(actor, other, at = Date.now()) {

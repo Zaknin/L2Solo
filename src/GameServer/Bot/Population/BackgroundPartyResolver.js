@@ -1,5 +1,11 @@
 const PveEncounter = require('./ColdPveEncounter');
 const Assembly = require('./PartyHuntingAssembly');
+const ColdCompetitionWait = require('./ColdCompetitionWait');
+const Material = require('./CraftMaterialParty');
+const Roster = require('../../Clan/ClanRaidRoster');
+const PartyAgreement = require('./PartyAgreement');
+const PartyGoalPolicy = require('./PartyGoalPolicy');
+const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
 const ProgressionRates = invoke('GameServer/ProgressionRates');
 const BackgroundResolver = invoke('GameServer/Bot/Population/BackgroundResolver');
 const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -155,7 +161,6 @@ const BackgroundPartyResolver = {
                 debug: { reason: 'missing_party_members_or_spot' }
             };
         }
-        const Material = require('./CraftMaterialParty');
         const materialHunt = Material.isObjective(party.stats?.objective);
         if (materialHunt && !party.stats.pveEncounter && !Material.needs(members, party.stats.objective, party.stats.agreement).length) {
             return { memberResults: members.map(state => ({ state, result: { patch: {}, events: [],
@@ -170,10 +175,9 @@ const BackgroundPartyResolver = {
             && party.stats?.objective?.sourceKind === 'raid'
             && Number(party.stats.objective.raidBossTemplateId || party.stats.objective.npcId)
                 === Number(spot.raidBossTemplateId);
-        const Roster = require('../../Clan/ClanRaidRoster');
         const marked = !!Roster.markerFor(party);
         const admission = marked ? Roster.admission(party, members, spot, { owner: raidOwner, timestamp,
-            arrived: require('./PartyHuntingAssembly').ready(party, members, spot) }) : null;
+            arrived: Assembly.ready(party, members, spot) }) : null;
         // Sitting is not hunting readiness. A complete, current roster must
         // still run the recovery below; rejecting it here drops every MP/HP
         // tick and leaves preparation permanently waiting for its own rest.
@@ -322,7 +326,7 @@ const BackgroundPartyResolver = {
         const assemblyMembers = raidCombatActive || admission?.held
             ? members.filter(member => !admission?.held || Number(member.vitals?.hp) > 0).map((member) => ({ ...member, activity: 'grouped' }))
             : members;
-        if (understaffed || raidRosterIncomplete || !require('./PartyHuntingAssembly').ready(party, assemblyMembers, spot)) {
+        if (understaffed || raidRosterIncomplete || !Assembly.ready(party, assemblyMembers, spot)) {
             // No route may mean admission is temporarily unavailable. Do not
             // turn that into remote combat or rewrite a member's physical spot.
             const nextResolveAt = timestamp + 30000;
@@ -604,8 +608,8 @@ const BackgroundPartyResolver = {
             });
         });
 
-        const lootDistribution = require('./PartyAgreement').allocate(memberResults, party.stats?.agreement,
-            { rng, needScore: require('./PartyGoalPolicy').itemNeed }) || PartyLootAllocator.transferGearDrops(memberResults);
+        const lootDistribution = PartyAgreement.allocate(memberResults, party.stats?.agreement,
+            { rng, needScore: PartyGoalPolicy.itemNeed }) || PartyLootAllocator.transferGearDrops(memberResults);
         let distributedMemberResults = lootDistribution.memberResults;
         let partyRestUntil = null;
 
@@ -801,7 +805,7 @@ const BackgroundPartyResolver = {
 const resolveParty = BackgroundPartyResolver.resolve;
 BackgroundPartyResolver.resolve = (options = {}) => {
     const timestamp = options.timestamp ?? Date.now();
-    const competition = require('./ColdCompetitionWait').consumeParty(options.party, options.members || [], options.elapsedMs ?? 60000, timestamp);
+    const competition = ColdCompetitionWait.consumeParty(options.party, options.members || [], options.elapsedMs ?? 60000, timestamp);
     const hadWait = [options.party, ...(options.members || [])].some(state => state?.stats?.coldCompetition?.wait);
     const paused = competition.waiting || (hadWait && competition.elapsedMs === 0);
     const members = competition.members || options.members || [];
@@ -826,6 +830,6 @@ BackgroundPartyResolver.resolve = (options = {}) => {
     return result;
 };
 const resolveWithCompetition = BackgroundPartyResolver.resolve;
-BackgroundPartyResolver.resolve = (options = {}) => require('./PartySpotRiskPolicy').record(
+BackgroundPartyResolver.resolve = (options = {}) => PartySpotRiskPolicy.record(
     options.party, resolveWithCompetition(options), options.timestamp ?? Date.now());
 module.exports = BackgroundPartyResolver;

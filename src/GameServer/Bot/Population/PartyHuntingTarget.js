@@ -1,3 +1,4 @@
+const Material = require('./CraftMaterialParty');
 function activePlanTarget(plan) {
     return plan?.status === 'active' ? Number(plan.next?.npcId || plan.targetNpcId || 0) : 0;
 }
@@ -11,7 +12,6 @@ function cachedState(id) {
 // The shared objective wins; an ordinary hunting party follows its leader's
 // active plan. A randomly selected encounter representative cannot retarget it.
 function npcId(party, leader, stateOf = cachedState) {
-    const Material = require('./CraftMaterialParty');
     if (Material.isObjective(party?.stats?.objective)) {
         const members = (party.memberIds || []).slice(0, Material.MAX_MEMBERS)
             .map(id => Number(id) === Number(leader?.characterId) ? leader : stateOf(id)).filter(Boolean);

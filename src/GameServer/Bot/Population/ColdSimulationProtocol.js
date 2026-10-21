@@ -1,4 +1,7 @@
 const InventorySummary = require('./InventorySummary');
+// PartyGoalCalculation loads this module at its top: required once, at the
+// first party envelope, and held.
+let PartyGoalCalculation;
 
 const PROTOCOL_VERSION = 1;
 const MAX_BATCH = 64;
@@ -199,7 +202,8 @@ function validateEnvelope(message, direction, options = {}) {
         const party = paged && payload.pageIndex > 0
             ? { partyId: payload.partyId, memberIds: payload.members?.map(state => state?.characterId),
                 leaderId: payload.members?.[0]?.characterId } : payload.party;
-        if (!require('./PartyGoalCalculation').validMembers(party, payload.members, paged)
+        // lazy: cycle PartyGoalCalculation requires ColdSimulationProtocol at load.
+        if (!(PartyGoalCalculation ||= require('./PartyGoalCalculation')).validMembers(party, payload.members, paged)
             || paged && (!Number.isSafeInteger(payload.pageIndex) || !Number.isSafeInteger(payload.pageCount)
                 || payload.pageCount < 1 || payload.pageCount > 9 || payload.pageIndex < 0
                 || payload.pageIndex >= payload.pageCount || payload.members.length !== 1

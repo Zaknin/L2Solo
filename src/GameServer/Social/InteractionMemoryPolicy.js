@@ -3,6 +3,9 @@ const VERSION = 1;
 const Help = require('./CombatHelpPolicy');
 const Aid = require('./OpponentAidPolicy');
 const Layers = require('./RelationshipLayers');
+// ClanSocialPolicy loads this module at its top: required once, at the first
+// clan episode, and held.
+let ClanSocialPolicy;
 const LIMITS = Object.freeze({ character: 32, clan: 8, alliance: 8 });
 const PROTECTED_LIMIT = 16;
 const RECENT_LIMIT = 128;
@@ -122,7 +125,7 @@ function event(input) {
         ...(input.player === true ? { player: true } : {}),
         ...(input.traits ? { traits: { loyalty: Number(input.traits.loyalty ?? 0.5), resilience: Number(input.traits.resilience ?? 0.5) } } : {}),
         // lazy: cycle ClanSocialPolicy loads InteractionMemoryPolicy at its top.
-        ...(input.clan ? { clan: require('../Clan/ClanSocialPolicy').evidence(input.clan) } : {}) };
+        ...(input.clan ? { clan: (ClanSocialPolicy ||= require('../Clan/ClanSocialPolicy')).evidence(input.clan) } : {}) };
 }
 
 // The share of a feeling left after `elapsed` ms; nothing grows before its time.
