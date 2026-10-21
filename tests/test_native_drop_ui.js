@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('fs');
 require('../src/Global');
 const Native = invoke('GameServer/World/Generics/NpcBypasses/NativeDrop');
@@ -20,7 +21,7 @@ const request = (id = selected, token = 1) => { session.nativeDropAt = 0;
     Native(session, ['native-drop', '1', String(token), String(id)]); };
 try {
     Index.find = (world, id) => { assert.strictEqual(world, World); return exists && id === 40001 ? npc : null; };
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     invoke('GameServer/World/Generics/NpcTalkResponse')(session, { link: 'native-drop 1 7 40001' });
     assert(body().startsWith(Protocol.PREFIX));
     let fields = body().split('\n')[1].split('\t');
@@ -38,7 +39,7 @@ try {
     selected = 40002; request(40001); assert.strictEqual(packets.length, count, 'stale target rejected');
     selected = 40001;
     for (const preset of ['x1', 'x10', 'x50']) {
-        process.env.L2NODE_PROGRESSION_RATE = preset;
+        useRate(preset);
         for (const id of [1, 674, 10487]) {
             template = id; request();
             const expected = Native.rewardRows(knowledge.npcDetail(id));
@@ -66,5 +67,5 @@ try {
     console.log(`Native drop UI: real bypass/packet, target validation, display-template isolation, rates, ${mobs.length} NPCs, max ${maxRows} rewards passed`);
 } finally {
     Index.find = oldFind;
-    if (oldRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE; else process.env.L2NODE_PROGRESSION_RATE = oldRate;
+    useRate(oldRate);
 }

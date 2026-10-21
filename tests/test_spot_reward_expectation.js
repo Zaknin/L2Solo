@@ -1,5 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 const path = require('node:path');
 require('../src/Global');
 const Data = invoke('GameServer/DataCache'); Data.init();
@@ -26,7 +27,7 @@ try {
     Data.npcs = [...Data.npcs, mob(lower, 18, 'Exact Low Mob'), mob(higher, 30, 'Exact High Mob')];
     Data.npcRewards = [...Data.npcRewards, reward(lower), reward(higher)];
     Data.items = [...Data.items, { selfId: itemId, template: { price: 4, kind: 'Other.Material' } }];
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     close(Rewards.value(blue, 26).adena, 70, 'no drop penalty through eight levels');
     close(Rewards.value(blue, 27).adena, 70 * .91 / 3, 'the NPC level, not avgLevel 99, activates gap-nine penalty');
     close(Rewards.value(blue, 33).adena, 70 * .37 / 3, 'gap-fifteen native Adena');
@@ -39,7 +40,7 @@ try {
     for (const key of ['adena', 'drop', 'spoil']) close(mix[key], (lo[key] * 3 + hi[key]) / 4,
         'each NPC gets its own penalty before spawn-weighted aggregation');
 
-    process.env.L2NODE_PROGRESSION_RATE = 'x50';
+    useRate('x50');
     const highRate = Rewards.value(blue, 33, { spoilSkillLevel: 1 });
     close(highRate.adena, .7 * .37 / 3 * 3500, 'high-rate Adena chance divides by drop rate, amount retains base rate');
     close(highRate.drop, 1000, 'normal drop chance saturates while base-rate quantity survives Deep Blue');
@@ -90,16 +91,16 @@ try {
         close(second.income, second.kills * (partyYield.adena + partyYield.drop) / 3,
             'only the first native party spoiler receives spoil; two spoilers do not duplicate income');
     } finally { Match.spotMatchup = savedMatch; Hunt.consumablePrices = savedCosts; }
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     close(Table.value('S', 'dps', 33).loot, row.kills * lo.drop, 'rate change invalidates table value memo');
-    process.env.L2NODE_PROGRESSION_RATE = 'x50';
+    useRate('x50');
     Table.rankedIncome('dps', 33, { shots: 0, potions: 0 }, -100, true);
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     Table.best('dps', 33);
     const reranked = Table.rankedIncome('dps', 33, { shots: 0, potions: 0 }, -100, true).find(row => row.spotId === 'S');
     close(reranked.loot, reranked.kills * lo.drop,
         'a best-row review after a rate change cannot retain an older priced or unpriced ranking');
-    process.env.L2NODE_PROGRESSION_RATE = 'x50';
+    useRate('x50');
 
     let calls = 0;
     Rates.rewardGroupRoll = (...args) => { calls++; return original.roll(...args); };
@@ -118,7 +119,7 @@ try {
     let seed = 123456;
     const rng = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 2 ** 32; };
     for (const rate of ['x1', 'x10', 'x50']) {
-        process.env.L2NODE_PROGRESSION_RATE = rate;
+        useRate(rate);
         for (const gap of [8, 9, 15]) {
             const level = 18 + gap, expected = Rewards.value(blue, level, { spoilSkillLevel: 1 });
             const sum = { adena: 0, drop: 0, spoil: 0 }, trials = 30000;
@@ -133,7 +134,7 @@ try {
         }
     }
     // Replacing datapack arrays must invalidate both prepared groups and values.
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     const before = Rewards.value(blue, 26).drop;
     const tableBefore = Table.value('S', 'dps', 26).loot;
     Data.items = Data.items.map(item => item.selfId === itemId ? { ...item, template: { ...item.template, price: 8 } } : item);
@@ -162,7 +163,6 @@ try {
 } finally {
     Data.npcs = original.npcs; Data.npcRewards = original.rewards; Data.items = original.items;
     Rates.rewardGroupRoll = original.roll;
-    if (original.rate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = original.rate;
+    useRate(original.rate);
     Table.useFile(); Table.useSpots([]);
 }

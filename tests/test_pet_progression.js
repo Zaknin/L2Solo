@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
@@ -175,9 +176,9 @@ async function main() {
         await random(.3,()=>kill(231));
         assert.strictEqual(count(3820),0,'30 percent back skin chance');
         const previousRate = process.env.L2NODE_PROGRESSION_RATE;
-        process.env.L2NODE_PROGRESSION_RATE = 'x50';
+        useRate('x50');
         try { await random(.29,()=>kill(231)); } finally {
-            if(previousRate===undefined) delete process.env.L2NODE_PROGRESSION_RATE; else process.env.L2NODE_PROGRESSION_RATE=previousRate;
+            useRate(previousRate);
         }
         assert.strictEqual(count(3820),1,'authored drop quantity ignores server rates');
         const skins = deluxe?20:10;

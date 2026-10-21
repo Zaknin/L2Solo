@@ -1,10 +1,11 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('node:fs');
 require('./helpers/databaseIsolation');
 const isolated = require('./helpers/isolatedSocialDatabase')('market-economy-policy');
 require('../src/Global');
 isolated.assertConfigured(options.default);
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Shots = invoke('GameServer/Bot/Economy/ColdShotEconomyService');

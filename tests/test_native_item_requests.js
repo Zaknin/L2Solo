@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('node:fs');
 const vm = require('node:vm');
 require('../src/Global');
@@ -39,12 +40,12 @@ async function main() {
     rate = 10; assert.equal(cache.itemDetail(57).rate, 10);
     const oldRate = process.env.L2NODE_PROGRESSION_RATE;
     try {
-        process.env.L2NODE_PROGRESSION_RATE = 'x1'; Knowledge.warmup();
+        useRate('x1'); Knowledge.warmup();
         const detail = Knowledge().itemDetail(57); assert.equal(Knowledge().itemDetail(57), detail);
-        process.env.L2NODE_PROGRESSION_RATE = 'x10';
+        useRate('x10');
         assert.notEqual(Knowledge().itemDetail(57), detail);
         assert.equal(Knowledge().itemDetail(57).rateProfile.preset, 'x10');
-    } finally { if (oldRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE; else process.env.L2NODE_PROGRESSION_RATE = oldRate; }
+    } finally { if (oldRate === undefined) useRate(undefined); else useRate(oldRate); }
 
     // Real endpoint burst, timer delivery and close cancellation (no live server).
     let packets = 0;

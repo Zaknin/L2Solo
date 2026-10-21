@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { useRate, useGeneral } = require('./helpers/progressionRate');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -24,8 +25,8 @@ const warnings = [];
 Response.userInfo = () => Buffer.from([0x04]);
 utils.infoWarn = (prefix, ...args) => warnings.push(require('node:util').format(...args));
 options.default.Database.path = file;
-process.env.L2NODE_PROGRESSION_RATE = 'x1';
-Object.assign(options.default.General, {
+useRate('x1');
+useGeneral({
     expRate: 1, spRate: 1, questExpRate: 1, questSpRate: 1, questAdenaRate: 1
 });
 

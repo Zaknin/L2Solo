@@ -1,11 +1,12 @@
 'use strict';
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 require('./helpers/databaseIsolation');
 const fixture = require('./helpers/isolatedSocialDatabase')('wish-static-shots');
 require('../src/Global');
 const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 fixture.assertConfigured(options.default);
-process.env.L2NODE_PROGRESSION_RATE = 'x50';
+useRate('x50');
 const fs = require('node:fs'), path = require('node:path'), { Worker } = require('node:worker_threads');
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');

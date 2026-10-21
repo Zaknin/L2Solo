@@ -2,6 +2,7 @@
 // own consequences run on that decision; the event its round raised waits
 // for the next step's decision point instead of a rebuild after the round.
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 require('./helpers/databaseIsolation');
 const fixture = require('./helpers/isolatedSocialDatabase')('worker-one-decision');
 const path = require('node:path');
@@ -19,7 +20,7 @@ const { npcPlanningCatalogRows } = require('../src/GameServer/Bot/Population/Col
 const root = path.resolve(__dirname, '..');
 
 async function createWorld(id) {
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     DataCache.init();
     fixture.assertConfigured(options.default);
     const seed = new DatabaseSync(fixture.world);

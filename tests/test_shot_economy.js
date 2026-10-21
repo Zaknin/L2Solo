@@ -1,9 +1,10 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 
 require('../src/Global');
 
 const previousRate = process.env.L2NODE_PROGRESSION_RATE;
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 
 const DataCache = invoke('GameServer/DataCache');
 DataCache.init();
@@ -166,7 +167,6 @@ index.shotSupply.set(1463, 1000);
 assert.strictEqual(Shots.craftCandidate(dwarf, recipe, index), null,
     'existing shot supply must close the speculative crafting route');
 
-if (previousRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-else process.env.L2NODE_PROGRESSION_RATE = previousRate;
+useRate(previousRate);
 
 console.log('Shot economy pricing, recipe and demand checks passed');

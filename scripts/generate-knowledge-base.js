@@ -111,6 +111,7 @@ function buildRateProfiles() {
     const profiles = {};
     Object.keys(ProgressionRates.PRESETS).forEach((preset) => {
         process.env.L2NODE_PROGRESSION_RATE = preset;
+        ProgressionRates.reset();
         profiles[preset] = ProgressionRates.profile();
     });
     return profiles;
@@ -126,6 +127,7 @@ function spoilSelectionChance(group, itemIndex) {
 
 function rateResult(group, item, itemIndex, kind, preset, npcLevel) {
     process.env.L2NODE_PROGRESSION_RATE = preset;
+    ProgressionRates.reset();
     const roll = ProgressionRates.rewardGroupRoll(group, kind, {
         npcLevel,
         killerLevel: npcLevel,
@@ -479,6 +481,7 @@ function buildKnowledgeBase() {
     } finally {
         if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
         else process.env.L2NODE_PROGRESSION_RATE = originalRate;
+        ProgressionRates.reset();
     }
 }
 

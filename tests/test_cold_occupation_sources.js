@@ -1,5 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 require('../src/Global');
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Sources = require('../src/GameServer/Bot/Population/ColdOccupationSources');
@@ -20,13 +21,12 @@ const startupOffers = Sources.npcOffersFor(1785), sharedView = Catalogue.npcTown
 assert.strictEqual(startupOffers, sharedView.offersFor(1785), 'cold reader borrows the shared item/town stock');
 const originalRate = process.env.L2NODE_PROGRESSION_RATE;
 try {
-    process.env.L2NODE_PROGRESSION_RATE = 'x50';
+    useRate('x50');
     assert.notStrictEqual(Catalogue.npcTownOffers(), sharedView, 'a current shared query can read a revised rate');
     assert.strictEqual(Sources.npcOffersFor(1785), startupOffers,
         'the cold occupation contract retains its original startup-time prices');
 } finally {
-    if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = originalRate;
+    useRate(originalRate);
 }
 assert(Object.isFrozen(Towns.regionIndex.zones[0].points[0]));
 for (const loc of [Towns.towns.giran_town, Towns.towns.floran_village,

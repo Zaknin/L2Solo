@@ -6,6 +6,7 @@
 // player's packet would. Reopening the database between steps proves that state
 // and rewards survive a server restart rather than living in a cached session.
 const fs = require('node:fs');
+const { useRate, useGeneral } = require('./progressionRate');
 const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
@@ -20,8 +21,8 @@ const CHARACTER_COLUMNS = `(id,username,name,classId,race,level,exp,sp,maxHp,max
 
 // Quest rates are pinned so reward assertions compare against authored values.
 function pinRates() {
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
-    Object.assign(options.default.General, { questExpRate: 1, questSpRate: 1, questAdenaRate: 1 });
+    useRate('x1');
+    useGeneral({ questExpRate: 1, questSpRate: 1, questAdenaRate: 1 });
 }
 
 async function createWorld(characters, label = 'c4-quest') {

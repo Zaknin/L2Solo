@@ -1,7 +1,8 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 
 require('../src/Global');
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 const DataCache = invoke('GameServer/DataCache');
 DataCache.init();
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');

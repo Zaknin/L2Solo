@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 require('../src/Global');
 
 const Data = invoke('GameServer/DataCache');
@@ -75,10 +76,9 @@ try {
     ] }));
     const originalPreset = process.env.L2NODE_PROGRESSION_RATE;
     restores.push(() => {
-        if (originalPreset === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-        else process.env.L2NODE_PROGRESSION_RATE = originalPreset;
+        useRate(originalPreset);
     });
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     const npc = { fetchSelfId: () => 558, fetchLevel: () => 43,
         fetchLocX: () => 59814, fetchLocY: () => 25253, fetchLocZ: () => -3818 };
     for (let index = 0; index < 10; index++) Rewards.call(world, session, npc);

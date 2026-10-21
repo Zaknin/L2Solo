@@ -1,9 +1,10 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 
 require('../src/Global');
 const DataCache = invoke('GameServer/DataCache');
 DataCache.init();
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 const FirstPrice = invoke('GameServer/Bot/Economy/FirstPrice');
 const BotMarketPricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
 const NpcSellRules = invoke('GameServer/Items/NpcSellRules');

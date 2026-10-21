@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -78,7 +79,7 @@ assert.strictEqual(Efficiency.huntIncome(legacy, at).source, 'table', 'rows save
 assert(Efficiency.scores(legacy, at).get('rich') !== undefined, 'and still rank spots by exp');
 const commonHour = invoke('GameServer/Bot/Economy/EconomyContext').forState(rich).hourAdena;
 assert.strictEqual(Buff.incomeForTenMinutes(rich), Math.round(commonHour / 6), 'the service uses the same wish hour');
-process.env.L2NODE_PROGRESSION_RATE = 'x50';
+useRate('x50');
 assert.strictEqual(Efficiency.bestIncome(rich.stats.huntEfficiency).perHour, 600000,
     'stored measured amounts are never multiplied by the new rate');
 console.log('Recovery-aware hunt ranking, build/mode invalidation, exploration, bounded persistence and hour value passed');

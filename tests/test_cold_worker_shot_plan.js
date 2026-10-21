@@ -1,5 +1,6 @@
 process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture asserts the optional worker telemetry bridge.
 const assert = require('node:assert/strict');
+const { useRate, useGeneral } = require('./helpers/progressionRate');
 require('./helpers/databaseIsolation');
 const fixture = require('./helpers/isolatedSocialDatabase')('worker-shot-plan');
 const path = require('node:path');
@@ -23,8 +24,8 @@ Config.economyDiagnostics = true; Config.economyDiagnosticsBotIds = '710021';
 // Keep the original native fixture and assertions, with both literal UUID
 // database paths configured and asserted before the first connection.
 async function createWorld(characters) {
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
-    Object.assign(options.default.General, { questExpRate: 1, questSpRate: 1, questAdenaRate: 1 });
+    useRate('x1');
+    useGeneral({ questExpRate: 1, questSpRate: 1, questAdenaRate: 1 });
     DataCache.init();
     fixture.assertConfigured(options.default);
     const seed = new DatabaseSync(fixture.world);
@@ -217,7 +218,9 @@ parentPort.on('message', message => {
         assert.equal(heldBook.adena, beforeLearn);
         assert.equal((await Database.fetchItems(id)).filter(row => row.selfId === ownedRecipe.recipeItemId).reduce((sum, row) => sum + row.amount, 0), 1);
         await invoke('HistoryDatabase').flush();
-        const diagnostics = fs.readFileSync(path.join(fixture.directory, 'logs/economy-diagnostics.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+        // The history worker may still be appending a later bridged batch while
+        // this reads: only newline-terminated (whole) rows are parsed.
+        const diagnostics = fs.readFileSync(path.join(fixture.directory, 'logs/economy-diagnostics.jsonl'), 'utf8').split('\n').slice(0, -1).map(JSON.parse);
         // The bridge is bounded (64 records a second): whether the later town
         // choice survives depends on the wall-clock second it lands in, so the
         // check is that this bot's worker records reach the writer at all.

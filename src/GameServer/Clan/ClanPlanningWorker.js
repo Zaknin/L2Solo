@@ -27,6 +27,7 @@ const tables = new TableMirror();
 const ClanSupplies = invoke('GameServer/Clan/ClanSupplyPolicy');
 const PersonalWarehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
 const BotMarketPricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
+const ProgressionRates = invoke('GameServer/ProgressionRates');
 tables.watch('clan_supplies', { reset() {}, remove() {}, put: (_key, row) => ClanSupplies.prepareRow(row) });
 tables.watch('personal_warehouse', { reset() {}, remove() {}, put: (_key, row) => PersonalWarehouse.prepareRow(row) });
 ClanSupplies.useRowSource(id => tables.rows('clan_supplies').get(id), () => tables.ready('clan_supplies'));
@@ -63,6 +64,7 @@ function useContext(next) {
     global.options.default.Progression = next.progression;
     if (next.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
     else process.env.L2NODE_PROGRESSION_RATE = next.progressionRate;
+    ProgressionRates.reset();
     fixedOffers = nextFixed;
     npcOffers = nextNpc;
     context = next;

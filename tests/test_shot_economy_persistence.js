@@ -1,11 +1,12 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('fs');
 const path = require('path');
 const isolated = require('./helpers/isolatedSocialDatabase')('shot_economy_persistence', path.resolve(__dirname, '..'));
 require('./helpers/databaseIsolation');
 require('../src/Global');
 isolated.assertConfigured(options.default);
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 const DB = invoke('Database');
 const Cache = invoke('GameServer/DataCache');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
