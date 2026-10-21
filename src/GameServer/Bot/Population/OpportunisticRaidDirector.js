@@ -168,7 +168,10 @@ class OpportunisticRaidDirector {
             const catalog = this.catalog.all(), alive = this.catalog.liveTemplateIds();
             for (const [id, until] of this.blockedBosses) if (until <= timestamp) this.blockedBosses.delete(id);
             const claimed = new Set(admitted.map(p => Number(p.stats?.objective?.raidBossTemplateId || 0)));
-            const start = (this.rosterCursor || 0) % rosters.length;
+            // A coverage pass drains the fresh, revalidated deferred queue in
+            // order. Rotating it again could hide the adjacent strong cohort
+            // behind newly proposed weak tanks for many forecast intervals.
+            const start = shortlist.priorityKey ? (this.rosterCursor || 0) % rosters.length : 0;
             const ordered = [...rosters.slice(start), ...rosters.slice(0, start)];
             this.rosterCursor = start + 1;
             const priorityIndex = ordered.findIndex(roster => roster.map(s => s.characterId).join(':') === shortlist.priorityKey);
@@ -191,7 +194,7 @@ class OpportunisticRaidDirector {
                 const all = catalog.filter(s => alive.has(s.raidBossTemplateId) && !claimed.has(s.raidBossTemplateId)
                     && !this.blockedBosses.has(s.raidBossTemplateId)
                     && roster.every(m => Policy.recruitLevelAllowed(m, s.avgLevel)))
-                    .sort((a, b) => (priority ? targetScore(a) - targetScore(b) : 0)
+                    .sort((a, b) => targetScore(a) - targetScore(b)
                         || a.avgLevel - b.avgLevel || a.raidBossTemplateId - b.raidBossTemplateId);
                 const offset = (this.bossCursors.get(key) || 0) % Math.max(1, all.length);
                 if (!all.length) { this.searchCounters.reject('target', 'raid_no_eligible_boss'); retire(roster); }

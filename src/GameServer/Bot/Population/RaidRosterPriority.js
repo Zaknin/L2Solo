@@ -13,8 +13,16 @@ const Classes = invoke('GameServer/ClassProgression');
 const Enchant = invoke('GameServer/Items/C4EnchantRules');
 const Henna = invoke('GameServer/Henna/HennaRules');
 const Capabilities = require('../../Clan/ClanCandidateCapabilities');
+const Healing = require('./RaidHealingEstimate');
+const Minions = require('../../../../data/Npcs/Minions/c4_raid_bosses.json');
+const guardsByBoss = new Map();
+for (const row of Minions) {
+    const id = Number(row.bossId);
+    if (!guardsByBoss.has(id)) guardsByBoss.set(id, []);
+    guardsByBoss.get(id).push(row);
+}
 
-// Ordering hints only: no profiles, simulation, market scans or social reads.
+// Candidate ordering hints only: no profiles, simulation, market scans or social reads.
 // Admission still hydrates all nine and runs the unchanged native forecast.
 function facts(state, role) {
     let armor = 0, weapon, weaponAttack = 0;
@@ -69,8 +77,7 @@ function facts(state, role) {
     let efficiency = 0;
     for (const skill of Combat.skillsFor(state)) {
         if (skill.passive) continue;
-        if (skill.power > 0 && skill.mp > 0 && Capabilities.healingSkill(skill))
-            efficiency = Math.max(efficiency, F.calcHealAmount(skill.power) / skill.mp);
+        efficiency = Math.max(efficiency, Healing.efficiency(skill, Math.max(0, Number(state.vitals?.maxHp) || 0)));
         const semantic = Rules.resolveCached(skill), stats = semantic?.stats || {};
         if (!Capabilities.mainBuffSkill(skill)) continue;
         const benefit = ['pAtkMul', 'pDefMul', 'maxHpMul', 'pAtkSpdMul'].reduce((sum, key) =>
@@ -109,10 +116,24 @@ function* supportPair(healers, scores) {
 }
 
 function targetScore(spot) {
-    const npc = Items.find(invoke('GameServer/DataCache').npcs, spot.raidBossTemplateId);
+    const templates = invoke('GameServer/DataCache').npcs;
+    const npc = Items.find(templates, spot.raidBossTemplateId);
     if (!npc) return Infinity;
     const p = Combat.npcCombatStats(npc);
-    return p.maxHp * p.pDef * p.pAtk * p.atkSpd;
+    let durability = p.maxHp * p.pDef, pressure = p.pAtk * p.atkSpd;
+    // Cheap template-only hint: work to clear the encounter times its opening
+    // attack pressure. Use the same maximum guard counts as admission. Exact
+    // weapon matchups, regeneration and respawning waves stay in the forecast.
+    for (const row of guardsByBoss.get(Number(npc.selfId)) || []) {
+        const count = Number(row.max || row.min || 0);
+        if (!count) continue;
+        const guard = Items.find(templates, row.minionId);
+        if (!guard) return Infinity;
+        const g = Combat.npcCombatStats(guard);
+        durability += g.maxHp * g.pDef * count;
+        pressure += g.pAtk * g.atkSpd * count;
+    }
+    return durability * pressure;
 }
 
 module.exports = { facts, supportPair, targetScore };

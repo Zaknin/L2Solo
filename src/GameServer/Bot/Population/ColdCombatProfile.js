@@ -903,7 +903,7 @@ function kitEffects(state, equipped) {
 
 function activeMusicEffects(profile = {}, timestamp = Date.now()) {
     return activeEffects(profile.effects, timestamp).filter((effect) => (
-        C4SkillRules.resolve({
+        C4SkillRules.resolveCached({
             selfId: effect.id,
             name: effect.name,
             level: effect.level
@@ -933,7 +933,7 @@ function partyMusicMpCost(profile, skill, timestamp = Date.now()) {
 }
 
 function partyMusicEffect(skill, timestamp = Date.now()) {
-    const semantic = C4SkillRules.resolve(skill);
+    const semantic = C4SkillRules.resolveCached(skill);
     const durationMs = Math.max(0, number(semantic.durationMs ?? skill.buffTime, 120000));
     const skillId = number(skill.selfId);
     return {
