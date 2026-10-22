@@ -5,7 +5,9 @@
 // the row. updatedAt moves too, so a second boot with no write in between
 // shifts only its own gap, not the first downtime again. lastResolvedAt moves
 // with them: the first step's length (now - lastResolvedAt) must not hold the
-// downtime, or the bot is credited hunting time it never lived.
+// downtime, or the bot is credited hunting time it never lived. The pause ends
+// when the shift runs, before the boot repairs: the boot time is not lived
+// time either, and a row a repair rewrites (a stale hot row) still moves.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
@@ -33,14 +35,14 @@ const stats = JSON.stringify({ classId: 0, role: 'dps', canonicalAreaId: 'elven_
     hennas: [null, null, null], coldCombat: { skillSource: 'hot', skills: [] } });
 const PARTY = 'downtime-party';
 
-async function bot(id, name, nextResolveAt, updatedAt) {
+async function bot(id, name, nextResolveAt, updatedAt, phase = 'cold') {
     const account = `bot_downtime_${id}`;
     await Native.character(Database, id, name, account, loc);
     await Database.execute([`INSERT INTO bot_life_state (characterId,accountName,characterName,level,
         phase,activity,currentRegion,locX,locY,locZ,hp,maxHp,mp,maxMp,inventorySummary,statsJson,
         activityStartedAt,nextResolveAt,lastResolvedAt,updatedAt,simulationRevision)
-        VALUES (?,?,?,18,'cold','hunting','Elven Ruins',?,?,?,100,100,100,100,'{}',?,?,?,?,?,3)`,
-        [id, account, name, loc.locX, loc.locY, loc.locZ, stats,
+        VALUES (?,?,?,18,?,'hunting','Elven Ruins',?,?,?,100,100,100,100,'{}',?,?,?,?,?,3)`,
+        [id, account, name, phase, loc.locX, loc.locY, loc.locZ, stats,
             updatedAt - 1000, nextResolveAt, updatedAt - 1000, updatedAt]]);
 }
 
@@ -70,14 +72,23 @@ async function run() {
         future: [9600414, 'DowntimeFuture', startedAt + 7200000, startedAt + 3600000]
     };
     for (const [id, name, next, updated] of Object.values(rows)) await bot(id, name, next, updated);
+    // Left hot by a crash: the boot recovery rewrites it (cold, updatedAt = now)
+    // but keeps its old due time, which must still move by the downtime.
+    const staleHot = [9600417, 'DowntimeStaleHot', lastWrite - 120000, lastWrite];
+    await bot(...staleHot, 'hot');
     const party = { nextResolveAt: lastWrite - 5000, updatedAt: lastWrite - 20000 };
     await Database.execute([`INSERT INTO bot_background_parties (partyId,leaderId,memberIdsJson,spotId,startedAt,
         nextResolveAt,cohesion,risk,status,roleCoverageJson,statsJson,updatedAt)
         VALUES (?,?,?,NULL,?,?,0.65,0.25,'active','{}','{}',?)`,
         [PARTY, 9600415, JSON.stringify([9600415, 9600416]), lastWrite - 600000, party.nextResolveAt, party.updatedAt]]);
+    const beforeBoot = Date.now();
     await boot();
+    // The pause the boot applied: from the last write to the shift, so it holds
+    // the boot time before the shift too (this process started before beforeBoot).
+    const { downtimeMs: pause } = await Life.bootPause();
+    assert(pause >= beforeBoot - lastWrite, `the pause lasts until the shift (${pause} ms < ${beforeBoot - lastWrite} ms)`);
 
-    const shifted = (value, moved) => moved ? value + downtime : value;
+    const shifted = (value, moved) => moved ? value + pause : value;
     const expected = {
         overdue: [shifted(rows.overdue[2], true), shifted(rows.overdue[3], true)],
         later: [shifted(rows.later[2], true), shifted(rows.later[3], true)],
@@ -98,11 +109,17 @@ async function run() {
         assert(Protocol.sameCommandCheckpoint(state, checkpointRow(row)),
             `${key}: the worker's first command checkpoint matches the row`);
     }
+    const [hotRow] = await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [staleHot[0]]]);
+    const hotState = Life.cachedState(staleHot[0]);
+    assert.equal(hotRow.phase, 'cold', 'stale hot: recovered as cold');
+    assert.equal(Number(hotRow.nextResolveAt), staleHot[2] + pause, 'stale hot: row due time moves by the downtime');
+    assert.equal(hotState.timing.nextResolveAt, staleHot[2] + pause, 'stale hot: cached due time moves by the downtime');
+    assert.equal(Number(hotRow.lastResolvedAt), staleHot[3] - 1000 + pause, 'stale hot: lastResolvedAt moves by the downtime');
     const cachedParty = Party.find(PARTY);
     const [partyRow] = await Database.execute(['SELECT * FROM bot_background_parties WHERE partyId=?', [PARTY]]);
-    assert.equal(cachedParty.nextResolveAt, party.nextResolveAt + downtime, 'party: cached due time');
-    assert.equal(Number(partyRow.nextResolveAt), party.nextResolveAt + downtime, 'party: row due time');
-    assert.equal(Number(partyRow.updatedAt), party.updatedAt + downtime, 'party: updatedAt moves with the due time');
+    assert.equal(cachedParty.nextResolveAt, party.nextResolveAt + pause, 'party: cached due time');
+    assert.equal(Number(partyRow.nextResolveAt), party.nextResolveAt + pause, 'party: row due time');
+    assert.equal(Number(partyRow.updatedAt), party.updatedAt + pause, 'party: updatedAt moves with the due time');
     assert.equal(cachedParty.updatedAt, Number(partyRow.updatedAt), 'party: the commit fence (updatedAt) matches the row');
     await Database.close();
 
@@ -122,8 +139,8 @@ async function run() {
     const partyAfter = db.prepare('SELECT nextResolveAt FROM bot_background_parties WHERE partyId=?').get(PARTY);
     db.close();
     assert.equal(Number(overdue.nextResolveAt), expected.overdue[0] + gap, 'second boot: bot moved by the gap only');
-    assert.equal(Number(partyAfter.nextResolveAt), party.nextResolveAt + downtime + gap, 'second boot: party moved by the gap only');
+    assert.equal(Number(partyAfter.nextResolveAt), party.nextResolveAt + pause + gap, 'second boot: party moved by the gap only');
     console.log('cold hydrate downtime shift PASS: bots and party +%d ms in row and cache, future write ignored, second boot +%d ms only',
-        downtime, gap);
+        pause, gap);
 }
 run().then(() => Database.close()).catch(async error => { console.error(error); process.exitCode = 1; await Database.close(); });

@@ -47,6 +47,9 @@ let coordinator = null;
     assert.strictEqual(await LifeState.init(), true);
     const initial = LifeState.cachedState(characterId);
     assert(initial, 'startup hydration must expose the copied cold row to the coordinator');
+    // Progress is read against the row the boot loaded: the boot shift moved
+    // the fixture's timers by the pause since its last write.
+    const loadedResolvedAt = Number(initial.timing.lastResolvedAt);
     // Start with a native learned kit. A subsequent automatic grant correctly
     // retires a decision built before that skill publication.
     const trained = await LifeState.reviewTrainingAfterCommit(initial);
@@ -68,7 +71,7 @@ let coordinator = null;
                     simulationRevision, statsJson
              FROM bot_life_state WHERE characterId = ?`, [characterId]
         ]);
-        if (Number(row?.simulationRevision || 0) >= 2 && Number(row?.lastResolvedAt || 0) > dueAt) break;
+        if (Number(row?.simulationRevision || 0) >= 2 && Number(row?.lastResolvedAt || 0) > loadedResolvedAt) break;
         await wait(100);
     }
     let snapshot = coordinator.snapshot();
@@ -81,7 +84,7 @@ let coordinator = null;
     assert(Number(snapshot.worker.resolved || 0) >= 1, 'worker thread must perform the resolve');
     assert(Number(snapshot.queue.committed || 0) >= 1, 'main gateway must durably commit worker progress');
     assert(Number(row.simulationRevision) >= 2, 'claim plus commit/release must advance revision twice');
-    assert(Number(row.lastResolvedAt) > dueAt, 'authoritative DB progress must advance lastResolvedAt');
+    assert(Number(row.lastResolvedAt) > loadedResolvedAt, 'authoritative DB progress must advance lastResolvedAt');
     const persistedStats = JSON.parse(row.statsJson || '{}');
     const equipmentPlan = persistedStats.equipmentPlan;
     if (equipmentPlan?.strategy === 'market') {

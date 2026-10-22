@@ -123,6 +123,11 @@ let coordinator = null;
     ]);
     assert.strictEqual(await PartyState.init(), true);
     assert.strictEqual(await LifeState.init(), true);
+    // Progress is read against the rows the boot loaded: the boot shift moved
+    // the fixture's timers by the pause since their last write.
+    const loadedResolvedAt = new Map(memberIds.map(id => [id, Number(LifeState.cachedState(id).timing.lastResolvedAt)]));
+    const loadedPartyDue = Number(PartyState.find('worker-party').nextResolveAt);
+    const advanced = row => Number(row.lastResolvedAt) > loadedResolvedAt.get(Number(row.characterId));
 
     coordinator = new ColdSimulationCoordinator();
     let mainCommands = 0;
@@ -148,7 +153,7 @@ let coordinator = null;
             `SELECT characterId, exp, lastResolvedAt, simulationRevision
              FROM bot_life_state WHERE partyId = 'worker-party' ORDER BY characterId`, []
         ]);
-        if (rows.length === 2 && rows.every((row) => Number(row.simulationRevision) >= 2 && Number(row.lastResolvedAt) > dueAt)) break;
+        if (rows.length === 2 && rows.every((row) => Number(row.simulationRevision) >= 2 && advanced(row))) break;
         await wait(100);
     }
     const [partyRow] = await Database.execute([
@@ -217,8 +222,8 @@ let coordinator = null;
     const preserved = await Database.execute([`SELECT statsJson FROM bot_life_state WHERE partyId = 'worker-party'`, []]);
     assert(preserved.every(row => JSON.parse(row.statsJson).transportFixture.length === 140000),
         'sparse transport must preserve unchanged durable state for every party member');
-    assert(rows.every((row) => Number(row.lastResolvedAt) > dueAt));
-    assert(Number(partyRow.nextResolveAt) > dueAt, 'leader commit must durably advance the party schedule');
+    assert(rows.every(advanced));
+    assert(Number(partyRow.nextResolveAt) > loadedPartyDue, 'leader commit must durably advance the party schedule');
     assert(Number(JSON.parse(partyRow.statsJson).fightsResolved || 0) >= 1);
     const memories = (await Database.loadInteractionMemories(memberIds)).map(snapshot => ({ ownerId: snapshot.ownerId, snapshotJson: JSON.stringify(snapshot) }));
     assert.strictEqual(memories.length, 2, 'real worker wins must commit mutual hunt memory');
