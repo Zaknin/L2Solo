@@ -664,9 +664,17 @@ function coldBuffPlan(fighters, timestamp) {
         {},
         {
             skills,
-            recipients: (_members, _provider, skill) => (
-                ['party', 'ally'].includes(skill.fetchSemantic().target) ? actors : []
-            ),
+            recipients: (_members, provider, skill) => {
+                const target = skill.fetchSemantic().target;
+                if (target === 'party') return actors;
+                if (target !== 'ally') return [];
+                // Forecast the same clan coverage as admission. A stronger
+                // Paagrio cannot replace a weaker chant on foreign members.
+                const source = provider.fighter.state;
+                const clanId = Number(source.clanId || source.stats?.clanId || 0);
+                return actors.filter(actor => actor === provider || clanId > 0
+                    && clanId === Number(actor.fighter.state.clanId || actor.fighter.state.stats?.clanId || 0));
+            },
             isAura: (skill) => ['party', 'ally'].includes(skill.fetchSemantic().target),
             effects: (actor) => (actor.fighter.profile.effects || [])
                 .filter((effect) => !effect?.expiresAt || Number(effect.expiresAt) > timestamp),
