@@ -6,6 +6,7 @@ const Gear = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const Shots = invoke('GameServer/Inventory/ShotStock');
 const F = invoke('GameServer/Formulas');
 const Rules = invoke('GameServer/Skills/C4SkillRules');
+const Buffs = invoke('GameServer/Bot/AI/PartyBuffLoadout');
 const Capabilities = require('../../Clan/ClanCandidateCapabilities');
 const Rewards = require('../../Actor/PartyRewardMath');
 const Minions = require('../../../../data/Npcs/Minions/c4_raid_bosses.json');
@@ -66,17 +67,49 @@ function compatible(a, b, assess, timestamp) {
     });
 }
 
+function hasRaidBuffs(members) {
+    const all = (1 << members.length) - 1;
+    let might = 0, shield = 0;
+    for (let i = 0; i < members.length; i++) {
+        const source = members[i];
+        let clanRecipients;
+        for (const skill of Capabilities.learnedSkills(source)) {
+            if (skill.passive) continue;
+            const semantic = Rules.resolveCached(skill);
+            if (semantic.effectType !== 'buff' || !['friendly', 'party', 'ally'].includes(semantic.target)) continue;
+            const family = Buffs.family(semantic.effect, semantic.stackFamily);
+            if (family !== 'might' && family !== 'shield') continue;
+            if ((family === 'might' ? might : shield) === all) continue;
+            let recipients = all;
+            if (semantic.target === 'ally' || semantic.sourceTarget === 'clan') {
+                // A clan aura includes its caster, but two clanless bots
+                // cannot supply one another. Union coverage across providers.
+                if (clanRecipients === undefined) {
+                    const clanId = Number(source.clanId || source.stats?.clanId || 0);
+                    clanRecipients = 1 << i;
+                    if (clanId > 0) for (let j = 0; j < members.length; j++) {
+                        if (clanId === Number(members[j].clanId || members[j].stats?.clanId || 0)) clanRecipients |= 1 << j;
+                    }
+                }
+                recipients = clanRecipients;
+            }
+            if (family === 'might') might |= recipients;
+            else shield |= recipients;
+            if (might === all && shield === all) return true;
+        }
+    }
+    return false;
+}
+
 function composition(members) {
     const tanks = members.filter(s => role(s) === 'tank');
     const healers = members.filter(s => role(s) === 'healer');
     const damage = members.filter(s => role(s) === 'damage');
     const aggression = tanks.some(s => Capabilities.learnedSkills(s).some(skill => !skill.passive
         && [28, 18].includes(Number(skill.selfId))));
-    const buffs = members.some(s => Capabilities.learnedSkills(s).some(skill => !skill.passive && Number(skill.selfId) === 1068))
-        && members.some(s => Capabilities.learnedSkills(s).some(skill => !skill.passive && Number(skill.selfId) === 1040));
     const ready = members.length === 9 && new Set(members.map(id)).size === 9
-        && tanks.length === 1 && healers.length === 2 && damage.length === 6 && aggression && buffs
-        && Rewards.validMemberIndexes(members.map(s => Number(s.level))).length === 9;
+        && tanks.length === 1 && healers.length === 2 && damage.length === 6 && aggression
+        && Rewards.validMemberIndexes(members.map(s => Number(s.level))).length === 9 && hasRaidBuffs(members);
     return { ready, tanks: tanks.length, healers: healers.length, damage: damage.length,
         reason: ready ? 'raid_ready' : 'raid_roles_or_learned_skills_missing' };
 }

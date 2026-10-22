@@ -340,6 +340,7 @@ const tests = [
     'tests/test_bot_healing_potions.js',
     'tests/test_bot_raid_safety.js',
     'tests/test_opportunistic_raids.js',
+    'tests/test_raid_buff_composition.js',
     'tests/test_raid_search_coverage.js',
     'tests/test_raid_priority_search.js',
     'tests/test_raid_adjacent_cohort.js',
