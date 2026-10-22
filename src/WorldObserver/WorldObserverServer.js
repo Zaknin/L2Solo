@@ -42,7 +42,7 @@ const WorldAreaCatalog = invoke('GameServer/World/WorldAreaCatalog');
 const WorldProjection = invoke('WorldObserver/WorldObserverProjection');
 // Main-thread cost of the open map: durations observer_dynamic (hot actors per
 // /world/changes poll), observer_changes, observer_status, observer_cold_change
-// (each cold state change once the projection exists), observer_json.
+// (changed cold actors coalesced per poll), observer_json.
 const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 const MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
@@ -452,6 +452,8 @@ const projectionRuntime = {
     initialized: false,
     initializing: null,
     dynamicKeys: new Set(),
+    pendingColdIds: new Set(),
+    coldReset: false,
     unsubscribe: null
 };
 // Read through worldStatus().runtime.developerDiagnostics.observer.
@@ -2043,21 +2045,50 @@ function projectionRow(actor) {
 function bindColdProjection() {
     if (projectionRuntime.unsubscribe) return;
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-    projectionRuntime.unsubscribe = LifeState.subscribeChanges((state) => {
-        if (!projectionRuntime.initialized || !state?.characterId) return;
-        const BotManager = invoke('GameServer/Bot/BotManager');
-        if (BotManager.findSessionById(Number(state.characterId))) return;
-        const clock = Diagnostics.active() ? performance.now() : null;
-        const leaderId = Number(state.party?.leaderId || state.stats?.leaderId || 0);
-        const actor = compactStateBot(state, new Set(), LifeState.cachedState(leaderId));
-        if (actor) WorldProjection.apply({ upserts: [projectionActor(actor, 'bot')] });
-        if (clock !== null) Diagnostics.duration('observer_cold_change', performance.now() - clock);
+    // Native worker receipts publish the cache directly; subscribeChanges is
+    // only the main-thread path that also sends changes back to the worker.
+    // Keep ids, not historical state objects, and compact the latest row once
+    // per poll even if several receipts arrive while the Observer is idle.
+    projectionRuntime.unsubscribe = LifeState.subscribePublications(({ characterId, kind }) => {
+        if (kind === 'reset') projectionRuntime.coldReset = true;
+        else if (Number(characterId) > 0) projectionRuntime.pendingColdIds.add(Number(characterId));
     });
+}
+
+function refreshColdProjection() {
+    if (projectionRuntime.coldReset) {
+        for (const actor of WorldProjection.snapshot().actors) {
+            if (actor.kind === 'bot') projectionRuntime.pendingColdIds.add(Number(actor.id));
+        }
+        projectionRuntime.coldReset = false;
+    }
+    if (!projectionRuntime.pendingColdIds.size) return;
+    const clock = Diagnostics.active() ? performance.now() : null;
+    const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+    const BotManager = invoke('GameServer/Bot/BotManager');
+    const upserts = [], removals = [], hotIds = new Set();
+    for (const id of projectionRuntime.pendingColdIds) {
+        if (BotManager.findSessionById(id)) continue;
+        const state = LifeState.cachedState(id);
+        if (!state) {
+            removals.push({ kind: 'bot', id });
+            continue;
+        }
+        const leaderId = Number(state.party?.leaderId || state.stats?.leaderId || 0);
+        const actor = compactStateBot(state, hotIds, LifeState.cachedState(leaderId));
+        if (actor) upserts.push(projectionActor(actor, 'bot'));
+    }
+    projectionRuntime.pendingColdIds.clear();
+    WorldProjection.apply({ upserts, removals });
+    if (clock !== null) Diagnostics.duration('observer_cold_change', performance.now() - clock);
 }
 
 async function ensureWorldProjection() {
     if (projectionRuntime.initialized) return WorldProjection.snapshot();
     if (projectionRuntime.initializing) return projectionRuntime.initializing;
+    // Subscribe before the cooperative bootstrap captures its rows, so a
+    // publication during collection is reconciled before returning the frame.
+    bindColdProjection();
     projectionRuntime.initializing = collectWorldActors().then(({ bots, players }) => {
         const actors = [
             ...bots.map((actor) => projectionActor(actor, 'bot')),
@@ -2069,7 +2100,6 @@ async function ensureWorldProjection() {
             ...players.map((actor) => `player:${Number(actor.id)}`)
         ]);
         projectionRuntime.initialized = true;
-        bindColdProjection();
         return result;
     }).finally(() => {
         projectionRuntime.initializing = null;
@@ -2128,6 +2158,7 @@ async function refreshDynamicProjection() {
         } else removals.push({ kind, id });
     });
     projectionRuntime.dynamicKeys = nextDynamicKeys;
+    refreshColdProjection();
     const applied = WorldProjection.apply({ upserts, removals });
     if (clock !== null) Diagnostics.duration('observer_dynamic', busyMs + performance.now() - clock);
     return applied;
