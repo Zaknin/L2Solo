@@ -312,6 +312,21 @@ function equipmentSummaryFromInventory(inventory = {}) {
         .sort((a, b) => a.slot - b.slot || a.selfId - b.selfId);
 }
 
+// The bag a bot physically holds, as its state: summary, Adena and worn gear
+// rebuilt strictly from the item rows (an entry with no row drops out).
+function inventoryStateFromItems(state, items = []) {
+    const inventory = inventorySummaryFromItems(items || []);
+    return {
+        ...state,
+        adena: inventoryAdena(inventory),
+        inventory,
+        stats: {
+            ...(state.stats || {}),
+            equipment: equipmentSummaryFromInventory(inventory)
+        }
+    };
+}
+
 function equipmentTargetFulfilled(stats = {}, inventory = {}) {
     const target = stats.equipmentPlan?.target;
     const selfId = Number(target?.selfId || 0);
@@ -3384,17 +3399,7 @@ const BotLifeState = {
         const state = previousState || cache.get(id);
         if (!id || !state) return Promise.resolve(null);
         return Database.fetchItems(id, 'life_sync_external_inventory').then((items) => {
-            const inventory = inventorySummaryFromItems(items || []);
-            const refreshed = {
-                ...state,
-                adena: inventoryAdena(inventory),
-                inventory,
-                stats: {
-                    ...(state.stats || {}),
-                    equipment: equipmentSummaryFromInventory(inventory)
-                },
-                updatedAt: now()
-            };
+            const refreshed = { ...inventoryStateFromItems(state, items), updatedAt: now() };
             const fromAfkTrade = options.autoEquip !== false && String(reason).startsWith('afk_trade_');
             const reconciled = fromAfkTrade ? reconcileEquipmentInventory(refreshed) : refreshed;
             const equipmentChanged = fromAfkTrade && JSON.stringify(refreshed.stats.equipment)
@@ -4135,6 +4140,7 @@ const BotLifeState = {
 
 BotLifeState.canonicalizeAreaState = canonicalizeAreaState;
 BotLifeState.inventorySummaryFromItems = inventorySummaryFromItems;
+BotLifeState.inventoryStateFromItems = inventoryStateFromItems;
 BotLifeState.setSessionSnapshotsAuthority = setSessionSnapshotsAuthority;
 BotLifeState.equipmentSummaryFromInventory = equipmentSummaryFromInventory;
 BotLifeState.marketPurchaseBlocker = marketPurchaseBlocker;
