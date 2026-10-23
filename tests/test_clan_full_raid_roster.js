@@ -72,6 +72,8 @@ function nativeSessions(states) {
             return new Item(state.characterId * 100 + i, { ...definition.template, ...definition.stats, ...definition.etc, ...row });
         });
         actor.skillset.populateSnapshot(state.stats.coldCombat.skills);
+        invoke('GameServer/Actor/Generics').calculateStats(session, actor);
+        actor.setHp(actor.fetchMaxHp()); actor.setMp(actor.fetchMaxMp());
         actor.automation.replenishVitals = () => {};
         actor.automation.stopReplenish = () => {};
         session.actor = actor;
@@ -161,6 +163,14 @@ async function nativeImpactCases(sessions, registry) {
     }
     try {
         await freshParty('melee');
+        const recovering = sessions[2], recoveringMp = recovering.actor.fetchMp();
+        recovering.actor.setMp(recovering.actor.fetchMaxMp() * 0.2);
+        Hot.tick(recovering, recovering.actor, invoke('GameServer/Actor/Generics'), {});
+        assert.equal(recovering.lastDecision.action, 'raid_recovery', 'a visible admitted healer sits before the first attack');
+        assert(recovering.actor.state.fetchSeated());
+        assert.equal(recovering.actor.fetchMp(), recovering.actor.fetchMaxMp() * 0.2, 'recovery uses native regeneration, not a free refill');
+        assert(!Roster.held(Parties.find(party.partyId)));
+        recovering.actor.setMp(recoveringMp); recovering.actor.state.setSeated(false);
         sessions[0].raidOpenedBossId = boss.fetchId();
         assert(!Roster.nativeHotStarted(party), 'defensive autoaggro/tactical flag does not earn opening');
         sessions.forEach(session => { session.actor.state.setCasts(true); Hot.tick(session, session.actor, invoke('GameServer/Actor/Generics'), {}); });
@@ -172,6 +182,9 @@ async function nativeImpactCases(sessions, registry) {
         healer.actor.attack.queueTimer = callback => { healTimers.push(callback); return null; };
         healer.actor.attack.remoteHit(healer, healer.actor, healer.actor.skillset.fetchSkill(1015));
         healTimers.at(-1)(); assert(!Roster.held(Parties.find(party.partyId))); assert.equal(openingWrites, 0);
+        // The real heal refreshes native maxima in this compact actor fixture.
+        // Recover those vitals before testing unrelated first-impact races.
+        sessions.forEach(session => { session.actor.setHp(session.actor.fetchMaxHp()); session.actor.setMp(session.actor.fetchMaxMp()); });
         await denied('logout ninth', () => registry.delete(base + 8), () => registry.set(base + 8, { actor: sessions[8].actor, session: sessions[8] }));
         await denied('party change', () => { sessions[8].hotBackgroundPartyId = 'foreign'; }, () => { sessions[8].hotBackgroundPartyId = party.partyId; });
         await denied('membership race', () => query('UPDATE characters SET clanId=0 WHERE id=?', [base + 8]),
@@ -183,6 +196,9 @@ async function nativeImpactCases(sessions, registry) {
             () => query("UPDATE clan_simulation_clans SET stateJson=json_set(stateJson,'$.productionGoal.fullRoster.generation',?) WHERE clanId=?", [marker.generation, marker.clanId]));
         const item = sessions[8].actor.backpack.fetchItems()[0], enchant = item.fetchEnchantLevel();
         await denied('gear race', () => item.setEnchantLevel(enchant + 1), () => item.setEnchantLevel(enchant));
+        const support = sessions[2].actor, manaBefore = support.fetchMp(), hpBefore = support.fetchHp();
+        await denied('MP spent after admission', () => support.setMp(support.fetchMaxMp() * 0.2), () => support.setMp(manaBefore));
+        await denied('HP lost after admission', () => support.setHp(support.fetchMaxHp() * 0.5), () => support.setHp(hpBefore));
         const learned = healer.actor.skillset.skills;
         await denied('learned capability race', () => { healer.actor.skillset.skills = []; }, () => { healer.actor.skillset.skills = learned; });
         await denied('arrival race', () => sessions[8].actor.setLocX(5000), () => sessions[8].actor.setLocX(0));
@@ -199,13 +215,17 @@ async function nativeImpactCases(sessions, registry) {
         assert(Roster.nativeHotStarted(party)); assert.equal(openingWrites, 1);
         assert.equal(captures, 9, 'one compact pass for the opening event'); assert.equal(fullCaptures, 0); assert.equal(ownerReads, 2);
         const heldProof = structuredClone(party.stats.raidAdmission);
+        const heldMana = sessions[2].actor.fetchMp();
+        sessions[2].actor.setMp(sessions[2].actor.fetchMaxMp() * 0.2);
         registry.delete(base + 8); queuedMelee()(); registry.set(base + 8, { actor: sessions[8].actor, session: sessions[8] });
+        sessions[2].actor.setMp(heldMana);
         assert.equal(boss.fetchHp(), 980, 'legitimate post-opening departure does not require nine alive again');
         assert.equal(captures, 9); assert.equal(ownerReads, 2); assert.equal(openingWrites, 1);
         assert.deepEqual(party.stats.raidAdmission, heldProof);
         await freshParty('magic');
         const caster = sessions[5], attack = caster.actor.attack, timers = [];
         const skill = caster.actor.skillset.fetchSkill(1184);
+        caster.actor.setMp(caster.actor.fetchMaxMp() * 0.95);
         attack.queueTimer = callback => { timers.push(callback); return null; };
         attack.prepareSkillDamage = () => 10;
         attack.remoteHit(caster, boss, skill); registry.delete(base + 8); timers.at(-1)();
@@ -216,8 +236,11 @@ async function nativeImpactCases(sessions, registry) {
         const beforeExp = caster.actor.fetchExp();
         timers.length = 0; boss.setHp(5); caster.actor.state.setCasts(false);
         caster.actor.skillReuseUntil.delete(skill.fetchSelfId()); // Fixture advances past the native reuse before its next cast.
+        caster.actor.setMp(caster.actor.fetchMaxMp() * 0.95);
         attack.remoteHit(caster, boss, skill);
         timers.at(-1)(); party = Parties.find(party.partyId);
+        assert(caster.actor.fetchMp() < caster.actor.fetchMaxMp() * 0.95,
+            'native magic can open from the 95% boundary while paying its own cost without any refill');
         assert(boss.state.fetchDead()); assert.equal(boss.fetchDestId(), undefined);
         assert.equal(loot, 1); assert.equal(experience, 9); await goalCompletion;
         assert(caster.actor.fetchExp() > beforeExp, 'actual native party EXP reaches the killer after durable opening');
@@ -252,6 +275,18 @@ function productionResolverCases(members) {
     const ownerGone = run(members, null);
     assert.equal(ownerGone.partyPatch.status, 'dissolved'); assert.equal(ownerGone.debug.reason, 'raid_roster_owner_changed');
     assert(ownerGone.memberResults.every(row => row.result.materialize.exp === 0 && row.result.materialize.items.length === 0));
+    const resting = members.map(state => ({ ...state, activity: 'resting',
+        vitals: { ...state.vitals, mp: 0 }, stats: { ...state.stats, restUntil: at - 1 } }));
+    const restingParty = { ...party, stats: { ...party.stats, restUntil: at - 1,
+        raidPreparation: { status: 'preparing', passes: 1, remainingBuffs: 31 } } };
+    const recovered = run(resting, currentOwner, restingParty);
+    assert.equal(recovered.debug.activity, 'resting',
+        'the marked roster must apply its native MP recovery before checking readiness to hunt');
+    assert(recovered.memberResults.every(row => row.result.patch.vitals.mp > 0));
+    assert.equal(recovered.debug.fights, 0, 'recovery never opens combat');
+    assert(!recovered.partyPatch.stats.raidAdmission, 'only actual combat earns the marked admission');
+    assert.equal(run(resting.slice(0, 8), currentOwner, restingParty).debug.reason, 'raid_roster_incomplete');
+    assert.equal(run(resting, null, restingParty).debug.reason, 'raid_roster_owner_changed');
     const previous = { prepare: Solo.prepareRaidParty, fight: Solo.resolvePartyFight };
     let attempts = 0;
     try {
@@ -264,6 +299,15 @@ function productionResolverCases(members) {
                 debug: { actions: 1, mobSelfId: 10137, remainingHp: 500 } };
         };
         const readyParty = { ...party, stats: { ...party.stats, raidPreparation: { status: 'ready' } } };
+        const exhausted = members.map(state => ({ ...state, vitals: { ...state.vitals,
+            mp: state.vitals.maxMp * 0.2 } }));
+        const recovery = run(exhausted, currentOwner, readyParty);
+        assert.equal(attempts, 0, 'finished buffs with ordinary-party mana cannot start a raid');
+        assert.equal(recovery.debug.fights, 0);
+        assert(recovery.memberResults.some(row => row.result.patch.activity === 'resting'));
+        assert(!recovery.partyPatch.stats.raidAdmission, 'paid recovery does not earn the first attack');
+        assert(recovery.memberResults.every(row => row.result.patch.vitals.mp >= row.state.vitals.mp),
+            'the native rest path actually regenerates mana instead of polling admission');
         const opened = run(members, currentOwner, readyParty);
         assert.equal(attempts, 1, 'production marked resolver reaches exactly one native fight leaf');
         assert.equal(opened.partyPatch.stats.raidAdmission.startedAt, at);
@@ -343,6 +387,8 @@ async function main() {
         assert(formed.ok);
         Life.acceptPartyAssignments(assigned, formed.lifeRows); party = Parties.acceptRow(formed.partyRow); members = await refreshed();
         const checked = admission(members); assert(checked.ok, checked.reason); const proof = checked.proof;
+        assert.equal(Roster.admission(party, members, spot, { owner: { ...owner(), raidBlocked: true }, arrived: true }).reason,
+            'raid_failure_blocked', 'a ready nine cannot open a boss blocked by its clan failure memory');
         assert(Buffer.byteLength(JSON.stringify(proof)) <= 1024);
         for (const count of [7, 8]) assert(!admission(members.slice(0, count)).ok);
         assert(!admission([...members.slice(0, 8), members[0]]).ok);
@@ -406,6 +452,12 @@ async function main() {
             goal: { ...goal, fullRoster: { ...marker, generation: 'replacement' } } }),
         () => Database.updateAutonomousClanGoal({ clanId: marker.clanId, ownerSection: marker.ownerSection, goal }), 'raid_roster_owner_changed');
         await reject(proof, async () => { spot.raidInstanceId = 'respawn'; }, async () => { spot.raidInstanceId = marker.raidInstanceId; }, 'raid_roster_source_changed');
+        await reject(proof, async () => {
+            await query("UPDATE clan_simulation_clans SET stateJson=json_set(stateJson,'$.raidFailures',json(?)) WHERE clanId=?",
+                [JSON.stringify({ [marker.npcId]: { bossTemplateId: marker.npcId, retryAllowed: false, failedAt: 100 } }), marker.clanId]);
+        }, async () => {
+            await query("UPDATE clan_simulation_clans SET stateJson=json_remove(stateJson,'$.raidFailures') WHERE clanId=?", [marker.clanId]);
+        }, 'raid_failure_blocked');
         const stale = await propose(proof);
         const noReward = await query('SELECT characterId,exp FROM bot_life_state ORDER BY characterId');
         stale.entries[0].revision -= 1;
@@ -471,6 +523,18 @@ async function main() {
         Life.acceptPartyAssignments(hotAssigned, hotFormed.lifeRows); party = Parties.acceptRow(hotFormed.partyRow); await phase('hot');
         sessions.forEach(session => { session.hotBackgroundPartyId = party.partyId; delete session.raidOpenedBossId; });
         Runtime.start();
+        const openingRows = await query('SELECT * FROM bot_background_parties WHERE partyId=?', [party.partyId]);
+        const manaBeforeOpening = sessions.map(session => session.actor.fetchMp());
+        sessions.forEach(session => session.actor.setMp(session.actor.fetchMaxMp() * 0.2));
+        const deniedOpening = await Lifecycle.openMarkedRaid(party, sessions);
+        assert.equal(deniedOpening.ok, false, 'a visible nine at 20% MP cannot open the raid');
+        assert.equal(deniedOpening.reason, 'raid_resources_not_ready');
+        assert.deepEqual(await query('SELECT * FROM bot_background_parties WHERE partyId=?', [party.partyId]), openingRows,
+            'denied admission does not write an opening proof');
+        sessions.forEach((session, index) => {
+            assert.equal(session.actor.fetchMp(), session.actor.fetchMaxMp() * 0.2, 'admission grants no free recovery');
+            session.actor.setMp(manaBeforeOpening[index]);
+        });
         const opened = await Lifecycle.openMarkedRaid(party, sessions);
         assert(opened.ok, opened.reason); party = opened.party;
         assert(Roster.admitted(party)); assert(!Roster.held(party));

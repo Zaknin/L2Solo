@@ -74,7 +74,25 @@ async function run() {
     const gone = await record({ id: 1, level: 2, state: { updatedAt: 1, goal: levelGoal(), productionGoal: null } },
         party('productionGoal'));
     assert.equal(gone.result.code, 'raid_goal_changed', 'a replaced goal is left alone');
-    assert.equal(gone.saves.length + gone.actions.length, 0);
+    assert.equal(gone.saves.length, 1, 'a replaced goal cannot discard the clan raid memory');
+    assert.deepEqual(gone.saves[0].goal, levelGoal(), 'the new goal is not replanned by an old raid');
+    assert.equal(gone.saves[0].raidFailure.partyId, 'raid:1');
+    assert.equal(gone.actions.length, 0);
+    const remembered = { ...failure, consecutiveFailures: 1, failedAt: 100 };
+    const rotated = await record({ id: 1, level: 4, state: { updatedAt: 2,
+        goal: raidGoal(), raidFailures: { 29001: remembered } } }, party('goal', 200));
+    assert.equal(rotated.saves[0].raidFailure.consecutiveFailures, 2,
+        'a second attempt uses clan memory even after the equipment goal was rebuilt');
+    assert.equal(rotated.saves[0].raidFailure.retryAllowed, false);
+    const stale = await record({ id: 1, level: 4, state: { updatedAt: 2,
+        goal: raidGoal(), raidFailures: { 29001: { ...remembered, failedAt: 300 } } } }, party('goal', 200));
+    assert.equal(stale.saves.length, 0, 'late delivery of an older terminal attempt cannot replace newer memory');
+    const playerGoal = raidGoal({ controlledBy: 'player', orderId: 88 });
+    const player = await record({ id: 1, level: 4, state: { updatedAt: 1, goal: playerGoal } }, party('goal'));
+    assert.equal(player.result.code, 'player_order_controls_replan');
+    assert.deepEqual(player.saves[0].goal, playerGoal, 'observing a failure cannot rewrite a player order');
+    assert.equal(player.saves[0].raidFailure.partyId, 'raid:1');
+    assert.equal(player.actions.length, 0);
     console.log('Clan raid failure owner checks passed');
 }
 

@@ -21,6 +21,7 @@ const ARMOR_GRADE_TOLERANCE = Object.freeze({
     default: 0.5
 });
 const DAMAGE_ROLES = new Set(['dps', 'mage', 'dagger', 'archer']);
+const BUSY_ACTIVITIES = new Set(['shopping', 'merchant', 'traveling', 'crafting', 'dead', 'respawning']);
 
 function number(value, fallback = 0) {
     const parsed = Number(value);
@@ -209,6 +210,8 @@ function selectRaidMembers(members = [], readinessCache = null, beneficiary = nu
     const preference = (left, right) => Number(preferred.has(memberId(right))) - Number(preferred.has(memberId(left)));
     const ranked = [...members].sort((left, right) => (
         preference(left, right)
+        || Number(BUSY_ACTIVITIES.has(left.activity) || !!left.stats?.travel)
+            - Number(BUSY_ACTIVITIES.has(right.activity) || !!right.stats?.travel)
         || number(readinessFor(right, readinessCache).effectiveLevel, right.level)
         - number(readinessFor(left, readinessCache).effectiveLevel, left.level)
         || number(right.level) - number(left.level)

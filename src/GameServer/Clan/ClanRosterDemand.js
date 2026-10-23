@@ -53,10 +53,22 @@ function goalFingerprint(goal) {
         goal.plan?.kind, goal.plan?.sourceId, goal.plan?.economicRequirements || null, goal.assignedMemberIds || []] : null);
 }
 function scanKey(clan, spots, previousGoal, section) {
-    return scanKeyForSources(clan, hash(spots.map(sourceFingerprint)), previousGoal, section);
+    return scanKeyForSources(clan, scanSources(spots), previousGoal, section);
 }
-function scanKeyForSources(clan, sources, previousGoal, section, own = ownFingerprint(clan)) {
-    return hash([own, section, previousGoal?.target?.memberId || null, previousGoal?.target?.itemId || null, sources]);
+function scanSources(spots) {
+    // Discovery follows the level/class query, not a particular boss life or
+    // damage revision. Admission still checks the full sourceFingerprint.
+    return hash(spots.map(spot => [spot.id, spot.avgLevel, spot.raidBossTemplateId])
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0]))));
+}
+function scanKeyForSources(clan, sources, previousGoal, section) {
+    // Farming, temporary availability, buffs, gear and levels are reassessed
+    // on every pass. They must not keep discovery on its first page. The
+    // selected roster retains the complete ownFingerprint and proof rows.
+    return hash([clan.id, clan.level, clan.state?.mode, clan.physicalMemberCount ?? clan.members.length,
+        clan.members.map(member => [id(member), Number(member.classId ?? member.stats?.classId ?? 0)])
+            .sort((left, right) => left[0] - right[0]),
+        section, previousGoal?.target?.memberId || null, previousGoal?.target?.itemId || null, sources]);
 }
 function neededKinds(assessment) {
     const deficits = assessment.deficits || {};
@@ -274,8 +286,12 @@ function prepare(clan, spots, prospects = [], previousGoal = null, readinessCach
                 ownFingerprint: ownFingerprint(clan), actualReady: actual.ready && actual.eligible.length === 9,
                 deficits: actual.deficits, requirements: actual.requirements, neededKinds: neededKinds(actual),
                 reason: actual.ready ? 'raid_ready' : actual.reason };
-        } else if (free > 0) {
-            const kinds = neededKinds(future);
+        }
+        if (free > 0) {
+            // A prospective nine only exposes a conditional equipment route.
+            // Until the clan chooses it and recruits, keep discovering better
+            // alternatives for its missing roles within the same finite sweep.
+            const kinds = neededKinds(future.ready ? actual : future);
             const kind = kinds.includes('healer') ? 'healing' : kinds.includes('mainBuffer') ? 'mainBuffer' : kinds.includes('tank') ? 'tank' : 'damage';
             const entry = requests.get(kind) || { kind, kinds, minLevel: Infinity, maxLevel: 0 };
             entry.minLevel = Math.min(entry.minLevel, Math.max(1, spot.avgLevel - Raid.MAX_LEVEL_BELOW_BOSS));
@@ -309,7 +325,7 @@ function fullRoster(clan, goal, team, section) {
     const demand = buildDemand(clan, goal, team, section);
     return { clanId: clan.id, ownerSection: section, goalKey: goal.goalKey, generation: demand.generation,
         memberIds: team.memberIds, sourceId: team.source.id, npcId: team.source.npcId,
-        raidInstanceId: team.source.raidInstanceId, minPartySize: 9, maxPartySize: 9 };
+        raidInstanceId: team.source.raidInstanceId, sourceFingerprint: team.source.fingerprint, minPartySize: 9, maxPartySize: 9 };
 }
 function intakeContext(candidate, clan) {
     const demand = clan.state?.recruitmentDemand;
@@ -326,6 +342,6 @@ function intakeContext(candidate, clan) {
         targetMemberCount: Math.min(Rules.memberLimit(clan.level), clan.members.length + remaining.length) };
 }
 
-module.exports = { memberFingerprint, ownFingerprint, ownJoinFingerprint, ownerSection, sourceFingerprint, goalFingerprint, scanKey, scanKeyForSources, hash, neededKinds, proofRow,
+module.exports = { memberFingerprint, ownFingerprint, ownJoinFingerprint, ownerSection, sourceFingerprint, goalFingerprint, scanKey, scanSources, scanKeyForSources, hash, neededKinds, proofRow,
     prepare, buildDemand, fullRoster, intakeContext, recipeIds, economicRequirements, economicRequest, discoveryOptions,
     conditionalOptions, economicTeam, economicCapable, economicSourceCurrent, economicPlan, ownedSpoilCapability, retainedEconomicProspects };

@@ -49,4 +49,11 @@ assert.equal(Policy.carriedFailure({ raidFailure: closeFailure }, {
     next: { sourceKind: 'raid', npcId: 10131 }
 }, false), null, 'rotating to a different equipment debt clears the old raid failure');
 
+const remembered = Policy.memory({ raidFailures: { 10280: { ...highHpFailure, failedAt: 200 } },
+    productionGoal: { raidFailure: { ...secondFailure, failedAt: 100 } } });
+assert.deepEqual([...Policy.blockedSpotIds({ raidFailure: differentBoss }, { raidFailures: remembered })].sort(),
+    ['raid:10131', 'raid:10280'], 'clan memory remembers several failed bosses while another goal receives its allowed retry');
+assert.equal(Policy.memory({ raidFailures: remembered }, { raidFailure: { ...closeFailure, failedAt: 50 } })[10131].retryAllowed,
+    false, 'an old goal cannot erase a newer boss retry limit');
+
 console.log('Clan raid failure threshold, retry limit and per-boss reset passed');

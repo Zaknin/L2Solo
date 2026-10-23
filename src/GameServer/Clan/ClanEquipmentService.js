@@ -632,9 +632,19 @@ async function prepareRecruitment(clan, profiles, previousGoal, options) {
     const section = RosterDemand.ownerSection(clan, options.ownerSection);
     const key = RosterDemand.scanKey(clan, profiles, previousGoal, section);
     const previousScan = clan.state?.recruitmentScan;
-    const restarted = (options.reviewCauses || []).includes('recruitment_input');
-    const scan = !restarted && previousScan?.key === key ? { ...previousScan } : { key, refused: [] };
-    const held = !restarted && clan.state?.recruitmentDemand && clan.state.recruitmentDemand.goalKey === previousGoal?.goalKey
+    const ownFingerprint = RosterDemand.ownFingerprint(clan);
+    const changedInput = (options.reviewCauses || []).includes('recruitment_input')
+        || previousScan?.ownFingerprint && previousScan.ownFingerprint !== ownFingerprint;
+    const restarted = previousScan?.key !== key || previousScan.done && (changedInput || previousScan.rescan);
+    const scan = restarted ? { key, refused: [] } : { ...previousScan };
+    // A busy population changes candidates between every pair of pages. Finish
+    // this finite sweep first; then revisit candidates added/changed behind its
+    // cursor. Rehydrate and revalidate retained people on every pass.
+    if (changedInput && !restarted) scan.rescan = true;
+    // Each accepted member changes the discovery key. The remaining selected
+    // people still belong to this goal: reload their native availability and
+    // rebuild the team proof rather than losing them on every partial join.
+    const held = clan.state?.recruitmentDemand && clan.state.recruitmentDemand.goalKey === previousGoal?.goalKey
         ? clan.state.recruitmentDemand.newMemberIds || [] : [];
     const retainedIds = [...new Set([...(scan.prospects || []), ...held])].filter(value => !(scan.refused || []).includes(value)).slice(0, 9);
     let prospects = [];
@@ -651,7 +661,8 @@ async function prepareRecruitment(clan, profiles, previousGoal, options) {
             ...RosterDemand.prepare(clan, profiles, pool, previousGoal),
             economicProspects: RosterDemand.retainedEconomicProspects(pool, scan.requirements) });
     let prepared = await prepare(prospects);
-    while (!prepared.raids.length && remaining > 0 && !scan.done && prepared.requests.length) {
+    let searched = false;
+    while (remaining > 0 && !scan.done && prepared.requests.length && (!prepared.raids.length || !searched)) {
         const request = prepared.requests.find(row => !(scan.exhausted || []).includes(row.kind));
         if (!request) { scan.done = true; break; }
         if (scan.kind !== request.kind) { scan.kind = request.kind; scan.cursor = null; }
@@ -661,6 +672,7 @@ async function prepareRecruitment(clan, profiles, previousGoal, options) {
             excludeTradeMeetings: true,
             classIds: require('./ClanCandidateCapabilities').classIdsForRequirements(request.kinds),
             minLevel: request.minLevel, maxLevel: request.maxLevel, cursor: scan.cursor, limit: remaining });
+        searched = true;
         remaining -= page.length;
         prospects = [...new Map([...prospects, ...page.filter(member => !(scan.refused || []).includes(memberId(member)))]
             .map(member => [memberId(member), member])).values()];
@@ -671,15 +683,15 @@ async function prepareRecruitment(clan, profiles, previousGoal, options) {
     }
     scan.prospects = [...new Set([...prepared.retainedProspects, ...(prepared.economicProspects || [])])].slice(0, 9);
     scan.ownerSection = section;
-    scan.ownFingerprint = RosterDemand.ownFingerprint(clan);
+    scan.ownFingerprint = ownFingerprint;
     scan.goalKey = previousGoal?.goalKey || null;
-    scan.sources = RosterDemand.hash(profiles.map(RosterDemand.sourceFingerprint));
+    scan.sources = RosterDemand.scanSources(profiles);
     const watchRequests = prepared.requests;
     scan.classIds = require('./ClanCandidateCapabilities').classIdsForRequirements([...new Set(watchRequests.flatMap(row => row.kinds))]);
     scan.minLevel = watchRequests.length ? Math.min(...watchRequests.map(row => row.minLevel)) : 1;
     scan.maxLevel = watchRequests.length ? Math.max(...watchRequests.map(row => row.maxLevel)) : 100;
     return { ...prepared, scan, ownerSection: section, prospects, remaining, clan, profiles, previousGoal,
-        continuation: !prepared.raids.length && !scan.done && prepared.requests.length > 0 };
+        continuation: prepared.requests.length > 0 && (!scan.done || !!scan.rescan) };
 }
 
 async function prepareEconomic(recruitment, requirements, options) {
@@ -761,7 +773,7 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
             return [];
         }
     })();
-    const blockedRaidSpots = ClanRaidFailurePolicy.blockedSpotIds(previousGoal);
+    const blockedRaidSpots = ClanRaidFailurePolicy.blockedSpotIds(previousGoal, clan.state);
     candidateSpots = candidateSpots.filter((profile) => !blockedRaidSpots.has(String(profile.id)));
     const recruitment = clan.state?.mode === 'autonomous' && !activeRaidPartyForClan(clan.id)
         ? await prepareRecruitment(clan, candidateSpots.filter(profile => profile.raidBoss), previousGoal, options) : null;
@@ -914,44 +926,41 @@ async function recordRaidFailure(party, timestamp = Date.now()) {
         const clan = await invoke('GameServer/Clan/ClanGoalService').clanProjectionById(clanId);
         // A raid may belong to the production goal a young clan runs beside
         // its main goal; the failure is recorded on the goal that owns it.
-        const ownerSection = ['goal', 'productionGoal'].find(section => (
+        const matchedOwner = ['goal', 'productionGoal'].find(section => (
             String(clan?.state?.[section]?.goalKey || '') === goalKey));
-        const current = ownerSection ? clan.state[ownerSection] : null;
-        if (!current) {
-            return { ok: true, skipped: true, code: 'raid_goal_changed' };
-        }
-        if (String(current.controlledBy || '') === 'player') {
-            return { ok: true, skipped: true, code: 'player_order_controls_replan' };
-        }
-        if (String(current.raidFailure?.partyId || '') === String(party.partyId)
-            && number(current.raidFailure?.failedAt) === number(encounter.failedAt, timestamp)) {
+        if (!clan) return { ok: false, code: 'raid_failure_context_missing' };
+        const ownerSection = matchedOwner || 'goal';
+        const current = clan.state?.[ownerSection];
+        const replan = !!matchedOwner && current?.controlledBy !== 'player';
+        const previousFailure = ClanRaidFailurePolicy.memory(clan.state, current)[ClanRaidFailurePolicy.bossTemplateId(encounter)];
+        if (previousFailure && number(previousFailure.failedAt) >= number(encounter.failedAt, timestamp)) {
             return { ok: true, skipped: true, code: 'raid_failure_already_recorded', goal: current };
         }
 
-        const failure = ClanRaidFailurePolicy.decision(current.raidFailure, encounter);
-        const next = {
+        const failure = ClanRaidFailurePolicy.decision(previousFailure, encounter);
+        const recorded = { ...failure, failedAt: number(encounter.failedAt, timestamp), partyId: party.partyId,
+            failureReason: String(encounter.failureReason || 'party_death') };
+        const next = replan ? {
             ...current,
-            raidFailure: {
-                ...failure,
-                failedAt: number(encounter.failedAt, timestamp),
-                partyId: party.partyId,
-                failureReason: String(encounter.failureReason || 'party_death')
-            },
+            raidFailure: recorded,
             partyId: null,
             catastrophicFailures: number(current.catastrophicFailures) + 1,
             status: 'executing',
             reasonCodes: [...new Set([...(current.reasonCodes || []), failure.reasonCode])],
             updatedAt: timestamp
-        };
+        } : current || null;
         const saved = await Database.updateAutonomousClanGoal({
             clanId,
             goal: next,
+            raidFailure: recorded,
             ownerSection,
             expectedUpdatedAt: number(clan.state?.updatedAt) || null,
             eventType: 'equipment_raid_failed',
             reasonCode: failure.reasonCode
         });
         if (saved.ok) {
+            if (!replan) return { ...saved, failure, skipped: true,
+                code: matchedOwner ? 'player_order_controls_replan' : 'raid_goal_changed' };
             await Database.enqueueClanAction({
                 clanId,
                 actionKey: `clan:${clanId}:raid-failed:${failure.bossTemplateId}:${number(encounter.failedAt, timestamp)}`,
@@ -994,10 +1003,63 @@ function selectedPlanningTarget(clan, previousGoal, planning, selectedCandidate 
     };
 }
 
+function raidAssemblyCommitted(clan, goal) {
+    const Roster = require('./ClanRaidRoster');
+    const marker = goal?.fullRoster;
+    if (ClanRaidFailurePolicy.blockedSpotIds(goal, clan.state).has(marker?.sourceId)) return false;
+    if (clan.state?.mode !== 'autonomous' || goal?.status !== 'executing' || !Roster.valid(marker)
+        || number(marker.clanId) !== number(clan.id) || marker.goalKey !== goal.goalKey
+        || Date.now() - number(goal.plan?.selectedAt, number(goal.createdAt))
+            > require('../Bot/Population/PartyRequestPlanner').maxAgeMs('required')) return false;
+    const profile = invoke('GameServer/RaidBoss/RaidBossSourceCatalog').findById(marker.sourceId);
+    const source = profile && RaidEncounterScope.projectSource(profile);
+    if (!source || source.raidWorldAvailable === false || marker.raidInstanceId !== source.raidInstanceId
+        || marker.sourceFingerprint !== RosterDemand.sourceFingerprint(source)) return false;
+    const members = (clan.members || []).filter(member => marker.memberIds.includes(memberId(member)));
+    if (!Roster.exact(members.map(memberId), marker.memberIds)) return false;
+    const beneficiary = members.find(member => memberId(member) === number(goal.target?.memberId));
+    if (!beneficiary || Policy.targetFulfilled(beneficiary, goal, GearAcquisitionPlanner.equippedSlotsFor,
+        selfId => ItemTemplateIndex.findFinite(DataCache.items, selfId) || null)) return false;
+    if (members.every(member => !member.partyId && !member.party?.partyId)) {
+        const Formation = require('../Bot/Population/RequiredPartyFormation');
+        const available = (clan.members || []).filter(Formation.eligible);
+        if (available.length >= 9 && members.some(member => !Formation.eligible(member))
+            && ClanRaidPolicy.assessment({ ...clan, members: available }, source, goal,
+                { desiredMembers: 9, preferredMemberIds: marker.memberIds }).ready) return false;
+    }
+    if (members.some(member => {
+        if (!Roster.same(member.stats?.clanPartyObjective?.fullRoster, marker)
+            || require('../Bot/Population/PartyAssemblyRecovery').coolingDown(member)) return true;
+        const partyId = member.partyId || member.party?.partyId;
+        if (!partyId) return member.stats?.partyRequest?.status !== 'open';
+        const party = BackgroundPartyState.find(partyId);
+        return !party || party.status !== 'active' || !Roster.same(Roster.markerFor(party), marker)
+            || !Roster.exact(party.memberIds, marker.memberIds) || ClanEquipmentPartyPolicy.abandonedRaid(party)
+            || ['failed', 'defeated'].includes(party.stats?.raidEncounter?.status);
+    })) return false;
+    return ClanRaidPolicy.assessment({ ...clan, members }, source, goal,
+        { desiredMembers: 9, preferredMemberIds: marker.memberIds }).ready;
+}
+
 async function resolveClan(clan, previousGoal = null, options = {}) {
     DiagnosticConfig.developerDiagnostics && (metrics.resolves += 1);
     if (!clan || !number(clan.id)) {
         return { ok: true, skipped: true, reason: 'equipment_level_unavailable' };
+    }
+    const Roster = require('./ClanRaidRoster');
+    const blockedRaids = ClanRaidFailurePolicy.blockedSpotIds(previousGoal, clan.state);
+    for (const party of BackgroundPartyState.activeByObjectiveClan(clan.id, 'clan_raid_source_review')) {
+        const marker = Roster.markerFor(party);
+        if (!Roster.valid(marker) || Roster.held(party)) continue;
+        const profile = invoke('GameServer/RaidBoss/RaidBossSourceCatalog').findById(marker.sourceId);
+        const source = profile && RaidEncounterScope.projectSource(profile);
+        const blocked = blockedRaids.has(marker.sourceId);
+        if (!blocked && source?.raidWorldAvailable !== false && source?.raidInstanceId === marker.raidInstanceId) continue;
+        // Preparation owns no earned attack. A restart/respawn must not let
+        // its old boss life retain the in-progress lock indefinitely.
+        if (await Roster.cancelUnopened(party, blocked ? 'raid_failure_blocked' : 'raid_roster_source_changed')) {
+            return { ok: true, skipped: true, continuation: true, reason: 'clan_planning_deferred', goal: previousGoal };
+        }
     }
     const activeRaidParty = activeRaidPartyForClan(clan.id);
     if (activeRaidParty) {
@@ -1009,6 +1071,13 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
             goal: previousGoal,
             partyId: activeRaidParty.partyId
         };
+    }
+    // A physically admitted nine is already a clan commitment. Let its paid
+    // errands finish and the native party assemble before comparing another
+    // free wish. Source, membership, readiness and the waiting bound still
+    // release this commitment when a new plan is actually needed.
+    if (raidAssemblyCommitted(clan, previousGoal)) {
+        return { ok: true, skipped: true, reason: 'raid_assembling', goal: previousGoal };
     }
     const planning = options.planning || await planningForClan(clan, previousGoal, options);
     const { plans, previousFulfilled } = planning;
@@ -1071,7 +1140,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
         goal.status = 'preparing';
         goal.reasonCodes = ['clan_recruitment_wait'];
         if (team.economic) goal.plan.economicRequirements = team.requirements;
-        if (scan) { scan.key = RosterDemand.scanKeyForSources(clan, scan.sources, goal, section, scan.ownFingerprint); scan.goalKey = goal.goalKey; }
+        if (scan) { scan.key = RosterDemand.scanKeyForSources(clan, scan.sources, goal, section); scan.goalKey = goal.goalKey; }
         const demand = RosterDemand.buildDemand(clan, goal, team, section);
         const saved = await Database.updateAutonomousClanGoal({ clanId: clan.id, goal, ownerSection: section,
             expectedUpdatedAt: number(clan.state?.updatedAt), recruitmentDemand: demand, recruitmentScan: scan, supersededProductionGoalKey,
@@ -1100,7 +1169,7 @@ async function resolveClan(clan, previousGoal = null, options = {}) {
     if (selection.plan.economicOwnedRequirements) goal.plan.economicRequirements = selection.plan.economicOwnedRequirements;
     else if (previousGoal?.plan?.economicRequirements && goal.goalKey === previousGoal.goalKey)
         goal.plan.economicRequirements = previousGoal.plan.economicRequirements;
-    if (scan) { scan.key = RosterDemand.scanKeyForSources(clan, scan.sources, goal, section, scan.ownFingerprint); scan.goalKey = goal.goalKey; }
+    if (scan) { scan.key = RosterDemand.scanKeyForSources(clan, scan.sources, goal, section); scan.goalKey = goal.goalKey; }
     let persistedGoal = false;
     if (team?.actualReady) {
         goal.fullRoster = RosterDemand.fullRoster(clan, goal, team, section);

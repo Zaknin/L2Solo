@@ -50,7 +50,7 @@ function offensiveParty(session) {
         && invoke('GameServer/Bot/Population/BackgroundPartyState').find(session.hotBackgroundPartyId);
     return markerFor(party) ? party : null;
 }
-function beforeOffensiveEffect(session, actor, target, dispatchedParty = null) {
+function beforeOffensiveEffect(session, actor, target, dispatchedParty = null, paidCost = null) {
     if (!session?.hotBackgroundPartyId) return !dispatchedParty;
     const party = invoke('GameServer/Bot/Population/BackgroundPartyState').find(session.hotBackgroundPartyId);
     if (dispatchedParty && (!party || party.status !== 'hot' || party.partyId !== dispatchedParty.partyId
@@ -62,7 +62,7 @@ function beforeOffensiveEffect(session, actor, target, dispatchedParty = null) {
     if (Number(boss?.fetchSelfId?.()) !== marker.npcId
         || invoke('GameServer/RaidBoss/RaidEncounterScope').instanceId(boss) !== marker.raidInstanceId) return false;
     if (held(party)) return marker.memberIds.includes(Number(actor?.fetchId?.()));
-    return invoke('GameServer/Bot/Population/HotPartyLifecycle').openMarkedRaidAtImpact(party, session, actor, target, boss, nativeImpact);
+    return invoke('GameServer/Bot/Population/HotPartyLifecycle').openMarkedRaidAtImpact(party, session, actor, target, boss, nativeImpact, paidCost);
 }
 function assessmentMembers(members) {
     // The native planner accepts cold states. Execution callers have already
@@ -91,6 +91,7 @@ function admission(party, members, spot, options = {}) {
         || spot.raidWorldAvailable === false) return fail('raid_roster_source_changed');
     const owner = options.owner;
     if (!owner || owner.mode !== 'autonomous' || !same(owner.marker, marker)) return fail('raid_roster_owner_changed');
+    if (owner.raidBlocked) return fail('raid_failure_blocked');
     // A clan departure ends the roster (owner change cancels the party); the rest is transient.
     if (members.some(member => {
         const current = owner.members?.find(row => row[0] === id(member));
@@ -105,6 +106,9 @@ function admission(party, members, spot, options = {}) {
             || !(Number(member.vitals?.hp ?? member.hp) > 0) || member.stats?.travel || member.stats?.tradeMeeting
             || member.stats?.playerPartyTakeover;
     })) return fail('raid_roster_member_changed');
+    if (options.phase === 'hot' && members.some(member => !invoke('GameServer/Bot/AI/RestPolicy').raidReady(member))) {
+        return fail('raid_resources_not_ready');
+    }
     if (!options.arrived) return fail('party_assembling');
     const assessment = options.assessment || require('./ClanRaidPolicy').assessment({ members: assessmentMembers(members) }, spot,
         { assignedMemberIds: marker.memberIds }, { desiredMembers: 9, requireCapabilities: true, preferredMemberIds: marker.memberIds });
@@ -127,7 +131,7 @@ async function cancelUnopened(party, reason) {
 }
 // A marked party dissolved for one of these reasons leaves its clan goal executing:
 // wake its review for a new attempt. Callers wake only after the dissolve is saved.
-const CANCEL_REASONS = Object.freeze(['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened']);
+const CANCEL_REASONS = Object.freeze(['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened', 'raid_failure_blocked']);
 function wakeCancelled(party, reason = party?.stats?.partyBreakReason) {
     const marker = markerFor(party);
     if (!marker || !CANCEL_REASONS.includes(reason)) return false;

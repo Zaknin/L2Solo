@@ -89,6 +89,9 @@ function calculateRoute(member, spots = [], warehouseRows = [], options = {}) {
         ...(options.recipeId ? { recipeId: options.recipeId } : {}),
         allowedRecipeIds: options.allowedRecipeIds ? new Set(options.allowedRecipeIds) : undefined,
         maxExpectedKills: number(options.maxExpectedKills, Config.equipmentMaxExpectedKills),
+        // The beneficiary must pass the same ordinary-source level limit as
+        // the native clan party assignment. Raids have their own full proof.
+        maxSourceLevel: number(member.level) + Config.operationMaxTargetLevelGap,
         maxMarketPrice: marketBudget,
         spoilCapable: options.spoilCapable === true,
         allowRaidSources: options.allowRaidSources === true,

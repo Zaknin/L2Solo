@@ -72,7 +72,31 @@ function prepareBuffs(session, owner, members, Generics, now, options = {}) {
     return true;
 }
 
-function holdForRaidPreparation(session, owner, members, Generics, now) {
+function raidResourcesReady(member) {
+    const actor = member.actor;
+    return RestPolicy.raidReady(actor, { hp: actor.fetchHp(), maxHp: actor.fetchMaxHp(),
+        mp: actor.fetchMp(), maxMp: actor.fetchMaxMp() });
+}
+
+function holdForRaidRecovery(session, owner, members, now) {
+    if (members.every(raidResourcesReady)) return false;
+    owner.backgroundHuntTarget = null;
+    owner.raidPreparationReadyAt = 0;
+    owner.raidPreparationComplete = false;
+    const actor = session.actor;
+    Tactics.stop(session, actor);
+    session.currentTargetId = undefined;
+    actor.unselect?.();
+    if (!actor.state.fetchSeated()) {
+        actor.state.setSeated(true);
+        session.dataSendToOthers(invoke('GameServer/Network/Response').sitAndStand(actor), actor);
+    }
+    actor.automation.replenishVitals(actor);
+    session.lastDecision = { action: 'raid_recovery', partyId: session.hotBackgroundPartyId, at: now };
+    return true;
+}
+
+function holdForRaidPreparation(session, owner, members, Generics, now, requireRecovery = false) {
     // Preparation is a party-wide barrier. A short gap between two casts must
     // not let one member select the boss and permanently bypass the remaining
     // buffs. Keep the shared target empty until the complete roster has been
@@ -102,6 +126,8 @@ function holdForRaidPreparation(session, owner, members, Generics, now) {
         session.lastDecision = { action: 'raid_wait_buffs', partyId: session.hotBackgroundPartyId, at: now };
         return true;
     }
+
+    if (requireRecovery && holdForRaidRecovery(session, owner, members, now)) return true;
 
     if (!Number(owner.raidPreparationReadyAt || 0)) {
         owner.raidPreparationReadyAt = now + RAID_PREPARATION_SETTLE_MS;
@@ -276,13 +302,14 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
             return true;
         }
         if (!Roster.admitted(party)) {
-            if (holdForRaidPreparation(session, owner, members, Generics, now)) return true;
+            if (holdForRaidPreparation(session, owner, members, Generics, now, true)) return true;
             Lifecycle.openMarkedRaid(party, registered, now).catch(error =>
                 utils.infoWarn('BotParty', 'marked admission %s: %s', party.partyId, error.message));
             Tactics.stop(session, bot); bot.unselect?.(); session.currentTargetId = undefined;
             session.lastDecision = { action: 'raid_roster_admission', partyId: party.partyId, at: now };
             return true;
         }
+        if (holdForRaidRecovery(session, owner, members, now)) return true;
         // The native offensive impact owns the final current-input fence.
         // Tick dispatch must not recapture nine inventories for every actor.
     }

@@ -12,7 +12,7 @@ const marker = { clanId: 7, ownerSection: 'goal', goalKey: 'g1', generation: 'v1
 const party = { partyId: 'p1', status: 'hot', memberIds: ids, spotId: marker.sourceId, stats: { objective: { fullRoster: marker } } };
 const spot = { id: 'raid:123', raidBossTemplateId: 123, raidInstanceId: 'spawn1', raidWorldAvailable: true };
 const freshMembers = () => ids.map(id => ({ characterId: id, classId: 1, clanId: 7, level: 50, phase: 'hot',
-    partyId: 'p1', vitals: { hp: 100 }, stats: {} }));
+    partyId: 'p1', vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 }, stats: {} }));
 const freshOwner = () => ({ mode: 'autonomous', marker, members: ids.map(id => [id, 1, 7, 50, false]) });
 const options = owner => ({ owner, phase: 'hot', arrived: false });
 

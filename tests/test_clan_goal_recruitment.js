@@ -48,7 +48,9 @@ const character = seed.prepare(`INSERT INTO characters(id,username,name,classId,
  VALUES(?,'bot_pop_recruitment',?,?,0,50,500,300,0,0,0,0,0,0,0)`);
 const life = seed.prepare(`INSERT INTO bot_life_state(characterId,accountName,characterName,level,phase,activity,spotId,hp,maxHp,mp,maxMp,
  inventorySummary,statsJson,updatedAt) VALUES(?,'bot_pop_recruitment',?,50,'cold','hunting','ordinary:fixture',500,500,300,300,?,?,?)`);
-for (const value of [...roster, healer, damage, ...Array.from({ length: 71 }, (_, i) => member(base + 100 + i, 15, i === 70 ? heal : []))]) {
+for (const value of [...roster, healer, damage,
+    ...Array.from({ length: 71 }, (_, i) => member(base + 100 + i, 15, i === 70 ? heal : [])),
+    ...Array.from({ length: 80 }, (_, i) => member(base + 200 + i, 17, buff))]) {
     character.run(value.characterId, `Recruit${value.characterId}`, value.classId);
     for (const skill of value.stats.coldCombat.skills) seed.prepare('INSERT INTO skills(selfId,name,passive,level,characterId) VALUES(?,?,?,?,?)')
         .run(skill.selfId, skill.name || '', skill.passive ? 1 : 0, skill.level, value.characterId);
@@ -67,7 +69,7 @@ function planning(clan, prospects) {
     const prepared = Demand.prepare(clan, [spot], prospects, clan.state.productionGoal || null);
     return { ...prepared, spots: prepared.raids, occupancy: {}, plans: new Map([[base, plan]]),
         selection: { member: clan.members[0], plan }, recruitment: { ...prepared, ownerSection: 'productionGoal',
-            scan: { key: Demand.scanKey(clan, [spot], clan.state.productionGoal, 'productionGoal'), sources: Demand.hash([Demand.sourceFingerprint(spot)]),
+            scan: { key: Demand.scanKey(clan, [spot], clan.state.productionGoal, 'productionGoal'), sources: Demand.scanSources([spot]),
                 ownerSection: 'productionGoal', prospects: prepared.retainedProspects, refused: [], classIds: [15], minLevel: 45, maxLevel: 58 } } };
 }
 async function pureAndWorker(clan, prospects) {
@@ -175,20 +177,172 @@ async function boundedContinuation(clan) {
         await query('UPDATE board_trade_participants SET meetingId=NULL WHERE characterId=?', [base + 164]);
         assert.deepEqual(await Events.drain(), [], 'unchanged meeting replay is quiet');
 
-        const second = await Equipment.planningForClan({ ...clan, state: saved.state }, null,
+        const farming = structuredClone(clan);
+        farming.members[0].activity = 'resting';
+        farming.members[0].spotId = 'ordinary:next-camp';
+        farming.members[0].stats.coldCombat.effects = [{ selfId: 1068, level: 1, remainingMs: 120000 }];
+        assert.notEqual(Demand.ownFingerprint(farming), Demand.ownFingerprint(clan),
+            'the final roster proof still detects changes while discovery continues');
+        let conditional;
+        for (const [label, current, causes, source] of [
+            ['ordinary farming', farming, [], spot],
+            ['candidate commit', clan, ['recruitment_input'], spot],
+            ['respawn authority', clan, [], { ...spot, raidInstanceId: 'next-spawn', raidAuthorityRevision: 2 }]
+        ]) {
+            const offset = queries.length;
+            const second = await Equipment.planningForClan({ ...current, state: saved.state }, null,
+                { spots: [source], occupancy: {}, reviewCauses: causes, planningDeadline: Date.now() + 30000 });
+            assert.equal(second.recruitment.raids.length, 1, `${label}: continuation reaches learned healer beyond first64`);
+            assert.equal(queries[offset].options.cursor?.characterId, base + 163, `${label}: the next page keeps its cursor`);
+            assert(queries.slice(offset).reduce((n, entry) => n + entry.count, 0) <= 64,
+                `${label}: continuation keeps the existing candidate budget`);
+            if (label === 'candidate commit') conditional = second;
+        }
+        const alternativesOffset = queries.length;
+        await Equipment.planningForClan({ ...clan, state: { ...saved.state,
+            recruitmentScan: conditional.recruitment.scan } }, null,
             { spots: [spot], occupancy: {}, planningDeadline: Date.now() + 30000 });
-        assert.equal(second.recruitment.raids.length, 1, 'continuation reaches learned healer beyond first64');
-        assert(queries[1].options.cursor.characterId === base + 163);
-        assert(queries.slice(1).reduce((n, entry) => n + entry.count, 0) <= 64);
+        assert(queries.length > alternativesOffset, 'a conditional raid not yet adopted by the clan must not freeze discovery');
+        assert.equal(queries[alternativesOffset].options.cursor?.characterId, conditional.recruitment.scan.cursor.characterId);
+        assert(queries.slice(alternativesOffset).reduce((n, entry) => n + entry.count, 0) <= 64);
         const exhausted = { ...saved.state, recruitmentScan: { ...first.recruitment.scan, done: true, prospects: [] } };
         const count = queries.length;
         const stopped = await Equipment.planningForClan({ ...clan, state: exhausted }, null,
             { spots: [spot], occupancy: {}, planningDeadline: Date.now() + 30000 });
         assert(!stopped.recruitment.continuation); assert.equal(queries.length, count, 'exhausted unchanged logical scan performs no repeated first-page read');
+
+        // A candidate behind the cursor learns healing during the sweep. The
+        // event must neither rewind this page nor lose that candidate forever.
+        const behind = await Life.findByCharacterId(base + 100);
+        const trained = { ...behind, stats: { ...behind.stats, coldCombat: { ...behind.stats.coldCombat,
+            skills: Combat.skillSnapshotsFromRecords(heal) } } };
+        await Database.setSkill({ selfId: 1015, level: 1, name: 'Heal' }, behind.characterId);
+        assert(await Life.upsertState(trained, 'fixture_learned_heal'));
+        await query("UPDATE bot_life_state SET phase='hot' WHERE characterId>? AND characterId<?", [base + 170, base + 300]);
+        await query("UPDATE bot_life_state SET phase='hot' WHERE characterId=?", [base + 170]);
+        const offset = queries.length;
+        const finishing = await Equipment.planningForClan({ ...clan, state: saved.state }, null,
+            { spots: [spot], occupancy: {}, reviewCauses: ['recruitment_input'], planningDeadline: Date.now() + 30000 });
+        assert.equal(queries[offset].options.cursor?.characterId, base + 163);
+        assert(finishing.recruitment.scan.done && finishing.recruitment.continuation,
+            'candidate changes schedule a new sweep after the current one ends');
+        const nextOffset = queries.length;
+        const revisited = await Equipment.planningForClan({ ...clan, state: { ...saved.state, recruitmentScan: finishing.recruitment.scan } }, null,
+            { spots: [spot], occupancy: {}, planningDeadline: Date.now() + 30000 });
+        assert.equal(queries[nextOffset].options.cursor, null, 'the completed dirty sweep revisits earlier candidates');
+        const learned = revisited.recruitment.prospects.find(value => value.characterId === behind.characterId);
+        assert(learned, 'the restarted query includes the changed earlier candidate');
+        assert(require('../src/GameServer/Clan/ClanCandidateCapabilities').contextualCapability(learned, 'healer'),
+            JSON.stringify(learned.stats.coldCombat));
+        assert(revisited.recruitment.retainedProspects.includes(behind.characterId),
+            'the newly learned capability behind the cursor is retained for the next roster assessment');
+        await query('DELETE FROM skills WHERE characterId=? AND selfId=1015', [behind.characterId]);
+        assert(await Life.upsertState(behind, 'fixture_restore_heal'));
+        await query("UPDATE bot_life_state SET phase='cold' WHERE characterId=?", [base + 170]);
         await Database.updateAutonomousClanGoal({ clanId: clan.id, ownerSection: 'productionGoal', goal: null,
             recruitmentDemand: null, recruitmentScan: null, eventType: null });
     } finally { Gear.planFor = oldPlan; Life.clanOperationCandidates = oldQuery;
         await query("UPDATE bot_life_state SET phase='cold' WHERE characterId=?", [healer.characterId]); }
+}
+
+async function recruitMissingRoles() {
+    const own = Array.from({ length: 6 }, (_, i) => member(base + 1000 + i, [7, 9, 10, 21, 0, 9][i]));
+    const supports = [member(base + 1006, 4), member(base + 1007, 17, buff), member(base + 1008, 15, heal)];
+    for (const value of [...own, ...supports]) {
+        await query(`INSERT INTO characters(id,username,name,classId,race,level,maxHp,maxMp,sex,face,hair,hairColor,locX,locY,locZ)
+            VALUES(?,'bot_pop_recruitment',?,?,0,50,500,300,0,0,0,0,0,0,0)`, [value.characterId, `Roles${value.characterId}`, value.classId]);
+        for (const skill of value.stats.coldCombat.skills) await Database.setSkill({ ...skill,
+            name: skill.name || `Fixture skill ${skill.selfId}` }, value.characterId);
+        assert(await Life.upsertState({ ...value, name: `Roles${value.characterId}`,
+            vitals: { hp: 500, maxHp: 500, mp: 300, maxMp: 300 }, loc: { locX: 0, locY: 0, locZ: 0 } }, 'fixture_missing_roles'));
+        await query(`INSERT INTO bot_personas(characterId,seed,primaryDrive,archetype,traitsJson)
+            VALUES(?,'fixture','power','fighter',?)`, [value.characterId, JSON.stringify({ commitment: 1 })]);
+    }
+    const created = await Database.createAutonomousClan({ name: 'RaidRoleIntake', leaderId: own[0].characterId,
+        memberIds: own.map(value => value.characterId), founderQuorum: 5, maxBotMemberShare: 1,
+        stateJson: { goal: { type: 'level', status: 'preparing', goalKey: 'roles-level', target: { level: 1 } } } });
+    assert(created.ok);
+    const oldPlan = Gear.planFor, oldQuery = Life.clanOperationCandidates;
+    let hydrated = 0, accepted = 0, ready = null;
+    const passes = [];
+    Gear.planFor = (state, options = {}) => options.spots?.some(source => source.raidBoss)
+        ? structuredClone(plan) : { status: 'blocked', strategy: 'none' };
+    Life.clanOperationCandidates = async options => {
+        // The next discovery page need not contain people already selected
+        // before the first join. Their addressed IDs must survive that join.
+        if (accepted) return [];
+        const page = await oldQuery.call(Life, options); hydrated += page.length; return page;
+    };
+    try {
+        for (let pass = 0; pass < 10 && !ready; pass++) {
+            const clan = await Goals.clanProjectionById(created.clanId);
+            const before = hydrated;
+            const computed = await Equipment.planningForClan(clan, clan.state.productionGoal,
+                { spots: [spot], ownerSection: 'productionGoal', reviewCauses: ['recruitment_input'], planningDeadline: Date.now() + 30000 });
+            if (accepted) assert(computed.recruitment.raids.some(source => source.id === spot.id),
+                'a partial native join must retain the remaining selected roles across the membership scan reset');
+            assert(hydrated - before <= 64, 'multi-role discovery retains the per-pass candidate budget');
+            const result = await Equipment.resolveClan(clan, clan.state.productionGoal,
+                { ownerSection: 'productionGoal', planning: computed });
+            assert(result.ok, JSON.stringify(result));
+            passes.push({ members: clan.members.length, raids: computed.recruitment.raids.length,
+                cursor: computed.recruitment.scan.cursor, prospects: computed.recruitment.scan.prospects,
+                accepted: result.joined?.accepted, refused: result.joined?.refused, reason: result.reason });
+            if (result.joined?.accepted) accepted++;
+            if (result.goal?.fullRoster) ready = result.goal;
+            else if (!result.persistedGoal) {
+                assert((await Database.updateAutonomousClanGoal({ clanId: clan.id, ownerSection: 'productionGoal',
+                    goal: result.goal || null, recruitmentDemand: result.recruitmentDemand,
+                    recruitmentScan: result.recruitmentScan, eventType: null })).ok);
+            }
+        }
+        assert(ready, `bounded continuation and native joins produce a complete raid roster: ${JSON.stringify(passes)}`);
+        assert.equal(accepted, 3, 'the clan physically recruits its three missing roles');
+        const actual = await Goals.clanProjectionById(created.clanId);
+        assert.equal(actual.members.length, 9);
+        assert(Raid.composition(actual.members, { desiredMembers: 9, requireCapabilities: true }).ready,
+            'the joined nine have a learned healer, main buffer, tank and damage coverage');
+        assert.deepEqual([...ready.fullRoster.memberIds].sort(), actual.members.map(value => value.characterId).sort());
+        for (const value of actual.members) assert.deepEqual(value.stats.clanPartyObjective?.fullRoster, ready.fullRoster,
+            'all nine receive the same native raid objective after membership is durable');
+        const shopping = actual.members[0];
+        assert(await Life.upsertState({ ...shopping, activity: 'shopping' }, 'fixture_finish_purchase'));
+        const assembling = await Goals.clanProjectionById(created.clanId);
+        const alternative = { ...plan, target: { selfId: 91, name: 'Other upgrade', slot: 7 },
+            next: { spotId: 'ordinary:fixture', npcId: 0, itemId: 91 } };
+        const competing = { plans: new Map([[assembling.members[0].characterId, alternative]]),
+            selection: { member: assembling.members[0], plan: alternative } };
+        const oldDebt = { ...ready, createdAt: Date.now() - 24 * 60 * 60 * 1000 };
+        const kept = await Equipment.resolveClan(assembling, oldDebt, { planning: competing });
+        assert.equal(kept.reason, 'raid_assembling',
+            'an admitted nine finishing purchases must reach assembly before another economic wish replaces it');
+        assert.deepEqual(kept.goal, oldDebt, 'assembly starts when the raid route is assigned, even for an older equipment debt');
+        const empty = { plans: new Map(), selection: null };
+        const alternate = { ...shopping, characterId: base + 2000, id: base + 2000, activity: 'hunting',
+            stats: { ...shopping.stats, clanPartyObjective: null, partyRequest: null } };
+        const availableClan = { ...assembling, physicalMemberCount: 10, members: [...assembling.members, alternate] };
+        const immediatelyReady = Raid.assessment(availableClan, spot, ready,
+            { desiredMembers: 9, preferredMemberIds: availableClan.members.map(value => value.characterId) });
+        assert(immediatelyReady.ready);
+        assert(immediatelyReady.eligible.some(value => value.characterId === alternate.characterId),
+            'an equally capable available role must precede an occupied member');
+        assert.notEqual((await Equipment.resolveClan(availableClan, ready, { planning: empty })).reason, 'raid_assembling',
+            'an available complete alternative releases a roster waiting for personal town work');
+        spot.raidWorldAvailable = false;
+        assert.notEqual((await Equipment.resolveClan(assembling, ready, { planning: empty })).reason, 'raid_assembling',
+            'a missing boss releases the assembly commitment');
+        spot.raidWorldAvailable = true;
+        assert.notEqual((await Equipment.resolveClan({ ...assembling, members: assembling.members.slice(1) }, ready,
+            { planning: empty })).reason, 'raid_assembling', 'a lost member releases the assembly commitment');
+        const expired = { ...ready, plan: { ...ready.plan, selectedAt: Date.now() - 24 * 60 * 60 * 1000 } };
+        assert.notEqual((await Equipment.resolveClan(assembling, expired, { planning: empty })).reason, 'raid_assembling',
+            'assembly cannot hold an equipment goal indefinitely');
+        const oldInstance = spot.raidInstanceId;
+        spot.raidInstanceId = 'replacement-boss';
+        assert.notEqual((await Equipment.resolveClan(assembling, ready, { planning: empty })).reason, 'raid_assembling',
+            'a new boss life requires a new native admission');
+        spot.raidInstanceId = oldInstance;
+    } finally { Gear.planFor = oldPlan; Life.clanOperationCandidates = oldQuery; }
 }
 
 
@@ -337,6 +491,18 @@ async function criticDeliveryCases(clan) {
     const regenerated = await Equipment.resolveClan(clan, clan.state.productionGoal, { ownerSection: 'productionGoal', planning: planning(withPaidProof(clan), []) });
     assert(regenerated.ok); assert.notEqual(regenerated.goal.fullRoster.generation, ready.goal.fullRoster.generation);
     await dissolved('critic-same-route-generation'); await delivered(regenerated.goal, ids);
+    await attach(ids, regenerated.goal, 'critic-stale-preparation', regenerated.goal.fullRoster);
+    const stale = Parties.find('critic-stale-preparation');
+    assert(await Parties.createOrUpdate({ ...stale, stats: { ...stale.stats, raidPreparation: { status: 'preparing' } } }));
+    const previousInstance = spot.raidInstanceId;
+    spot.raidInstanceId = 'new-world-boss';
+    clan = await Goals.clanProjectionById(clan.id);
+    const restartedWorld = await Equipment.resolveClan(clan, clan.state.productionGoal,
+        { ownerSection: 'productionGoal', planning: planning(withPaidProof(clan), []) });
+    assert.equal(restartedWorld.reason, 'clan_planning_deferred', 'old-life preparation must release its false in-progress lock');
+    assert.equal(restartedWorld.continuation, true);
+    await dissolved('critic-stale-preparation');
+    spot.raidInstanceId = previousInstance;
     // The former trade has finished; a now unavailable fighter changes the
     // selected native nine from the existing ten without expelling anybody.
     await query('UPDATE board_trade_participants SET meetingId=NULL WHERE characterId=?', [paidId]);
@@ -461,6 +627,7 @@ async function main() {
         assert.equal(Events.recruitmentCount(), 0, 'completion clears finite request');
         Events.syncRecruitment({ id: clan.id, state: { mode: 'player_managed', recruitmentScan: scan } }); assert.equal(Events.recruitmentCount(), 0);
         Events.stop(); assert.equal(Events.recruitmentCount(), 0);
+        await recruitMissingRoles();
         await fundedOwners();
         console.log('Clan goal recruitment: native conditional RPC, alternatives, capacity, stale CAS, refusal, accepted9 and owner/watch tests passed');
     } finally {
