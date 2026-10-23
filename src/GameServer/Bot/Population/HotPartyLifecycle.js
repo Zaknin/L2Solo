@@ -534,7 +534,7 @@ function markedHotStates(party, sessions) {
         return { ...current, classId: Number(actor.fetchClassId()), clanId: Number(actor.fetchClanId()), level: Number(actor.fetchLevel()),
             partyId: current.party?.partyId,
             loc: { locX: actor.fetchLocX(), locY: actor.fetchLocY(), locZ: actor.fetchLocZ() },
-            vitals: { hp: actor.fetchHp(), maxHp: actor.fetchMaxHp() },
+            vitals: { hp: actor.fetchHp(), maxHp: actor.fetchMaxHp(), mp: actor.fetchMp(), maxMp: actor.fetchMaxMp() },
             inventory: Life.inventorySummaryFromItems(items),
             stats: { ...current.stats, coldCombat: invoke('GameServer/Bot/Population/ColdCombatProfile').capture(actor), hennas: session.hennas || [] } };
     });
@@ -592,20 +592,22 @@ async function openMarkedRaid(party, sessions, timestamp = Date.now()) {
     } catch (error) { return { ok: false, reason: error.message }; }
     finally {
         pending.delete(party.partyId);
-        if (['raid_roster_owner_changed', 'raid_roster_source_changed'].includes(cancellation)) {
+        if (['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_failure_blocked'].includes(cancellation)) {
             const result = await cooldown(party.partyId, cancellation, { ignoreVisibility: true });
             if (result.ok) await require('../../Clan/ClanRaidRoster').cancelUnopened(result.party || Parties.find(party.partyId), cancellation);
         }
     }
 }
 
-function markedAttackInputs(party, sessions) {
+function markedAttackInputs(party, sessions, paidActorId = null, paidCost = null) {
     const Roster = require('../../Clan/ClanRaidRoster');
     if (!Roster.admitted(party)) return [];
     const marker = Roster.markerFor(party);
     const spot = invoke('GameServer/RaidBoss/RaidEncounterScope').projectSource(
         invoke('GameServer/RaidBoss/RaidBossSourceCatalog').findById(marker.sourceId));
     const states = markedHotStates(party, sessions);
+    const payer = paidCost && states.find(state => state.characterId === paidActorId);
+    if (payer) payer.openingPaidCost = paidCost;
     const arrived = Roster.exact(sessions.map(id), marker.memberIds)
         && sessions.every(session => World.registeredActorById(id(session))?.session === session
             && session.hotBackgroundPartyId === party.partyId && !session.partyCompanion)
@@ -613,18 +615,19 @@ function markedAttackInputs(party, sessions) {
         && states.every(state => !state.stats?.travel && invoke('GameServer/Bot/AI/SpotService').containsLocation(spot, state.loc));
     return arrived && states.length === 9 && states.every(state => state.phase === 'hot' && state.partyId === party.partyId
         && state.vitals.hp > 0 && !state.stats?.playerPartyTakeover && !state.stats?.tradeMeeting
+        && invoke('GameServer/Bot/AI/RestPolicy').raidReady(state, state.vitals, state.openingPaidCost)
         && Roster.inputFingerprint(state) === party.stats.raidAdmission.members.find(row => row[0] === state.characterId)?.[3]) ? states : [];
 }
 function markedAttackReady(party, sessions) {
     const Roster = require('../../Clan/ClanRaidRoster');
     return !Roster.markerFor(party) || Roster.held(party) || markedAttackInputs(party, sessions).length === 9;
 }
-function openMarkedRaidAtImpact(party, session, actor, target, boss, nativeImpact) {
+function openMarkedRaidAtImpact(party, session, actor, target, boss, nativeImpact, paidCost = null) {
     const Roster = require('../../Clan/ClanRaidRoster');
     if (!Roster.isNativeImpact(nativeImpact) || pending.has(party.partyId) || party.status !== 'hot' || actor !== session.actor
         || !Roster.markerFor(party).memberIds.includes(id(session))) return false;
     const sessions = party.memberIds.map(memberId => World.registeredActorById(memberId)?.session).filter(Boolean);
-    const members = markedAttackInputs(party, sessions);
+    const members = markedAttackInputs(party, sessions, id(session), paidCost);
     if (members.length !== 9) return false;
     const result = Database.openClanRaidPartyAtImpact({ partyId: party.partyId, expectedPartyRevision: party.revision,
         attackerId: id(session), targetId: Number(target.fetchId()), bossId: Number(boss.fetchId()),

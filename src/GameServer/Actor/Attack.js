@@ -413,7 +413,12 @@ class Attack {
             return;
         }
 
+        const openingPayment = raidParty ? { hp: actor.fetchHp(), mp: actor.fetchMp() } : null;
         this.payRemoteCast(session, actor, skill, { magicSkill, launchLead, executionTargets, mpCost });
+        if (openingPayment) {
+            openingPayment.hp -= actor.fetchHp();
+            openingPayment.mp -= actor.fetchMp();
+        }
 
         const shotState = this.captureShotState(actor);
         if (!selfEffectOnly && executionTargets.length > 0 && RaidCurse.skillBlocked(session, actor, executionTargets, skill)) {
@@ -436,7 +441,7 @@ class Attack {
             invoke('GameServer/World/Generics/NpcDecay').decay(invoke('GameServer/World/World'), creature);
         }
         executionTargets.forEach((target) => this.applyRemoteCastEffect(session, actor, target, skill,
-            { corpseAreaCast, raidParty, shotState, magicSkill, selfEffectOnly, castWeapon }));
+            { corpseAreaCast, raidParty, shotState, magicSkill, selfEffectOnly, castWeapon, openingPayment }));
         this.finishRemoteCast(session, actor, skill, magicSkill);
     }
 
@@ -485,9 +490,9 @@ class Attack {
         return;
     }
 
-    applyRemoteCastEffect(session, actor, target, skill, { corpseAreaCast, raidParty, shotState, magicSkill, selfEffectOnly, castWeapon }) {
+    applyRemoteCastEffect(session, actor, target, skill, { corpseAreaCast, raidParty, shotState, magicSkill, selfEffectOnly, castWeapon, openingPayment }) {
         if ((skill.fetchTargetKind?.() === 'enemy' || corpseAreaCast)
-            && !invoke('GameServer/Clan/ClanRaidRoster').beforeOffensiveEffect(session, actor, target, raidParty)) return;
+            && !invoke('GameServer/Clan/ClanRaidRoster').beforeOffensiveEffect(session, actor, target, raidParty, openingPayment)) return;
         if (skill.fetchTargetKind?.() === 'enemy') invoke('GameServer/Bot/AI/BotMobCompetition').record(actor, target);
         this.restoreShotState(actor, shotState);
         const outcome = SkillEffects.execute(session, actor, target, skill, {

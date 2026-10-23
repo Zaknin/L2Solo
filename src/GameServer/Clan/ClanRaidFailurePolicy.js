@@ -40,11 +40,25 @@ function decision(previous = null, encounter = {}) {
     };
 }
 
-function blockedSpotIds(goal = {}) {
-    const failure = goal?.raidFailure;
-    return failure?.retryAllowed === false && bossTemplateId(failure) > 0
-        ? new Set([`raid:${bossTemplateId(failure)}`])
-        : new Set();
+function memory(state = {}, ...goals) {
+    const failures = {};
+    const remember = failure => {
+        const id = bossTemplateId(failure || {});
+        if (!(id > 0)) return;
+        if (!failures[id] || number(failure.failedAt) >= number(failures[id].failedAt)) {
+            failures[id] = { ...failure };
+        }
+    };
+    [state?.goal, state?.productionGoal, ...goals].forEach(goal => remember(goal?.raidFailure));
+    // Clan memory is authoritative when a stale goal still carries the same attempt.
+    Object.values(state?.raidFailures || {}).forEach(remember);
+    return failures;
+}
+
+function blockedSpotIds(goal = {}, state = {}) {
+    return new Set(Object.values(memory(state, goal))
+        .filter(failure => failure.retryAllowed === false)
+        .map(failure => `raid:${bossTemplateId(failure)}`));
 }
 
 function carriedFailure(previousGoal = null, _plan = null, sameTarget = false) {
@@ -61,6 +75,7 @@ module.exports = {
     bossTemplateId,
     remainingHpRatio,
     decision,
+    memory,
     blockedSpotIds,
     carriedFailure
 };

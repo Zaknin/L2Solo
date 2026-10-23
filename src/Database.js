@@ -1880,6 +1880,9 @@ function applySchemaMigrations() {
     }]);
     // The author's account warehouse (his migration 67, numbered after ours).
     migrations.push([73, () => PlayerWarehouse.migrate(connection)]);
+    migrations.push([74, () => require('./GameServer/Clan/ClanRaidFailureMigration')(connection, now())]);
+    // Reconcile worlds that already ran 74 with only part of the party history retained.
+    migrations.push([75, () => require('./GameServer/Clan/ClanRaidFailureMigration')(connection, now())]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -4212,7 +4215,8 @@ function clanRaidOwner(marker) {
     if (!Roster.valid(marker)) return null;
     const row = one(`SELECT s.mode,c.level,json_extract(s.stateJson,'$.${marker.ownerSection}.fullRoster') AS markerJson,
         json_extract(s.stateJson,'$.${marker.ownerSection}.status') AS goalStatus,
-        json_extract(s.stateJson,'$.${marker.ownerSection}.controlledBy') AS controlledBy
+        json_extract(s.stateJson,'$.${marker.ownerSection}.controlledBy') AS controlledBy,
+        json_extract(s.stateJson,'$.raidFailures') AS raidFailuresJson
         FROM clan_simulation_clans s JOIN clans c ON c.id=s.clanId WHERE s.clanId=?`, [marker.clanId]);
     const members = all(`SELECT c.id AS characterId,c.classId,c.clanId,COALESCE(l.level,c.level) AS level,
         (COALESCE(p.ordinaryEligible,0)=0
@@ -4221,7 +4225,9 @@ function clanRaidOwner(marker) {
         FROM characters c LEFT JOIN bot_life_state l ON l.characterId=c.id
         LEFT JOIN bot_party_candidate_projection p ON p.characterId=c.id
         WHERE c.id IN (${marker.memberIds.map(() => '?').join(',')})`, marker.memberIds);
-    return { mode: row?.mode, level: Number(row?.level), marker: !['completed', 'cancelled', 'failed', 'abandoned'].includes(row?.goalStatus)
+    const raidBlocked = require('./GameServer/Clan/ClanRaidFailurePolicy').blockedSpotIds(null,
+        { raidFailures: jsonObject(row?.raidFailuresJson) }).has(`raid:${marker.npcId}`);
+    return { mode: row?.mode, level: Number(row?.level), raidBlocked, marker: !['completed', 'cancelled', 'failed', 'abandoned'].includes(row?.goalStatus)
         && row?.controlledBy !== 'player' ? jsonObject(row?.markerJson) : null,
     members: members.map(member => [member.characterId, member.classId, member.clanId, member.level, !!member.reserved]) };
 }
@@ -4255,6 +4261,11 @@ function raidRosterCommitReason(partyRow, nextStats, raidCommit, hotMembers = nu
         return 'raid_roster_not_opened';
     const owner = clanRaidOwner(marker);
     if (!owner || owner.mode !== 'autonomous' || !Roster.same(owner.marker, marker)) return 'raid_roster_owner_changed';
+    if (owner.raidBlocked) return 'raid_failure_blocked';
+    if (hotMembers && (openingAtImpact || !Roster.admitted(party))
+        && hotMembers.every(member => member.phase === 'hot')
+        && hotMembers.some(member => !invoke('GameServer/Bot/AI/RestPolicy').raidReady(member, member.vitals,
+            openingAtImpact ? member.openingPaidCost : null))) return 'raid_resources_not_ready';
     const Catalog = require('./GameServer/RaidBoss/RaidBossSourceCatalog');
     const source = require('./GameServer/RaidBoss/RaidEncounterScope').projectSource(Catalog.findById(marker.sourceId));
     if (!source?.raidWorldAvailable || source.raidInstanceId !== marker.raidInstanceId
@@ -6107,6 +6118,8 @@ const Database = {
             const timestamp = Math.max(now(), Number(party.updatedAt) + 1);
             if (jsonObject(request.statsJson).raidAdmission || jsonObject(party.statsJson).raidAdmission) {
                 const snapshots = members.map(member => ({ characterId: member.characterId, level: member.patch.level,
+                    phase: request.phase, vitals: { hp: member.patch.hp, maxHp: member.patch.maxHp,
+                        mp: member.patch.mp, maxMp: member.patch.maxMp },
                     classId: jsonObject(member.patch.statsJson).classId, inventory: jsonObject(member.patch.inventorySummary), stats: jsonObject(member.patch.statsJson) }));
                 const reason = raidRosterCommitReason(party, jsonObject(request.statsJson), null, snapshots);
                 if (reason) return { ok: false, reason };
@@ -9483,6 +9496,7 @@ const Database = {
         recruitmentDemand,
         recruitmentScan,
         rosterProof = null,
+        raidFailure = null,
         supersededProductionGoalKey = null
     } = {}) {
         const clan = Number(clanId);
@@ -9501,6 +9515,7 @@ const Database = {
                 || !recruitmentProofCurrent(clan, clanRow.level, previousState, rosterProof))) return { ok: false, code: 'recruitment_snapshot_changed' };
             const timestamp = now();
             const state = simulationState(simulation.stateJson, clan, clanRow.leaderId, previousState.memberIds || [], timestamp);
+            state.raidFailures = require('./GameServer/Clan/ClanRaidFailurePolicy').memory(previousState, goal, { raidFailure });
             state[ownerSection] = goal || null;
             if (recruitmentDemand !== undefined) state.recruitmentDemand = recruitmentDemand;
             else if (state.recruitmentDemand?.ownerSection === ownerSection && (!goal || goal.status === 'completed'
@@ -9534,7 +9549,7 @@ const Database = {
                     goalType: String(goal?.type || ''),
                     plan: String(goal?.plan?.kind || ''),
                     reasonCode: String(reasonCode || ''),
-                    payloadJson: JSON.stringify(goal || {}),
+                    payloadJson: JSON.stringify(raidFailure ? { ...goal, raidFailure } : goal || {}),
                     occurredAt: timestamp
                 });
             }
