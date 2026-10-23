@@ -38,6 +38,7 @@ const posted = [];
 const coordinator = new ColdSimulationCoordinator();
 coordinator.worker = { postMessage: (message) => posted.push(message) };
 coordinator.workerEpoch = 'test-epoch';
+coordinator.ready = true;
 
 assert(coordinator.post('pause', { reason: 'test' }));
 assert.strictEqual(posted[0].bytes, Protocol.byteLength({ ...posted[0], bytes: undefined }));

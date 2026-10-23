@@ -446,11 +446,14 @@ async function buyAdNeedChanged(record, line) {
         utils.infoWarn('AfkTrade', 'refused buy quote %d refresh: %s', record.id, error.message);
     }
     const phase = life().cachedState(record.ownerId)?.phase;
-    if (phase === 'cold') coordinator()?.requestEconomyRefresh?.(record.ownerId);
+    let asked = true;
+    if (phase === 'cold') asked = coordinator()?.requestEconomyRefresh?.(record.ownerId) === true;
     else if (phase === 'hot') {
-        coordinator()?.requestEconomyLook?.(record.ownerId);
+        asked = coordinator()?.requestEconomyLook?.(record.ownerId) === true;
         invoke('GameServer/Bot/Economy/HotBoardReviewService').ownerChanged(record.ownerId, 'line');
     }
+    // A request the worker dropped (not ready yet) is asked again on the next refusal.
+    if (!asked) refusedAds.delete(record.id);
 }
 async function cancel(characterId) {
     const rows = db().fetchTradeMeetingsForOwner ? await db().fetchTradeMeetingsForOwner(Number(characterId))

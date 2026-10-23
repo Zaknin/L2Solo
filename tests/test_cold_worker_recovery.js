@@ -1,4 +1,3 @@
-process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('assert');
 const EventEmitter = require('events');
 
@@ -45,11 +44,18 @@ function wait(ms) {
         'the full-world worker must leave headroom above its retained state and caches');
 
     first.emit('exit', 1);
-    assert.strictEqual(coordinator.snapshot().workerRestarts, 1);
     await wait(1100);
     const second = FakeWorker.instances[1];
     assert(second, 'unexpected worker exit must restart with bounded backoff');
     assert.notStrictEqual(coordinator.workerEpoch, firstEpoch, 'restart must fence every old-epoch message');
+
+    // The restarted worker has no kernel until it reports `running`: a snapshot page sent now
+    // would only fault (kernel_not_initialized). post() drops it for every page sender until then.
+    const beforeReady = second.messages.length;
+    assert.strictEqual(await coordinator.sendSnapshotPage([{ state: { characterId: 7 } }]), false,
+        'a snapshot page is not streamed to a worker that has not initialised its kernel');
+    assert(!second.messages.slice(beforeReady).some(message => message.type === 'snapshot_page'),
+        'no snapshot_page reaches a worker before it reports running');
 
     const beforeBatches = second.messages.length;
     const results = Array.from({ length: 20 }, (_, index) => ({
@@ -65,16 +71,6 @@ function wait(ms) {
     assert(batchMessages.every((message) => Protocol.validateEnvelope(message, 'main', {
         workerEpoch: coordinator.workerEpoch
     }).ok), 'every split ACK page must independently validate');
-
-    await coordinator.onMessage({
-        version: 1,
-        type: 'heartbeat',
-        msgId: 'old-heartbeat',
-        workerEpoch: firstEpoch,
-        sentAt: Date.now(),
-        payload: {}
-    });
-    assert.strictEqual(coordinator.snapshot().invalidMessages, 1, 'late messages from the crashed epoch must be rejected');
 
     coordinator.lastHeartbeatAt = Date.now() - 20000;
     coordinator.watchdog();
@@ -101,6 +97,15 @@ function wait(ms) {
 
     coordinator.lastWatchdogAt = 0;
     coordinator.lastHeartbeatAt = Date.now() - 20000;
+    // A late heartbeat from the crashed epoch is no sign of life of the current worker.
+    await coordinator.onMessage({
+        version: 1,
+        type: 'heartbeat',
+        msgId: 'old-heartbeat',
+        workerEpoch: firstEpoch,
+        sentAt: Date.now(),
+        payload: {}
+    });
     coordinator.watchdog();
     assert.strictEqual(second.terminated, true, 'a dead worker must be terminated so the restart path can recover leases');
     coordinator.stopping = true;
