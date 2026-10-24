@@ -329,7 +329,20 @@ function fullRoster(clan, goal, team, section) {
 }
 function intakeContext(candidate, clan) {
     const demand = clan.state?.recruitmentDemand;
-    if (!demand || clan.state?.mode !== 'autonomous') return null;
+    if (clan.state?.mode !== 'autonomous') return null;
+    if (!demand) {
+        const strategy = require('./ClanStrategyPolicy').active(clan);
+        if (!strategy) return null;
+        if (strategy.objective !== 'recruit' || strategy.status !== 'active') return { contextualAllowed: false };
+        const roles = strategy.target.roles || [];
+        const missing = roles.filter(role => !clan.members.some(member => Capabilities.contextualCapability(member,
+            role === 'buffer' ? 'mainBuffer' : role, { beneficiaries: clan.members })));
+        const capability = missing.some(role => Capabilities.contextualCapability(candidate, role === 'buffer' ? 'mainBuffer' : role,
+            { beneficiaries: clan.members }));
+        const allowed = capability || !missing.length && clan.members.length < strategy.target.members;
+        return { contextualAllowed: allowed, roleNeed: capability, growthNeed: allowed,
+            targetMemberCount: strategy.target.members };
+    }
     const goal = clan.state[demand.ownerSection];
     const ownIds = new Set(clan.members.map(id));
     const remaining = demand.newMemberIds.filter(value => !ownIds.has(value));

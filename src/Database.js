@@ -9487,6 +9487,35 @@ const Database = {
     fetchClanWarehouseItems(clanId) {
         return select('clan_warehouse_items', ['*'], 'clanId = ? AND amount > 0', [Number(clanId)], 'clan-warehouse:list');
     },
+    updateAutonomousClanStrategy({ clanId, leaderId, expectedUpdatedAt, strategy, eventType = null } = {}) {
+        const clan = Number(clanId);
+        if (!clan || strategy?.version !== 1 || !require('./GameServer/Clan/ClanStrategyPolicy').LABELS[strategy.objective]
+            || Buffer.byteLength(JSON.stringify(strategy)) > 12000) return Promise.resolve({ ok: false, code: 'invalid_clan_strategy' });
+        return inTransaction(() => {
+            const row = one(`SELECT c.leaderId, s.mode, s.stateJson FROM clans c
+                JOIN clan_simulation_clans s ON s.clanId=c.id WHERE c.id=?`, [clan]);
+            if (!row || row.mode !== 'autonomous' || Number(row.leaderId) !== Number(leaderId))
+                return { ok: false, code: 'strategy_owner_changed' };
+            const state = jsonObject(row.stateJson);
+            if (state.goal?.controlledBy === 'player' && state.goal.status !== 'completed')
+                return { ok: false, code: 'player_order_active' };
+            if (Number(state.updatedAt || 0) !== Number(expectedUpdatedAt)) return { ok: false, code: 'ownership_conflict' };
+            const changed = !state.strategy || (state.strategy.objective !== strategy.objective
+                || state.strategy.selectedAt !== strategy.selectedAt);
+            // Switching between native executors releases only autonomous work.
+            // The service keeps earned raid/trial commitments before this write.
+            if (changed) {
+                state.goal = null; state.productionGoal = null;
+                state.recruitmentDemand = null; state.recruitmentScan = null;
+            }
+            state.strategy = strategy;
+            state.updatedAt = now();
+            write('UPDATE clan_simulation_clans SET stateJson=?, updatedAt=? WHERE clanId=?', [JSON.stringify(state), state.updatedAt, clan]);
+            if (eventType) recordClanGoalEventUnsafe({ clanId: clan, eventType, goalType: 'strategy', plan: strategy.objective,
+                reasonCode: strategy.reason, payloadJson: JSON.stringify(strategy), occurredAt: state.updatedAt });
+            return { ok: true, state, membershipRepair: changed ? ClanMembership.repairGoalsUnsafe([clan]) : null };
+        }, 'clan-strategy:update').then(ClanMembership.publish);
+    },
     updateAutonomousClanGoal({
         clanId,
         goal = null,

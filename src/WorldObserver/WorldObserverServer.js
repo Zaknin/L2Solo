@@ -704,6 +704,29 @@ function clanAuxiliaryRows() {
     ]).then(([warehouse, contributions, demands, operations, actions]) => ({ warehouse, contributions, demands, operations, actions }));
 }
 
+function compactClanStrategy(value) {
+    const Policy = invoke('GameServer/Clan/ClanStrategyPolicy');
+    if (invoke('GameServer/Clan/ClanSimulationConfig').strategicManagementEnabled === false) return null;
+    if (value?.version !== 1 || !Policy.LABELS[value.objective]) return null;
+    const descriptions = {
+        advance_clan: `Reach clan level ${clanNumber(value.target?.level)}`,
+        equip_roster: `Complete ${clanNumber(value.target?.upgrades?.length)} member upgrades`,
+        raid_preparation: 'Prepare the roster and complete a useful raid upgrade',
+        recruit: `Build a ${clanNumber(value.target?.members)} member core${value.target?.roles?.length ? `; needed: ${value.target.roles.filter(role => ['tank', 'healer', 'buffer'].includes(role)).join(', ')}` : ''}`,
+        treasury: `Save ${clanNumber(value.target?.adena).toLocaleString('en-US')} Adena before discretionary purchases`,
+        clan_hall: 'Acquire a residence and fund its maintenance', maintain: 'Continue personal progression and preserve clan resources'
+    };
+    return { objective: value.objective, label: Policy.LABELS[value.objective], description: descriptions[value.objective],
+        status: ['active', 'completed', 'blocked'].includes(value.status) ? value.status : 'active',
+        progress: clanNumber(value.progress), required: clanNumber(value.required), unit: String(value.unit || 'milestone').slice(0, 32),
+        percent: Math.max(0, Math.min(100, clanNumber(value.percent))),
+        reason: Policy.REASONS.includes(value.reason) ? value.reason : 'leader_preference',
+        source: value.source === 'llm' ? 'llm' : 'deterministic', selectedAt: clanNumber(value.selectedAt),
+        progressAt: clanNumber(value.progressAt), lastDecisionAt: clanNumber(value.lastDecisionAt),
+        inference: { requests: clanNumber(value.inference?.requests), promptTokens: clanNumber(value.inference?.promptTokens),
+            completionTokens: clanNumber(value.inference?.completionTokens) } };
+}
+
 function compactClanOverview(row, auxiliary = {}) {
     const state = observerJson(row.stateJson);
     const warehouse = auxiliary.warehouse || {};
@@ -763,6 +786,7 @@ function compactClanOverview(row, auxiliary = {}) {
             latestAt: clanNumber(operation.latestOperationAt)
         },
         goal: compactClanGoal(state.goal),
+        strategy: compactClanStrategy(state.strategy),
         productionGoal: level < 3 ? compactClanGoal(state.productionGoal) : null
     };
 }
@@ -997,6 +1021,7 @@ async function clanDetail(clanId) {
     // The goal card and its durable carrier plan must describe the same
     // snapshot even if a clan action changed the goal during these reads.
     overview.goal = compactClanGoal(clanState.goal);
+    overview.strategy = compactClanStrategy(clanState.strategy);
     overview.productionGoal = overview.level < 3 ? compactClanGoal(clanState.productionGoal) : null;
     const craftGoals = [clanState.goal, overview.productionGoal ? clanState.productionGoal : null]
         .filter(goal => goal?.plan?.kind === 'craft' && goal.controlledBy !== 'player');
@@ -3127,6 +3152,7 @@ const WorldObserverServer = {
     compactColdDetail,
     compactHotDetail,
     compactClanGoal,
+    compactClanStrategy,
     compactClanCraftPlan,
     compactClanOverview,
     compactClanMember,

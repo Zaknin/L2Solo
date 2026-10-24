@@ -90,6 +90,8 @@ async function clanProjection() {
 // contribution ledger; this action advances the level once the ledger holds the
 // requirement and, at level 1, deposits the members' surplus into the warehouse.
 async function resolveClan(clan, options = {}) {
+    const strategy = require('./ClanStrategyPolicy').active(clan);
+    if (strategy && strategy.objective !== 'advance_clan') return { ok: true, skipped: true, reason: 'strategy_focus' };
     if (!clan || number(clan.level) < 0 || number(clan.level) > 3) {
         return { ok: true, skipped: true, reason: 'level_out_of_slice' };
     }
