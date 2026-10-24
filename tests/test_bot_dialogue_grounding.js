@@ -51,6 +51,16 @@ async function main() {
             assert.equal(Trade.parse(state, message, playerSession), null, 'qualified speech must not accept a price');
         }
         assert.equal(Trade.parse(state, 'yes', playerSession).action, 'accept');
+        active.quantity = 1;
+        assert.equal(Trade.parse(state, 'yes, for one', playerSession).action, 'accept');
+        assert.equal(Trade.parse(state, 'okay for 1!', playerSession).action, 'accept');
+        assert.equal(Trade.parse(state, 'yes, for 2', playerSession), null,
+            'a different quantity must not accept the current offer');
+        assert.equal(Trade.parse(state, 'yes, for one', { actor: { fetchName: () => 'OtherPlayer' } }), null,
+            'another player cannot accept the active offer');
+        active.quantity = 2;
+        assert.equal(Trade.parse(state, 'yes, for one', playerSession), null);
+        assert.equal(Trade.parse(state, 'yes, for 2', playerSession).action, 'accept');
         assert.equal(Trade.parse(state, 'cancel', playerSession).action, 'decline');
         assert.equal(Trade.parse(state, 'refresh your shop', playerSession).action, 'status',
             'refreshing a listing must not accept a pending price');

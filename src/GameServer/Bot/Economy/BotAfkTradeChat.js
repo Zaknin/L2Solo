@@ -86,7 +86,11 @@ function parse(state, text, playerSession = null) {
     const active = buying ? activeBuy(shop, playerSession) : Negotiation.activeSummary(shop.session);
     const ownActive = active && (!active.playerName
         || active.playerName === playerSession?.actor?.fetchName?.());
-    if (ownActive && /^(?:accept|agree|deal|yes|yep|sure|ok|okay|\u0441\u043e\u0433\u043b\u0430\u0441\u0435\u043d|\u0441\u043e\u0433\u043b\u0430\u0441\u043d\u0430|\u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0438\u043b\u0438\u0441\u044c|\u0431\u0435\u0440\u0443|\u0434\u0430|\u0430\u0433\u0430)(?:[,\s]+(?:please|thanks|thank you|the offer|that price))?[.!?\s]*$/i.test(lower)) {
+    const quantityAcceptance = lower.match(/(?:,\s*|\s+)for\s+(one|[1-9]\d*)[.!?\s]*$/i);
+    const acceptanceText = quantityAcceptance ? lower.slice(0, quantityAcceptance.index).trim() : lower;
+    const acceptedQuantity = quantityAcceptance && Number(quantityAcceptance[1] === 'one' ? 1 : quantityAcceptance[1]);
+    if (ownActive && (!quantityAcceptance || acceptedQuantity === Number(active.quantity))
+        && /^(?:accept|agree|deal|yes|yep|sure|ok|okay|\u0441\u043e\u0433\u043b\u0430\u0441\u0435\u043d|\u0441\u043e\u0433\u043b\u0430\u0441\u043d\u0430|\u0434\u043e\u0433\u043e\u0432\u043e\u0440\u0438\u043b\u0438\u0441\u044c|\u0431\u0435\u0440\u0443|\u0434\u0430|\u0430\u0433\u0430)(?:[,\s]+(?:please|thanks|thank you|the offer|that price))?[.!?\s]*$/i.test(acceptanceText)) {
         return { ...shop, action: 'accept' };
     }
     if (ownActive && /^(?:decline|cancel|\u043e\u0442\u043c\u0435\u043d\u0430|\u043d\u0435\u0442|\u043f\u0435\u0440\u0435\u0434\u0443\u043c\u0430\u043b)(?:[\s,!.?]|$)/i.test(lower)) {
