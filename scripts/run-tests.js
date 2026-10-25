@@ -16,6 +16,14 @@ const notRunTests = new Map([
 ]);
 
 const tests = [
+    'tests/test_recommendations.js',
+    'tests/test_recommendation_lifecycle.js',
+    'tests/test_clan_strategy.js',
+    'tests/test_clan_crystal_supply.js',
+    'tests/test_clan_strategy_native.js',
+    'tests/test_clan_strategy_offline.js',
+    'tests/test_clan_strategy_runtime_regressions.js',
+    'tests/test_clan_strategy_persistence.js',
     'tests/test_bot_dialogue_grounding.js',
     'tests/test_bot_dialogue_party.js',
     'tests/test_bot_afk_buy_shop.js',
@@ -804,6 +812,7 @@ const tests = [
     'tests/test_npc_decay.js',
     'tests/test_npc_respawn.js',
     'tests/test_party_companion_rest_follow.js',
+    'tests/test_party_support_movement.js',
     'tests/test_party_capacity.js',
     'tests/test_party_rewards.js',
     'tests/test_party_buff_targets.js',

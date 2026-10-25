@@ -9,6 +9,7 @@ const BotSkillCapabilities = invoke('GameServer/Bot/AI/BotSkillCapabilities');
 const BotSupportPlanner = invoke('GameServer/Bot/AI/BotSupportPlanner');
 const PartyAwareness = invoke('GameServer/Bot/AI/PartyAwareness');
 const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
+const PartySupportMovement = invoke('GameServer/Bot/AI/PartySupportMovement');
 const WorkflowTelemetry = invoke('GameServer/Bot/AI/BotWorkflowTelemetry');
 const PartyPulling = invoke('GameServer/Bot/AI/PartyPulling');
 const PartyRevivalService = invoke('GameServer/Bot/AI/PartyRevivalService');
@@ -326,7 +327,29 @@ function shouldKeepCurrentFollowMove(session, bot, player, leaderDistance) {
 
     const target = session.lastFollowMoveTarget;
     if (!target) return false;
+    if (['healer', 'buffer'].includes(BotRoles.inferRole(bot))) {
+        const currentTarget = PartySupportMovement.followDestination(session, bot, followTargetFor(session, player));
+        return !!currentTarget && distance2d(target, currentTarget) <= PartySupportMovement.TARGET_DRIFT;
+    }
     return distance2d(target, loc(player)) <= FOLLOW_TARGET_DRIFT;
+}
+
+function stopFollowMove(session, bot) {
+    const hadFollowMove = !!session.lastFollowMoveTarget;
+    session.lastFollowMoveTarget = null;
+    if (hadFollowMove && (session.moveTimer || bot.state?.fetchTowards?.()) &&
+        !bot.state?.fetchHits?.() && !bot.state?.fetchCasts?.() && !session.pendingSupportApproach &&
+        bot.state?.fetchTowards?.() !== 'remote') {
+        bot.automation?.abortAll?.(bot);
+    }
+}
+
+function stopSupportMelee(bot) {
+    if (bot.state?.fetchCasts?.() || (!bot.state?.fetchHits?.() && bot.state?.fetchTowards?.() !== 'melee')) return;
+    bot.attack?.clearTimers?.();
+    bot.attack?.resetQueuedEvent?.();
+    bot.state?.setHits?.(false);
+    bot.automation?.abortAll?.(bot);
 }
 
 function standUp(session, bot) {
@@ -408,7 +431,7 @@ function clearPendingSupportApproach(session, bot, { abortMove = false } = {}) {
     return true;
 }
 
-function queueSupportSkillOn(session, bot, Generics, target, skill, ctrl, kind, announcement = null) {
+function queueSupportSkillOn(session, bot, Generics, target, skill, ctrl, kind, announcement = null, { allowApproach = true } = {}) {
     const skillDistance = Number(skill.fetchDistance?.()) || 0;
     const partyAura = skill.fetchTargetKind?.() === 'party' && skillDistance < 0;
     const castRange = partyAura ? Infinity : Math.max(0, skillDistance);
@@ -420,6 +443,15 @@ function queueSupportSkillOn(session, bot, Generics, target, skill, ctrl, kind, 
 
     const now = Date.now();
     const targetLoc = loc(target);
+    const destination = allowApproach
+        ? PartySupportMovement.supportDestination(session, bot, target, castRange)
+        : null;
+    if (!destination) {
+        clearPendingSupportApproach(session, bot, { abortMove: true });
+        BotSupportPlanner.cancelSupportCast(session, bot);
+        session.returnToPartyAfterSupport = true;
+        return 'blocked';
+    }
     const pending = session.pendingSupportApproach;
     const sameAction = pending &&
         Number(pending.targetId) === Number(target.fetchId()) &&
@@ -445,7 +477,9 @@ function queueSupportSkillOn(session, bot, Generics, target, skill, ctrl, kind, 
     };
 
     if (shouldRepath) {
-        bot.moveTo({ from: loc(bot), to: targetLoc });
+        session.lastFollowMoveTarget = null;
+        bot.moveTo({ from: loc(bot), to: destination,
+            routeGuard: PartySupportMovement.routeGuard(session, bot, destination) });
     }
     return 'approach';
 }
@@ -475,7 +509,7 @@ function resumePendingSupportApproach(session, bot, Generics, leaderSession) {
         pending.kind,
         pending.announcement
     );
-    return { handled: true, action: result, target, skill, kind: pending.kind };
+    return { handled: result !== 'blocked', action: result, target, skill, kind: pending.kind };
 }
 
 function canAttemptAggression(session, target) {
@@ -582,9 +616,9 @@ function partyMembersInSupportRange(leaderSession, bot, maxDistance = 900) {
         .filter((entry) => entry.distance <= maxDistance);
 }
 
-function weakestPartyMember(leaderSession, bot, preferredActor = null, maxDistance = 900) {
+function weakestPartyMember(leaderSession, bot, preferredActor = null, maxDistance = 900, eligible = () => true) {
     const members = partyMembersInSupportRange(leaderSession, bot, maxDistance)
-        .filter((entry) => entry.actor !== bot)
+        .filter((entry) => entry.actor !== bot && eligible(entry.actor))
         .sort((a, b) => a.hpRatio - b.hpRatio);
     const preferred = members.find((entry) => entry.actor === preferredActor);
     return preferred?.hpRatio < 0.95 ? preferred : (members[0] || null);
@@ -621,19 +655,22 @@ function announceUnexpectedNpcAdd(session, bot, leaderSession, partyThreat, lead
 }
 
 function moveToFollowTarget(session, bot, player) {
-    const followTarget = followTargetFor(session, player);
+    const support = ['healer', 'buffer'].includes(BotRoles.inferRole(bot));
+    const formation = followTargetFor(session, player);
+    const followTarget = support ? PartySupportMovement.followDestination(session, bot, formation) : formation;
     // Formation positions are deliberately offset from the leader.  Comparing
     // only against the leader made a bot repeatedly path to its current
     // position once it had reached that offset.
-    if (distance2d(loc(bot), followTarget) <= FOLLOW_FORMATION_TOLERANCE) {
-        session.lastFollowMoveTarget = null;
+    if (!followTarget || distance2d(loc(bot), followTarget) <= FOLLOW_FORMATION_TOLERANCE) {
+        stopFollowMove(session, bot);
         return false;
     }
     session.lastFollowMoveTarget = followTarget;
     bot.moveTo({
         from: { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() },
         to: followTarget,
-        targetActor: player
+        targetActor: player,
+        ...(support ? { routeGuard: PartySupportMovement.routeGuard(session, bot, followTarget) } : {})
     });
     return true;
 }
@@ -755,7 +792,8 @@ function assistActionForRole(role) {
 }
 
 function supportCanMeleeAssist(bot, role) {
-    return !['healer', 'buffer'].includes(role) || BotRoles.hasMeleeWeapon(bot);
+    return !BotRoles.isPartyCasterSupport(bot) &&
+        (!['healer', 'buffer'].includes(role) || BotRoles.hasMeleeWeapon(bot));
 }
 
 function assistReasonForRole(role) {
@@ -1171,8 +1209,9 @@ const FollowingState = {
 
     // A support approach or cast already in progress.
     tickPendingSupport(ctx) {
-        const { session, bot, Generics, playerSession, pulling, partyThreat, leaderTargetId } = ctx;
-        if (pendingSupportShouldYield(session, bot, playerSession, pulling.puller?.actor, partyThreat || leaderTargetId)) {
+        const { session, bot, Generics, playerSession, pulling, partyThreat, leaderTargetId, personalSupportThreat } = ctx;
+        if (session.pendingSupportApproach && (personalSupportThreat || ctx.impairments?.rooted ||
+            pendingSupportShouldYield(session, bot, playerSession, pulling.puller?.actor, partyThreat || leaderTargetId))) {
             clearPendingSupportApproach(session, bot, { abortMove: true });
             BotSupportPlanner.cancelSupportCast(session, bot);
         }
@@ -1197,7 +1236,7 @@ const FollowingState = {
 
     // Vitals, return after support, resting with the leader, low HP/MP recovery.
     tickRest(ctx) {
-        const { session, bot, BotAI, playerSession, player, role, distance, leaderSeated, restFormationDistance, pulling, partyThreat, leaderTargetId } = ctx;
+        const { session, bot, BotAI, playerSession, player, role, distance, leaderSeated, restFormationDistance, pulling, partyThreat, leaderTargetId, personalSupportThreat } = ctx;
         const botVitals = {
             hpRatio: ratio(bot.fetchHp(), bot.fetchMaxHp()),
             mpRatio: ratio(bot.fetchMp(), bot.fetchMaxMp())
@@ -1213,7 +1252,7 @@ const FollowingState = {
             BotRoles.shouldRestForMana(bot) && botVitals.mpRatio < 0.95
         );
 
-        if (session.returnToPartyAfterSupport && !isBusy(bot)) {
+        if (session.returnToPartyAfterSupport && !personalSupportThreat && !isBusy(bot)) {
             session.returnToPartyAfterSupport = false;
             session.currentTargetId = undefined;
             bot.unselect();
@@ -1398,8 +1437,18 @@ const FollowingState = {
 
     // Support plan, heal choice, rebuff requests, party buffs, healer actions.
     tickSupportAndHealing(ctx) {
-        const { session, bot, Generics, playerSession, player, role, partyRaid, pulling, partyThreat, currentPartyAggroMonsters, leaderTargetId, impairments, botVitals, partyVitals } = ctx;
+        const { session, bot, Generics, playerSession, player, role, partyRaid, pulling, partyThreat, currentPartyAggroMonsters, leaderTargetId, impairments, botVitals, partyVitals, personalSupportThreat } = ctx;
         let { acted, keepRoleDecision } = ctx;
+        const queueSupport = (target, skill, kind, announcement = null) => {
+            const result = queueSupportSkillOn(session, bot, Generics, target, skill, false, kind, announcement,
+                { allowApproach: !personalSupportThreat && !impairments.rooted });
+            acted = result !== 'blocked';
+            if (!acted) {
+                keepRoleDecision = true;
+                recordRoleDecision(session, bot, 'hold_position', 'unsafe_support_approach', { targetId: target.fetchId() });
+            }
+            return result;
+        };
         const supportBuffTarget = timedFollowingStage('supportPlan', () => (
             BotSupportPlanner.nextAction(
                 bot,
@@ -1410,8 +1459,15 @@ const FollowingState = {
         const routineHealCandidate = role === 'healer' ? BotSkillCapabilities.selectHealSkill(bot) : null;
         const emergencyHealCandidate = role === 'healer' ? BotSkillCapabilities.selectHealSkill(bot, { emergency: true }) : null;
         const rechargeSkill = role === 'healer' ? BotSkillCapabilities.manaRechargeSkill(bot) : null;
+        const healCandidates = [emergencyHealCandidate, routineHealCandidate].filter(Boolean);
+        const reachablePatient = target => !healCandidates.length || healCandidates.some(skill => {
+            const range = Number(skill.fetchDistance?.()) || 0;
+            return (skill.fetchTargetKind?.() === 'party' && range < 0) || point(bot).distance(point(target)) <= range ||
+                (!personalSupportThreat && !impairments.rooted &&
+                    !!PartySupportMovement.supportDestination(session, bot, target, Math.max(0, range)));
+        });
         const woundedPartyMember = role === 'healer'
-            ? weakestPartyMember(playerSession, bot, pulling.puller?.actor)
+            ? weakestPartyMember(playerSession, bot, pulling.puller?.actor, 900, reachablePatient)
             : null;
         const woundedPartyCount = role === 'healer'
             ? partyMembersInSupportRange(playerSession, bot).filter((entry) => entry.hpRatio < 0.70).length
@@ -1499,17 +1555,13 @@ const FollowingState = {
                 // A queued cast is not a buff yet. The reservation begins in
                 // Attack.remoteHit once the native cast has actually started.
                 BotSupportPlanner.queueSupportCast(session, supportBuffTarget);
-                const supportResult = queueSupportSkillOn(
-                    session,
-                    bot,
-                    Generics,
+                const supportResult = queueSupport(
                     supportBuffTarget.target,
                     supportBuffTarget.skill,
-                    false,
                     `buff:${supportBuffTarget.effect}`
                 );
                 returnToPartyAfterSupport(session, bot, player, supportBuffTarget.target);
-                recordRoleDecision(session, bot, supportResult === 'cast' ? 'cast_support' : 'move_for_support', supportBuffTarget.effect, {
+                if (acted) recordRoleDecision(session, bot, supportResult === 'cast' ? 'cast_support' : 'move_for_support', supportBuffTarget.effect, {
                     buff: supportBuffTarget.effect,
                     skillId: supportBuffTarget.skill.fetchSelfId(),
                     targetId: supportBuffTarget.target.fetchId()
@@ -1521,12 +1573,12 @@ const FollowingState = {
             if (woundedPartyMember?.hpRatio < 0.45 && healerCanCast(emergencyHealSkill)) {
                 acted = true;
                 recordRoleDecision(session, bot, 'heal_party', 'emergency_heal', { targetId: woundedPartyMember.actor.fetchId() });
-                queueSupportSkillOn(session, bot, Generics, woundedPartyMember.actor, emergencyHealSkill, false, 'emergency_heal', { kind: 'emergency_heal' });
+                queueSupport(woundedPartyMember.actor, emergencyHealSkill, 'emergency_heal', { kind: 'emergency_heal' });
                 returnToPartyAfterSupport(session, bot, player, woundedPartyMember.actor);
             } else if (botVitals.hpRatio < 0.55 && botVitals.mpRatio >= 0.25 && healerCanCast(emergencyHealSkill)) {
                 acted = true;
                 recordRoleDecision(session, bot, 'heal_self', 'self_preservation', { targetId: bot.fetchId() });
-                queueSupportSkillOn(session, bot, Generics, bot, emergencyHealSkill, false, 'self_preservation');
+                queueSupport(bot, emergencyHealSkill, 'self_preservation');
             } else if (woundedPartyMember?.hpRatio < 0.70 && botVitals.mpRatio >= 0.35 && healerCanCast(topOffHealSkill)) {
                 acted = true;
                 const groupHeal = topOffHealSkill?.fetchTargetKind?.() === 'party';
@@ -1535,7 +1587,7 @@ const FollowingState = {
                     woundedCount: woundedPartyCount,
                     skillId: topOffHealSkill.fetchSelfId()
                 });
-                queueSupportSkillOn(session, bot, Generics, woundedPartyMember.actor, topOffHealSkill, false, groupHeal ? 'group_heal' : 'top_off');
+                queueSupport(woundedPartyMember.actor, topOffHealSkill, groupHeal ? 'group_heal' : 'top_off');
                 returnToPartyAfterSupport(session, bot, player, woundedPartyMember.actor);
             } else if (woundedPartyMember?.hpRatio < 0.70 && botVitals.mpRatio < 0.35) {
                 recordRoleDecision(session, bot, 'save_mp', woundedPartyMember.hpRatio < 0.45 ? 'low_mp_emergency' : 'party_not_critical');
@@ -1551,12 +1603,12 @@ const FollowingState = {
                 keepRoleDecision = true;
             } else if (manaPartyMember && rechargeSkill && !isBusy(bot) && !healerNeedsAction) {
                 acted = true;
-                markPartyRecharge(playerSession, bot, manaPartyMember.actor, rechargeSkill);
                 recordRoleDecision(session, bot, 'recharge_party', emergencyTankManaMember ? 'restore_tank_control_mp' : 'restore_mp', {
                     targetId: manaPartyMember.actor.fetchId(),
                     skillId: rechargeSkill.fetchSelfId()
                 });
-                queueSupportSkillOn(session, bot, Generics, manaPartyMember.actor, rechargeSkill, false, 'restore_mp');
+                queueSupport(manaPartyMember.actor, rechargeSkill, 'restore_mp');
+                if (acted) markPartyRecharge(playerSession, bot, manaPartyMember.actor, rechargeSkill);
                 returnToPartyAfterSupport(session, bot, player, manaPartyMember.actor);
             } else if (!routineHealSkill && !emergencyHealSkill && !groupHealSkill && woundedPartyMember?.hpRatio < 0.70) {
                 recordRoleDecision(session, bot, 'cannot_heal', 'no_learned_heal');
@@ -1810,6 +1862,7 @@ const FollowingState = {
             const targetId = target.fetchId();
             const holdSupportLine = !supportCanMeleeAssist(bot, role);
             if (holdSupportLine) {
+                stopSupportMelee(bot);
                 session.currentTargetId = undefined;
                 bot.unselect();
                 recordRoleDecision(session, bot, BotRoles.partyRoleStance(role), 'hold_support_line', {
@@ -1870,6 +1923,7 @@ const FollowingState = {
         if (!acted) {
             const playerTargetId = leaderTargetId;
             if (playerTargetId && playerTargetId !== bot.fetchId() && playerTargetId !== player.fetchId() && !supportCanMeleeAssist(bot, role)) {
+                stopSupportMelee(bot);
                 session.currentTargetId = undefined;
                 bot.unselect();
                 recordRoleDecision(session, bot, BotRoles.partyRoleStance(role), 'hold_support_line', { targetId: playerTargetId });
@@ -1992,7 +2046,7 @@ const FollowingState = {
                 }
                 const followTarget = followTargetFor(session, player);
                 if (distance2d(loc(bot), followTarget) <= FOLLOW_FORMATION_TOLERANCE) {
-                    session.lastFollowMoveTarget = null;
+                    stopFollowMove(session, bot);
                 } else {
                     if (shouldKeepCurrentFollowMove(session, bot, player, distance)) {
                         session.lastFollowMoveHeldAt = Date.now();
@@ -2001,7 +2055,12 @@ const FollowingState = {
                     moveToFollowTarget(session, bot, player);
                 }
             } else {
-                session.lastFollowMoveTarget = null;
+                if (session.lastFollowMoveTarget && ['healer', 'buffer'].includes(role) &&
+                    shouldKeepCurrentFollowMove(session, bot, player, distance)) {
+                    session.lastFollowMoveHeldAt = Date.now();
+                    return true;
+                }
+                stopFollowMove(session, bot);
                 if (!keepRoleDecision) {
                     recordRoleDecision(session, bot, BotRoles.partyRoleStance(role), 'ready');
                 }

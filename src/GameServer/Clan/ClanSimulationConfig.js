@@ -23,6 +23,10 @@ const DEFAULTS = {
     operationMaxTargetLevelGap: 5,
     catastrophicFailureThreshold: 5,
     llmGoalManagementEnabled: true,
+    strategicManagementEnabled: true,
+    strategyMinHoldMs: 30 * 60 * 1000,
+    strategyStallMs: 6 * 60 * 60 * 1000,
+    strategyRetryMs: 5 * 60 * 1000,
     llmTitleManagementEnabled: false,
     goalReviewMs: 5 * 60 * 1000,
     equipmentReviewMs: 15 * 60 * 1000,
@@ -64,6 +68,10 @@ const ENV_KEYS = {
     operationMaxTargetLevelGap: 'CLAN_SIMULATION_OPERATION_MAX_TARGET_LEVEL_GAP',
     catastrophicFailureThreshold: 'CLAN_SIMULATION_CATASTROPHIC_FAILURE_THRESHOLD',
     llmGoalManagementEnabled: 'CLAN_SIMULATION_LLM_GOALS_ENABLED',
+    strategicManagementEnabled: 'CLAN_SIMULATION_STRATEGY_ENABLED',
+    strategyMinHoldMs: 'CLAN_SIMULATION_STRATEGY_MIN_HOLD_MS',
+    strategyStallMs: 'CLAN_SIMULATION_STRATEGY_STALL_MS',
+    strategyRetryMs: 'CLAN_SIMULATION_STRATEGY_RETRY_MS',
     llmTitleManagementEnabled: 'CLAN_SIMULATION_LLM_TITLES_ENABLED',
     goalReviewMs: 'CLAN_SIMULATION_GOAL_REVIEW_MS',
     equipmentReviewMs: 'CLAN_SIMULATION_EQUIPMENT_REVIEW_MS',
@@ -138,6 +146,9 @@ config.operationMaxMembers = Math.max(
 config.operationMaxTargetLevelGap = Math.max(0, Math.floor(config.operationMaxTargetLevelGap));
 config.catastrophicFailureThreshold = Math.max(1, Math.floor(config.catastrophicFailureThreshold));
 config.goalReviewMs = Math.max(1000, Math.floor(config.goalReviewMs));
+config.strategyMinHoldMs = Math.max(60000, Math.floor(config.strategyMinHoldMs));
+config.strategyStallMs = Math.max(config.strategyMinHoldMs, Math.floor(config.strategyStallMs));
+config.strategyRetryMs = Math.max(60000, Math.floor(config.strategyRetryMs));
 config.equipmentReviewMs = Math.max(config.goalReviewMs, Math.floor(config.equipmentReviewMs));
 config.equipmentPartyStallMs = Math.max(config.goalReviewMs, Math.floor(config.equipmentPartyStallMs));
 config.equipmentHardStallMs = Math.max(config.equipmentPartyStallMs, Math.floor(config.equipmentHardStallMs));

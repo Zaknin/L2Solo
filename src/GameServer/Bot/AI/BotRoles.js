@@ -163,6 +163,10 @@ function isPartyMusicFighter(value) {
     return PARTY_MUSIC_CLASSES.has(roleClassId(value));
 }
 
+function isPartyCasterSupport(value) {
+    return isHealer(value) || isHealingBuffer(value);
+}
+
 function shouldRestForMana(value) {
     const role = inferRole(value);
     return MANA_REST_ROLES.has(role) || (
@@ -227,6 +231,7 @@ module.exports = {
     canBuff,
     isHealingBuffer,
     isPartyMusicFighter,
+    isPartyCasterSupport,
     shouldRestForMana,
     needsPartyManaRecovery,
     isRanged,

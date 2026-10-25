@@ -315,6 +315,21 @@ async function cancelLegacyBloodMarkDemand(clan, context) {
 async function resolveClan(clan, options = {}) {
     ReviewEvents.track(clan);
     try {
+        const strategic = await require('./ClanStrategyService').review(clan, options);
+        if (strategic.pending || strategic.ok === false) return strategic;
+        const strategy = require('./ClanStrategyPolicy').active(clan);
+        if (!strategy && clan?.state?.goal?.type === 'strategy') {
+            const cleared = await Database.updateAutonomousClanGoal({ clanId: clan.id, goal: null,
+                expectedUpdatedAt: number(clan.state.updatedAt), eventType: null });
+            if (!cleared.ok) return cleared;
+            clan.state = cleared.state;
+        }
+        if (strategic.managed && ['treasury', 'recruit', 'clan_hall', 'maintain'].includes(strategy?.objective)) {
+            const goal = require('./ClanStrategyService').waitingGoal(strategy);
+            const saved = await Database.updateAutonomousClanGoal({ clanId: clan.id, goal,
+                expectedUpdatedAt: number(clan.state?.updatedAt), eventType: null });
+            return { ...saved, changed: false, goal, strategy };
+        }
         const result = await resolveClanInternal(clan, options);
         if (result.goal && clan) ReviewEvents.track({ ...clan, state: { ...clan.state,
             [result.ownerSection || 'goal']: result.goal,
@@ -331,8 +346,7 @@ async function resolveClan(clan, options = {}) {
 async function resolveClanInternal(clan, options = {}) {
     if (!clan) return { ok: true, skipped: true, reason: 'target_not_autonomous' };
     const stateGoal = clan.state?.goal || null;
-    if (String(clan.state?.mode || '') === 'player_managed'
-        && String(stateGoal?.controlledBy || '') === 'player'
+    if (String(stateGoal?.controlledBy || '') === 'player'
         && stateGoal?.status !== 'completed') {
         return {
             ok: true,
@@ -348,7 +362,9 @@ async function resolveClanInternal(clan, options = {}) {
     // planner starts with a clean slate instead of treating that order as its
     // own previous goal.
     const automaticPrevious = String(stateGoal?.controlledBy || '') === 'player' ? null : stateGoal;
-    if (number(clan.level) === 3 && String(clan.state?.mode || '') === 'autonomous') {
+    const strategy = require('./ClanStrategyPolicy').active(clan);
+    if (number(clan.level) === 3 && String(clan.state?.mode || '') === 'autonomous'
+        && (!strategy || strategy.objective === 'advance_clan' || stateGoal?.plan?.kind === 'alliance_trial')) {
         const trial = await Database.resolveBotClanAlliance(clan.id);
         if (trial.advanced?.ok) {
             await ClanService.reload();
@@ -363,11 +379,11 @@ async function resolveClanInternal(clan, options = {}) {
             return { ...saved, clanId: clan.id, changed: true, goal };
         }
     }
-    if (number(clan.level) >= 3) {
+    if (number(clan.level) >= 3 || strategy && ['equip_roster', 'raid_preparation'].includes(strategy.objective)) {
         const previous = automaticPrevious?.type === 'equipment' ? automaticPrevious : clan.state?.productionGoal || null;
         const candidateSnapshot = await ClanGoalCandidateService.snapshotFor(clan, previous, options);
         await ClanEquipmentService.validatePlanning(clan, candidateSnapshot.planning);
-        const brain = candidateSnapshot.decisionNeeded
+        const brain = !strategy && candidateSnapshot.decisionNeeded
             ? ClanBrain.choose(clan, candidateSnapshot, options) : null;
         if (brain?.pending) {
             return {
@@ -392,6 +408,11 @@ async function resolveClanInternal(clan, options = {}) {
             candidateIds: candidateSnapshot.candidates.map(candidate => candidate.id)
         });
         if (equipment.skipped && !equipment.completed) {
+            if (strategy && ['equip_roster', 'raid_preparation'].includes(strategy.objective)
+                && equipment.reason === 'no_equipment_debt') {
+                const blocked = await require('./ClanStrategyService').block(clan);
+                return { ...blocked, retryable: true, reason: 'clan_planning_deferred' };
+            }
             if (equipment.recruitmentScan) {
                 const section = equipment.ownerSection || 'goal';
                 const saved = await Database.updateAutonomousClanGoal({ clanId: clan.id,

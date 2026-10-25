@@ -549,6 +549,13 @@ async function assignPlan(member, plan, clan, goal) {
     plan = { ...plan, clanMaterialDemand: Object.fromEntries(Crafting.requirements(Crafting.resolveRecipe(plan.recipeId), {}, null, 1, plan.craftProviders, plan.componentRecipes)) };
 
     const currentPlan = currentState.stats?.equipmentPlan;
+    if (samePlanTarget(currentPlan, plan) && currentPlan?.crystalPreparation
+        && number(currentPlan.clanGoal?.clanId) === number(clan.id)
+        && String(currentPlan.clanGoal?.goalKey) === String(goal.goalKey)
+        && number(currentState.inventory?.[1459]?.amount)
+            < number(plan.materials?.find(row => Number(row.selfId) === 1459)?.amount)) {
+        plan = { ...plan, crystalPreparation: currentPlan.crystalPreparation };
+    }
     if (currentPlan?.clanGoal?.clanId
         && number(currentPlan.clanGoal.clanId) !== number(clan.id)
         && !samePlanTarget(currentPlan, plan)) {
@@ -794,7 +801,8 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
     const previousMemberId = number(previousGoal?.target?.memberId);
     // The clan pays what a member lacks for its goal from its free money (above
     // the clan hall's protected reserve).
-    const clanShare = invoke('GameServer/ClanHall/Policy').freeAdena(warehouseRows, clan, clan.state?.mode, clan.state?.goal);
+    const clanShare = require('./ClanStrategyPolicy').spendingAllowed(clan, 'equipment')
+        ? invoke('GameServer/ClanHall/Policy').freeAdena(warehouseRows, clan, clan.state?.mode, clan.state?.goal) : 0;
     const previousAssigned = new Set((previousGoal?.assignedMemberIds || []).map(number).filter(Boolean));
     const spoilCapable = (clan.members || []).some((member) => (
         member?.phase === 'cold'
@@ -806,6 +814,11 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
         previousMemberId,
         previousFulfilled
     );
+    const strategicTargets = require('./ClanStrategyPolicy').active(clan)?.target?.upgrades;
+    if (strategicTargets?.length) {
+        const order = new Map(strategicTargets.map((target, index) => [target.memberId, index]));
+        members.sort((a, b) => (order.get(memberId(a)) ?? 100) - (order.get(memberId(b)) ?? 100));
+    }
     const planningWindow = Math.max(1, number(Config.operationMinMembers, 5));
     const plans = new Map();
     const workerFingerprint = PlanningWorker.enabled() ? planningFingerprint(clan) : null;
@@ -827,6 +840,8 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
                 new Set((previousGoal?.assignedMemberIds || []).map(number).filter(Boolean))));
         const memberOptions = {
             ...craftOptions,
+            strategicTarget: strategicTargets?.find(target => target.memberId === id
+                && !require('./ClanStrategyPolicy').equipped(member, target)),
             economicCraftAllowed: require('../Bot/Economy/ProductionPolicy').buyersDisabled() === false,
             ignoreExistingPlan: previousFulfilled && id === previousMemberId,
             spoilCapable,
@@ -901,6 +916,7 @@ async function planningForClanAdmitted(clan, previousGoal = null, options = {}) 
     } else if (selection?.plan?.strategy === 'market' && economy.network.queue.some(wish => wish.object.kind === 'equipment')) {
         selection = null;
     }
+    selection = require('./ClanStrategyPolicy').selection(clan, plans, selection);
     return {
         warehouseRows,
         plans,
@@ -1244,6 +1260,7 @@ const ClanEquipmentService = {
     validatePlanning,
     equipmentRoster,
     activeRaidPartyForClan,
+    raidAssemblyCommitted,
     recordRaidFailure,
     releaseConflictingRosterParties,
     metrics() {

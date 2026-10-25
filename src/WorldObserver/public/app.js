@@ -945,7 +945,8 @@ function clanOverviewSignature(clan) {
         clan.market,
         clan.actions,
         clan.operations,
-        clan.goal
+        clan.goal,
+        clan.strategy
     ]);
 }
 
@@ -995,6 +996,23 @@ function renderClans({ renderDetail = true } = {}) {
         </button>
     `).join('') : '<div class="list-empty">No clans match this search.</div>';
     if (renderDetail) renderClanDetail();
+}
+
+function clanStrategyMarkup(strategy) {
+    if (!strategy) return '';
+    const reasons = { progression: 'Investing in clan progression', readiness: 'Improving group readiness',
+        leader_preference: 'Following the leader’s priorities', member_welfare: 'Supporting clan members',
+        opportunity: 'Acting on a new opportunity', recovery: 'Recovering after a setback', keep_course: 'Continuing useful progress' };
+    const percent = Math.max(0, Math.min(100, Number(strategy.percent) || 0));
+    return `<section class="clan-strategy" aria-label="Clan strategy">
+        <div class="clan-block-title"><span>${uiIcon('target')}Clan strategy</span><b class="clan-goal-status" data-status="${text(strategy.status)}">${text(clanOrderStatusLabel(strategy.status))}</b></div>
+        <strong>${text(strategy.label)}</strong><p>${text(strategy.description)}</p>
+        <div class="clan-goal-progress" role="progressbar" aria-label="Strategy progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><i style="width:${percent}%"></i></div>
+        <div class="clan-strategy-progress"><span>${number(strategy.progress)} / ${number(strategy.required)} ${text(strategy.unit)}</span><b>${percent}%</b></div>
+        <p>Clan progress · <strong>${number(strategy.achievements?.upgrades)} upgrades completed overall</strong></p>
+        <p>${text(reasons[strategy.reason] || reasons.leader_preference)}</p>
+        <details><summary>Decision details</summary><p>${strategy.source === 'llm' ? 'Model decision' : 'Automatic fallback'} · ${number(strategy.inference?.requests)} request${Number(strategy.inference?.requests) === 1 ? '' : 's'} · ${number(strategy.inference?.promptTokens)} input / ${number(strategy.inference?.completionTokens)} output tokens</p></details>
+    </section>`;
 }
 
 function clanGoalSummary(goal, clan = null) {
@@ -1515,6 +1533,7 @@ function renderClanDetail() {
                 <span class="clan-level-badge">L${number(clan.level, 0)}</span>
             </div>
         </div>
+        ${clanStrategyMarkup(clan.strategy)}
         <div class="clan-briefing">
             <section class="clan-goal-brief">
                 <div class="clan-block-title"><span>${uiIcon('target')}${text(clanGoalExplanation(clan, detail.order).mode)}</span><b>${text(goal.progress)}</b></div>
@@ -3544,6 +3563,8 @@ async function refresh() {
                 return;
             }
             state.worldEpoch = epoch || state.worldEpoch;
+            // Clan progress can change while the spatial world has no delta.
+            loadClanDirectory();
             loadWorldStatus();
             return;
         }

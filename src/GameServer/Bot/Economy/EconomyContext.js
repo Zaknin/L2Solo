@@ -1538,7 +1538,9 @@ function planOf(context, base, { key, tripHour, projection = null, knowledgeEnab
 // one copy for the build and every later view of its plan.
 function stockReader(state, rootItem) {
     const reserved = invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state);
-    return (id, rootKey) => ({ owned: rootKey.startsWith('stock:') && rootItem(rootKey) === id
+    const supply = state.stats?.equipmentPlan?.clanGoal?.clanId && require('./ClanCrystalSupply').requirement(state);
+    return (id, rootKey) => ({ owned: supply?.key === rootKey ? require('./ClanCrystalSupply').stock(state, id)
+        : rootKey.startsWith('stock:') && rootItem(rootKey) === id
         ? positive(state.inventory?.[id]?.amount) : invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {}, reserved),
     incoming: positive(state.acceptedIncoming?.[id]) });
 }

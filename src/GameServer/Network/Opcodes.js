@@ -99,7 +99,7 @@ const Opcodes = {
 
         table[0x57] = session => invoke('GameServer/AfkTrade/PlayerBoardWindow').open(session); // Board
         table[0x9d] = ClientRequest.skillCoolTime;
-        table[0xb9] = () => {}; // Recommend button
+        table[0xb9] = ClientRequest.recommend;
         table[0x4a] = () => {}; // StartRotating
         table[0x4b] = () => {}; // FinishRotating
         table[0xd0] = ClientRequest.extendedRequest;

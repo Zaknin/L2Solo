@@ -334,7 +334,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, enqueuedA
 
 // Resolved on first use, like the other lazy dependencies of the worker:
 // require() inside lifecycleKind ran per inventory item on every row.
-let ClanPartyDuty, BotCrystallization;
+let ClanPartyDuty, BotCrystallization, ClanCrystalSupply;
 
 // A near bot's record (hot, nearSeq: its body's last post) against a hot row
 // without a newer post number: a writer's copy of the cached row
@@ -375,6 +375,10 @@ function lifecycleKind(state = {}, facts = NO_FACTS) {
     // Finish town services before waiting for a clan hunt. The pure shopping
     // resolver only advances its deadline and cannot buy, sell or leave town.
     if (['shopping', 'crafting', 'merchant'].includes(state.activity)) return 'command';
+    // Crystal inputs may still need buying or a trip. The native command must
+    // consume this step's chosen wish before another clan review replaces its
+    // preparation metadata; the pure hunt resolver cannot perform that work.
+    if (plan.clanGoal?.clanId && (ClanCrystalSupply ||= require('../Economy/ClanCrystalSupply')).requirement(state)) return 'command';
     if ((BotCrystallization ||= require('../Economy/BotCrystallization')).ready(state)) return 'command';
     if (String(plan.strategy || '') === 'market') {
         const price = Math.max(0, Number(plan.market?.price || 0));

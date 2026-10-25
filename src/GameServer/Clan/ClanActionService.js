@@ -189,6 +189,7 @@ function deferredRetryDelay(actionType, result = {}) {
 }
 
 async function scheduleProduction(clan) {
+    if (require('./ClanStrategyPolicy').active(clan)) return;
     if (number(clan.level) >= 3) return;
     if (clan.state?.goal?.controlledBy === 'player' && clan.state.goal.status !== 'completed') return;
     const [active] = await Database.execute([`SELECT id FROM clan_actions WHERE clanId = ?
@@ -200,6 +201,8 @@ async function scheduleProduction(clan) {
 }
 
 async function resolveProduction(clan, options = {}) {
+    const strategy = require('./ClanStrategyPolicy').active(clan);
+    if (strategy) return { ok: true, skipped: true, reason: 'strategy_focus' };
     if (clan.state?.goal?.controlledBy === 'player' && clan.state.goal.status !== 'completed') {
         return { ok: true, skipped: true, reason: 'player_order_active' };
     }
@@ -625,6 +628,13 @@ async function resolveAction(action, options = {}) {
                 // Auxiliary actions do not alter the goal execution chain.
             } else if (clan && advanced) {
                 await schedulePlanAfterLevelUp(clan, action);
+            } else if (clan && require('./ClanStrategyPolicy').active(clan) && String(action.actionType) === ACTION_TYPES.PLAN) {
+                // This is a cheap progress/opportunity check, never a periodic
+                // LLM call. It also wakes stalled equipment and funding goals.
+                const reviewGoal = { type: 'strategy', status: 'executing', updatedAt: clan.state.strategy.lastDecisionAt };
+                await scheduleNext(clan, reviewGoal, action, Config.goalReviewMs);
+                // Native level payments/quests still have their own executor.
+                if (goal && actionTypeFor(clan, goal) !== ACTION_TYPES.PLAN) await scheduleNext(clan, goal, action);
             } else if (clan && playerMarketWait) {
                 await scheduleNext(clan, goal, action, Config.actionRetryMs);
                 DiagnosticConfig.developerDiagnostics && (metrics.retried += 1);

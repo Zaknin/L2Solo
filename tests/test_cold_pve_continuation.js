@@ -63,6 +63,9 @@ try {
     for (let i = 0; i < 19; i++) {
         const result = Party.resolve({ party, members, spot, elapsedMs: 12000, timestamp: start + i * 60000, rng: () => .5 });
         assert(result.debug.combatActions <= 96, 'party keeps its original per-slice action cap');
+        const huntMs = result.partyPatch.stats.recommendationHunt.pending['901:902'];
+        assert(huntMs > 0 && huntMs <= (i + 1) * 12000,
+            'shared hunt records active simulated combat, excluding the longer wall-clock gaps between resolves');
         party = JSON.parse(JSON.stringify({ ...party, ...result.partyPatch, stats: { ...party.stats, ...result.partyPatch.stats } }));
         members = result.memberResults.map(({ state, result }) => merge(state, result.patch));
         if (result.debug.wins) { won = true; assert(result.memberResults.some(x => x.result.materialize.exp > 0)); break; }
@@ -81,5 +84,7 @@ try {
     Cold.npcForSpot = () => ({ avoided: true, reason: 'target_resistance' });
     const avoided = Party.resolve({ party, members, spot, elapsedMs: 60000, timestamp: start + 20 * 60000, rng: () => .5 });
     assert.strictEqual(avoided.debug.fights, 0, 'an avoided encounter cannot inflate the planned fight count');
+    assert.strictEqual(avoided.partyPatch.stats.recommendationHunt.pending['901:902'], party.stats.recommendationHunt.pending['901:902'],
+        'an avoided fight adds no shared-hunt time');
     console.log('Cold PvE continuation: serialized solo/party damage, bounded slices, one reward, reset and honest counters passed');
 } finally { Cold.npcForSpot = original; }

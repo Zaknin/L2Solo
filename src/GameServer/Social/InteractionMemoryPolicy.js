@@ -113,7 +113,10 @@ function event(input) {
     if (input.hours !== undefined && (!Number.isFinite(input.hours) || input.hours < 0)) throw Error('interaction memory: invalid loss hours');
     if (input.playedHours !== undefined && (!Number.isFinite(input.playedHours) || input.playedHours < 0)) throw Error('interaction memory: invalid playing hours');
     if (input.traits && ['loyalty', 'resilience'].some(key => !Number.isFinite(Number(input.traits[key] ?? 0.5)))) throw Error('interaction memory: invalid traits');
+    if (input.huntMs !== undefined && (input.type !== 'hunted_together' || kind !== 'character'
+        || !Number.isSafeInteger(input.huntMs) || input.huntMs < 0 || input.huntMs > 3600000)) throw Error('interaction memory: invalid hunt duration');
     return { key: input.key, sourceId, targetId, kind, type: input.type, at: time(input.at),
+        ...(input.huntMs !== undefined ? { huntMs: input.huntMs } : {}),
         ...(input.hours !== undefined ? { hours: input.hours } : {}),
         ...(input.playedHours !== undefined ? { playedHours: input.playedHours } : {}),
         ...(input.player === true ? { player: true } : {}),

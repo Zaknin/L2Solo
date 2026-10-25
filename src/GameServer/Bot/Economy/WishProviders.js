@@ -41,7 +41,9 @@ const GEAR_ROUNDS = 4;
 const SOLVER_LIMITS = new Set(['missing_wish_requirement', 'cyclic_wish_network', 'invalid_wish_node', 'wish_network_depth']);
 function nominationBasis(state) {
     const focus = String(state.stats?.wishFocus?.[0] || '').match(/^power:(\d+):/);
-    return Object.freeze([Number(state.stats?.equipmentPlan?.target?.selfId || 0), Number(focus?.[1] || 0)]);
+    const supply = state.stats?.equipmentPlan?.clanGoal?.clanId && need('./ClanCrystalSupply').requirement(state);
+    return Object.freeze([Number(state.stats?.equipmentPlan?.target?.selfId || 0), Number(focus?.[1] || 0),
+        ...(supply ? [supply.plan.clanGoal.goalKey, supply.selfId, supply.amount] : [])]);
 }
 function gearCandidates(state, ctx = null, wornFor = wornReader(state), acquisitionAllowed = null, progression = null, exchanges = null) {
     const Data = invoke('GameServer/DataCache');
@@ -328,9 +330,12 @@ function buildProjection(state, ctx, deps) {
     const progression = Progression.acquisitionAssessment ? Progression.acquisitionAssessment(state, cProgression) : cProgression;
     const preparation = Progression.preparation(state, cProgression);
     const futureHorizon = preparation ? stageHours(preparation, ctx.hunt.expPerHour, ctx.persona) : 0;
-    const luxury = Progression.allowsCGradeAcquisition(state) && (state.level < 52 || cProgression.required) && (state.level >= 40 || preparation)
+    const clanSupply = state.stats?.equipmentPlan?.clanGoal?.clanId && need('./ClanCrystalSupply').requirement(state);
+    const luxury = (clanSupply?.plan?.strategy === 'luxury_exchange'
+        || Progression.allowsCGradeAcquisition(state) && (state.level < 52 || cProgression.required) && (state.level >= 40 || preparation))
         ? need('./BotLuxuryExchange').recipes() : null;
-    const crystalSupply = Number(state.level) >= 52 && !cProgression.required && Progression.adventurer?.(state);
+    const crystalSupply = clanSupply?.selfId === 1459
+        || Number(state.level) >= 52 && !cProgression.required && Progression.adventurer?.(state);
     const luxuryInputs = new Map();
     const powerWeight = (ctx.persona.primaryDrive === 'progression' ? 1 : 0.5) + trait(ctx.persona, 'caution');
     const statusWeight = trait(ctx.persona, 'ambition') * (1 + Number(ctx.persona.primaryDrive === 'wealth'));
@@ -364,7 +369,7 @@ function buildProjection(state, ctx, deps) {
     const knownRecipes = new Set(recipeIds(state, deps));
     const preparingItems = new Set();
     const purchaseFor = need('./WishPurchaseEvidence').reader(state, ctx, deps);
-    const crystalPurchaseFor = luxury || crystalSupply
+    const crystalPurchaseFor = luxury || crystalSupply || clanSupply
         ? need('./WishPurchaseEvidence').reader(state, ctx, deps, { npcOnly: true, town: 'Giran' }) : null;
     const purchases = new Map();
     const observedPurchase = id => {
@@ -566,7 +571,7 @@ function buildProjection(state, ctx, deps) {
                 town: 'Giran', quoted: true, tripHours: trip.hours, tripFees: trip.fees,
                 improvement: { kind: 'luxury_exchange', ...exchange, ...(scrapExchange ? { forCrystals: true } : {}) }, grossRequirements: requirements });
         }
-        if ((luxury || crystalSupply) && Number(id) === 1458 || crystalSupply && Number(id) === 1459) {
+        if ((luxury || crystalSupply || clanSupply) && Number(id) === 1458 || crystalSupply && Number(id) === 1459) {
             ctx.nodeInputs?.wholeBag();
             const Crystals = need('./BotCrystallization'), trip = ctx.trip?.details?.('Giran');
             const rank = Number(id) === 1459 ? 'c' : 'd', self = Crystals.canSelf(state, rank);
@@ -610,6 +615,13 @@ function buildProjection(state, ctx, deps) {
         return key;
         } finally { if (local) ctx.nodeInputs.end(); }
     };
+    if (clanSupply) {
+        const key = itemNode(clanSupply.selfId);
+        if (key) root({ key: clanSupply.key, need: 'power',
+            object: { itemId: Number(clanSupply.plan.target.selfId), slot: Number(clanSupply.plan.target.slot), clanSupply: true },
+            valueHours: Math.max(1, horizon), progressionPriority: 3.5, personalAcquisition: true,
+            paths: [{ requirements: [{ key, amount: clanSupply.amount }] }] });
+    }
     // A finite earning goal uses the existing resale certificate and input
     // graph. The finished product is output, never a preparatory BUY leaf.
     // Only finalists expand their recipe DAG; public candidates come from the
@@ -1239,7 +1251,8 @@ function personalCraftPlan(state, context, { allowStock = false } = {}) {
             plan: context.network.plans.get(leaf.rootKey) };
     const targetId = Number(wish?.object?.itemId || leaf.rootKey.split(':')[1]);
     const stock = allowStock && state.phase === 'hot' && /^stock:(shots|potions|scrolls)$/.test(leaf.rootKey);
-    if (!targetId || !leaf.rootKey.startsWith('power:') && !stock) return null;
+    const clanSupply = wish.object?.clanSupply && need('./ClanCrystalSupply').requirement(state);
+    if (!targetId || !leaf.rootKey.startsWith('power:') && !stock && !clanSupply) return null;
     if (stock && (leaf.activity !== 'crafting' || leaf.funding || !wish?.funded)) return null;
     // Ready blacksmith exchanges cost no money, so their root need not be in
     // the spending queue. Route the native selected leaf to the equipment
@@ -1285,6 +1298,15 @@ function personalCraftPlan(state, context, { allowStock = false } = {}) {
         for (const row of plan.requirements || []) visit(row.plan || context.network.plans.get(row.key), depth + 1);
     };
     visit(wish?.plan || context.network.plans.get(`item:${targetId}`));
+    if (clanSupply) {
+        const plan = clanSupply.plan;
+        const inputs = [...crystalInputs].map(([selfId, amount]) => ({ selfId, amount }));
+        return { ...plan, valueRate: Number(wish.ratio || 0),
+            ...(plan.strategy === 'luxury_exchange'
+                ? { materials: [...plan.materials.filter(row => !inputs.some(input => input.selfId === row.selfId)), ...inputs] }
+                : inputs.length ? { crystalPreparation: { exchange: crystalExchange,
+                    materials: [...(crystalExchange?.materials || []).map(row => ({ ...row })), ...inputs] } } : {}) };
+    }
     if (exchange) return { strategy: 'luxury_exchange', status: 'active',
         target: { selfId: targetId, slot: Number(wish.object?.slot || leaf.rootKey.split(':')[2]) }, exchange,
         materials: [...exchange.materials.map(row => ({ ...row })),
