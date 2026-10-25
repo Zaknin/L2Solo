@@ -9433,6 +9433,17 @@ const Database = {
             if (memberCount >= Math.max(1, Number(memberLimit) || 10)) {
                 return { ok: false, code: 'join_clan_full' };
             }
+            if (!expectedDemandGeneration) {
+                const demand = require('./GameServer/Clan/ClanRosterDemand').activeDemand({ state: jsonObject(simulation.stateJson) });
+                if (demand) {
+                    const ownIds = new Set(all('SELECT id FROM characters WHERE clanId = ?', [targetClanId]).map(row => row.id));
+                    const remaining = new Set(demand.newMemberIds.filter(value => !ownIds.has(value)));
+                    if (remaining.has(id)) return { ok: false, code: 'recruitment_owner_changed' };
+                    if (memberCount + remaining.size >= Math.max(1, Number(memberLimit) || 10)) {
+                        return { ok: false, code: 'recruitment_slots_reserved' };
+                    }
+                }
+            }
 
             const candidate = one(`SELECT c.id, c.username, c.clanId, life.accountName, life.statsJson
                 FROM characters c

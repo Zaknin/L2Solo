@@ -84,6 +84,7 @@ const tests = [
     'tests/test_clan_level_handoff.js',
     'tests/test_clan_demand_foundation.js',
     'tests/test_clan_goal_recruitment.js',
+    'tests/test_clan_background_recruitment.js',
     'tests/test_clan_full_raid_roster.js',
     'tests/test_clan_economic_intake.js',
     'tests/test_clan_equipment_component_progress.js',

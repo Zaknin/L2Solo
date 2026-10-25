@@ -304,8 +304,12 @@ has an estimated input limit of 1800 tokens and a 128-token completion limit.
 It skips the gateway's expanding schema-repair generation. Failed or stale responses use
 validated deterministic choices with a persisted retry backoff.
 
-The strategy directs discretionary clan purchases and recruitment. Existing
-raid/trial commitments and player orders retain priority; maintenance and personal
+The strategy directs discretionary clan purchases and prioritizes recruitment.
+Ordinary recruitment continues alongside every strategic objective and aims for
+the clan level's full member limit (10, 15, 20, 30, 40, 40 at levels 0–5).
+Candidate suitability and the configured population share limit still apply;
+selected raid and crafting recruits retain their reserved places.
+Existing raid/trial commitments and player orders retain priority; maintenance and personal
 bot lifecycles retain their native executors. Observer's clan detail shows the
 strategic objective, measurable progress, reason and cumulative reported token
 usage separately from the current operational task. A durable completed-upgrade

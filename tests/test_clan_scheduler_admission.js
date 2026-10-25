@@ -9,6 +9,52 @@ const ClanSimulationService = invoke('GameServer/Clan/ClanSimulationService');
 const Config = invoke('GameServer/Clan/ClanSimulationConfig');
 const Database = invoke('Database');
 const Governor = invoke('GameServer/Bot/Population/BackgroundWorkGovernor');
+const BackgroundJobs = invoke('GameServer/Bot/Population/BackgroundJobRegistry');
+
+async function schedulerRetry() {
+    const originalCreate = BackgroundJobs.create, originalNow = Date.now;
+    const originalRegistry = PopulationService.backgroundJobRegistry;
+    let clock = 1000000, founderRuns = 0, releaseAction, registry;
+    try {
+        Date.now = () => clock;
+        BackgroundJobs.create = options => originalCreate({ ...options, now: () => clock,
+            setInterval: () => ({ unref() {} }), clearInterval() {} });
+        PopulationService.backgroundJobRegistry = null;
+        PopulationService.nextClanActionAt = 0;
+        PopulationService.nextClanFounderAt = 0;
+        PopulationService.playerActivityProfile = () => ({ protected: false, realPlayers: 0 });
+        ClanActionService.resolveBatch = () => new Promise(resolve => { releaseAction = resolve; });
+        ClanSimulationService.resolveBatch = async () => { founderRuns++; return { attempted: 1 }; };
+        Governor.reset();
+        registry = PopulationService.startBackgroundJobRegistry();
+        await new Promise(resolve => setImmediate(resolve));
+        assert(releaseAction, 'native action service owns the shared resource');
+
+        clock += 30000;
+        registry.tick(clock);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(founderRuns, 0, 'recruitment must wait for the active SQLite-heavy action');
+        assert.equal(registry.snapshot().jobs.clan_founders.skipped, 1);
+        releaseAction({ attempted: 1, budgetStopped: true, queue: { ready: 1 } });
+        await new Promise(resolve => setImmediate(resolve));
+
+        clock += registry.tickMs;
+        registry.tick(clock);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(founderRuns, 1, 'a governor deferral retries on the next scheduler tick, before the next minute collision');
+        assert.equal(PopulationService.nextClanFounderAt, clock + Config.resolveIntervalMs);
+        clock += registry.tickMs;
+        registry.tick(clock);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(founderRuns, 1, 'an admitted pass retains the normal minute cadence');
+    } finally {
+        registry?.stop();
+        PopulationService.backgroundJobRegistry = originalRegistry;
+        BackgroundJobs.create = originalCreate;
+        Date.now = originalNow;
+        Governor.reset();
+    }
+}
 
 async function main() {
     const originalActionResolve = ClanActionService.resolveBatch;
@@ -26,6 +72,7 @@ async function main() {
         resolveIntervalMs: Config.resolveIntervalMs
     };
     const originalNextClanActionAt = PopulationService.nextClanActionAt;
+    const originalNextClanFounderAt = PopulationService.nextClanFounderAt;
 
     try {
         Config.enabled = true;
@@ -112,6 +159,7 @@ async function main() {
 
         assert.strictEqual(PopulationService.clanActionRunning, false);
         assert.strictEqual(PopulationService.clanFounderRunning, false);
+        await schedulerRetry();
         console.log('Clan scheduler admission checks passed');
     } finally {
         ClanActionService.resolveBatch = originalActionResolve;
@@ -122,6 +170,7 @@ async function main() {
         PopulationService.clanActionRunning = false;
         PopulationService.clanFounderRunning = false;
         PopulationService.nextClanActionAt = originalNextClanActionAt;
+        PopulationService.nextClanFounderAt = originalNextClanFounderAt;
         Governor.reset();
     }
 }
