@@ -224,12 +224,14 @@ function apply(snapshot, input, now) {
 
 function view(snapshot, playingHours = () => undefined, fastLayers = null, rowSource = null) {
     const rows = rowSource ? null : new Map((snapshot?.relations || []).map(row => [`${row.kind}:${row.targetId}`, row]));
+    const ids = rowSource ? null
+        : Object.freeze((snapshot?.relations || []).filter(row => row.kind === 'character').map(row => row.targetId));
     return Object.freeze({
         ownerId: snapshot?.ownerId || null,
         revision: snapshot?.revision || 0,
         ready: !!snapshot,
-        characterIds: Object.freeze(rowSource ? rowSource.characterIds
-            : (snapshot?.relations || []).filter(row => row.kind === 'character').map(row => row.targetId)),
+        // An iterable of the character targets in row order, read once per use.
+        get characterIds() { return rowSource ? rowSource.characterIds() : ids; },
         relation(kind, targetId, at) {
             time(at);
             const row = rowSource ? rowSource.row(kind, targetId) : rows.get(`${kind}:${targetId}`);
@@ -237,7 +239,8 @@ function view(snapshot, playingHours = () => undefined, fastLayers = null, rowSo
             return row ? { ...decayed(row, at, gameAt),
                 ...Layers.persistent(row, gameAt ?? row.gameAt ?? 0),
                 irritation: Layers.fastValue(fastLayers?.get(`${kind}:${targetId}`), gameAt ?? row.gameAt ?? 0),
-                social: { ...(row.social || {}) }, ...(row.abandonedAt ? { abandonedAt: row.abandonedAt } : {}),
+                // The worker's copy keeps no social counts (PackedInteractionRows keepSocial).
+                ...(row.social ? { social: { ...row.social } } : {}), ...(row.abandonedAt ? { abandonedAt: row.abandonedAt } : {}),
                 ...(row.lastHuntAt !== undefined ? { lastHuntAt: row.lastHuntAt } : {}),
                 ...(row.lastHelpAt ? { lastHelpAt: { ...row.lastHelpAt } } : {}),
                 ...(row.lastAidAt !== undefined ? { lastAidAt: row.lastAidAt } : {}),

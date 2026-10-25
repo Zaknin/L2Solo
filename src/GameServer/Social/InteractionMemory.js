@@ -36,8 +36,12 @@ class InteractionMemory {
         // Public snapshots decode fresh plain rows; unusual reason shapes keep
         // the old JSON clone as a lossless fallback. No wire or SQL shape changes.
         // PERF: 54,046 native rows retain 14.54 MB including numeric backing,
-        // versus 33.93 MB before; snapshots and social decisions compare exactly.
-        const copy = new PackedRows(snapshot);
+        // versus 33.93 MB before. Main's copy (the one with the repository)
+        // exports snapshots exactly as accepted; the worker's copy keeps no
+        // per-type social counts (main's BotSocialMemory is their only reader),
+        // so only main's snapshots and social reads compare exactly; every
+        // decision both threads make (assess, help clocks) answers the same.
+        const copy = new PackedRows(snapshot, { keepSocial: !!this.repository });
         if (snapshot.fast) this.fastLayers.set(copy.ownerId, new Map(snapshot.fast));
         this.snapshots.set(copy.ownerId, copy);
         this.views.set(copy.ownerId, Policy.view(copy, () => this.playingHours(copy.ownerId), this.fastLayers.get(copy.ownerId), copy));
