@@ -9,7 +9,7 @@ function encode(state, bots) {
     for (const b of rows) records.push([
         'friend', b.botId, text(b.name, 32), b.level, b.classId ?? 0,
         text(b.className || 'Unknown class', 40), text(b.role, 16),
-        text(b.trust, 16), text(b.familiarity, 16), b.selected ? 1 : 0,
+        Number(b.trust ?? 0).toFixed(1), Number(b.familiarity ?? 0).toFixed(1), b.selected ? 1 : 0,
         text(b.activity || 'hunting', 32), text(b.currentRegion || 'unknown', 48),
         Number(b.trust) >= state.threshold ? 1 : 0
     ].join('\t'));
