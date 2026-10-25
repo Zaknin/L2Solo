@@ -35,7 +35,8 @@ function load(file, dependencies, extra = '', globals = {}) {
 
     let finishLoad;
     const entering = load('GameServer/Actor/Generics/EnterWorld.js', {
-        'GameServer/Progression/DeathExperience': { load: () => new Promise(resolve => { finishLoad = resolve; }) }
+        'GameServer/Progression/DeathExperience': { load: () => new Promise(resolve => { finishLoad = resolve; }) },
+        'GameServer/Recommendations/Runtime': { refresh: async () => {} }
     });
     let online = false;
     const entry = entering({}, { setIsOnline() { online = true; throw new Error('online-after-load'); } });
