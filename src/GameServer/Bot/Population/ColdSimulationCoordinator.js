@@ -2,6 +2,7 @@ const DiagnosticConfig = require('./PopulationConfig');
 const { collectionPagesWithBytes, PAGE_BYTES } = require('./ColdMessagePages');
 const StateWire = require('./ColdStateWire');
 const path = require('path');
+const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { Worker } = require('worker_threads');
 const { performance } = require('perf_hooks');
@@ -79,6 +80,25 @@ function npcPlanningCatalogRows() {
         townNpcSellers: TownNpcCatalog.sellersByTown(),
         fetchForNpc: (npcSelfId) => NpcShopBuyLists.fetchForNpc(npcSelfId)
     });
+}
+
+const HEAP_SNAPSHOT_DIR = path.join(__dirname, '..', '..', '..', '..', 'tmp', 'heap');
+
+// Diagnostics (coldWorkerHeapSnapshot): Node writes one snapshot of the worker's heap as it nears
+// its cap (Heap.<date>.<time>.<pid>.<thread>.<seq>.heapsnapshot). Armed until this process has
+// written one, so a restarted worker does not write another. The worker's execArgv carries only
+// these flags: the server's own --openssl-legacy-provider is process-wide and a worker rejects it.
+function heapSnapshotOptions() {
+    if (Config.coldWorkerHeapSnapshot !== true) return {};
+    try {
+        fs.mkdirSync(HEAP_SNAPSHOT_DIR, { recursive: true });
+        const own = `.${process.pid}.`;
+        if (fs.readdirSync(HEAP_SNAPSHOT_DIR).some(name => name.includes(own) && name.endsWith('.heapsnapshot'))) return {};
+    } catch (error) {
+        utils.infoWarn('ColdWorker', 'heap snapshot disabled: %s', error.message);
+        return {};
+    }
+    return { execArgv: ['--heapsnapshot-near-heap-limit=1', `--diagnostic-dir=${HEAP_SNAPSHOT_DIR}`] };
 }
 
 class ColdSimulationCoordinator {
@@ -353,7 +373,8 @@ class ColdSimulationCoordinator {
             workerData: { workerEpoch: this.workerEpoch, developerDiagnostics: Config.developerDiagnostics === true,
                 sharedGeodata: GeodataEngine.sharedDescriptor() },
             name: 'l2node-cold-simulation',
-            resourceLimits: { maxOldGenerationSizeMb: Math.max(128, Number(Config.coldWorkerHeapMb) || 512) }
+            resourceLimits: { maxOldGenerationSizeMb: Math.max(128, Number(Config.coldWorkerHeapMb) || 512) },
+            ...heapSnapshotOptions()
         });
         this.worker = worker;
         Metrics.beginColdSafetyEpoch(this.workerEpoch);
