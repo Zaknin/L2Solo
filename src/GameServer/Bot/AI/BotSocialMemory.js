@@ -19,7 +19,7 @@ function relationship(record) {
 function recentlyAbandoned(record, at) { return record?.recentlyAbandonedAt > 0 && at - record.recentlyAbandonedAt < RECENT_ABANDON_MS; }
 function snapshot(player, bot) {
     const relation = Memory.views.get(actorId(bot))?.relation('character', actorId(player), Date.now());
-    const counts = relation?.social || {};
+    const counts = Memory.socialCounts(actorId(bot), actorId(player));
     return { playerId: actorId(player), botId: actorId(bot), playerName: actorName(player), botName: actorName(bot),
         trust: relation?.trust || 0, familiarity: relation?.familiarity || 0, groupRuns: counts.party_formed || 0, inviteAttempts: counts.invite_attempt || 0,
         wipesTogether: counts.party_wiped || 0, helpedInCombat: counts.helped_in_combat || 0,

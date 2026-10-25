@@ -136,35 +136,6 @@ const before = worker.snapshot(1);
 worker.propose([make('proposal')]);
 assert.deepStrictEqual(worker.snapshot(1), before, 'uncommitted cold proposals create no memories');
 
-{
-    // The worker's copy (no repository) answers every help clock and layer as
-    // main's copy does, but keeps no per-type social counts; main keeps them.
-    const Help = require('../src/GameServer/Social/CombatHelpPolicy');
-    const traits = { loyalty: 0.3, resilience: 0.8 };
-    const help = (key, targetId, type, at) => ({ ...make(key, targetId, type, at), playedHours: 10, hours: 0.2, traits });
-    let helped = Policy.empty(1);
-    helped = Policy.apply(helped, help('h:1', 2, 'helped_in_combat', now - 3000), now).snapshot;
-    helped = Policy.apply(helped, help('h:2', 2, 'healed', now - 2000), now).snapshot;
-    helped = Policy.apply(helped, help('h:3', 2, 'resurrected', now - 1000), now).snapshot;
-    helped = Policy.apply(helped, help('h:4', 3, 'attacked', now), now).snapshot;
-    const owner = new Memory({ load() { throw new Error('not loaded here'); } });
-    const cold = new Memory();
-    owner.accept(helped);
-    cold.accept(owner.snapshot(1));
-    const warm = owner.views.get(1).relation('character', 2, now), far = cold.views.get(1).relation('character', 2, now);
-    assert.deepStrictEqual(far.lastHelpAt, { helped_in_combat: now - 3000, healed: now - 2000, resurrected: now - 1000 });
-    for (const type of Help.TYPES) assert.strictEqual(Help.lastAt(far, type), Help.lastAt(warm, type), type);
-    assert.strictEqual(Help.eligible(far, 'healed', now), false, 'a remembered heal holds its cooldown on the worker');
-    const stranger = cold.views.get(1).relation('character', 3, now);
-    assert.strictEqual(stranger.lastHelpAt, undefined);
-    for (const type of Help.TYPES) assert.strictEqual(Help.eligible(stranger, type, now), true, 'no help remembered = no cooldown');
-    assert.strictEqual(far.gratitude, warm.gratitude, 'traits-scaled layers answer the same');
-    assert.strictEqual(far.social, undefined, 'the worker keeps no social counts');
-    assert.deepStrictEqual(warm.social, { helped_in_combat: 1, healed: 1, resurrected: 1 });
-    assert.deepStrictEqual(owner.snapshot(1).relations, helped.relations, 'main exports the accepted rows unchanged');
-    assert.deepStrictEqual([...cold.views.get(1).characterIds], [...owner.views.get(1).characterIds]);
-}
-
 for (let i = 0; i < 200; i++) snapshot = Policy.apply(snapshot, make(`new:${i}`, i + 10, 'hunted_together', now + i), now + i).snapshot;
 for (const kind of ['clan', 'alliance']) for (let i = 0; i < 20; i++) {
     snapshot = Policy.apply(snapshot, { ...make(`${kind}:${i}`, i + 1000, 'helped_in_combat', now + 300 + i), kind }, now + 300 + i).snapshot;

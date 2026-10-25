@@ -1,6 +1,7 @@
 'use strict';
 const { createHash } = require('node:crypto');
 const Help = require('./CombatHelpPolicy');
+const { TRAIT_KEYS: TRAITS } = require('./RelationshipLayers');
 
 // Private storage only. Exported snapshots and policy results remain ordinary
 // objects. Float64 keeps every accepted JS number, including clocks and ids.
@@ -18,7 +19,8 @@ const EVENT_IDS = new Map(EVENTS.map((type, index) => [type, index]));
 // exist and in what key order) and the event traits {loyalty, resilience}
 // (Policy.event's normalized shape) are columns too, not per-row objects.
 const HELP = NUMBERS.length;
-const TRAITS = ['loyalty', 'resilience'];
+// The order code keeps 2 bits per key (index + 1, 0 = none): at most 3 types.
+if (Help.TYPES.length > 3) throw new Error('PackedInteractionRows: the help-clock order code holds at most 3 Help.TYPES');
 const TRAIT = HELP + Help.TYPES.length;
 const REASON = TRAIT + TRAITS.length;
 const REASONS = 3;
@@ -77,7 +79,7 @@ function supported(row) {
 
 class PackedInteractionRows {
     // keepSocial false (the worker's copy): the per-type `social` counts are
-    // dropped; their only reader is main's BotSocialMemory.
+    // dropped; their only reader is main's InteractionMemory.socialCounts.
     constructor(snapshot, { keepSocial = true } = {}) {
         this.version = snapshot.version;
         this.ownerId = snapshot.ownerId;
@@ -180,7 +182,8 @@ class PackedInteractionRows {
                     value[Help.TYPES[index]] = this.values[base + HELP + index];
                 }
             } else if (column === -6 && this.meta[metadata + 1] & TRAIT_COLUMNS) {
-                value = { loyalty: this.values[base + TRAIT], resilience: this.values[base + TRAIT + 1] };
+                value = {};
+                for (let index = 0; index < TRAITS.length; index++) value[TRAITS[index]] = this.values[base + TRAIT + index];
             } else if (column === -6 && this.meta[metadata + 1] & TRAIT_EMPTY) value = {};
             else value = this.extras.get(ordinal)[field];
             if (field === '__proto__') Object.defineProperty(row, field, { value, enumerable: true, writable: true, configurable: true });

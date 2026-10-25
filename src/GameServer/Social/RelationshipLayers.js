@@ -6,6 +6,9 @@ function positive(value) { return Math.max(0, Number(value) || 0); }
 function hours(row, input) {
     return Math.max(positive(row?.gameAt), positive(input?.playedHours));
 }
+// The event traits' keys in their stored order (Policy.event normalizes to
+// them; PackedInteractionRows packs them as columns). One owner of the list.
+const TRAIT_KEYS = Object.freeze(['loyalty', 'resilience']);
 function durations(traits = {}) {
     const loyalty = Math.max(0, Math.min(1, Number(traits.loyalty ?? 0.5)));
     const resilience = Math.max(0, Math.min(1, Number(traits.resilience ?? 0.5)));
@@ -37,4 +40,4 @@ function fastValue(row, at) {
     if (!row) return 0;
     return row.value * 0.5 ** (Math.max(0, at - row.gameAt) / row.halfLife);
 }
-module.exports = { durations, persistent, apply, fast, fastValue, hours };
+module.exports = { TRAIT_KEYS, durations, persistent, apply, fast, fastValue, hours };
