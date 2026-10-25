@@ -147,6 +147,10 @@ function isMarketRecipeItem(item) {
 
 const CRYSTALS = new Set(Object.values(CRYSTAL_IDS));
 
+function isGradeCrystal(item) {
+    return CRYSTALS.has(Number(item?.selfId));
+}
+
 // Consumables a bot sells to the NPC beyond what its class keeps: arrows (a
 // bot's bow spends none, Actor/BowResources), scrolls other than enchant
 // scrolls (the Scrolls of Escape a bot reads for town trips are reserved up to
@@ -636,7 +640,7 @@ function npcLiquidationCandidates(state, options = {}) {
         unlimited: true,
         allowPreTradeCleanup: options.allowPreTradeCleanup === true
     }).filter((item) => {
-        if (isClanProgressionItem(item)) return false;
+        if (isClanProgressionItem(item) || isGradeCrystal(item)) return false;
         const gear = String(item.kind || '').startsWith('Weapon.') || String(item.kind || '').startsWith('Armor.');
         const lowGradeGear = gear && gradeIndex(item.rank) < gradeIndex('c');
         return isNpcOnlyItem(item) || lowGradeGear || item.basePrice <= maxUnitPrice;
@@ -705,6 +709,7 @@ module.exports = {
     gradeIndex,
     isBelowCGrade,
     isClanProgressionItem,
+    isGradeCrystal,
     isNpcOnlyItem,
     isQuestItem,
     isRecipeItem,

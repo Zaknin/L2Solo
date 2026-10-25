@@ -3521,7 +3521,8 @@ const BotLifeState = {
         candidates.forEach((candidate) => {
             const selfId = Number(candidate.selfId || 0);
             const existing = inventory[String(selfId)];
-            if (!existing || selfId === 57 || invoke('GameServer/Items/C4BeginnerShots').isRestricted(selfId)) return;
+            if (!existing || selfId === 57 || Disposition.isGradeCrystal(candidate)
+                || invoke('GameServer/Items/C4BeginnerShots').isRestricted(selfId)) return;
             const free = Disposition.saleFreeAmount(state, existing, reserved);
             const equippedCount = Math.max(0, Number(existing?.equippedCount ?? (existing?.equipped ? 1 : 0)));
             const amount = Math.min(

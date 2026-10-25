@@ -114,6 +114,7 @@ function evaluate(state, options = {}) {
     const decisions = [];
     const forBoard = [];
     for (const item of candidates) {
+        const marketOnly = ItemDisposition.isGradeCrystal(item);
         const hard = classify(state, item);
         if (hard.action !== 'market') {
             decisions.push({ ...hard, item });
@@ -145,13 +146,15 @@ function evaluate(state, options = {}) {
         const chosen = MarketPricing.disposition(item, ctx, {
             // A market quote can wait for a buyer even when this adventurer
             // otherwise liquidates surplus instead of warehousing it.
-            town, room: options.stockQuotes === true ? 1 : liquidate ? 0 : roomFor(item, options.stored),
-            stockQuote: options.stockQuotes === true,
+            town, room: options.stockQuotes === true || marketOnly ? 1 : liquidate ? 0 : roomFor(item, options.stored),
+            stockQuote: options.stockQuotes === true || marketOnly,
             rollKey: ['dispose', ctx.characterId, item.selfId, decisionPoint]
         });
         // A valid ask without a known buyer waits on the market. It creates
         // no assumed receipts; physical reservations were removed above.
-        const action = chosen.priced?.ask?.stockQuote && chosen.action !== 'ad' ? 'list'
+        const ask = chosen.priced?.ask;
+        const action = (ask?.stockQuote || marketOnly && ask?.price > 0 && !ask.npc) && chosen.action !== 'ad' ? 'list'
+            : marketOnly && ['keep', 'npc'].includes(chosen.action) ? 'keep'
             : chosen.action === 'keep' ? liquidate ? 'npc' : 'warehouse' : chosen.action;
         const decision = { action,
             reason: chosen.priced?.ask?.stockQuote ? 'stock_quote' : 'expected_value', item,
@@ -171,7 +174,9 @@ function evaluate(state, options = {}) {
     const chosen = new Set(prioritizeListings(decisions.filter(row => row.action === 'list').map(row => row.item)).slice(0, slots));
     for (const decision of decisions) {
         if (decision.action !== 'list' || chosen.has(decision.item)) continue;
-        decision.action = liquidate ? 'npc' : 'warehouse';
+        // Grade crystals wait for a market slot; cleanup must not turn them
+        // into NPC receipts when more expensive loot fills the board.
+        decision.action = ItemDisposition.isGradeCrystal(decision.item) ? 'keep' : liquidate ? 'npc' : 'warehouse';
         decision.reason = 'no_board_slot';
     }
     return {

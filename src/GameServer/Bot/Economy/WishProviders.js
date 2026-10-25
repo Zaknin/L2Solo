@@ -1337,7 +1337,7 @@ function liquidationCandidates(state, ctx) {
         keptAmounts: { ...invoke('GameServer/Inventory/ShotStock').keptAmounts(state, ctx),
             ...invoke('GameServer/Bot/AI/HealingPotionStock').keptAmounts(state, { targetAmount: ctx.stock('potions').target }),
             ...invoke('GameServer/Bot/Travel/ScrollStock').keptAmounts(state) }
-    }).filter(row => row.npcComparable);
+    }).filter(row => row.npcComparable && !Disposition.isGradeCrystal(row));
 }
 // Re-run the native selector, including rejected and cap-displaced items. The
 // held foundation supplies only its stock targets; current owners still read
