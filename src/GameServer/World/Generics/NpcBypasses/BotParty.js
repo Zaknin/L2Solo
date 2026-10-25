@@ -277,8 +277,8 @@ function open(session) {
     render(session);
 }
 
-// Native presentation keeps the existing catalog and invite authority. Only the
-// visible page evaluates availability; opening All must not load 2,000 memories.
+// Native presentation keeps the existing catalog and invite authority. Rank the
+// filtered catalog before paging without loading social memories.
 function nativeState(session) {
     if (!session.nativeFinderState) {
         const level = Number(session.actor?.fetchLevel?.() || 0);
@@ -300,13 +300,16 @@ function renderNative(session, open = false, message = '') {
         (!state.query || c.name.toLowerCase().includes(state.query.toLowerCase())) &&
         (!range || (c.level >= range.min && c.level <= range.max)) &&
         (state.role === 'all' || (state.role === 'spoiler' ? c.profession.role === 'spoiler' : role?.roles.includes(c.profession.role)))
-    )).sort(compareCandidates);
+    )).map((c) => ({
+        ...c,
+        availability: candidateAvailability(session, c)
+    })).sort(compareRankedCandidates);
     const pages = Math.max(1, Math.ceil(candidates.length / CANDIDATES_PER_PAGE));
     state.page = Math.min(pages - 1, Math.max(0, Math.floor(Number(state.page) || 0)));
     const visible = candidates.slice(state.page * CANDIDATES_PER_PAGE, (state.page + 1) * CANDIDATES_PER_PAGE);
     session.nativeFinderVisible = visible.map((c) => c.name);
     const rows = visible.map((c) => {
-        const availability = candidateAvailability(session, c);
+        const availability = c.availability;
         return {
             name: c.name, level: c.level, classId: c.profession.classId ?? 0,
             className: c.profession.className || 'Unknown class', role: c.profession.role,
