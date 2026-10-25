@@ -22,6 +22,8 @@ function nearbyNpc(session) {
 function render(session, message = '') {
     const actor = session.actor, id = session.activeNpcTalk?.selfId;
     if (!handles(id)) return false;
+    const questLink = invoke('GameServer/Quest/QuestService').handlesNpc({ fetchSelfId: () => id })
+        ? `<a action="bypass -h html ${id}-quest"><font color="LEVEL">Quest - start or continue quests</font></a><br><br>` : '';
     const choices = Catalog.routesForNpc(id).filter(route => route.race === actor.fetchRace()
         && (ClassTransfer.eligibility(actor, route.classId).ok || actor.fetchClassId() === route.classId));
     const body = choices.map(route => {
@@ -34,7 +36,7 @@ function render(session, message = '') {
         return `${route.name}<br>${marks}<br><a action="bypass -h second-profession ${route.classId}">Become a ${route.name}</a><br><br>`;
     }).join('');
     session.dataSendToMe(Response.npcHtml(session.activeNpcTalk.objectId,
-        `<html><body>Second profession:<br>Bring the three trial marks and reach level 40.<br><br>${message}<br>${body || 'No second-profession transfer is available for your current class.'}</body></html>`));
+        `<html><body>Second profession transfer:<br>Bring the three trial marks and reach level 40.<br><br>${questLink}${message}<br>${body || 'No second-profession transfer is available for your current class.'}</body></html>`));
     session.dataSendToMe(Response.actionFailed());
     return true;
 }

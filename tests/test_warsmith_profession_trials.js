@@ -1,10 +1,14 @@
 const assert = require('node:assert/strict');
 const { createTrialWorld, guildsman, prosperity, finishRoute, abort, realActor, learn, craft, Service, Database } = require('./helpers/dwarfProfessionHarness');
+const Dialogue = require('./helpers/npcDialogueHarness');
 
 async function maestro(c, order) {
     const before = await c.world.character(c.id);
     await c.level(38); assert.equal(await c.event(231, 'start', 7531), false);
     await c.level(39); await c.click(231, 'start', 7531);
+    await Dialogue.talk(c.session, c.world, 7532);
+    assert.match(c.world.page(c.session), /Choose the next recommendation/);
+    assert.equal(c.cond(231), 1, 'Spiron does not choose another elder\'s recommendation');
     for (const branch of order) {
         if (branch === 'arin') {
             await realActor(c); await c.click(231, 'handin', 7536); await c.click(231, 'handin', 7556);
@@ -21,7 +25,11 @@ async function maestro(c, order) {
             }
             await c.reopen(); for (const npc of [7673, 7535]) await c.click(231, 'handin', npc);
         } else {
-            for (const npc of [7533, 7671, 7675]) await c.click(231, 'handin', npc);
+            for (const npc of [7533, 7671]) await c.click(231, 'handin', npc);
+            await Dialogue.talk(c.session, c.world, 7672);
+            assert.match(c.world.page(c.session), /Kamur/);
+            assert.equal(c.cond(231), 3, 'the jailer clue keeps the cave objective active');
+            await c.click(231, 'handin', 7675);
             await c.kill(5133); for (const npc of [7671, 7533]) await c.click(231, 'handin', npc);
         }
     }

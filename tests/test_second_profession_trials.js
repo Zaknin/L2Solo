@@ -7,11 +7,14 @@ const DiamondExchange = invoke('GameServer/World/Generics/NpcBypasses/DiamondExc
 const NpcTalk = invoke('GameServer/World/Generics/NpcTalk');
 const Actor = invoke('GameServer/Actor/Actor');
 const QuestAbort = invoke('GameServer/Network/Request/QuestAbort');
+const Dialogue = require('./helpers/npcDialogueHarness');
+const { reloadActor } = require('./helpers/fighterProfessionHarness');
 
 async function run() {
     const world = await createWorld([
         { id: 710001, classId: 1, level: 35 }, { id: 710002, classId: 1, level: 40 },
-        { id: 710003, classId: 19, race: 1, level: 40 }
+        { id: 710003, classId: 19, race: 1, level: 40 },
+        { id: 710004, classId: 1, race: 0, level: 78 }
     ], 'second-profession');
     const runtime = enableQuestSpawns();
     let session = await world.session(710001);
@@ -56,6 +59,44 @@ async function run() {
         await QuestAbort(target, packet);
     }
     try {
+        // Reproduce the report's high-level Warrior with one earned mark.
+        // Both visible Quest links must reach Trust, even when Hollint cannot
+        // transfer this class. Click only actions actually sent to the client.
+        const reported = await world.session(710004);
+        await reloadActor({ id: 710004, world, session: reported });
+        await Service.giveItem(reported, 2627, 1);
+        const hollint = { fetchSelfId: () => 7191, fetchId: () => 407191,
+            fetchName: () => 'Hollint', fetchTitle: () => 'High Priest',
+            fetchLocX: () => 0, fetchLocY: () => 0, fetchLocZ: () => 0, isDead: () => false };
+        runtime.npc.spawns.push(hollint);
+        NpcTalk(reported, hollint);
+        await Dialogue.settle(reported);
+        const primaryMenu = world.page(reported);
+        assert.match(primaryMenu, /<font color="LEVEL">Quest - Testimony of Trust \(Mark of Trust\)/);
+        assert.equal((primaryMenu.match(/bypass -h html 7191-quest"/g) || []).length, 1);
+        assert(primaryMenu.indexOf('html 7191-quest') < primaryMenu.indexOf('change-class menu human'));
+        assert.match(primaryMenu, /Second profession transfer \(3 marks\)/);
+        assert(!primaryMenu.includes('Second profession trials'));
+        await Dialogue.click(reported, world, 'html 7191-quest');
+        if (!world.page(reported).includes('bypass -h quest 217 start"')) {
+            await Dialogue.click(reported, world, 'quest 217 show_quest');
+        }
+        assert.match(world.page(reported), /quest 217 start/);
+        NpcTalk(reported, hollint);
+        await Dialogue.settle(reported);
+        await Dialogue.click(reported, world, 'second-profession');
+        assert.match(world.page(reported), /No second-profession transfer is available for your current class/);
+        await Dialogue.click(reported, world, 'html 7191-quest');
+        if (!world.page(reported).includes('bypass -h quest 217 start"')) {
+            await Dialogue.click(reported, world, 'quest 217 show_quest');
+        }
+        await Dialogue.click(reported, world, 'quest 217 start');
+        assert.equal(world.state(reported, 217).getInt('cond'), 1);
+        assert.equal((await world.questRow(710004, 217)).state, 'started');
+        for (const item of [2627, 1558, 1556]) assert.equal(await world.amount(710004, item), 1);
+        await Dialogue.talk(reported, world, 7191);
+        assert.match(world.page(reported), /Visit Asterios/);
+
         assert.equal(Profession.routes.length, 31);
         for (const route of Profession.routes) {
             assert.equal(route.marks.length, 3);
@@ -290,7 +331,7 @@ async function run() {
         for (const item of world.state(stranger, 222).quest.questItems) assert.equal(await world.amount(710002, item), 0);
         await world.event(stranger, 222, 'start', 7623);
         assert.equal(await world.amount(710002, 2763), 1);
-        console.log('Second profession: complete Gladiator trials, ownership, restart, atomic transfer and diamond exchange passed');
+        console.log('Second profession: Hollint main/transfer Quest links, complete Gladiator trials, ownership, restart, atomic transfer and diamond exchange passed');
     } finally {
         for (const npc of [...runtime.npc.spawns]) if (npc.questSpawn) runtime.despawnQuestNpc(npc);
         await world.close();

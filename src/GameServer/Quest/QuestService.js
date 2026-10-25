@@ -105,7 +105,7 @@ function render(session, npc, html) {
   // Soul Crystal quest). Add the transfer branch without replacing that page.
   const npcId = npc.fetchSelfId?.() ?? session.activeNpcTalk?.selfId;
   if (invoke('GameServer/SecondProfession').handles(npcId) && !html.includes('bypass -h second-profession')) {
-    html = html.replace(/<\/body>/i, '<br><a action="bypass -h second-profession">Second profession trials</a><br></body>');
+    html = html.replace(/<\/body>/i, '<br><a action="bypass -h second-profession">Second profession transfer (3 marks)</a><br></body>');
   }
   session.dataSendToMe(ServerResponse.npcHtml(npc.fetchId(), html));
   session.dataSendToMe(ServerResponse.actionFailed());
