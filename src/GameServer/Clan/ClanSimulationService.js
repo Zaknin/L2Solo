@@ -266,11 +266,12 @@ async function resolveCandidate(candidate, options = {}) {
         });
         if (existing) {
             recordReason(Contracts.REASON_CODES.FOUNDER_EXISTING_CLAN);
-            if (existing.clan.state?.recruitmentDemand) {
+            const demand = require('./ClanRosterDemand').activeDemand(existing.clan);
+            if (demand?.newMemberIds.includes(candidate.characterId)) {
                 const [current] = await invoke('GameServer/Bot/Population/BotLifeState').statesByIds([candidate.characterId],
                     { unassigned: true });
                 if (!current) return { ok: false, code: 'recruitment_candidate_changed' };
-                return joinExisting({ ...candidate, ...current }, existing.clan, existing.suitability, existing.clan.state.recruitmentDemand);
+                return joinExisting({ ...candidate, ...current }, existing.clan, existing.suitability, demand);
             }
             return joinExisting(candidate, existing.clan, existing.suitability);
         }

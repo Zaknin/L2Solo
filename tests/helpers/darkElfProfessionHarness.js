@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const shared = require('./clericProfessionHarness');
 const { H } = shared;
+const Dialogue = require('./npcDialogueHarness');
 
 async function fate(c, foreign = null, { beforeSkulls = null } = {}) {
     const before = await c.world.character(c.id);
@@ -30,7 +31,7 @@ async function fate(c, foreign = null, { beforeSkulls = null } = {}) {
     await c.click(219, 'recover', 7476); await c.click(219, 'recover', 7476);
     assert.equal(H.personalSpawns(c.state(219), 7613).length, 1);
     const restored = H.personalSpawns(c.state(219), 7613)[0];
-    await c.world.talk(c.session, 7613, restored.fetchId());
+    await Dialogue.talk(c.session, c.world, 7613, restored);
     assert(c.world.page(c.session).includes('moon still shines'));
     for (const npc of [7114, 7210, 7476]) await c.click(219, 'handin', npc);
     assert.equal(H.personalSpawns(c.state(219)).length, 0);

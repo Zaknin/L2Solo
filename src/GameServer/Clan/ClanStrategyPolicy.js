@@ -100,9 +100,8 @@ function snapshot(clan, inputs = {}) {
     const raid = targets.find(row => row.raid);
     if (raid) add('raid_preparation', { upgrades: [raid], sourceId: raid.sourceId }, 'Prepare a native raid route for a useful upgrade', raid.cost);
     const missing = ['tank', 'healer', 'buffer'].filter(role => !state.capable[role]);
-    const desired = Roles.desiredMemberCount(state.level);
-    if (state.members < state.capacity && (missing.length || state.members < desired)) add('recruit', {
-        roles: missing, members: Math.min(state.capacity, Math.max(state.members + 1, Math.min(desired, state.members + 3)))
+    if (state.members < state.capacity) add('recruit', {
+        roles: missing, members: state.capacity
     }, missing.length ? `Recruit capable ${missing.join(', ')}` : 'Build a larger stable core');
     const reserve = Math.ceil(Math.max(100000 * Math.max(1, state.level), state.maintenance * 1.5,
         state.income * (2 + state.leader.traits.caution / 5)) / 10000) * 10000;

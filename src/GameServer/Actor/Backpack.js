@@ -103,10 +103,24 @@ class Backpack extends BackpackModel {
                 }
             }
             else {
+                const wasEquipped = item.fetchEquipped();
+                if (wasEquipped) {
+                    // Normalize legacy duplicate rows just like an explicit
+                    // unequip, including durable removal of their equip flags.
+                    this.unequipGear(session, item.fetchSlot(), { syncToggles: false });
+                }
                 // Update memory state instantly
                 this.items = this.fetchItems().filter((ob) => ob.fetchId() !== id);
                 Item.bindInventory(this);
                 this.onInventoryChange?.(item.fetchSelfId());
+                if (wasEquipped) {
+                    // Deleting or dropping worn gear must clear its stats and
+                    // visual state just like an explicit unequip.
+                    invoke(path.actor).calculateStats(session, session.actor);
+                    ToggleSkills.syncEquipment(session, session.actor);
+                    session.dataSendToMe(ServerResponse.userInfo(session.actor));
+                    session.dataSendToOthers(ServerResponse.charInfo(session.actor), session.actor);
+                }
                 session.dataSendToMe(ServerResponse.itemsList(this.fetchItems()));
                 if (diagnosticBefore !== null) ConsumptionDiagnostics.hot(session, item.fetchSelfId(), diagnosticBefore, Math.max(0, total), diagnosticReason);
                 callback(item.fetchSelfId());

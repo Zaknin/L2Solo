@@ -327,27 +327,35 @@ function fullRoster(clan, goal, team, section) {
         memberIds: team.memberIds, sourceId: team.source.id, npcId: team.source.npcId,
         raidInstanceId: team.source.raidInstanceId, sourceFingerprint: team.source.fingerprint, minPartySize: 9, maxPartySize: 9 };
 }
-function intakeContext(candidate, clan) {
+function activeDemand(clan) {
     const demand = clan.state?.recruitmentDemand;
+    const goal = clan.state?.[demand?.ownerSection];
+    return demand && goal && goal.goalKey === demand.goalKey && goal.status !== 'completed'
+        && goal.controlledBy !== 'player' ? demand : null;
+}
+function intakeContext(candidate, clan) {
     if (clan.state?.mode !== 'autonomous') return null;
+    const demand = activeDemand(clan);
     if (!demand) {
         const strategy = require('./ClanStrategyPolicy').active(clan);
-        if (!strategy) return null;
-        if (strategy.objective !== 'recruit' || strategy.status !== 'active') return { contextualAllowed: false };
-        const roles = strategy.target.roles || [];
-        const missing = roles.filter(role => !clan.members.some(member => Capabilities.contextualCapability(member,
-            role === 'buffer' ? 'mainBuffer' : role, { beneficiaries: clan.members })));
-        const capability = missing.some(role => Capabilities.contextualCapability(candidate, role === 'buffer' ? 'mainBuffer' : role,
-            { beneficiaries: clan.members }));
-        const allowed = capability || !missing.length && clan.members.length < strategy.target.members;
-        return { contextualAllowed: allowed, roleNeed: capability, growthNeed: allowed,
-            targetMemberCount: strategy.target.members };
+        const roles = strategy?.objective === 'recruit' && strategy.status === 'active' ? strategy.target.roles || [] : [];
+        const capability = roles.some(role => {
+            const kind = role === 'buffer' ? 'mainBuffer' : role;
+            return !clan.members.some(member => Capabilities.contextualCapability(member, kind, { beneficiaries: clan.members }))
+                && Capabilities.contextualCapability(candidate, kind, { beneficiaries: clan.members });
+        });
+        return { contextualAllowed: Number(clan.physicalMemberCount ?? clan.members.length) < Rules.memberLimit(clan.level),
+            targetMemberCount: Rules.memberLimit(clan.level), ...(capability ? { roleNeed: true } : {}) };
     }
-    const goal = clan.state[demand.ownerSection];
     const ownIds = new Set(clan.members.map(id));
-    const remaining = demand.newMemberIds.filter(value => !ownIds.has(value));
-    const allowed = goal?.goalKey === demand.goalKey && goal.status !== 'completed' && goal.controlledBy !== 'player'
-        && remaining.includes(id(candidate)) && candidate.level >= demand.minLevel && candidate.level <= demand.maxLevel
+    const remaining = [...new Set(demand.newMemberIds)].filter(value => !ownIds.has(value));
+    if (!remaining.includes(id(candidate))) {
+        // Ordinary growth continues alongside equipment work, keeping room
+        // for the specialists already selected by the native task planner.
+        return { contextualAllowed: Rules.memberLimit(clan.level)
+            - Number(clan.physicalMemberCount ?? clan.members.length) > remaining.length };
+    }
+    const allowed = candidate.level >= demand.minLevel && candidate.level <= demand.maxLevel
         && (demand.source?.kind === 'economic' ? demand.requirements.some(requirement => economicCapable(candidate, requirement))
             || demand.neededKinds.some(kind => Capabilities.contextualCapability(candidate, kind))
             : demand.neededKinds.some(kind => Capabilities.contextualCapability(candidate, kind)));
@@ -355,6 +363,6 @@ function intakeContext(candidate, clan) {
         targetMemberCount: Math.min(Rules.memberLimit(clan.level), clan.members.length + remaining.length) };
 }
 
-module.exports = { memberFingerprint, ownFingerprint, ownJoinFingerprint, ownerSection, sourceFingerprint, goalFingerprint, scanKey, scanSources, scanKeyForSources, hash, neededKinds, proofRow,
+module.exports = { memberFingerprint, ownFingerprint, ownJoinFingerprint, ownerSection, sourceFingerprint, goalFingerprint, scanKey, scanSources, scanKeyForSources, hash, neededKinds, proofRow, activeDemand,
     prepare, buildDemand, fullRoster, intakeContext, recipeIds, economicRequirements, economicRequest, discoveryOptions,
     conditionalOptions, economicTeam, economicCapable, economicSourceCurrent, economicPlan, ownedSpoilCapability, retainedEconomicProspects };

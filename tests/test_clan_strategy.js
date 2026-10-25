@@ -64,6 +64,8 @@ async function main() {
         const allBusy = { ...clan, members: clan.members.map(member => ({ ...member, partyId: 'busy' })) };
         assert.deepEqual(Policy.snapshot(allBusy, input).candidates.find(row => row.objective === 'recruit').target.roles, [],
             'busy owned support is not a missing roster capability');
+        assert.equal(Policy.snapshot(allBusy, input).candidates.find(row => row.objective === 'recruit').target.members, 30,
+            'strategic recruitment aims for full clan capacity');
         const trial = { ...clan, members: [...clan.members, { ...clan.members[0], characterId: 4 }].map(member => ({ ...member, level: 60 })),
             state: { ...clan.state, goal: { plan: { kind: 'alliance_trial' }, progress: 15, required: 30 } } };
         const trialStrategy = { objective: 'advance_clan', target: { level: 4 } };

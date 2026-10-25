@@ -1052,6 +1052,7 @@ const PopulationService = {
     clanActionRunning: false,
     clanFounderRunning: false,
     nextClanActionAt: 0,
+    nextClanFounderAt: 0,
 
     init() {
         if (Config.enabled === false) return;
@@ -1191,6 +1192,7 @@ const PopulationService = {
         this.clanActionRunning = false;
         this.clanFounderRunning = false;
         this.nextClanActionAt = 0;
+        this.nextClanFounderAt = 0;
         this.stateRetentionRunning = false;
         this.stateRetentionPassRows = 0;
         this.nextStateRetentionAt = 0;
@@ -1466,9 +1468,11 @@ const PopulationService = {
             });
             registry.register({
                 name: 'clan_founders',
-                intervalMs: clanIntervalMs,
+                intervalMs: Math.max(50, Number(Config.backgroundJobTickMs) || 250),
                 offsetMs: Math.max(250, Math.floor(clanIntervalMs / 2)),
-                run: () => this.resolveClanFounders()
+                run: () => this.nextClanFounderAt > Date.now()
+                    ? { skipped: true, reason: 'not_due' }
+                    : this.resolveClanFounders()
             });
         }
 
@@ -1896,6 +1900,10 @@ const PopulationService = {
         }
 
         this.clanFounderRunning = true;
+        // A governor deferral leaves the pass due, so the registry retries
+        // after the competing action releases SQLite instead of colliding
+        // with that action again at the next full-minute boundary.
+        this.nextClanFounderAt = Date.now() + Math.max(1000, Number(ClanSimulationConfig.resolveIntervalMs) || 60000);
         const startedAt = Date.now();
         return Promise.resolve().then(() => ClanSimulationService.resolveBatch(ClanSimulationConfig.resolveBatchSize, {
             budgetMs: admission.budgetMs

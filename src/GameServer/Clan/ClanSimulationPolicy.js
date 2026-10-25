@@ -13,14 +13,6 @@ const FIRST_PROFESSION_CLASS_IDS = new Set([
 ]);
 
 const ROSTER_ROLES = Object.freeze(['tank', 'healer', 'buffer', 'dps', 'mage', 'crafter', 'spoiler']);
-const MEMBER_TARGETS = Object.freeze({
-    0: 7,
-    1: 10,
-    2: 14,
-    3: 20,
-    4: 28,
-    5: 35
-});
 const DEFAULT_ROLE_WEIGHTS = Object.freeze({
     tank: 1.00,
     healer: 1.00,
@@ -85,13 +77,9 @@ function rosterNeeds(members = [], desired = ROSTER_ROLES) {
     }, {});
 }
 
-function desiredMemberCount(level, options = {}) {
+function desiredMemberCount(level) {
     const normalizedLevel = Math.max(0, Math.floor(number(level)));
-    const configured = options.memberTargets?.[normalizedLevel]
-        ?? MEMBER_TARGETS[normalizedLevel]
-        ?? MEMBER_TARGETS[5];
-    const hardLimit = ClanRules.memberLimit(normalizedLevel);
-    return Math.min(hardLimit, Math.max(1, Math.floor(number(configured, hardLimit))));
+    return ClanRules.memberLimit(normalizedLevel);
 }
 
 // A clan leader needs leadership (shown as "leadership" for assertiveness in the
@@ -175,7 +163,7 @@ function clanSuitability(candidate = {}, clan = {}, options = {}) {
     const role = rosterRole(candidate);
     const needs = options.rosterNeeds || rosterNeeds(members, options.desiredRoles);
     const roleNeed = options.roleNeed === undefined ? (needs[role] ? 1 : 0) : Number(!!options.roleNeed);
-    const targetMemberCount = options.targetMemberCount === undefined ? desiredMemberCount(clan.level, options)
+    const targetMemberCount = options.targetMemberCount === undefined ? desiredMemberCount(clan.level)
         : Math.min(ClanRules.memberLimit(clan.level), Math.max(members.length, Number(options.targetMemberCount) || members.length));
     const memberGap = Math.max(0, targetMemberCount - members.length);
     const growthNeed = options.growthNeed === undefined ? memberGap > 0 : !!options.growthNeed;
@@ -246,7 +234,6 @@ module.exports = {
     BASE_CLASS_IDS,
     FIRST_PROFESSION_CLASS_IDS,
     ROSTER_ROLES,
-    MEMBER_TARGETS,
     DEFAULT_ROLE_WEIGHTS,
     hasFirstProfession,
     isStaticService,

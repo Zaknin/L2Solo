@@ -63,8 +63,8 @@ async function recruitment() {
     const joined = await Simulation.resolveCandidate(candidates.find(row => row.characterId === 105));
     assert(joined.ok && joined.clanId === 701, 'closed support needs allow the next DPS to join through the native service');
     const full = (await Simulation.autonomousClanProjection()).find(row => row.id === 701);
-    assert(!Demand.intakeContext(candidates.find(row => row.characterId === 106), full).contextualAllowed,
-        'a filled strategic roster does not request another copy of its existing healer');
+    assert(Demand.intakeContext(candidates.find(row => row.characterId === 106), full).contextualAllowed,
+        'a completed smaller strategic target does not stop growth to the native clan limit');
 
     // The next candidate in the same scan must see a just-joined support kit.
     await member(201, 4, 702, [], 60);

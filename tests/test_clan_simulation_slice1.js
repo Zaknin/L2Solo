@@ -118,17 +118,26 @@ async function main() {
         assert(growthMatch, 'a strong duplicate-role candidate should grow an under-target clan');
         assert.strictEqual(growthMatch.suitability.roleNeed, false);
         assert.strictEqual(growthMatch.suitability.growthNeed, true);
-        assert.strictEqual(growthMatch.suitability.targetMemberCount, 14);
+        assert.strictEqual(growthMatch.suitability.targetMemberCount, 20);
 
         const targetRoster = [...completeRoster, ...Array.from({ length: 7 }, (_, index) => ({
             id: 4200110 + index,
             classId: 3
         }))];
-        assert.strictEqual(Policy.selectExistingClan(growthCandidate, [{
+        assert(Policy.selectExistingClan(growthCandidate, [{
             id: 2,
             level: 2,
             members: targetRoster
-        }]), null, 'a clan at its growth target should not accept arbitrary duplicate roles');
+        }]), 'a suitable duplicate role can join beyond the former reduced target');
+        const fullRoster = [...targetRoster, ...Array.from({ length: 6 }, (_, index) => ({
+            id: 4200120 + index,
+            classId: 3
+        }))];
+        assert.strictEqual(Policy.selectExistingClan(growthCandidate, [{
+            id: 2,
+            level: 2,
+            members: fullRoster
+        }]), null, 'the native member limit still stops recruitment');
 
         const projection = await ClanSimulationService.candidateProjection(20);
         assert.strictEqual(projection.length, 10, 'founder projection should only contain generated adventurers');
