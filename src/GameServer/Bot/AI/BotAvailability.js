@@ -141,7 +141,12 @@ const BotAvailability = {
         else if (!options.forceFriend && Math.abs(bot.fetchLevel() - player.fetchLevel()) > MAX_LEVEL_GAP) reason = 'level_gap_too_large';
 
         if (reason === 'available' && !result.clanmate && !options.forceFriend) {
-            result.partyDecision = PersonaPartyDecisionPolicy.evaluate(botSession, result.memory, { peer: playerSession });
+            // Cold activation changes the bot's current spot and economic
+            // forecast. Keep its answer to this invite through that handoff;
+            // all current hard/social gates above still apply.
+            result.partyDecision = options.acceptedPartyDecision?.accept === true
+                ? options.acceptedPartyDecision
+                : PersonaPartyDecisionPolicy.evaluate(botSession, result.memory, { peer: playerSession });
             if (!result.partyDecision.accept) {
                 reason = result.partyDecision.reason;
             }

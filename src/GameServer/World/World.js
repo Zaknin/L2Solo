@@ -662,9 +662,13 @@ const World = {
         const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
         const PersonaPartyDecisionPolicy = invoke('GameServer/Bot/AI/PersonaPartyDecisionPolicy');
         const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
+        const capacityReservation = options.capacityReservation || targetSession;
+        if (!actor || session?.actor !== actor) {
+            PartyCompanionService.releaseCapacity(session, capacityReservation);
+            return false;
+        }
         const availability = BotAvailability.evaluate(session, targetSession, options);
         const bot = targetSession.actor;
-        const capacityReservation = options.capacityReservation || targetSession;
 
         BotSocialMemory.recordEvent(session, targetSession, 'invite_attempt', source);
 
@@ -700,11 +704,15 @@ const World = {
             }
             attachOptions.capacityReservation = capacityReservation;
 
-            if (!PartyCompanionService.attach(session, targetSession, attachOptions)) {
+            // A store withdrawal can outlive the character that invited us.
+            const current = session.actor === actor;
+            if (!current || !PartyCompanionService.attach(session, targetSession, attachOptions)) {
                 PartyCompanionService.releaseCapacity(session, capacityReservation);
-                BotSocialMemory.recordEvent(session, targetSession, 'party_refused', 'party_full');
-                session.dataSendToMe(ServerResponse.joinParty(0));
-                BotManager.botTell(targetSession, session, "Your party is full. Ask me again after making room.");
+                if (current) {
+                    BotSocialMemory.recordEvent(session, targetSession, 'party_refused', 'party_full');
+                    session.dataSendToMe(ServerResponse.joinParty(0));
+                    BotManager.botTell(targetSession, session, "Your party is full. Ask me again after making room.");
+                }
                 if (withdrawal?.withdrawn) {
                     const BotMerchantStoreService = invoke('GameServer/Bot/Economy/BotMerchantStoreService');
                     return BotMerchantStoreService.restoreAfterPartyFailure(targetSession, withdrawal).then(() => false);
@@ -715,7 +723,7 @@ const World = {
             BotSocialMemory.recordEvent(session, targetSession, 'party_formed', source);
             setTimeout(() => {
                 // The bot may be dismissed within this second.
-                if (!PartyCompanionService.isActiveCompanion(targetSession, session)) return;
+                if (session.actor !== actor || !PartyCompanionService.isActiveCompanion(targetSession, session)) return;
                 BotManager.botTell(
                     targetSession,
                     session,
@@ -734,6 +742,7 @@ const World = {
             completedWithdrawal = withdrawal;
             if (withdrawal.ok) return attachCompanion(withdrawal);
             PartyCompanionService.releaseCapacity(session, capacityReservation);
+            if (session.actor !== actor) return false;
             BotSocialMemory.recordEvent(session, targetSession, 'party_refused', withdrawal.reason || 'store_withdrawal_failed');
             session.dataSendToMe(ServerResponse.joinParty(0));
             BotManager.botTell(targetSession, session, "Give me a moment to finish this trade, then ask me again.");
@@ -748,12 +757,13 @@ const World = {
                 }
             }
             utils.infoWarn('BotParty', 'merchant withdrawal failed for %s: %s', bot?.fetchName?.() || 'unknown', error.message || error);
-            session.dataSendToMe(ServerResponse.joinParty(0));
+            if (session.actor === actor) session.dataSendToMe(ServerResponse.joinParty(0));
             return false;
         });
     },
 
     inviteBotByName(session, actor, name, distribution, source = 'named_invite', options = {}) {
+        if (!actor || session?.actor !== actor) return Promise.resolve(false);
         const lookup = String(name || '').trim();
         if (!lookup) {
             session.dataSendToMe(ServerResponse.actionFailed());
@@ -775,12 +785,14 @@ const World = {
 
         ConsoleText.transmit(session, ConsoleText.caption.waitForResponse);
         return LifeState.findByName(lookup).then(async (state) => {
+            if (session.actor !== actor) return false;
             if (!state) {
                 session.dataSendToMe(ServerResponse.actionFailed());
                 return false;
             }
 
             await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([Number(state.characterId)]);
+            if (session.actor !== actor) return false;
             const availability = BotAvailability.evaluateState(session, state, options);
             if (!availability.available) {
                 BotSocialMemory.recordEvent(session, state, 'invite_attempt', source);
@@ -809,6 +821,10 @@ const World = {
                 forceNearPlayer: true,
                 interruptBackgroundActivity: availability.clanmate || options.forceFriend === true
             }).then((result) => {
+                if (session.actor !== actor) {
+                    PartyCompanionService.releaseCapacity(session, capacityReservation);
+                    return false;
+                }
                 if (!result.ok) {
                     PartyCompanionService.releaseCapacity(session, capacityReservation);
                     BotSocialMemory.recordEvent(session, state, 'invite_attempt', source);
@@ -821,6 +837,10 @@ const World = {
                 }
 
                 return waitForBotSession(BotManager, state.name || lookup).then((targetSession) => {
+                    if (session.actor !== actor) {
+                        PartyCompanionService.releaseCapacity(session, capacityReservation);
+                        return false;
+                    }
                     if (!targetSession) {
                         PartyCompanionService.releaseCapacity(session, capacityReservation);
                         session.dataSendToMe(ServerResponse.actionFailed());
@@ -830,14 +850,15 @@ const World = {
 
                     return this.inviteBotCompanion(session, actor, targetSession, distribution, source, {
                         ...options,
-                        capacityReservation
+                        capacityReservation,
+                        acceptedPartyDecision: availability.partyDecision
                     });
                 });
             });
         }).catch((err) => {
             PartyCompanionService.releaseCapacity(session, capacityReservation);
             utils.infoWarn('BotParty', 'remote invite failed for %s: %s', lookup, err.message);
-            session.dataSendToMe(ServerResponse.actionFailed());
+            if (session.actor === actor) session.dataSendToMe(ServerResponse.actionFailed());
             return false;
         });
     },
