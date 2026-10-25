@@ -1641,6 +1641,7 @@ function resolvePartyFight({ members, spot, targetNpcId = 0, rng = Math.random, 
         help: [...help.values()],
         debug: {
             actions,
+            durationMs: time,
             skillUses: fighters.reduce((sum, fighter) => sum + fighter.skillUses, 0),
             musicUses: fighters.reduce((sum, fighter) => sum + fighter.musicUses, 0),
             summonUses: fighters.reduce((sum, fighter) => sum + Number(fighter.summonUses || 0), 0),

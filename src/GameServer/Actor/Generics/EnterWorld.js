@@ -22,6 +22,7 @@ function refreshLoadedSkillState(session, actor, Generics, response = ServerResp
 async function enterWorld(session, actor) {
     const Generics = invoke(path.actor);
     await invoke('GameServer/Progression/DeathExperience').load(actor);
+    await invoke('GameServer/Recommendations/Runtime').refresh(actor);
 
     // Set character as online
     actor.setIsOnline(true);

@@ -335,6 +335,9 @@ class ActorModel extends CreatureModel {
     }
 
     fetchRecRemain() {
+        if (this.model.recDay >= 0 && Number.isInteger(this.model.recSpent)) {
+            return Math.max(0, require('../Recommendations/Rules').allowance(this.fetchLevel()) - this.model.recSpent);
+        }
         return this.model.recRemain;
     }
 

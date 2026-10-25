@@ -90,7 +90,7 @@ class Actor extends ActorModel {
     }
 
     basicAction(data) {
-        invoke(path.actor).basicAction(
+        return invoke(path.actor).basicAction(
             this.session, this, data
         );
     }

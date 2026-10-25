@@ -27,6 +27,9 @@ function marketTown(name = 'Giran') {
 // other towns. economy: the caller's economy of this same state, if it has one.
 function beginMarketTravel(state, goal, timestamp = Date.now(), { economy = null } = {}) {
     if (!state || !goal || ['traveling', 'shopping', 'merchant', 'crafting'].includes(state.activity)) return null;
+    const ticket = state.stats?.partyMarketReturn;
+    if (Number(ticket?.until) > 0 && Number(ticket.until) <= timestamp)
+        state = { ...state, stats: { ...state.stats, partyMarketReturn: null } };
     if (BotErrands.busyWith(state, MARKET_TRIP_BUSY_FLAGS)) return null;
     const buyingGear = goal.type === 'upgrade_gear'
         && ['market_search_for_weapon', 'market_search_for_gear'].includes(goal.plan?.expectedBenefit);

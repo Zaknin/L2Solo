@@ -133,13 +133,17 @@ async function autonomousClanProjection() {
             SELECT simulated.clanId, simulated.stateJson,
                    clans.name, clans.level, clans.leaderId,
                    members.id AS characterId, members.name AS memberName,
-                   members.classId, members.level AS memberLevel, members.clanId AS memberClanId
+                   members.classId, members.level AS memberLevel, members.clanId AS memberClanId,
+                   CASE WHEN json_valid(life.statsJson) THEN json_extract(life.statsJson, '$.coldCombat') END AS memberCombat
             FROM clan_simulation_clans simulated
             JOIN clans ON clans.id = simulated.clanId
             LEFT JOIN characters members ON members.clanId = simulated.clanId
+            LEFT JOIN bot_life_state life ON life.characterId = members.id AND ? = 1
+                AND json_extract(simulated.stateJson, '$.strategy.objective') = 'recruit'
+                AND json_extract(simulated.stateJson, '$.strategy.status') = 'active'
             WHERE simulated.mode = 'autonomous'
             ORDER BY simulated.clanId ASC, members.id ASC
-        `, []], 'clan-simulation:clan-projection');
+        `, [Config.strategicManagementEnabled !== false ? 1 : 0]], 'clan-simulation:clan-projection');
         const byId = new Map();
         rows.forEach((row) => {
             const clanId = number(row.clanId);
@@ -160,7 +164,10 @@ async function autonomousClanProjection() {
                     name: String(row.memberName || ''),
                     classId: number(row.classId, -1),
                     level: number(row.memberLevel),
-                    clanId: number(row.memberClanId)
+                    clanId: number(row.memberClanId),
+                    // Strategic recruitment needs learned abilities, not the
+                    // hypothetical class tree. Other clan projections stay lean.
+                    ...(row.memberCombat ? { stats: { coldCombat: parseJson(row.memberCombat) } } : {})
                 });
             }
         });
@@ -386,7 +393,8 @@ const ClanSimulationService = {
                     summary.joined += 1;
                     reservedIds.add(candidate.characterId);
                     const target = clans.find((clan) => Number(clan.id) === Number(result.clanId));
-                    if (target) target.members.push({ id: candidate.characterId, characterId: candidate.characterId, classId: candidate.classId, level: candidate.level });
+                    if (target) target.members.push({ id: candidate.characterId, characterId: candidate.characterId,
+                        classId: candidate.classId, level: candidate.level, stats: candidate.stats });
                 } else if (result.ok && result.clanId) {
                     summary.created += 1;
                     (result.memberIds || [candidate.characterId, ...(result.recruits || []).map((entry) => entry.characterId)])

@@ -553,6 +553,9 @@ module.exports = function ({
                         id = Number(characterId);
                     if (!c || c.mode !== 'autonomous' || !pay) return { ok: false, code: 'clan_payment_invalid' };
                     const currentGoal = json(c.stateJson).goal;
+                    if (pay > 0 && !invoke('GameServer/Clan/ClanStrategyPolicy').spendingAllowed(
+                        { ...c, state: json(c.stateJson) }, kind === 'clan_level_purchase' ? 'level' : 'equipment'))
+                        return { ok: false, code: 'clan_strategy_reserve' };
                     // Only the exact still-current progression purchase spends
                     // its own earmark. Ordinary member/hall payments cannot.
                     const progressionPurchase = progressionGoal && kind === 'clan_level_purchase'

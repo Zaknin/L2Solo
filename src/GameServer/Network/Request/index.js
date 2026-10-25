@@ -1,4 +1,5 @@
 module.exports = {
+    recommend: require('./Recommend'),
     skillCoolTime: require('./SkillCoolTime'),
                action: require('./Action'),
             actionUse: require('./ActionUse'),

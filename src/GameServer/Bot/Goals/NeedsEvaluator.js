@@ -34,14 +34,21 @@ function evaluate(state = {}, options = {}) {
     if (floor?.action === 'rest') return [{ type: 'recover', priority: 100,
         target: { hpPct: floor.hpRatio, mpPct: floor.mpRatio },
         plan: { kind: 'rest', expectedBenefit: 'restore_vitals' }, blockers: [] }];
-    if (floor?.action === 'unload') return [{ ...cleanupGoal(floor), priority: 100 }];
+    let context = options.economy;
+    if (floor?.action === 'unload') {
+        const supply = state.stats?.equipmentPlan?.clanGoal?.clanId ? require('../Economy/ClanCrystalSupply') : null;
+        if (floor.reason === 'no_slot' && supply?.requirement(state)) {
+            context ||= ColdEconomyDecision.economyFor(state, { ...options, timestamp });
+            if (!supply.freesSpace(state, context.network.activity)) return [{ ...cleanupGoal(floor), priority: 100 }];
+        } else return [{ ...cleanupGoal(floor), priority: 100 }];
+    }
     const errand = Object.hasOwn(options, 'errand') ? options.errand
         : invoke('GameServer/Bot/Economy/ColdMarketService').pendingErrand(state, timestamp);
     if (errand?.town && errand.selfId > 0) return [{ type: 'market_errand', priority: 80,
         target: { itemId: errand.selfId, amount: errand.amount },
         plan: { kind: 'market_buy', expectedBenefit: 'market_errand', marketTown: errand.town, purpose: errand.purpose },
         blockers: [] }];
-    const context = options.economy || ColdEconomyDecision.economyFor(state, { ...options, timestamp });
+    context ||= ColdEconomyDecision.economyFor(state, { ...options, timestamp });
     options.onEconomy?.(context);
     const leaf = context.network.activity;
     if (!leaf) return [];

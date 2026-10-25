@@ -179,6 +179,8 @@ class Npc extends NpcModel {
         const target = this.fetchMostHated();
         if (!target) return false;
 
+        if (damageValue > 0) require('../Social/SharedHuntActivity').recordCombat(this, actor);
+
         if (!this.state.fetchCombats()) {
             this.enterCombatState(session, target, { skipAggro: true });
         }

@@ -411,6 +411,7 @@ const BackgroundPartyResolver = {
         const overhitContexts = [];
         let losses = 0;
         let combatActions = 0;
+        let combatMs = 0;
         let skillUses = 0;
         let heals = 0;
         let musicUses = 0;
@@ -451,6 +452,7 @@ const BackgroundPartyResolver = {
             if (encounter.won || !pending) fights += 1;
             for (const help of encounter.help || []) combatHelp.set(`${help.sourceId}:${help.targetId}:${help.type}`, help);
             combatActions += Number(encounter.debug?.actions || 0);
+            combatMs += Number(encounter.debug?.durationMs || 0);
             skillUses += encounter.members.reduce((sum, member) => sum + Number(member.skillUses || 0), 0);
             heals += encounter.members.reduce((sum, member) => sum + Number(member.heals || 0), 0);
             musicUses += encounter.members.reduce((sum, member) => sum + Number(member.musicUses || 0), 0);
@@ -499,10 +501,17 @@ const BackgroundPartyResolver = {
         // remain eligible next resolve; committed pairs are skipped by cooldown.
         const helpEvents = invoke('GameServer/Social/ColdCombatHelpMemory').eventsFor([...combatHelp.values()],
             episodeId, timestamp, assessRelationship, id => members.find(m => Number(m.characterId) === id));
-        const huntEvents = wins > 0 && losses === 0 && combatMembers.every(member => Number(member.vitals?.hp) > 0)
+        const HuntActivity = require('../../Social/SharedHuntActivity');
+        const noLosses = losses === 0 && combatMembers.every(member => Number(member.vitals?.hp) > 0);
+        const aliveHunt = !raid && noLosses;
+        const huntActivity = HuntActivity.coldProgress(party.stats?.recommendationHunt, members,
+            aliveHunt ? Math.min(Math.max(0, elapsedMs), PARTY_RESOLVE_MAX_MS, combatMs) : 0, timestamp);
+        const huntEvents = wins > 0 && noLosses
             ? invoke('GameServer/Social/SharedHuntMemory').eventsForGroup(members.map(member => Number(member.characterId)),
-                episodeId, timestamp, assessRelationship, id => members.find(m => Number(m.characterId) === id)) : [];
+                episodeId, timestamp, assessRelationship, id => members.find(m => Number(m.characterId) === id),
+                (source, target) => huntActivity.pending[HuntActivity.pairKey(source, target)]) : [];
         const memoryEvents = [...helpEvents, ...huntEvents].slice(0, 64);
+        HuntActivity.consumeCold(huntActivity, memoryEvents);
 
         rewards.forEach(({ state, exp, sp, adena, items }, index) => {
             const resolved = combatMembers[index] || state;
@@ -733,6 +742,7 @@ const BackgroundPartyResolver = {
                     ...(lootDistribution.agreement ? { agreement: lootDistribution.agreement } : {}),
                     ...(materialHunt ? { materialTargetNpcId: targetNpcId } : {}),
                     pveEncounter: raid ? null : pending,
+                    recommendationHunt: huntActivity,
                     ...(raid ? { raidEncounter: raidSnapshot } : {}),
                     ...(marked && attemptedFights > 0 ? { raidAdmission: admission.proof } : {}),
                     assemblyWait: null,

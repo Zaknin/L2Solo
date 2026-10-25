@@ -510,6 +510,11 @@ assert.strictEqual(ServerResponse.charInfo(boatActor).readInt32LE(13), 7000001, 
 const nameColorOffset = charInfo.lastIndexOf(Buffer.from([0xff, 0xff, 0xff, 0x00]));
 assert.ok(nameColorOffset > 0, 'C4 CharInfo should end its meaningful payload with name color');
 const charInfoTail = charInfo.subarray(nameColorOffset + 4 - 37, nameColorOffset + 4);
+assert.strictEqual(charInfo.readUInt8(nameColorOffset + 4 - 40), 9, 'C4 public recommendation allowance');
+assert.strictEqual(charInfo.readUInt16LE(nameColorOffset + 4 - 39), 2, 'C4 public recommendation score drives blue names');
+const ownNameColorOffset = userInfo.lastIndexOf(Buffer.from([0xff, 0xff, 0xff, 0x00]));
+assert.strictEqual(userInfo.readUInt16LE(ownNameColorOffset + 4 - 51), 9, 'C4 own recommendation allowance');
+assert.strictEqual(userInfo.readUInt16LE(ownNameColorOffset + 4 - 49), 2, 'C4 own recommendation score');
 assert.strictEqual(charInfoTail.readInt32LE(0), 1000000, 'C4 CharInfo should send mount NPC id with the client NPC offset before class id');
 assert.strictEqual(charInfoTail.readInt32LE(4), 10, 'C4 CharInfo should send class id after mount NPC id');
 assert.strictEqual(charInfoTail.readInt32LE(8), 0, 'C4 CharInfo should not send CP in the public tail');

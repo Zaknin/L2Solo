@@ -403,6 +403,9 @@ function stateView(state, recipes = null) {
 function storesOf(owner, into = new Array(4)) {
     into[0] = owner.stats?.clanMaterialDemand ?? null; into[1] = Warehouse.contentIdentity(owner);
     into[2] = ClanSupply.contentIdentity(owner); into[3] = ClanSupply.hasWarehouse(owner);
+    const crystals = owner.stats?.equipmentPlan?.clanGoal?.clanId && require('./ClanCrystalSupply').identity(owner);
+    if (crystals) into[4] = crystals;
+    else into.length = 4;
     return into;
 }
 // memory: the bot's interaction memory (the caller's deps.memory), null when

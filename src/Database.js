@@ -1884,6 +1884,9 @@ function applySchemaMigrations() {
     // Reconcile worlds that already ran 74 with only part of the party history retained.
     migrations.push([75, () => require('./GameServer/Clan/ClanRaidFailureMigration')(connection, now())]);
     migrations.push([76, () => require('./GameServer/Bot/AI/BotClanConversationStore').install(connection)]);
+    migrations.push([77, () => require('./DatabaseRecommendations').install(connection)]);
+    // Older progress inferred time between kills, including offline gaps.
+    migrations.push([78, () => connection.exec('DELETE FROM recommendation_hunts')]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -3352,7 +3355,8 @@ function learnBoardTradeUnsafe(trade, participants) {
     return rows;
 }
 
-function recordMarketTradeUnsafe(trade, { unique = false } = {}) {
+function recordMarketTradeUnsafe(trade, { unique = false, recommend = false } = {}) {
+    if (recommend) Recommendations.usefulTrade(trade, trade.occurredAt);
     // The observation count belongs to the world, not to the retained tail
     // of its history. Bootstrap it on the first replay or deal, then advance it in
     // the same transaction as each board deal. AFK event keys are new by
@@ -4116,6 +4120,7 @@ function commitInteractionMemoryUnsafe(batch, timestamp) {
         Rows.save({ write }, before.get(ownerId), snapshots.get(ownerId));
     }
     commitClanSocialUnsafe(batch.filter((_, i) => statuses[i] === 'applied'), timestamp);
+    Recommendations.observe(batch.filter((_, i) => statuses[i] === 'applied'), snapshots, timestamp);
     return { ok: true, statuses, snapshots: [...snapshots.values()] };
 }
 
@@ -5269,8 +5274,9 @@ const Database = {
                 sourceType: botOwned ? 'afk_bot_store' : 'afk_player_store', selfId: line.selfId, itemName: line.name,
                 quantity, unitPrice: line.price, totalPrice: total, town: shop.town,
                 sellerCharacterId: shop.ownerId, sellerName: owner?.name || null,
-                buyerCharacterId: buyerId, buyerName: buyer?.name || null
-            }, { unique: true });
+                buyerCharacterId: buyerId, buyerName: buyer?.name || null,
+                recommendationHours: Number(details.funding?.valueHours || 0)
+            }, { unique: true, recommend: true });
             const marketTrades = learnBoardTradeUnsafe({ selfId: line.selfId, unitPrice: line.price, quantity,
                 sellerCharacterId: shop.ownerId, buyerCharacterId: buyerId }, [[Number(shop.ownerId), owner], [buyerId, buyer]]);
             const before = afkTradeShopUnsafe(shopId);
@@ -5351,7 +5357,7 @@ const Database = {
                 quantity, unitPrice: line.price, totalPrice: total, town: shop.town,
                 sellerCharacterId: sellerId, sellerName: seller?.name || null,
                 buyerCharacterId: shop.ownerId, buyerName: owner?.name || null
-            }, { unique: true });
+            }, { unique: true, recommend: true });
             const marketTrades = learnBoardTradeUnsafe({ selfId: line.selfId, unitPrice: line.price, quantity,
                 sellerCharacterId: sellerId, buyerCharacterId: shop.ownerId }, [[sellerId, seller], [Number(shop.ownerId), owner]]);
             const before = afkTradeShopUnsafe(shopId);
@@ -6718,7 +6724,8 @@ const Database = {
                 channel: details.buyOrder ? 'player_wtb' : 'player_wts', sourceType: details.buyOrder ? 'private_buy_store' : 'private_store',
                 selfId: Number(source.selfId), itemName: source.name,
                 quantity, unitPrice: price, totalPrice: total, town: details.town,
-                sellerCharacterId: sellerId, sellerName: seller?.name, buyerCharacterId: buyerId, buyerName: buyer?.name });
+                sellerCharacterId: sellerId, sellerName: seller?.name, buyerCharacterId: buyerId, buyerName: buyer?.name,
+                recommendationHours: Number(details.funding?.valueHours || 0) }, { recommend: true });
             return { totalAdena: total, name: source.name,
                 sellerInventory: afkTradeInventoryUnsafe(sellerId), buyerInventory: afkTradeInventoryUnsafe(buyerId) };
         }, 'private-store:purchase'));
@@ -8107,11 +8114,19 @@ const Database = {
                     throw Error('invalid_bot_luxury_exchange');
                 const blocker = Life.marketPurchaseBlocker(source, { selfId: recipe.itemId }, recipe.amount);
                 if (blocker) throw Error(blocker);
+                const supply = require('./GameServer/Bot/Economy/ClanCrystalSupply').requirement(source);
+                const plan = supply?.plan;
+                const selectedExchange = Luxury.resolve(plan?.strategy === 'luxury_exchange' ? plan.exchange : plan?.crystalPreparation?.exchange);
+                const clanState = plan && jsonObject(one('SELECT stateJson FROM clan_simulation_clans WHERE clanId=?', [source.clanId])?.stateJson);
+                const ownsInputs = selectedExchange?.itemId === recipe.itemId && [clanState?.goal, clanState?.productionGoal]
+                    .some(goal => goal?.goalKey === plan?.clanGoal?.goalKey
+                        && !['completed', 'cancelled', 'failed', 'abandoned'].includes(goal.status)
+                        && Number(goal.target?.memberId) === characterId && Number(goal.target?.itemId) === Number(plan.target.selfId));
                 for (const cost of recipe.materials) {
                     const held = source.inventory[cost.selfId] || {};
                     if (held.protected || held.acceptedCustomer || held.assignedClan || held.available === false
                         || Number(held.amount || 0) - Math.max(Number(held.protectedAmount || 0),
-                            Number(held.reservedAmount || 0), Number(source.stats.clanMaterialDemand?.[cost.selfId] || 0)) < cost.amount)
+                            Number(held.reservedAmount || 0), ownsInputs ? 0 : Number(source.stats.clanMaterialDemand?.[cost.selfId] || 0)) < cost.amount)
                         throw Error('improvement_missing_materials');
                     consume(cost.selfId, cost.amount); changedIds.push(cost.selfId);
                 }
@@ -9487,6 +9502,44 @@ const Database = {
     fetchClanWarehouseItems(clanId) {
         return select('clan_warehouse_items', ['*'], 'clanId = ? AND amount > 0', [Number(clanId)], 'clan-warehouse:list');
     },
+    updateAutonomousClanStrategy({ clanId, leaderId, expectedUpdatedAt, strategy, eventType = null } = {}) {
+        const clan = Number(clanId);
+        if (!clan || strategy?.version !== 1 || !require('./GameServer/Clan/ClanStrategyPolicy').LABELS[strategy.objective]
+            || Buffer.byteLength(JSON.stringify(strategy)) > 12000) return Promise.resolve({ ok: false, code: 'invalid_clan_strategy' });
+        return inTransaction(() => {
+            const row = one(`SELECT c.leaderId, s.mode, s.stateJson FROM clans c
+                JOIN clan_simulation_clans s ON s.clanId=c.id WHERE c.id=?`, [clan]);
+            if (!row || row.mode !== 'autonomous' || Number(row.leaderId) !== Number(leaderId))
+                return { ok: false, code: 'strategy_owner_changed' };
+            const state = jsonObject(row.stateJson);
+            if (state.goal?.controlledBy === 'player' && state.goal.status !== 'completed')
+                return { ok: false, code: 'player_order_active' };
+            if (Number(state.updatedAt || 0) !== Number(expectedUpdatedAt)) return { ok: false, code: 'ownership_conflict' };
+            const changed = !state.strategy || (state.strategy.objective !== strategy.objective
+                || state.strategy.selectedAt !== strategy.selectedAt);
+            // Switching between native executors releases only autonomous work.
+            // The service keeps earned raid/trial commitments before this write.
+            if (changed) {
+                state.goal = null; state.productionGoal = null;
+                state.recruitmentDemand = null; state.recruitmentScan = null;
+            }
+            state.strategy = strategy;
+            state.updatedAt = now();
+            write('UPDATE clan_simulation_clans SET stateJson=?, updatedAt=? WHERE clanId=?', [JSON.stringify(state), state.updatedAt, clan]);
+            if (eventType) recordClanGoalEventUnsafe({ clanId: clan, eventType, goalType: 'strategy', plan: strategy.objective,
+                reasonCode: strategy.reason, payloadJson: JSON.stringify(strategy), occurredAt: state.updatedAt });
+            return { ok: true, state, strategyChanged: !!changed,
+                membershipRepair: changed ? ClanMembership.repairGoalsUnsafe([clan]) : null };
+        }, 'clan-strategy:update').then(ClanMembership.publish).then(result => {
+            if (result.ok) {
+                ClanReviewInputs.syncRecruitment({ id: clan, state: result.state });
+                // Wake finance and other executors only after a committed
+                // strategic choice, never for progress-only updates or a failed CAS.
+                if (result.strategyChanged) ClanReviewInputs.changed(clan, 'strategy');
+            }
+            return result;
+        });
+    },
     updateAutonomousClanGoal({
         clanId,
         goal = null,
@@ -9577,6 +9630,19 @@ const Database = {
         const safeLimit = Math.max(1, Math.min(200, Math.floor(Number(limit) || 50)));
         return readHistory(() => History.all(`SELECT * FROM clan_goal_events WHERE clanId = ?
             ORDER BY occurredAt DESC, id DESC LIMIT ${safeLimit}`, [Number(clanId)]), 'clan-goal:events');
+    },
+    fetchClanEquipmentAchievements(clanId) {
+        return readHistory(() => {
+            const rows = History.all(`SELECT targetKey, COUNT(*) OVER () AS total FROM (
+                SELECT json_extract(payloadJson, '$.target.memberId') || ':' ||
+                    json_extract(payloadJson, '$.target.itemId') || ':' || json_extract(payloadJson, '$.target.slot') AS targetKey,
+                    MAX(occurredAt) AS completedAt
+                FROM clan_goal_events WHERE clanId=? AND eventType='equipment_goal_completed'
+                    AND json_valid(payloadJson) AND json_extract(payloadJson, '$.target.memberId') > 0
+                    AND json_extract(payloadJson, '$.target.itemId') > 0 AND json_extract(payloadJson, '$.target.slot') > 0
+                GROUP BY targetKey) ORDER BY completedAt DESC LIMIT 128`, [Number(clanId)]);
+            return { upgrades: Number(rows[0]?.total || 0), recent: rows.reverse().map(row => row.targetKey) };
+        }, 'clan-strategy:achievements');
     },
     upsertClanMarketDemand({ clanId, itemId, amount, maxPrice, goalKey, status = 'open' } = {}) {
         const clan = Number(clanId);
@@ -10935,6 +11001,10 @@ const Database = {
 };
 
 const ClanLevelSp = require('./GameServer/Clan/ClanLevelSpRepository')({ one, write, run, withCharacterFlushes });
+const Recommendations = require('./DatabaseRecommendations').create({ one, all, write, enqueue, inTransaction, withCharacterFlushes, now });
+for (const name of ['refreshRecommendations', 'giveRecommendation', 'fetchRecommendationEvents', 'recommendationHead', 'pruneRecommendations']) {
+    Database[name] = Recommendations[name];
+}
 Object.assign(Database, require('./GameServer/Clan/ClanAllianceRepository')({ one, all, write, inTransaction, withCharacterFlushes, ClanLevelSp, recordClanGoalEventUnsafe }));
 
 Object.assign(Database, require('./GameServer/ClanHall/Repository')({
@@ -10967,6 +11037,8 @@ const TradeMeetings = require('./GameServer/AfkTrade/TradeMeeting').create({
     completed: (meeting, line) => {
         const at = now(), buyerId = line.payer ? meeting.actorB : meeting.actorA;
         const sellerId = line.payer ? meeting.actorA : meeting.actorB;
+        const certificate = JSON.parse(meeting.terms).lines[line.ordinal]?.certificate;
+        const intent = certificate ? TradeIntent.decode(certificate) : null;
         const ad = line.sourceAdId && one('SELECT * FROM afk_trade_shops WHERE id=?', [line.sourceAdId]);
         if (ad?.custodyPolicy === 1) {
             write('UPDATE afk_trade_lines SET count=max(0,count-?),fills=fills+1,updatedAt=? WHERE shopId=? AND selfId=? AND enchant=?',
@@ -10984,7 +11056,9 @@ const TradeMeetings = require('./GameServer/AfkTrade/TradeMeeting').create({
             sourceType: BoardRules.isBotAccount(seller?.username) ? 'afk_bot_store' : 'afk_player_store',
             selfId: line.selfId, itemName: line.name, quantity: line.count, unitPrice: line.price,
             totalPrice: line.count * line.price, town: meeting.town, sellerCharacterId: sellerId,
-            sellerName: seller?.name || null, buyerCharacterId: buyerId, buyerName: buyer?.name || null }, { unique: true });
+            sellerName: seller?.name || null, buyerCharacterId: buyerId, buyerName: buyer?.name || null,
+            recommendationHours: intent ? intent.valueHours * line.count / intent.amount : 0
+        }, { unique: true, recommend: true });
         learnBoardTradeUnsafe({ selfId: line.selfId, unitPrice: line.price, quantity: line.count,
             sellerCharacterId: sellerId, buyerCharacterId: buyerId }, [[sellerId, seller], [buyerId, buyer]]);
         if (ad?.custodyPolicy !== 1) return null;
