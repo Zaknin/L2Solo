@@ -15,6 +15,7 @@ function userInfo(actor) {
     const relation = ClanService.isLeader(actor, clan) ? 0x40 : 0x00;
     const paperdollId = (slot) => actor.backpack.fetchPaperdollId(slot) || 0;
     const paperdollSelfId = (slot) => actor.backpack.fetchPaperdollSelfId(slot) || 0;
+    // Two-hand gear lives in slot 14 locally, but C4 needs it in both weapon fields.
     const weaponId = paperdollId(7) || paperdollId(14);
     const weaponSelfId = paperdollSelfId(7) || paperdollSelfId(14);
 
@@ -46,13 +47,13 @@ function userInfo(actor) {
         .writeD(0x28); // ?
 
         for (let i = 0; i < 14; i++) {
-            packet.writeD(paperdollId(i));
+            packet.writeD(i === 7 ? weaponId : paperdollId(i));
         }
         packet.writeD(weaponId) // C4 repeats the right-hand weapon here
             .writeD(0x00); // Hair equipment is not modelled locally
 
         for (let i = 0; i < 14; i++) {
-            packet.writeD(paperdollSelfId(i));
+            packet.writeD(i === 7 ? weaponSelfId : paperdollSelfId(i));
         }
         packet.writeD(weaponSelfId) // C4 repeats the right-hand weapon here
             .writeD(0x00); // Hair equipment is not modelled locally

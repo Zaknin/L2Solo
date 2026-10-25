@@ -712,6 +712,7 @@ const tests = [
     'tests/test_weapon_sa_exchange.js',
     'tests/test_grade_penalty.js',
     'tests/test_equipment_slots.js',
+    'tests/test_equipment_removal_sync.js',
     'tests/test_fall_damage.js',
     'tests/test_gatekeeper_teleports.js',
     'tests/test_travel_routes.js',
