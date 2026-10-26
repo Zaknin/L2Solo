@@ -248,6 +248,28 @@ function scaleAmount(amount, amountMultiplier, rng = Math.random) {
     return Math.max(1, whole + (rng() < fraction ? 1 : 0));
 }
 
+// C4 spoil: each item of a landed spoil group rolls on its own chance, so one
+// sweep can give several items of a group; the datapack has groups whose
+// item chances add up past 100, which one 0-100 line cannot roll.
+// The chance (0..1) that a landed group gives this item.
+function spoilItemChance(item) {
+    return Math.max(0, Math.min(1, (Number(item?.chance) || 0) / 100));
+}
+
+// The items a landed spoil group gives: [{ item, amount }], the one spoil roll
+// of the hot sweep (SpoilSweep) and the cold fight (BackgroundDropResolver).
+function rollSpoilGroup(group, amountMultiplier, rng = Math.random) {
+    const landed = [];
+    for (const item of group?.items || []) {
+        if (!(rng() < spoilItemChance(item))) continue;
+        const min = Math.max(1, Math.floor(Number(item.min) || 1));
+        const max = Math.max(min, Math.floor(Number(item.max) || min));
+        const baseAmount = min === max ? min : Math.floor(rng() * (max - min + 1)) + min;
+        landed.push({ item, amount: scaleAmount(baseAmount, amountMultiplier, rng) });
+    }
+    return landed;
+}
+
 module.exports = {
     PRESETS,
     normalizePreset,
@@ -266,5 +288,7 @@ module.exports = {
     deepBlueActive,
     deepBluePenaltyPercent,
     rewardGroupRoll,
-    scaleAmount
+    scaleAmount,
+    spoilItemChance,
+    rollSpoilGroup
 };

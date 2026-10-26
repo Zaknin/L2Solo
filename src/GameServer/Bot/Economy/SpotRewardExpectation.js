@@ -78,17 +78,13 @@ function groupsFor(reward) {
         const total = kind === 'drop' ? items.reduce((sum, item) =>
             sum + Rates.dropItemSelectionWeight(group, item, rate), 0) : 100;
         const expected = { group, kind, adena: 0, items: 0 };
-        let partition = 0, covered = 0;
         for (const item of items) {
             let share, amount;
             if (kind === 'drop') {
                 share = total > 0 ? Rates.dropItemSelectionWeight(group, item, rate) / total : 0;
                 amount = Rates.expectedDropAmount(group, item, rate);
             } else {
-                partition += Number(item.chance || 0);
-                const next = Math.max(covered, Math.min(100, Math.max(0, partition)));
-                share = (next - covered) / 100;
-                covered = next;
+                share = Rates.spoilItemChance(item);
                 const min = Math.max(1, Math.floor(Number(item.min) || 1));
                 amount = (min + Math.max(min, Math.floor(Number(item.max) || min))) / 2;
             }

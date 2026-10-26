@@ -116,14 +116,6 @@ function buildRateProfiles() {
     return profiles;
 }
 
-function spoilSelectionChance(group, itemIndex) {
-    const items = group?.items || [];
-    const start = items.slice(0, itemIndex)
-        .reduce((total, item) => total + Math.max(0, Number(item?.chance) || 0), 0);
-    const end = start + Math.max(0, Number(items[itemIndex]?.chance) || 0);
-    return Math.max(0, Math.min(100, end) - Math.min(100, start)) / 100;
-}
-
 function rateResult(group, item, itemIndex, kind, preset, npcLevel) {
     process.env.L2NODE_PROGRESSION_RATE = preset;
     const roll = ProgressionRates.rewardGroupRoll(group, kind, {
@@ -134,7 +126,7 @@ function rateResult(group, item, itemIndex, kind, preset, npcLevel) {
     const groupChance = Number(roll.chance || 0) / 100;
     const selectionChance = kind === 'drop'
         ? ProgressionRates.dropItemSelectionChance(group, item, roll.itemRate)
-        : spoilSelectionChance(group, itemIndex);
+        : ProgressionRates.spoilItemChance(item);
     const expectedConditionalAmount = kind === 'drop'
         ? ProgressionRates.expectedDropAmount(group, item, roll.itemRate)
         : ((Number(item.min || 1) + Number(item.max || item.min || 1)) / 2)

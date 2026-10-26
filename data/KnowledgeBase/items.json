@@ -50466,16 +50466,16 @@
           "mobName": "Kobold Looter Bepook",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 7.5956,
-              "expectedAmountPerKill": 0.075956
+              "chancePercent": 15.7956,
+              "expectedAmountPerKill": 0.157956
             },
             "x10": {
-              "chancePercent": 7.5956,
-              "expectedAmountPerKill": 0.75956
+              "chancePercent": 15.7956,
+              "expectedAmountPerKill": 1.57956
             },
             "x50": {
-              "chancePercent": 7.5956,
-              "expectedAmountPerKill": 3.7978
+              "chancePercent": 15.7956,
+              "expectedAmountPerKill": 7.8978
             }
           }
         }
@@ -128570,16 +128570,16 @@
           "mobName": "White Fang",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 13.4302,
-              "expectedAmountPerKill": 0.134302
+              "chancePercent": 80.1573,
+              "expectedAmountPerKill": 0.801573
             },
             "x10": {
-              "chancePercent": 13.4302,
-              "expectedAmountPerKill": 1.34302
+              "chancePercent": 80.1573,
+              "expectedAmountPerKill": 8.01573
             },
             "x50": {
-              "chancePercent": 13.4302,
-              "expectedAmountPerKill": 6.7151
+              "chancePercent": 80.1573,
+              "expectedAmountPerKill": 40.07865
             }
           }
         }
@@ -177347,16 +177347,16 @@
           "mobName": "Elder Tarlk Basilisk",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 31.8222,
-              "expectedAmountPerKill": 0.318222
+              "chancePercent": 34.0889,
+              "expectedAmountPerKill": 0.340889
             },
             "x10": {
-              "chancePercent": 31.8222,
-              "expectedAmountPerKill": 3.18222
+              "chancePercent": 34.0889,
+              "expectedAmountPerKill": 3.40889
             },
             "x50": {
-              "chancePercent": 31.8222,
-              "expectedAmountPerKill": 15.9111
+              "chancePercent": 34.0889,
+              "expectedAmountPerKill": 17.04445
             }
           }
         },
@@ -177401,16 +177401,16 @@
           "mobName": "Harit Lizardman",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 1.85,
-              "expectedAmountPerKill": 0.0185
+              "chancePercent": 32.7167,
+              "expectedAmountPerKill": 0.327167
             },
             "x10": {
-              "chancePercent": 1.85,
-              "expectedAmountPerKill": 0.185
+              "chancePercent": 32.7167,
+              "expectedAmountPerKill": 3.27167
             },
             "x50": {
-              "chancePercent": 1.85,
-              "expectedAmountPerKill": 0.925
+              "chancePercent": 32.7167,
+              "expectedAmountPerKill": 16.35835
             }
           }
         },
@@ -186645,16 +186645,16 @@
           "mobName": "Werewolf Hunter",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 50.9381,
-              "expectedAmountPerKill": 0.509381
+              "chancePercent": 83.3126,
+              "expectedAmountPerKill": 0.833126
             },
             "x10": {
-              "chancePercent": 50.9381,
-              "expectedAmountPerKill": 5.09381
+              "chancePercent": 83.3126,
+              "expectedAmountPerKill": 8.33126
             },
             "x50": {
-              "chancePercent": 50.9381,
-              "expectedAmountPerKill": 25.46905
+              "chancePercent": 83.3126,
+              "expectedAmountPerKill": 41.6563
             }
           }
         }
@@ -187239,16 +187239,16 @@
           "mobName": "Langk Lizardman",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 23.56,
-              "expectedAmountPerKill": 0.2356
+              "chancePercent": 28.1029,
+              "expectedAmountPerKill": 0.281029
             },
             "x10": {
-              "chancePercent": 23.56,
-              "expectedAmountPerKill": 2.356
+              "chancePercent": 28.1029,
+              "expectedAmountPerKill": 2.81029
             },
             "x50": {
-              "chancePercent": 23.56,
-              "expectedAmountPerKill": 11.78
+              "chancePercent": 28.1029,
+              "expectedAmountPerKill": 14.05145
             }
           }
         },
@@ -187428,16 +187428,16 @@
           "mobName": "Marsh Zombie Lord",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 26.4417,
-              "expectedAmountPerKill": 0.264417
+              "chancePercent": 40.8657,
+              "expectedAmountPerKill": 0.408657
             },
             "x10": {
-              "chancePercent": 26.4417,
-              "expectedAmountPerKill": 2.64417
+              "chancePercent": 40.8657,
+              "expectedAmountPerKill": 4.08657
             },
             "x50": {
-              "chancePercent": 26.4417,
-              "expectedAmountPerKill": 13.22085
+              "chancePercent": 40.8657,
+              "expectedAmountPerKill": 20.43285
             }
           }
         },
@@ -192659,16 +192659,16 @@
           "mobName": "Falibati",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 91.2263,
-              "expectedAmountPerKill": 0.912263
+              "chancePercent": 99.125,
+              "expectedAmountPerKill": 0.99125
             },
             "x10": {
-              "chancePercent": 91.2263,
-              "expectedAmountPerKill": 9.12263
+              "chancePercent": 99.125,
+              "expectedAmountPerKill": 9.9125
             },
             "x50": {
-              "chancePercent": 91.2263,
-              "expectedAmountPerKill": 45.61315
+              "chancePercent": 99.125,
+              "expectedAmountPerKill": 49.5625
             }
           }
         },
@@ -192686,16 +192686,16 @@
           "mobName": "Lord Ishka",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 59.5795,
-              "expectedAmountPerKill": 5.362155
+              "chancePercent": 91.2067,
+              "expectedAmountPerKill": 8.208603
             },
             "x10": {
-              "chancePercent": 59.5795,
-              "expectedAmountPerKill": 53.62155
+              "chancePercent": 91.2067,
+              "expectedAmountPerKill": 82.08603
             },
             "x50": {
-              "chancePercent": 59.5795,
-              "expectedAmountPerKill": 268.10775
+              "chancePercent": 91.2067,
+              "expectedAmountPerKill": 410.43015
             }
           }
         }
@@ -193307,16 +193307,16 @@
           "mobName": "Misery Skeleton",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 31.5907,
-              "expectedAmountPerKill": 0.631814
+              "chancePercent": 68.4093,
+              "expectedAmountPerKill": 1.368186
             },
             "x10": {
-              "chancePercent": 31.5907,
-              "expectedAmountPerKill": 6.31814
+              "chancePercent": 68.4093,
+              "expectedAmountPerKill": 13.68186
             },
             "x50": {
-              "chancePercent": 31.5907,
-              "expectedAmountPerKill": 31.5907
+              "chancePercent": 68.4093,
+              "expectedAmountPerKill": 68.4093
             }
           }
         },
@@ -194198,16 +194198,16 @@
           "mobName": "Neer Ghoul Berserker",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 75.670761,
-              "expectedAmountPerKill": 1
+              "chancePercent": 82.519239,
+              "expectedAmountPerKill": 1.1638
             },
             "x10": {
-              "chancePercent": 75.670761,
-              "expectedAmountPerKill": 10
+              "chancePercent": 82.519239,
+              "expectedAmountPerKill": 11.638
             },
             "x50": {
-              "chancePercent": 75.670761,
-              "expectedAmountPerKill": 50
+              "chancePercent": 82.519239,
+              "expectedAmountPerKill": 58.19
             }
           }
         },
@@ -194846,16 +194846,16 @@
           "mobName": "Balor Orc Lieutenant",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 77.7315825625,
-              "expectedAmountPerKill": 1
+              "chancePercent": 88.7959174375,
+              "expectedAmountPerKill": 1.33055
             },
             "x10": {
-              "chancePercent": 77.7315825625,
-              "expectedAmountPerKill": 10
+              "chancePercent": 88.7959174375,
+              "expectedAmountPerKill": 13.3055
             },
             "x50": {
-              "chancePercent": 77.7315825625,
-              "expectedAmountPerKill": 50
+              "chancePercent": 88.7959174375,
+              "expectedAmountPerKill": 66.5275
             }
           }
         },
@@ -194900,16 +194900,16 @@
           "mobName": "Corpse Candle",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 39.0896,
-              "expectedAmountPerKill": 0.390896
+              "chancePercent": 81.2139,
+              "expectedAmountPerKill": 0.812139
             },
             "x10": {
-              "chancePercent": 39.0896,
-              "expectedAmountPerKill": 3.90896
+              "chancePercent": 81.2139,
+              "expectedAmountPerKill": 8.12139
             },
             "x50": {
-              "chancePercent": 39.0896,
-              "expectedAmountPerKill": 19.5448
+              "chancePercent": 81.2139,
+              "expectedAmountPerKill": 40.60695
             }
           }
         },
@@ -200620,16 +200620,16 @@
           "mobName": "Evil Eye Patroller",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 26.4417,
-              "expectedAmountPerKill": 0.264417
+              "chancePercent": 55.1688,
+              "expectedAmountPerKill": 0.551688
             },
             "x10": {
-              "chancePercent": 26.4417,
-              "expectedAmountPerKill": 2.64417
+              "chancePercent": 55.1688,
+              "expectedAmountPerKill": 5.51688
             },
             "x50": {
-              "chancePercent": 26.4417,
-              "expectedAmountPerKill": 13.22085
+              "chancePercent": 55.1688,
+              "expectedAmountPerKill": 27.5844
             }
           }
         },
@@ -207262,16 +207262,16 @@
           "mobName": "Ol Mahum Captain",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 49.0709,
-              "expectedAmountPerKill": 0.981418
+              "chancePercent": 50.9291,
+              "expectedAmountPerKill": 1.018582
             },
             "x10": {
-              "chancePercent": 49.0709,
-              "expectedAmountPerKill": 9.81418
+              "chancePercent": 50.9291,
+              "expectedAmountPerKill": 10.18582
             },
             "x50": {
-              "chancePercent": 49.0709,
-              "expectedAmountPerKill": 49.0709
+              "chancePercent": 50.9291,
+              "expectedAmountPerKill": 50.9291
             }
           }
         },
@@ -207640,16 +207640,16 @@
           "mobName": "Grandis",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 73.1179,
-              "expectedAmountPerKill": 0.731179
+              "chancePercent": 94.0875,
+              "expectedAmountPerKill": 0.940875
             },
             "x10": {
-              "chancePercent": 73.1179,
-              "expectedAmountPerKill": 7.31179
+              "chancePercent": 94.0875,
+              "expectedAmountPerKill": 9.40875
             },
             "x50": {
-              "chancePercent": 73.1179,
-              "expectedAmountPerKill": 36.55895
+              "chancePercent": 94.0875,
+              "expectedAmountPerKill": 47.04375
             }
           }
         },
@@ -221599,16 +221599,16 @@
           "mobName": "Tunath Orc Warrior",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 28.6914,
-              "expectedAmountPerKill": 0.286914
+              "chancePercent": 64.1778,
+              "expectedAmountPerKill": 0.641778
             },
             "x10": {
-              "chancePercent": 28.6914,
-              "expectedAmountPerKill": 2.86914
+              "chancePercent": 64.1778,
+              "expectedAmountPerKill": 6.41778
             },
             "x50": {
-              "chancePercent": 28.6914,
-              "expectedAmountPerKill": 14.3457
+              "chancePercent": 64.1778,
+              "expectedAmountPerKill": 32.0889
             }
           }
         },
@@ -228214,16 +228214,16 @@
           "mobName": "Androscorpio Hunter",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 39.1528,
-              "expectedAmountPerKill": 0.783056
+              "chancePercent": 54.7625,
+              "expectedAmountPerKill": 1.09525
             },
             "x10": {
-              "chancePercent": 39.1528,
-              "expectedAmountPerKill": 7.83056
+              "chancePercent": 54.7625,
+              "expectedAmountPerKill": 10.9525
             },
             "x50": {
-              "chancePercent": 39.1528,
-              "expectedAmountPerKill": 39.1528
+              "chancePercent": 54.7625,
+              "expectedAmountPerKill": 54.7625
             }
           }
         },
@@ -228619,16 +228619,16 @@
           "mobName": "Demon Tempest",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 6.9525,
-              "expectedAmountPerKill": 1.181925
+              "chancePercent": 98.5209,
+              "expectedAmountPerKill": 16.748553
             },
             "x10": {
-              "chancePercent": 6.9525,
-              "expectedAmountPerKill": 11.81925
+              "chancePercent": 98.5209,
+              "expectedAmountPerKill": 167.48553
             },
             "x50": {
-              "chancePercent": 6.9525,
-              "expectedAmountPerKill": 59.09625
+              "chancePercent": 98.5209,
+              "expectedAmountPerKill": 837.42765
             }
           }
         },
@@ -235315,16 +235315,16 @@
           "mobName": "Skeleton Lord",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 75.1100182561,
-              "expectedAmountPerKill": 1
+              "chancePercent": 78.2068817439,
+              "expectedAmountPerKill": 1.066338
             },
             "x10": {
-              "chancePercent": 75.1100182561,
-              "expectedAmountPerKill": 10
+              "chancePercent": 78.2068817439,
+              "expectedAmountPerKill": 10.66338
             },
             "x50": {
-              "chancePercent": 75.1100182561,
-              "expectedAmountPerKill": 50
+              "chancePercent": 78.2068817439,
+              "expectedAmountPerKill": 53.3169
             }
           }
         },
@@ -254107,16 +254107,16 @@
           "mobName": "Ol Mahum Raider",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 11.4559,
-              "expectedAmountPerKill": 0.229118
+              "chancePercent": 59.0294,
+              "expectedAmountPerKill": 1.180588
             },
             "x10": {
-              "chancePercent": 11.4559,
-              "expectedAmountPerKill": 2.29118
+              "chancePercent": 59.0294,
+              "expectedAmountPerKill": 11.80588
             },
             "x50": {
-              "chancePercent": 11.4559,
-              "expectedAmountPerKill": 11.4559
+              "chancePercent": 59.0294,
+              "expectedAmountPerKill": 59.0294
             }
           }
         },
@@ -254296,16 +254296,16 @@
           "mobName": "Cave Blade Spider",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 43.3533,
-              "expectedAmountPerKill": 0.433533
+              "chancePercent": 75.5289,
+              "expectedAmountPerKill": 0.755289
             },
             "x10": {
-              "chancePercent": 43.3533,
-              "expectedAmountPerKill": 4.33533
+              "chancePercent": 75.5289,
+              "expectedAmountPerKill": 7.55289
             },
             "x50": {
-              "chancePercent": 43.3533,
-              "expectedAmountPerKill": 21.67665
+              "chancePercent": 75.5289,
+              "expectedAmountPerKill": 37.76445
             }
           }
         },
@@ -254350,16 +254350,16 @@
           "mobName": "Quicksilver Beast",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 36.3,
-              "expectedAmountPerKill": 0.363
+              "chancePercent": 38.22,
+              "expectedAmountPerKill": 0.3822
             },
             "x10": {
-              "chancePercent": 36.3,
-              "expectedAmountPerKill": 3.63
+              "chancePercent": 38.22,
+              "expectedAmountPerKill": 3.822
             },
             "x50": {
-              "chancePercent": 36.3,
-              "expectedAmountPerKill": 18.15
+              "chancePercent": 38.22,
+              "expectedAmountPerKill": 19.11
             }
           }
         },
@@ -261721,16 +261721,16 @@
           "mobName": "Corsair Captain Kylon",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 39.4542,
-              "expectedAmountPerKill": 1.97271
+              "chancePercent": 86.7984,
+              "expectedAmountPerKill": 4.33992
             },
             "x10": {
-              "chancePercent": 39.4542,
-              "expectedAmountPerKill": 19.7271
+              "chancePercent": 86.7984,
+              "expectedAmountPerKill": 43.3992
             },
             "x50": {
-              "chancePercent": 39.4542,
-              "expectedAmountPerKill": 98.6355
+              "chancePercent": 86.7984,
+              "expectedAmountPerKill": 216.996
             }
           }
         },
@@ -272521,16 +272521,16 @@
           "mobName": "Marsh Drake",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 28.24,
-              "expectedAmountPerKill": 0.2824
+              "chancePercent": 35.88,
+              "expectedAmountPerKill": 0.3588
             },
             "x10": {
-              "chancePercent": 28.24,
-              "expectedAmountPerKill": 2.824
+              "chancePercent": 35.88,
+              "expectedAmountPerKill": 3.588
             },
             "x50": {
-              "chancePercent": 28.24,
-              "expectedAmountPerKill": 14.12
+              "chancePercent": 35.88,
+              "expectedAmountPerKill": 17.94
             }
           }
         },
@@ -275383,16 +275383,16 @@
           "mobName": "Malruk Lord",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 5.6958,
-              "expectedAmountPerKill": 0.056958
+              "chancePercent": 11.3165,
+              "expectedAmountPerKill": 0.113165
             },
             "x10": {
-              "chancePercent": 5.6958,
-              "expectedAmountPerKill": 0.56958
+              "chancePercent": 11.3165,
+              "expectedAmountPerKill": 1.13165
             },
             "x50": {
-              "chancePercent": 5.6958,
-              "expectedAmountPerKill": 2.8479
+              "chancePercent": 11.3165,
+              "expectedAmountPerKill": 5.65825
             }
           }
         },
@@ -275410,16 +275410,16 @@
           "mobName": "Revenant Of Sir Calibus",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 5.6771,
-              "expectedAmountPerKill": 0.056771
+              "chancePercent": 26.4104,
+              "expectedAmountPerKill": 0.264104
             },
             "x10": {
-              "chancePercent": 5.6771,
-              "expectedAmountPerKill": 0.56771
+              "chancePercent": 26.4104,
+              "expectedAmountPerKill": 2.64104
             },
             "x50": {
-              "chancePercent": 5.6771,
-              "expectedAmountPerKill": 2.83855
+              "chancePercent": 26.4104,
+              "expectedAmountPerKill": 13.2052
             }
           }
         },
@@ -295712,16 +295712,16 @@
           "mobName": "Taik Orc Seeker",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 97.6394,
-              "expectedAmountPerKill": 0.976394
+              "chancePercent": 98.2,
+              "expectedAmountPerKill": 0.982
             },
             "x10": {
-              "chancePercent": 97.6394,
-              "expectedAmountPerKill": 9.76394
+              "chancePercent": 98.2,
+              "expectedAmountPerKill": 9.82
             },
             "x50": {
-              "chancePercent": 97.6394,
-              "expectedAmountPerKill": 48.8197
+              "chancePercent": 98.2,
+              "expectedAmountPerKill": 49.1
             }
           }
         },
@@ -307416,16 +307416,16 @@
           "mobName": "Nakondas",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 10.0252,
-              "expectedAmountPerKill": 0.300756
+              "chancePercent": 69.6234,
+              "expectedAmountPerKill": 2.088702
             },
             "x10": {
-              "chancePercent": 10.0252,
-              "expectedAmountPerKill": 3.00756
+              "chancePercent": 69.6234,
+              "expectedAmountPerKill": 20.88702
             },
             "x50": {
-              "chancePercent": 10.0252,
-              "expectedAmountPerKill": 15.0378
+              "chancePercent": 69.6234,
+              "expectedAmountPerKill": 104.4351
             }
           }
         },
@@ -319534,16 +319534,16 @@
           "mobName": "Rampage Golem Leader Talos",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 30.5041,
-              "expectedAmountPerKill": 0.305041
+              "chancePercent": 51.5996,
+              "expectedAmountPerKill": 0.515996
             },
             "x10": {
-              "chancePercent": 30.5041,
-              "expectedAmountPerKill": 3.05041
+              "chancePercent": 51.5996,
+              "expectedAmountPerKill": 5.15996
             },
             "x50": {
-              "chancePercent": 30.5041,
-              "expectedAmountPerKill": 15.25205
+              "chancePercent": 51.5996,
+              "expectedAmountPerKill": 25.7998
             }
           }
         },
@@ -320074,16 +320074,16 @@
           "mobName": "Turek Orc Shaman",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 2.5899,
-              "expectedAmountPerKill": 0.025899
+              "chancePercent": 11.46,
+              "expectedAmountPerKill": 0.1146
             },
             "x10": {
-              "chancePercent": 2.5899,
-              "expectedAmountPerKill": 0.25899
+              "chancePercent": 11.46,
+              "expectedAmountPerKill": 1.146
             },
             "x50": {
-              "chancePercent": 2.5899,
-              "expectedAmountPerKill": 1.29495
+              "chancePercent": 11.46,
+              "expectedAmountPerKill": 5.73
             }
           }
         },
@@ -322423,16 +322423,16 @@
           "mobName": "Necrosentinel Guard",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 4.7979,
-              "expectedAmountPerKill": 0.047979
+              "chancePercent": 47.4918,
+              "expectedAmountPerKill": 0.474918
             },
             "x10": {
-              "chancePercent": 4.7979,
-              "expectedAmountPerKill": 0.47979
+              "chancePercent": 47.4918,
+              "expectedAmountPerKill": 4.74918
             },
             "x50": {
-              "chancePercent": 4.7979,
-              "expectedAmountPerKill": 2.39895
+              "chancePercent": 47.4918,
+              "expectedAmountPerKill": 23.7459
             }
           }
         }
@@ -327302,16 +327302,16 @@
           "mobName": "Rinoket",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 0.4141,
-              "expectedAmountPerKill": 0.004141
+              "chancePercent": 61.8094,
+              "expectedAmountPerKill": 0.618094
             },
             "x10": {
-              "chancePercent": 0.4141,
-              "expectedAmountPerKill": 0.04141
+              "chancePercent": 61.8094,
+              "expectedAmountPerKill": 6.18094
             },
             "x50": {
-              "chancePercent": 0.4141,
-              "expectedAmountPerKill": 0.20705
+              "chancePercent": 61.8094,
+              "expectedAmountPerKill": 30.9047
             }
           }
         },
@@ -359771,16 +359771,16 @@
           "mobName": "Premo Prime",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 35.5408,
-              "expectedAmountPerKill": 0.355408
+              "chancePercent": 44.7633,
+              "expectedAmountPerKill": 0.447633
             },
             "x10": {
-              "chancePercent": 35.5408,
-              "expectedAmountPerKill": 3.55408
+              "chancePercent": 44.7633,
+              "expectedAmountPerKill": 4.47633
             },
             "x50": {
-              "chancePercent": 35.5408,
-              "expectedAmountPerKill": 17.7704
+              "chancePercent": 44.7633,
+              "expectedAmountPerKill": 22.38165
             }
           }
         },
@@ -365883,16 +365883,16 @@
           "mobName": "Stakato Queen Zyrnna",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 1.3207,
-              "expectedAmountPerKill": 0.013207
+              "chancePercent": 32.8063,
+              "expectedAmountPerKill": 0.328063
             },
             "x10": {
-              "chancePercent": 1.3207,
-              "expectedAmountPerKill": 0.13207
+              "chancePercent": 32.8063,
+              "expectedAmountPerKill": 3.28063
             },
             "x50": {
-              "chancePercent": 1.3207,
-              "expectedAmountPerKill": 0.66035
+              "chancePercent": 32.8063,
+              "expectedAmountPerKill": 16.40315
             }
           }
         }
@@ -416207,16 +416207,16 @@
           "mobName": "Handmaiden Of Orfen",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 32.1296,
-              "expectedAmountPerKill": 0.321296
+              "chancePercent": 74.3578,
+              "expectedAmountPerKill": 0.743578
             },
             "x10": {
-              "chancePercent": 32.1296,
-              "expectedAmountPerKill": 3.21296
+              "chancePercent": 74.3578,
+              "expectedAmountPerKill": 7.43578
             },
             "x50": {
-              "chancePercent": 32.1296,
-              "expectedAmountPerKill": 16.0648
+              "chancePercent": 74.3578,
+              "expectedAmountPerKill": 37.1789
             }
           }
         },
@@ -421655,16 +421655,16 @@
           "mobName": "Timak Orc Troop Archer",
           "rateProfiles": {
             "x1": {
-              "chancePercent": 9.7627,
-              "expectedAmountPerKill": 0.097627
+              "chancePercent": 10.7425,
+              "expectedAmountPerKill": 0.107425
             },
             "x10": {
-              "chancePercent": 9.7627,
-              "expectedAmountPerKill": 0.97627
+              "chancePercent": 10.7425,
+              "expectedAmountPerKill": 1.07425
             },
             "x50": {
-              "chancePercent": 9.7627,
-              "expectedAmountPerKill": 4.88135
+              "chancePercent": 10.7425,
+              "expectedAmountPerKill": 5.37125
             }
           }
         }
