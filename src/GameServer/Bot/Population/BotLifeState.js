@@ -3643,6 +3643,17 @@ const BotLifeState = {
         return writeHeldOnRevision(member, { stats: { equipmentPlan: plan, lastReason: reason } }, reason);
     },
 
+    retireMarketErrand(characterId, expected) {
+        const current = cache.get(Number(characterId));
+        if (!current || current.phase !== 'cold' || !expected) return Promise.resolve(null);
+        const Errands = require('./CombinedErrandPolicy');
+        const next = Errands.complete(current, expected);
+        if (JSON.stringify(next.stats.marketErrands) === JSON.stringify(current.stats.marketErrands || [])
+            && JSON.stringify(next.stats.marketErrand) === JSON.stringify(current.stats.marketErrand || null)) return Promise.resolve(null);
+        return writeHeldOnRevision(current, { stats: { marketErrands: next.stats.marketErrands,
+            marketErrand: next.stats.marketErrand, lastReason: 'market_errand_need_changed' } }, 'market_errand_need_changed');
+    },
+
     acceptClanLevelSpState(row) {
         const snapshot = normalize(row);
         cache.set(snapshot.characterId, snapshot);

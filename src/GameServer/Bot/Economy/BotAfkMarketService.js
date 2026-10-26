@@ -272,7 +272,8 @@ function sellLines(state, stock, inventory, evaluateOptions = {}) {
             break;
         }
     };
-    for (const listing of ListingPolicy.prioritizeListings(listings)) {
+    for (const listing of ListingPolicy.prioritizeListings(listings, { board: AfkTrade.boardIndex(),
+        characterId: state.characterId, timestamp: evaluateOptions.now })) {
         existing.filter(line => lineKey(line) === lineKey(listing)).forEach(keepExisting);
         appendListing(listing);
     }

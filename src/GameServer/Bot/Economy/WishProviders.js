@@ -643,6 +643,15 @@ function buildProjection(state, ctx, deps) {
     const production = new Map(), seenProduction = new Set();
     const investment = state.stats?.shotRecipeDemand;
     const investmentId = Number(investment?.at) + 30 * 60 * 1000 > timestamp ? Number(investment.itemId) : 0;
+    const productionBatches = recipe => {
+        const setup = investmentId === Number(recipe.recipeItemId) ? investment
+            : [state.stats?.shotCraft?.preparing, state.stats?.wealthCraft].find(row => row
+                && (row === state.stats?.shotCraft?.preparing || row.outcome === 'buying')
+                && Number(row.recipeId) === Number(recipe.recipeId) && Number(row.at) + 30 * 60 * 1000 > timestamp);
+        const batches = Number(setup?.batches);
+        return Number.isSafeInteger(batches) && batches > 0
+            ? Math.min(need('./WealthCraftPolicy').MAX_BATCHES, batches) : 1;
+    };
     const serviceCraft = invoke('GameServer/Bot/Economy/CraftShopService');
     if (ctx.board && ctx.hourAdena > 0 && serviceCraft.isServiceCrafter(state)
         && !state.stats?.craftStationId && !/^bot_craft_\d+$/i.test(String(state.accountName || ''))) {
@@ -714,7 +723,10 @@ function buildProjection(state, ctx, deps) {
         const fixedOffers = material ? (deps.fixedProductionOffersFor?.(id) || []).slice(0, 5) : [];
         const listingOffers = shot ? need('./WealthCraftPolicy').drain(need('./ShotSalePolicy').exits(state, recipe, {
             board: ctx.board, timestamp, trip: ctx.trip, npcOffersFor: ctx.npcOffersFor, existing: oldUnits })) : [];
-        for (const offer of [...publicOffers, ...fixedOffers, ...listingOffers]) {
+        const batches = productionBatches(recipe), units = count * batches;
+        for (const source of [...publicOffers, ...fixedOffers, ...listingOffers]) {
+            const offer = source.forQuantity ? source.forQuantity(batches) : source;
+            if (!offer) continue;
             if (!usableExit(offer, ownSales)) continue;
             const trip = ctx.trip?.details?.(offer.town);
             if (!trip?.known || ![trip.hours, trip.fees].every(value => Number.isFinite(value) && value >= 0)) continue;
@@ -722,23 +734,23 @@ function buildProjection(state, ctx, deps) {
                 const input = { applicableUnits: offer.applicableUnits, willingUnits: offer.willingUnits,
                     cheaperUnits: offer.cheaperUnits, price: offer.price, residualUnitValue: offer.residualUnitValue };
                 const before = Price.saleOutcome({ ...input, units: oldUnits });
-                const after = Price.saleOutcome({ ...input, units: oldUnits + count });
+                const after = Price.saleOutcome({ ...input, units: oldUnits + units });
                 return { status: before.known && after.known ? 'ready' : 'unknown', exit: offer,
                     before, after, gross: after.receipts - before.receipts };
             })() : Price.bidSale(state, offer, { board: ctx.board, persona: ctx.persona, timestamp, asks,
-                oldUnits, units: count, residualUnitValue: ctx.buyback(id), fixed: offer.type === 'static' });
+                oldUnits, units, residualUnitValue: ctx.buyback(id), fixed: offer.type === 'static' });
             if (sale.status !== 'ready' || sale.exit.trial && !(sale.after.sold > sale.before.sold)) continue;
             const { gross } = sale;
             if (!(gross > 0)) continue;
             const inputPrice = [...(Profit.requirements(recipe) || [])]
-                .reduce((sum, [id, amount]) => sum + amount * positive(price(id)), 0);
+                .reduce((sum, [id, amount]) => sum + amount * batches * positive(price(id)), 0);
             const learningPrice = knownRecipes.has(Number(recipe.recipeId)) ? 0 : positive(price(recipe.recipeItemId));
             const proxy = gross * Number(recipe.successRate ?? 100) / 100 - inputPrice - learningPrice;
             // Independent price is a ranking proxy, not acquisition cost:
             // the bounded DAG can expose a cheaper farm/component craft.
             const previous = production.get(id);
             if (!previous || proxy > previous.proxy || proxy === previous.proxy && recipe.recipeId < previous.recipe.recipeId)
-                production.set(id, { recipe, gross, proxy, shot, earningPreference, inputPrice: inputPrice + learningPrice, town: offer.town, trip });
+                production.set(id, { recipe, batches, gross, proxy, shot, earningPreference, inputPrice: inputPrice + learningPrice, town: offer.town, trip });
         }
         }
     }
@@ -751,7 +763,8 @@ function buildProjection(state, ctx, deps) {
         const path = craftPath(row.recipe, id, 0, true);
         if (!path) continue;
         produced.add(id);
-        root({ key: `resale:${id}`, need: 'power', object: { itemId: id, amount: Number(row.recipe.productCount || 1), kind: 'resale' },
+        root({ key: `resale:${id}`, need: 'power', object: { itemId: id,
+            amount: Number(row.recipe.productCount || 1) * row.batches, kind: 'resale' },
             primaryEarning: row.earningPreference,
             // Keep the crafter's finite income setup in the same graph as
             // its gear. Otherwise its separate native action can travel to

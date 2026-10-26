@@ -111,3 +111,93 @@ assert.equal(Intent.meetingPurchase(selectedNetwork, standing, terms,
 assert.equal(Intent.meetingPurchase(selectedNetwork, [{ ...standing[0], worth: 2000 }], terms).amount, 10,
     'ordinary public willingness remains valid without selected-quote fallback');
 console.log('PASS finite selected purchase consent, standing bid limits and native funding rounding');
+
+const nativeWish = { ...requiredWish, plan: { ...requiredWish.plan,
+    requirements: [{ key: 'item:202', amount: 2, plan: { ...plannedPurchase('npc', true, true, 2),
+        unitPrice: 1459, town: 'Dion', availableUnits: Infinity } }] } };
+const nativeNetwork = { ...selectedNetwork, queue: [nativeWish], activity: {
+    ...selectedNetwork.activity, sourceType: 'npc', valueHours: .5 } };
+assert.equal(Intent.project({}, nativeNetwork, {}, () => 378, 40).length, 0,
+    'a selected NPC purchase still publishes no duplicate player demand');
+const peerInstead = Intent.meetingPurchase(nativeNetwork, [], { ...terms, price: 1200 });
+assert(peerInstead, 'a cheaper peer quote may fulfill the exact funded NPC input');
+assert.equal(peerInstead.amount, 2); assert.equal(peerInstead.valueHours, .5);
+for (const changed of [{ count: 3 }, { price: 1460 }, { town: 'Giran' }, { enchant: 1 }, { selfId: 203 }])
+    assert.equal(Intent.meetingPurchase(nativeNetwork, [], { ...terms, ...changed }), null);
+assert.equal(Intent.meetingPurchase({ ...nativeNetwork, queue: [{ ...nativeWish, funded: false }] }, [], terms), null);
+
+const materialIntent = { key: 'power:101:7', itemId: 202, amount: 10,
+    worth: 100, valueHours: 1, valueRate: .01 };
+const materialTerms = { selfId: 202, count: 2, price: 500, town: 'Dion' };
+const materialNetwork = { quantityPrepared: true, moneyPrice: .0001, queue: [], activity: null };
+assert.equal(Intent.purchaseWorth(materialIntent, materialNetwork.moneyPrice), 1000);
+assert.equal(Intent.meetingPurchase(materialNetwork, [materialIntent], materialTerms), materialIntent,
+    'an advertised craft input uses the same goal willingness at consent, even when another action is selected');
+assert.equal(Intent.meetingPurchase(materialNetwork, [materialIntent], { ...materialTerms, price: 1001 }), null,
+    'fresh goal value still bounds the purchase price');
+assert.equal(Intent.meetingPurchase(materialNetwork, [materialIntent], { ...materialTerms, count: 11 }), null);
+assert.equal(Intent.meetingPurchase(materialNetwork, [], materialTerms), null,
+    'a retired goal does not gain consent from its old public bid');
+assert.equal(Intent.meetingPurchase({ ...materialNetwork, quantityPrepared: false }, [materialIntent], materialTerms), null,
+    'an unprepared network cannot authorize a purchase from a prior intention');
+assert.equal(Intent.meetingPurchase({ ...materialNetwork, moneyPrice: .001 }, [materialIntent], materialTerms), null,
+    'higher priority spending can lower the fresh willingness');
+console.log('PASS public craft input and meeting consent share goal willingness');
+
+const requiredInput = { ...materialIntent, quote: { price: 700, town: 'Dion', amount: 3 } };
+const fundedKit = { ...materialNetwork, moneyPrice: .001, queue: [{ key: materialIntent.key, funded: true,
+    valueHours: 1, ratio: .01, plan: { missingAmount: 1, requirements: [{ key: 'item:202', amount: 10,
+        plan: { ...plannedPurchase('afk', true, true, 10), unitPrice: 700, availableUnits: 3, town: 'Dion' } }] } }] };
+assert.equal(Intent.meetingPurchase(fundedKit, [requiredInput], materialTerms).worth, 700,
+    'another prerequisite of the same funded kit retains its fresh executable quote authority');
+for (const change of [{ price: 701 }, { count: 4 }, { town: 'Giran' }, { enchant: 1 }])
+    assert.equal(Intent.meetingPurchase(fundedKit, [requiredInput], { ...materialTerms, ...change }), null);
+assert.equal(Intent.meetingPurchase({ ...fundedKit, queue: [{ key: materialIntent.key, funded: false }] },
+    [requiredInput], materialTerms), null, 'an unfunded kit cannot spend at a required input quote');
+assert(Intent.meetingPurchase(fundedKit, [materialIntent], materialTerms),
+    'a fresh funded input quote survives omission from the public projection');
+const retiredKit = { ...fundedKit, queue: [{ ...fundedKit.queue[0], plan: { missingAmount: 0 } }] };
+assert.equal(Intent.meetingPurchase(retiredKit, [requiredInput], materialTerms), null,
+    'an old public quote cannot replace a retired actual input');
+
+let deepInput = { missingAmount: 3, requirements: [] };
+for (let depth = 0; depth < 6; depth++) deepInput = { missingAmount: 1,
+    requirements: [{ key: depth === 0 ? 'item:202' : `craft:${depth}`, amount: 3, plan: deepInput }] };
+assert(Intent.project({}, { quantityPrepared: true, queue: [{ key: 'power:101:7', object: { itemId: 101 },
+    valueHours: 1, ratio: .01, plan: deepInput }] }, {}, () => 100, 40).some(row => row.itemId === 202 && row.amount === 3),
+    'nested craft inputs inside the native graph depth remain publicly purchasable');
+
+const crystalPlan = amount => ({ ...plannedPurchase('afk', true, true, amount),
+    unitPrice: 318, availableUnits: 575, town: 'Giran' });
+const crystalRoot = (key, amount) => ({ ...preparedRoot(key, 1458, crystalPlan(amount)), funded: true });
+const exchange = crystalRoot('power:854:2', 370);
+exchange.plan.intentionPath = { kind: 'craft', missingAmount: 1, recipeId: 59,
+    requirements: [{ key: 'item:1914', amount: 10, plan: plannedPurchase(undefined, false, false, 10) }] };
+const exchangeNetwork = { quantityPrepared: true, moneyPrice: 1, queue: [exchange] };
+const exchangeRows = Intent.project({}, exchangeNetwork, {}, () => 0, 40);
+assert.deepEqual(exchangeRows.map(row => [row.itemId, row.amount]), [[1458, 370], [1914, 10]],
+    'the actual exchange and future craft inputs both survive publication');
+exchange.plan.intentionPath.requirements = [{ key: 'item:1458', amount: 500, plan: crystalPlan(500) }];
+assert.equal(Intent.project({}, exchangeNetwork, {}, () => 0, 40)[0].amount, 370,
+    'alternative paths do not add a second quantity for the same goal');
+
+const firstCrystal = crystalRoot('power:883:5', 117), nextCrystal = crystalRoot('power:915:3', 260);
+const rootNetwork = { quantityPrepared: true, moneyPrice: 1, queue: [firstCrystal, nextCrystal],
+    activity: { kind: 'buy', activity: 'shopping', sourceType: 'afk', quoted: true, executable: true,
+        itemId: 1458, amount: 117, availableUnits: 575, unitPrice: 318, town: 'Giran', rootKey: firstCrystal.key } };
+const rootRows = Intent.project({}, rootNetwork, {}, () => 0, 1);
+assert.equal(rootRows.length, 1); assert.equal(rootRows[0].amount, 117);
+const crystalTerms = { selfId: 1458, count: 260, price: 318, town: 'Giran', enchant: 0 };
+assert.equal(Intent.meetingPurchase(rootNetwork, rootRows, crystalTerms).key, nextCrystal.key,
+    'a funded input omitted by item deduplication receives its own fresh certificate');
+for (const change of [{ count: 261 }, { count: 377 }, { price: 319 }, { town: 'Dion' }, { enchant: 1 }])
+    assert.equal(Intent.meetingPurchase(rootNetwork, rootRows, { ...crystalTerms, ...change }), null,
+        'root quantities cannot be added or transferred to a different quote');
+assert.equal(Intent.meetingPurchase({ ...rootNetwork, queue: [firstCrystal, { ...nextCrystal, funded: false }] },
+    rootRows, crystalTerms), null, 'another root cannot lend its funding');
+const futureOnly = { ...nextCrystal, plan: { missingAmount: 1,
+    intentionPath: { missingAmount: 1, requirements: [{ key: 'item:1458', amount: 260, plan: crystalPlan(260) }] } } };
+assert.equal(Intent.meetingPurchase({ ...rootNetwork, queue: [firstCrystal, futureOnly] },
+    Intent.project({}, { quantityPrepared: true, queue: [futureOnly] }, {}, () => 0, 40), crystalTerms), null,
+    'a quoted future craft alternative cannot impersonate the funded actual acquisition');
+console.log('PASS exchange inputs survive craft alternatives and meetings retain each funded root quantity');

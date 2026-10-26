@@ -646,7 +646,7 @@ async function finalizeTrade(result, kind, counterpartyId) {
     }
     MarketCounters.deal(result.line?.selfId, result.line?.price, result.amount, Date.now(),
         kind === 'sale' ? result.shop?.ownerId : counterpartyId, result.shop?.town || null,
-        kind === 'sale' ? counterpartyId : result.shop?.ownerId);
+        kind === 'sale' ? counterpartyId : result.shop?.ownerId, Number(result.line?.enchant || 0));
     syncOnlineInventory(result.shop.ownerId, result.ownerInventory);
     syncOnlineInventory(counterpartyId, result.counterpartyInventory);
     await settleOwners(result.settlementOwners);
@@ -1115,7 +1115,8 @@ async function init() {
     // The market counters learn the board's last deals again (group E, E58).
     MarketCounters.useSpots(() => invoke('GameServer/Bot/Population/SpotProfiles').ensure() || []);
     MarketCounters.reset();
-    MarketCounters.load(await Database.fetchRecentBoardDeals({ perItem: MarketCounters.REPLAY_DEALS }));
+    MarketCounters.load(await Database.fetchRecentBoardDeals({ perItem: MarketCounters.REPLAY_DEALS }),
+        await Database.fetchRecentFixedStoreDeals());
     boardReady = true;
     await require('./TradeMeetingService').init();
     notifyBoardChange({ ready: true });

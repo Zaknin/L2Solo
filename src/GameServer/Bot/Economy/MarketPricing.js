@@ -30,7 +30,7 @@ function traderContext(state, deps = {}) {
     // The bot's own trip to a town: none to the town it is shopping in.
     const here = state?.activity === 'shopping' ? state.currentRegion || null : null;
     const demandFor = (id, enchant, town, askingPrice) => {
-        const demand = !enchant ? require('./ShotTradeDemand').forecast(id, town, timestamp) : null;
+        const demand = !enchant ? require('./MarketTradeDemand').forecast(id, town, timestamp) : null;
         if (!demand || !(askingPrice > 0)) return demand;
         const board = deps.board || economy.board;
         const belief = PriceBelief.prior(id, { board, characterId: Number(state.characterId),

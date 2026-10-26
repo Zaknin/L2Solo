@@ -84,6 +84,40 @@ async function run() {
     const resumedCraft = { strategy: 'none', status: 'deferred', reason: 'wish_focus', recipeId: 1,
         target: { selfId: 76, slot: 7 }, materials: [{ selfId: 1458, amount: 6 }] };
     assert.equal(count(state(1458, { equipmentPlan: resumedCraft })), 14, 'deferred personal craft retains its collected inputs');
+    const incompleteCraft = { ...resumedCraft, status: 'active', strategy: 'craft',
+        materials: [{ selfId: 1458, amount: 353 }] };
+    const pausedCraft = Selection.deferredWishPlan(incompleteCraft, {}, state());
+    assert.equal(pausedCraft.heldInputs[1458], 20, 'deferral captures the already collected inputs');
+    const productionStock = state(1458, { equipmentPlan: pausedCraft });
+    productionStock.inventory[1458].amount += 11;
+    assert.equal(count(productionStock), 11, 'new production inputs stay free of the paused gear reserve');
+    assert.equal(invoke('GameServer/Bot/Economy/ShotCraftPolicy').availableMaterial(productionStock, 1458), 11);
+    const productionIterator = invoke('GameServer/Bot/Population/ColdOccupationSources').reservations(productionStock);
+    let productionStep; do { productionStep = productionIterator.next(); } while (!productionStep.done);
+    assert.equal(productionStep.value[1458], 20, 'the worker and executor protect the same fixed quantity');
+    assert.deepEqual(Selection.deferredWishPlan(pausedCraft, {}, productionStock).heldInputs, pausedCraft.heldInputs,
+        'repeated reviews cannot absorb new purchases into the old reserve');
+    const resumed = { ...pausedCraft, status: 'active', strategy: 'craft' };
+    assert.equal(count(state(1458, { equipmentPlan: resumed })), 0, 'resuming gear collection restores its full requirement');
+    assert.equal(Selection.deferredWishPlan(resumed, {}, productionStock).heldInputs[1458], 31,
+        'a later pause captures the newly collected gear inputs');
+    const productionTrip = { ...productionStock, stats: { ...productionStock.stats,
+        shotCraft: { preparing: { recipeId: 20, batches: 11, gearTarget: 76,
+            gearInputs: { 1458: 20 }, at: Date.now() } } } };
+    const replanned = Selection.deferredWishPlan({ ...incompleteCraft }, {}, productionTrip);
+    assert.equal(replanned.heldInputs[1458], 20,
+        'an intervening gear replan cannot claim the production inputs bought during its trip');
+    assert.equal(count(productionTrip), 0, 'the selected production lot cannot return to the market before crafting');
+    assert.equal(Disposition.warehouseCandidates(productionTrip).some(row => row.selfId === 1458), false,
+        'storage cannot take the selected production input');
+    assert.equal(invoke('GameServer/Bot/Economy/ShotCraftPolicy').availableMaterial(productionTrip, 1458), 11,
+        'the production executor can consume its own retained inputs');
+    const expiredProduction = { ...productionTrip, stats: { ...productionTrip.stats,
+        shotCraft: { preparing: { ...productionTrip.stats.shotCraft.preparing, at: Date.now() - 31 * 60000 } } } };
+    assert.equal(count(expiredProduction), 11, 'an obsolete production setup releases only its own input reserve');
+    assert.notEqual(Disposition.reservationInputKey(productionStock),
+        Disposition.reservationInputKey({ ...productionStock, stats: { equipmentPlan: { ...pausedCraft, heldInputs: { 1458: 21 } } } }),
+        'reservation caches include the paused physical ownership');
     const bridge = Selection.withBridgeInputPreparation(state(), paused,
         { strategy: 'npc', status: 'active', weaponBridge: true, target: { selfId: 129, slot: 7 } });
     assert(bridge.inputPreparation, 'a D weapon bridge keeps the unfinished C input goal');
@@ -142,6 +176,15 @@ async function run() {
         'a stale NPC decision cannot sell crystals or mint its payout');
     assert.equal(Native.amount(await Database.fetchItems(sellerId), 1458), 20);
     assert.equal(Native.amount(await Database.fetchItems(sellerId), 57), 10000);
+    const producing = await Life.upsertState({ ...held, stats: { ...held.stats,
+        shotCraft: { preparing: { recipeId: 20, batches: 5, at: Date.now() } } } }, 'fixture_production_inputs');
+    const crystalItem = (await Database.fetchItems(sellerId)).find(row => row.selfId === 1458);
+    await assert.rejects(invoke('GameServer/AfkTrade/AfkTradeService').publishBot(sellerId,
+        { kind: 'shop', storeType: 1, town: 'Giran', title: 'Stale surplus', ...point,
+            lines: [{ selfId: 1458, objectId: crystalItem.id, count: 8, price: 10, stackable: true }] }),
+    /economy_material_protected/, 'the native publication refuses a stale proposal that would escrow production materials');
+    assert.equal(Native.amount(await Database.fetchItems(sellerId), 1458), 20);
+    await Life.upsertState({ ...Life.snapshot(sellerId), stats: { ...producing.stats, shotCraft: null } }, 'fixture_production_finished');
     async function accept(amount, token) {
         const old = (await Database.fetchAfkTradeShops(buyerId)).filter(row => row.kind === 'buy_ad');
         await Database.replaceBoardRecords(buyerId, 'buy_ad', [{ storeType: 3, town: 'Giran',

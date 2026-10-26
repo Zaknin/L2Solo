@@ -144,6 +144,15 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 50));
             marketSellRetryAfter: after.stats.marketSellRetryAfter, lastReason: after.stats.lastReason })}`);
         assert.equal(meetings.size, 1, 'no later pass answers the refused ad again');
 
+        assert.equal(Afk.ownerRecords(buyerId).some(row => row.kind === 'buy_ad'), false,
+            'the payer refuses and retires the stale public quote for every later seller');
+        assert.equal((await Database.fetchItems(buyerId)).find(row => row.selfId === 57).amount, 1000000,
+            'retiring an unfunded intention never moves the physical wallet');
+        // A later independently prepared quote can be answered again.
+        await Afk.replaceBotRecords(buyerId, 'buy_ad', [{ storeType: 3, town: 'Giran', title: 'Skins', ...place,
+            lines: [{ selfId: SKIN, name: 'Animal Skin', count: 20, price: 5000, stackable: true,
+                intent: { itemId: SKIN, amount: 20, price: 5000, key: `resale:${SKIN}`, recipeId: 0, valueHours: 2, valueRate: 100 } }] }], { expected: {} });
+
         // A refused deal while the town errands stop early (a purchase that
         // waits on its own meeting, ColdMarketService.finishTownErrands): the
         // visit cannot end on that pass (GoalExecutor.finishVisit), so the retry
@@ -167,6 +176,42 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 50));
         assert(retryWhilePreparing > Date.now(), 'the sale retry is saved with the pending deal');
         assert(Number(after.stats.marketSellRetryAfter) > Date.now(), 'the ended visit keeps its sale retry');
         assert(Number(errandAfter.stats.marketSellRetryAfter) > Date.now(), 'the errand seller keeps its sale retry');
+        await Afk.replaceBotRecords(buyerId, 'buy_ad', [{ storeType: 3, town: 'Giran', title: 'Skins', ...place,
+            lines: [{ selfId: SKIN, name: 'Animal Skin', count: 20, price: 5000, stackable: true,
+                intent: { itemId: SKIN, amount: 20, price: 5000, key: `resale:${SKIN}`, recipeId: 0, valueHours: 2, valueRate: 100 } }] }], { expected: {} });
+        const liveQuote = (await Database.fetchAfkTradeShops(buyerId)).find(row => row.kind === 'buy_ad');
+        const nativeReprice = Afk.repriceBotLines;
+        let raced = false;
+        Afk.repriceBotLines = async (id, reprices, options) => {
+            if (!raced && id === buyerId && options.withdrawals?.length) {
+                raced = true;
+                await nativeReprice(id, [{ recordId: liveQuote.id, lineId: liveQuote.lines[0].id,
+                    expectedRevision: liveQuote.revision, previousPricing: liveQuote.lines[0].pricing,
+                    price: 5100 }]);
+            }
+            return nativeReprice(id, reprices, options);
+        };
+        try {
+            await Meetings.prepareTrade(errandSellerId, { shopId: liveQuote.id }, SKIN, 1);
+            for (let pass = 0; pass < 10 && (!raced || Meetings.hasPreparation(errandSellerId)); pass++) await settle();
+            assert(raced, 'a newer quote was published before stale cleanup reached the native transaction');
+            const freshQuote = (await Database.fetchAfkTradeShops(buyerId)).find(row => row.id === liveQuote.id);
+            assert.equal(freshQuote.lines[0].price, 5100);
+            assert.equal(freshQuote.status, 'active', 'a refused older revision cannot withdraw a newer buy quote');
+        } finally { Afk.repriceBotLines = nativeReprice; }
+        const refused = [];
+        Coordinator.requestMeetingPreparation = () => new Promise((_resolve, reject) => {
+            refused.push(() => reject(Error('trade_meeting_need_changed')));
+        });
+        let sellerCommandCurrent = true;
+        await Database.withMutationAdmission(() => {
+            if (!sellerCommandCurrent) throw Error('cold_postcommit_source_retired');
+        }, () => Meetings.prepareTrade(errandSellerId, { shopId: liveQuote.id }, SKIN, 1));
+        sellerCommandCurrent = false;
+        refused.forEach(reject => reject());
+        for (let pass = 0; pass < 10 && Afk.ownerRecords(buyerId).some(row => row.id === liveQuote.id); pass++) await settle();
+        assert.equal(Afk.ownerRecords(buyerId).some(row => row.id === liveQuote.id), false,
+            'the payer refusal retires its own quote after the initiating seller command has ended');
         console.log('E311 refused trade meeting does not hold the town visit: passed');
     } finally {
         Coordinator.requestMeetingPreparation = prepare;

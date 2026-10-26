@@ -341,6 +341,11 @@ async function prepareTrade(characterId, store, itemId, amount, options = {}) {
     // Preserve the caller's decision authority across asynchronous native reads.
     // Freshly reading a participant must not turn a stale decision into consent.
     const sourceState = options.coldState || life().cachedState(characterId);
+    const Errands = require('../Bot/Population/CombinedErrandPolicy');
+    const errand = record.storeType === 1 && Errands.pending(sourceState).find(row =>
+        Number(row.selfId) === Number(itemId) && row.town === record.town);
+    const goal = record.storeType === 1 && invoke('GameServer/Bot/Goals/GoalState').snapshot(buyer)?.current;
+    const purchaseGoal = Number(goal?.target?.itemId) === Number(itemId) ? goal : null;
     const callerAuthority = options.economyCommand?.authority || (sourceState
         ? EconomyCommit.authority(sourceState) : null);
     if (callerAuthority) {
@@ -391,26 +396,55 @@ async function prepareTrade(characterId, store, itemId, amount, options = {}) {
             enchant: line.enchant || 0, count, price: line.price, needAdId: 0, needAdRevision: 0, adId: record.id, adRevision: record.revision, certificate: null })) };
     stage(request);
     const entry = staged.get(token);
-    entry.ready = prepareActors(token).catch(error => {
+    entry.ready = prepareActors(token).catch(async error => {
         discard(token);
         // Only the payer's worker refuses a need; on a buy ad the payer is its
         // owner, so the need behind the ad changed. The refusal alone left the
         // ad on the board for every later seller (E198 (2)).
-        if (error.message === 'trade_meeting_need_changed' && record.storeType === 3) buyAdNeedChanged(record);
+        if (error.message === 'trade_meeting_need_changed' && record.storeType === 3) await buyAdNeedChanged(record, line);
+        else if (error.message === 'trade_meeting_need_changed') await purchaseNeedChanged(buyer, errand, purchaseGoal);
         throw error;
     });
     entry.ready.catch(() => {}); // UI confirmation or the bot continuation owns the outcome.
     return quote;
 }
-// The owner plans the same need once more: a cold worker's new card
-// republishes or closes the ad through executePlan, a hot owner's board
-// review looks again. One request per ad revision: a republished ad has a
-// new revision; an unchanged plan does not repeat on every later refusal.
+// Stop advertising the exact quote its payer just refused, then let the
+// owner publish its fresh quantities/value. A later revision survives this
+// cleanup; sibling shop lines and both physical wallets are preserved.
 const refusedAds = new Map();
-function buyAdNeedChanged(record) {
-    if (refusedAds.get(record.id) === record.revision) return;
-    refusedAds.delete(record.id); refusedAds.set(record.id, record.revision);
+async function purchaseNeedChanged(ownerId, errand, goal) {
+    try {
+        await db().withMutationAdmission(() => {
+            if (life().cachedState(ownerId)?.phase !== 'cold') throw Error('stale_market_review');
+        }, async () => {
+            const saved = errand && await life().retireMarketErrand(ownerId, errand);
+            await invoke('GameServer/Bot/Goals/GoalState').abandonAccepted(ownerId, goal);
+            if (saved && errand.purpose === 'clan') await invoke('GameServer/Clan/ClanPurchaseCredit')
+                .returnUnspent(ownerId, errand, 0);
+        });
+    } catch (error) { utils.infoWarn('AfkTrade', 'refused purchase of %d refresh: %s', ownerId, error.message); }
+    coordinator()?.requestEconomyRefresh?.(ownerId);
+}
+
+async function buyAdNeedChanged(record, line) {
+    const key = `${record.id}:${line.id}`;
+    if (refusedAds.get(key) === record.revision) return;
+    refusedAds.delete(key); refusedAds.set(key, record.revision);
     if (refusedAds.size > 1024) refusedAds.delete(refusedAds.keys().next().value);
+    try {
+        // This is the payer's later refusal, not a continuation of the
+        // initiating seller's command. Its async admission may have expired.
+        // Admit only this unchanged conditional BUY quote; SQL repeats the
+        // owner, revision and pricing checks at the write boundary.
+        await db().withMutationAdmission(() => {
+            const quote = afk().boardIndex().records.get(Number(record.id))?.find(row => row.lineId === line.id);
+            if (!quote || quote.ownerId !== record.ownerId || quote.revision !== record.revision
+                || quote.custodyPolicy !== 1 || quote.storeType !== 3) throw Error('afk_trade_shop_changed');
+        }, () => afk().repriceBotLines(record.ownerId, [], { withdrawals: [{ recordId: record.id,
+            lineId: line.id, expectedRevision: record.revision, previousPricing: line.pricing || null }] }));
+    } catch (error) {
+        utils.infoWarn('AfkTrade', 'refused buy quote %d refresh: %s', record.id, error.message);
+    }
     const phase = life().cachedState(record.ownerId)?.phase;
     if (phase === 'cold') coordinator()?.requestEconomyRefresh?.(record.ownerId);
     else if (phase === 'hot') {
@@ -434,7 +468,8 @@ async function trade(characterId, store, itemId, amount, options) {
     // Release it before either independent worker preparation replies.
     const token = prepared.preparationId, entry = staged.get(token);
     entry.ready.then(() => accept(token, characterId)).catch(error => {
-        utils.infoWarn('AfkTrade', 'meeting preparation %s: %s', token, error.message);
+        utils.infoWarn('AfkTrade', 'meeting preparation %s: %s (actor=%d record=%d item=%d count=%d)',
+            token, error.message, characterId, store.shopId, itemId, amount);
     });
     return { pending: true, preparationId: token, token, outcome: 'preparing', purchased: false, sold: false, state: life().cachedState(characterId) };
 }

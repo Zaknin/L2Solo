@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS market_trades (
     sellerCharacterId INTEGER,
     sellerName TEXT,
     buyerCharacterId INTEGER,
-    buyerName TEXT
+    buyerName TEXT,
+    enchant INTEGER CHECK(enchant IS NULL OR enchant >= 0)
 );
 CREATE INDEX IF NOT EXISTS market_trades_item_recent
     ON market_trades(selfId, occurredAt DESC, id DESC);

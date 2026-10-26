@@ -9,17 +9,33 @@ const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
 const ColdEconomyDecision = invoke('GameServer/Bot/Population/ColdEconomyDecision');
 const KnowledgeLearning = invoke('GameServer/Bot/AI/KnowledgeLearning');
 const { MAX_GEAR_COPIES_PER_TYPE } = require('./WarehouseRules');
+const TradeDemand = require('./MarketTradeDemand');
 
 
 function isGear(item = {}) {
     return String(item.kind || '').startsWith('Weapon.') || String(item.kind || '').startsWith('Armor.');
 }
 
-// A showcase has three places. Rank unit asks, not stack totals: a cheap
-// bulk lot must not displace a valuable single item. Stable ties keep the
-// same selection on the worker and at a native town visit.
-function prioritizeListings(listings = []) {
-    return listings.slice().sort((left, right) => Number(right.price || 0) - Number(left.price || 0)
+// Public interest and recent completed purchases earn scarce board space.
+// Quote depth is a ranking signal, never funded or guaranteed receipts.
+// Unobserved stock uses the old stable price order only for spare places.
+function prioritizeListings(listings = [], { board, characterId = 0, timestamp = Date.now() } = {}) {
+    const score = item => {
+        let bidUnits = 0, bidPrice = 0;
+        for (const line of board?.list(item.selfId, BoardRules.BUY) || []) {
+            if (Number(line.ownerId) === Number(characterId) || Number(line.enchant || 0) !== Number(item.enchant || 0)) continue;
+            bidUnits += Number(line.count); bidPrice = Math.max(bidPrice, Number(line.price));
+        }
+        const flow = !item.enchant ? TradeDemand.forecast(item.selfId, null, timestamp) : null;
+        const count = Math.max(0, Number(item.count) || 0), price = Math.max(0, Number(item.price) || 0);
+        return [bidUnits > 0 && bidPrice >= price ? 2 : bidUnits > 0 || flow ? 1 : 0,
+            Math.max(Math.min(count, bidUnits) * Math.min(price, bidPrice),
+                Math.min(count, flow?.applicableUnits || 0) * price)];
+    };
+    const scores = new Map(listings.map(item => [item, score(item)]));
+    return listings.slice().sort((left, right) => scores.get(right)[0] - scores.get(left)[0]
+        || scores.get(right)[1] - scores.get(left)[1]
+        || Number(right.price || 0) - Number(left.price || 0)
         || Number(right.enchant || 0) - Number(left.enchant || 0)
         || Number(isGear(right)) - Number(isGear(left))
         || Number(left.selfId) - Number(right.selfId));
@@ -90,8 +106,8 @@ const BOARD_SLOTS = BoardRules.BOT_SHOP_LINES + BoardRules.BOT_RECORDS.sell_ad;
 // The bot's sale at a market visit or a review (group E): the author's hard
 // rules first; every other item goes by one expected-value decision (the
 // board at its best ask, the NPC buy-back now, a buy ad answered in its town,
-// or keeping it), one roll. The highest unit asks take the market's bounded
-// slots, including held listings, so new valuable loot can replace cheap stock.
+// or keeping it), one roll. Public interest and recent purchases rank the
+// bounded slots, including held listings, before the unknown waiting stock.
 // A line the bot already has keeps its price
 // (its own look reprices it or takes it back, MarketPricing.look). options: now
 // (the decision point), slots (board slots), kept (selfId -> price of its
@@ -171,7 +187,7 @@ function evaluate(state, options = {}) {
             pricing: MarketPricing.lineState(decision.item.selfId, ctx, { price, storeType: BoardRules.SELL, enchant: decision.item.enchant || 0 }) };
     }
     const slots = Math.max(0, Math.floor(Number(options.slots ?? BOARD_SLOTS)));
-    const chosen = new Set(prioritizeListings(decisions.filter(row => row.action === 'list').map(row => row.item)).slice(0, slots));
+    const chosen = new Set(prioritizeListings(decisions.filter(row => row.action === 'list').map(row => row.item), ctx).slice(0, slots));
     for (const decision of decisions) {
         if (decision.action !== 'list' || chosen.has(decision.item)) continue;
         // Grade crystals wait for a market slot; cleanup must not turn them

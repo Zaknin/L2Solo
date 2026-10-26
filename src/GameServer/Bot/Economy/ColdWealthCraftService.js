@@ -181,6 +181,11 @@ function withOutcome(state, opportunity, outcome, extras = {}) {
         ...state,
         stats: {
             ...(state.stats || {}),
+            ...(outcome === 'buying' && (state.stats?.wealthCraft?.outcome !== 'buying'
+                || Number(state.stats.wealthCraft.recipeId) !== Number(opportunity.recipe.recipeId)
+                || Number(state.stats.wealthCraft.batches) !== Number(opportunity.batches || 1))
+                ? DecisionEvents.applyRaise({ ...(state.stats || {}) },
+                    require('./DecisionSections').sectionMask(['sources', 'benefits', 'money'])) : {}),
             ...(['sold', 'waiting_for_buyer'].includes(outcome) ? { production: {
                 ...(state.stats?.production || {}),
                 crafts: Number(state.stats?.production?.crafts || 0) + 1,
@@ -189,6 +194,7 @@ function withOutcome(state, opportunity, outcome, extras = {}) {
             wealthCraft: {
                 recipeId: Number(opportunity.recipe.recipeId),
                 productId: Number(opportunity.recipe.productId),
+                batches: Number(opportunity.batches || 1),
                 inputCost: Number(opportunity.basket.cost),
                 expectedProfit: Number(opportunity.expectedProfit),
                 outcome,

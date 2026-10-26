@@ -1450,7 +1450,8 @@ function forState(state = {}, deps = {}) {
 // npcOwnsPurchase, WishProviders.personalCraftPlan. Shared nodes stay shared.
 // A requirement row without its plan is looked up by key in network.plans
 // (personalCraftPlan); `unresolved` collects those keys for the kept map.
-const NODE_FIELDS = ['kind', 'sourceType', 'quoted', 'executable', 'recipeId', 'missingAmount', 'improvement', 'unseal', 'batches'];
+const NODE_FIELDS = ['kind', 'sourceType', 'quoted', 'executable', 'recipeId', 'missingAmount', 'improvement', 'unseal', 'batches',
+    'unitPrice', 'town', 'availableUnits'];
 const NO_REQUIREMENTS = Object.freeze([]);
 function planTrimmer(unresolved = new Set()) {
     const seen = new Map();
@@ -1538,10 +1539,15 @@ function planOf(context, base, { key, tripHour, projection = null, knowledgeEnab
 // one copy for the build and every later view of its plan.
 function stockReader(state, rootItem) {
     const reserved = invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state);
+    // Production actions cannot consume the collected personal gear kit.
+    // Their purchase graph must see that same free stock, or an input trip
+    // reaches the seller with no surviving need for its own reserved goods.
+    let productionReserved;
     const supply = state.stats?.equipmentPlan?.clanGoal?.clanId && require('./ClanCrystalSupply').requirement(state);
     return (id, rootKey) => ({ owned: supply?.key === rootKey ? require('./ClanCrystalSupply').stock(state, id)
         : rootKey.startsWith('stock:') && rootItem(rootKey) === id
-        ? positive(state.inventory?.[id]?.amount) : invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {}, reserved),
+        ? positive(state.inventory?.[id]?.amount) : invoke('GameServer/Bot/Economy/WealthCraftDecision').freeAmount(state, state.inventory?.[id] || {},
+            rootKey.startsWith('resale:') ? productionReserved ||= invoke('GameServer/Bot/Economy/ItemDisposition').reservedEquipmentAmounts(state) : reserved),
     incoming: positive(state.acceptedIncoming?.[id]) });
 }
 function valueReaders(state, network, values, persona, knowledgeEnabled, kitCost, money) {

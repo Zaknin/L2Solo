@@ -1,7 +1,7 @@
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
-const { isNativeSource } = require('./TradeIntent');
+const { isNativeSource, purchaseWorth } = require('./TradeIntent');
 const Diagnostics = require('./EconomyDiagnostics');
 const BoardRules = require('../../AfkTrade/BoardRules');
 const nativeGoal = goal => isNativeSource(goal?.plan?.sourceType);
@@ -87,7 +87,7 @@ function bidFor(state, goal, { money = Infinity, ...options } = {}) {
         ...options, tripCost: options.economy?.trip || options.tripCost
     });
     let worth = goal.intent?.key && ctx.economy.moneyPrice > 0
-        ? goal.intent.valueHours / Math.max(1, goal.intent.amount) / ctx.economy.moneyPrice
+        ? purchaseWorth(goal.intent, ctx.economy.moneyPrice)
         : ctx.economy.worth(selfId) ?? requestedPrice;
     if (!(worth > 0)) {
         const belief = PriceBelief.prior(selfId, ctx);
@@ -110,7 +110,7 @@ function bidFor(state, goal, { money = Infinity, ...options } = {}) {
         rank: template.etc?.rank || 'none',
         price,
         count,
-        purchaseCap: chosen.purchaseCap,
+        purchaseCap: Math.min(cap, chosen.purchaseCap ?? Infinity),
         survivalCost: kit,
         pricing: chosen.pricing
     };

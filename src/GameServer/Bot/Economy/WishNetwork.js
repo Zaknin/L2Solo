@@ -670,6 +670,12 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         return node?.object?.kind === 'resale' && node.paths?.some(path => ['craft', 'spoil_sale'].includes(path.kind)
             && path.trial === true && path.repeatable === false);
     };
+    // A direct production root is itself the craft path. Its finite output
+    // quantity must enter allocation, just like an item requirement does;
+    // otherwise even an eleven-batch goal requests one batch of inputs.
+    const rootAmount = node => node?.object?.kind === 'resale'
+        && node.paths?.some(path => path.kind === 'craft' && path.trial === true && path.repeatable === false)
+        && Number.isSafeInteger(node.object.amount) && node.object.amount > 0 ? node.object.amount : 1;
     // MVP-4: one horizon H per root; a benefit per hour starts when the
     // path is ready (funding delay at net income, then the path's hours).
     // An unknown delay keeps the interest unresolved: no money, no gap.
@@ -709,7 +715,8 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
     // returned claims enter the caller's map only when it keeps the root.
     const allocate = (wish, used) => {
         const allocation = { rootKey: wish.key, used: new Map(used) };
-        const plan = solve(wish.key, 0, 1, allocation, finiteProduction(wish.key), byKey.get(wish.key).progressionPriority > 0);
+        const plan = solve(wish.key, 0, rootAmount(byKey.get(wish.key)), allocation,
+            finiteProduction(wish.key), byKey.get(wish.key).progressionPriority > 0);
         wish.progressionPriority = nonnegative(byKey.get(wish.key).progressionPriority);
         wish.progressionFunding = !!byKey.get(wish.key).progressionFunding;
         wish.plan = plan; wish.price = plan?.price ?? Infinity; wish.effort = plan?.effort ?? Infinity;
