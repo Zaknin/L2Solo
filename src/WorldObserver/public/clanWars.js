@@ -11,6 +11,11 @@
         conflict_cooled: 'The conflict has cooled', war_losses: 'Repeated military losses', manual: 'Clan command', clan_dissolved: 'Clan dissolved' };
     const outcomes = { assembled: 'War party formed', spot_cleared: 'Enemy spot cleared', losses: 'Retreat after losses',
         time_limit: 'Expedition time elapsed', war_ended: 'War ended; returning home', roster_changed: 'Party changed; returning home' };
+    const assemblyReasons = { waiting_slot: 'Waiting for a shared party slot', party_capacity_wait: 'Waiting for a shared party slot',
+        waiting_budget: 'Waiting for server capacity', forming: 'Forming the party', member_busy: 'Member busy; retrying',
+        roster_changed: 'Rechecking the roster', formation_retry: 'Retrying formation', roster_not_ready: 'Waiting for a healer and two fighters',
+        no_fresh_intel: 'Waiting for a fresh enemy sighting', operation_capacity: 'All military operation slots are occupied',
+        operation_cooldown: 'Resting before another expedition', ready: 'Roster ready; waiting in the military queue' };
     function relations(snapshot, clanId) {
         const rows = snapshot?.declarations || [], own = Number(clanId), targets = new Set();
         for (const row of rows) if (row.active === 1) {
@@ -39,6 +44,8 @@
         const rows = relations(snapshot, own), brief = summary(snapshot, own);
         const operations = (snapshot.campaigns?.operations || []).filter(op => op.clanId === own || op.enemyClanId === own);
         const plan = snapshot.campaigns?.plans?.find(p => p.clanId === own), decision = plan?.lastDecision;
+        const queued = snapshot.campaigns?.assembly?.queue?.find(r => r.clanId === own);
+        const readiness = snapshot.campaigns?.assembly?.readiness?.find(r => r.clanId === own);
         const age = at => `<time title="${escape(time(at))}">${escape(relative(at))}</time>`;
         const until = at => { const seconds = Math.max(1, Math.ceil((at - now) / 1000));
             return seconds < 60 ? `in ${seconds}s` : `in ${Math.ceil(seconds / 60)}m`; };
@@ -50,6 +57,8 @@
             ${decision ? `<p class="clan-war-decision"><strong>${decision.accepted ? decision.action === 'withdraw' ? 'Withdrew war' : decision.reason === 'accept_war' ? 'Accepted war' : 'Declared war' : 'Decision deferred'}</strong> · ${link(decision.targetClanId)}<span>${escape(reasons[decision.reason] || 'Clan diplomatic review')} · ${escape(relative(decision.at))}</span></p>` : ''}
             ${plan?.ceasefireUntil > now ? `<p class="clan-war-note">Cooling off before another declaration · ${escape(time(plan.ceasefireUntil))}</p>` : ''}
             <div class="clan-war-operation-heading"><strong>Expeditions</strong><span>${operations.length} active</span></div>
+            ${queued ? `<p class="clan-war-note"><strong>Roster ready · ${Number(queued.members)} members</strong> → ${link(queued.enemyClanId)}<br>${escape(assemblyReasons[queued.reason] || 'Waiting for formation')} · Priority held since ${escape(time(queued.queuedAt))}</p>`
+                : readiness && readiness.reason !== 'operation_active' ? `<p class="clan-war-note">${escape(assemblyReasons[readiness.reason] || 'Military readiness is being checked')}</p>` : ''}
             <div class="clan-war-operations">${operations.length ? operations.map(op => `<article class="clan-war-operation${op.clanId !== own ? ' is-incoming' : ''}"><div class="clan-war-operation-title"><strong>${link(op.clanId)} → ${link(op.enemyClanId)}</strong><span>${escape(phases[op.phase || op.status] || 'On expedition')}</span></div><p>${op.clanId !== own ? 'Incoming raid' : op.kind === 'defend_spot' ? 'Defend a farm spot' : 'Raid an enemy farm'} · ${Number.isInteger(op.livingMembers) ? `${op.livingMembers}/${(op.memberIds || []).length} members alive` : `${(op.memberIds || []).length} members`}</p><div class="clan-war-destination"><span>${escape(op.phase === 'returning' ? op.homeName || 'Home farm spot' : op.targetName || 'Witnessed enemy location')}</span><small>${op.arrivalAt > now ? `Arrival ${until(op.arrivalAt)}` : op.expiresAt > now ? `Order ends ${until(op.expiresAt)}` : 'Returning order pending'}</small></div><a class="clan-war-map-link" href="/observer/world?clanId=${Number(op.clanId)}" data-clan-map-id="${Number(op.clanId)}" data-clan-map-name="${escape(name(op.clanId))}">Show expedition clan on map</a></article>`).join('') : '<p class="clan-war-note">No military parties deployed.</p>'}</div>
             ${plan?.lastOperation ? `<p class="clan-war-note">Latest expedition: ${escape(outcomes[plan.lastOperation.outcome] || 'Expedition updated')} · ${escape(relative(plan.lastOperation.at))}</p>` : ''}
             ${recent.length ? `<details class="clan-war-history"><summary>War history <span>${recent.length} recent events</span></summary>${recent.map(e => `<div class="clan-war-event"><div>${link(e.fromClanId)} ${e.action === 'declare' ? 'declared war on' : 'withdrew war against'} ${link(e.toClanId)}<small>${escape(reasons[e.reason] || 'Clan diplomatic command')}</small></div>${age(e.createdAt)}</div>`).join('')}</details>` : ''}`;

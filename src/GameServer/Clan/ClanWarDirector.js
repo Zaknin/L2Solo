@@ -7,10 +7,13 @@ const partyOf = s => s?.party?.partyId || s?.partyId || null;
 const near = (a, b, radius = 900) => a && b && Math.hypot(a.locX - b.locX, a.locY - b.locY) <= radius && Math.abs(a.locZ - b.locZ) <= 200;
 
 class ClanWarDirector {
-    constructor({ database, life, parties, clans, war, social, memory, personaFor, form, actions, canWork = () => true, canContinue = () => true, now = Date.now }) {
-        Object.assign(this, { database, life, parties, clans, war, social, memory, personaFor, form, actions, canWork, canContinue, now });
+    constructor({ database, life, parties, clans, war, social, memory, personaFor, form, actions, updateDemand = () => {}, formationStatus = () => null,
+        canWork = () => true, canContinue = () => true, now = Date.now }) {
+        Object.assign(this, { database, life, parties, clans, war, social, memory, personaFor, form, actions, updateDemand, formationStatus, canWork, canContinue, now });
         this.states = new Map(); this.bySpot = new Map(); this.locations = new Map();
         this.plans = new Map(); this.autonomous = new Set(); this.cursor = 0; this.running = null; this.active = false;
+        this.assemblyQueue = new Map(); this.assemblyCursor = 0; this.assemblyCandidates = [];
+        this.assemblyChecks = new Map(); this.assemblyMetrics = { checks: 0, attempts: 0 };
     }
     index(state, id) {
         const prior = this.locations.get(id);
@@ -30,6 +33,7 @@ class ClanWarDirector {
         const [rows, autonomous] = await Promise.all([this.database.fetchClanWarPlans(), this.database.execute([
             "SELECT clanId FROM clan_simulation_clans WHERE mode='autonomous'"])]);
         this.autonomous = new Set(autonomous.map(r => r.clanId));
+        this.membershipRevision = this.clans.membershipRevision();
         rows.forEach(r => this.plans.set(r.clanId, { revision: r.revision, ...JSON.parse(r.stateJson) }));
         this.active = true;
         this.unsubscribe = this.life.subscribePublications(packet => {
@@ -38,7 +42,8 @@ class ClanWarDirector {
             const id = Number(packet.characterId); this.index(this.life.cachedState(id), id);
         }, { replay: true });
     }
-    stop() { this.active = false; this.unsubscribe?.(); }
+    clearAssembly() { this.assemblyQueue.clear(); this.assemblyChecks.clear(); this.updateDemand([]); }
+    stop() { this.active = false; this.unsubscribe?.(); this.clearAssembly(); }
     async save(clanId, state) {
         const previous = this.plans.get(clanId), { revision, ...json } = state;
         const result = await this.database.saveClanWarPlan(clanId, previous?.revision || 0, json);
@@ -207,11 +212,12 @@ class ClanWarDirector {
             await this.save(op.clanId, { ...plan, combatAt: { ...(plan.combatAt || {}), [op.enemyClanId]: at } });
         }
     }
-    async assemble(clan, plan, at) {
-        if (this.parties.admitted().filter(p => p.stats?.warOperation).length >= Config.maxActiveOperations) return;
-        if (at < Number(plan.nextOperationAt || 0) || this.parties.admitted().some(p => p.stats?.warOperation?.clanId === clan.id)) return;
+    prepareAssembly(clan, plan, at, operations = this.parties.admitted().filter(p => p.stats?.warOperation)) {
+        if (operations.length >= Config.maxActiveOperations) return { reason: 'operation_capacity' };
+        if (operations.some(p => p.stats.warOperation.clanId === clan.id)) return { reason: 'operation_active' };
+        if (at < Number(plan.nextOperationAt || 0)) return { reason: 'operation_cooldown' };
         const intel = (plan.intel || []).find(i => at - i.at < Config.intelTtlMs && this.war.view.between(clan.id, i.enemyClanId).mutual);
-        if (!intel) return;
+        if (!intel) return { reason: 'no_fresh_intel' };
         const available = this.ownMembers(clan, at);
         const role = s => invoke('GameServer/Bot/AI/BotRoles').inferRole(s);
         const existing = this.parties.active().find(p => !p.stats?.warOperation && p.stats?.objective?.priority !== 'required'
@@ -223,7 +229,12 @@ class ClanWarDirector {
         const selected = existing ? existing.memberIds.map(id => this.life.cachedState(id))
             : Policy.roster(free, role, Config.minMembers, Config.maxMembers);
         if (selected.length < Config.minMembers || !selected.some(s => role(s) === 'healer')
-            || selected.filter(s => !['healer', 'buffer'].includes(role(s))).length < 2) return;
+            || selected.filter(s => !['healer', 'buffer'].includes(role(s))).length < 2) return { reason: 'roster_not_ready' };
+        return { selected, existing, intel, available };
+    }
+    async assemble(clan, plan, at, ready = this.prepareAssembly(clan, plan, at)) {
+        if (!ready.selected) return null;
+        const { selected, existing, intel, available } = ready;
         const home = selected.find(s => s.characterId === existing?.leaderId) || selected[0];
         const op = { id: `${clan.id}:${at}`, clanId: clan.id, enemyClanId: intel.enemyClanId,
             kind: available.some(s => s.spotId === intel.spotId) ? 'defend_spot' : 'raid_farm', status: 'assembling',
@@ -232,31 +243,96 @@ class ClanWarDirector {
         const party = existing ? await this.setOperation(existing, op) : await this.form(selected, op);
         if (party) await this.save(clan.id, { ...plan, nextOperationAt: at + Config.operationCooldownMs,
             lastOperation: { id: op.id, partyId: party.partyId, at, outcome: 'assembled' } });
+        return party || null;
+    }
+    syncAssemblyDemand() {
+        this.updateDemand([...this.assemblyQueue].filter(([, r]) => !r.existing).map(([id]) => id));
+    }
+    refreshAssembly(at) {
+        const started = performance.now(); let checks = 0;
+        const revision = `${this.war.view.revision}:${this.membershipRevision}`;
+        if (this.assemblyRevision !== revision) {
+            this.assemblyRevision = revision;
+            this.assemblyCandidates = [...new Set(this.war.view.all().filter(r => r.active && this.war.view.hasMutual(r.fromClanId))
+                .map(r => r.fromClanId))].filter(id => this.autonomous.has(id));
+            const candidates = new Set(this.assemblyCandidates);
+            for (const id of this.assemblyChecks.keys()) if (!candidates.has(id)) this.assemblyChecks.delete(id);
+        }
+        const operations = this.parties.admitted().filter(p => p.stats?.warOperation);
+        const slots = Math.min(4, Math.max(0, Config.maxActiveOperations - operations.length));
+        const check = id => {
+            const clan = this.clans.findById(id), plan = this.plans.get(id) || {};
+            const ready = clan && this.autonomous.has(id) && this.war.view.hasMutual(id)
+                ? this.prepareAssembly(clan, plan, at, operations) : { reason: 'war_ended' };
+            checks++;
+            this.assemblyChecks.set(id, { clanId: id, checkedAt: at, reason: ready.reason || 'ready' });
+            if (ready.reason) { this.assemblyQueue.delete(id); return; }
+            const prior = this.assemblyQueue.get(id);
+            if (!prior && this.assemblyQueue.size >= slots) return;
+            this.assemblyQueue.set(id, { ...ready, clan, plan, queuedAt: prior?.queuedAt ?? at,
+                reason: this.canWork() ? 'waiting_slot' : 'waiting_budget' });
+        };
+        const queued = new Set(this.assemblyQueue.keys());
+        for (const id of queued) check(id); // At most the four operation slots.
+        for (let n = 0; n < Math.min(4, this.assemblyCandidates.length); n++) {
+            const id = this.assemblyCandidates[(this.assemblyCursor++) % this.assemblyCandidates.length];
+            if (!queued.has(id)) check(id);
+        }
+        for (const id of [...this.assemblyQueue.keys()].slice(slots)) this.assemblyQueue.delete(id);
+        this.syncAssemblyDemand();
+        this.assemblyMetrics = { ...this.assemblyMetrics, checkedAt: at, checks, refreshMs: performance.now() - started };
+    }
+    async processAssembly(at) {
+        const entry = this.assemblyQueue.entries().next().value;
+        if (!entry || !this.active || !this.canWork()) return;
+        const [id, request] = entry;
+        request.reason = 'forming'; this.assemblyMetrics.attempts++;
+        try {
+            const party = await this.assemble(request.clan, request.plan, at, request);
+            if (party) {
+                this.assemblyQueue.delete(id);
+                this.assemblyChecks.set(id, { clanId: id, checkedAt: at, reason: 'operation_active' });
+            }
+            else request.reason = this.formationStatus()?.clanId === id ? this.formationStatus().reason : 'formation_retry';
+        } finally {
+            // Stop/disable may have happened while the native membership writer ran.
+            if (!this.active || !Config.enabled || !this.canContinue()) this.clearAssembly();
+            else this.syncAssemblyDemand();
+        }
     }
     pulse(at = this.now()) {
-        if (!this.active || this.running || !Config.enabled || !this.canWork()) return this.running;
+        if (!this.active || !Config.enabled || !this.canContinue()) { this.clearAssembly(); return this.running; }
+        if (this.running) return this.running;
+        // Cached, bounded readiness is independent of SQL/worker admission.
+        // It must also revoke stale priority while heavier work is deferred.
+        this.refreshAssembly(at);
+        if (!this.canWork()) return null;
         this.running = (async () => {
             if (this.membershipRevision !== this.clans.membershipRevision()) {
                 this.membershipRevision = this.clans.membershipRevision();
                 const rows = await this.database.execute(["SELECT clanId FROM clan_simulation_clans WHERE mode='autonomous'"]);
                 this.autonomous = new Set(rows.map(r => r.clanId));
+                this.assemblyRevision = null;
+                this.refreshAssembly(at);
+            }
+            await this.processAssembly(at); // One formation attempt, before diplomatic writes.
+            for (const party of this.parties.admitted().filter(p => p.stats?.warOperation)) {
+                if (!this.active || !this.canWork()) break;
+                await this.maintain(party, at);
             }
             const clans = this.clans.all().filter(c => this.autonomous.has(c.id));
             for (let n = 0; n < Math.min(4, clans.length) && this.active && this.canWork(); n++) {
                 const clan = clans[(this.cursor++) % clans.length];
                 await this.review(clan, at);
-                const plan = this.plans.get(clan.id);
-                if (plan && this.active && this.canWork()) await this.assemble(clan, plan, at);
-            }
-            for (const party of this.parties.admitted().filter(p => p.stats?.warOperation)) {
-                if (!this.active || !this.canWork()) break;
-                await this.maintain(party, at);
             }
         })().finally(() => { this.running = null; });
         return this.running;
     }
     inspect() {
         return { active: this.active, plans: [...this.plans].map(([clanId, plan]) => ({ clanId, ...plan })), lastCombat: this.lastCombat,
+            assembly: { ...this.assemblyMetrics, readiness: [...this.assemblyChecks.values()],
+                queue: [...this.assemblyQueue].map(([clanId, r]) => ({ clanId, enemyClanId: r.intel.enemyClanId,
+                    targetSpotId: r.intel.spotId, queuedAt: r.queuedAt, members: r.selected.length, reason: r.reason })) },
             operations: this.parties.admitted().filter(p => p.stats?.warOperation).map(p => {
                 const hot = p.status === 'hot', members = p.memberIds.map(id => hot
                     ? invoke('GameServer/World/World').registeredActorById(id) : this.life.cachedState(id));

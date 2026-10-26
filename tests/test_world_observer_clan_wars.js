@@ -48,6 +48,14 @@ async function run() {
     assert(html.includes('Enemy farm') && html.includes('2/3') && html.includes('War history'));
     assert(Ui.render(snapshot, 20).includes('Incoming raid'), 'the defender sees an approaching expedition');
     assert(Ui.render(snapshot, 10, { error: 'offline' }).includes('Showing the last received'));
+    const waiting = { ...snapshot, campaigns: { ...snapshot.campaigns, operations: [], assembly: {
+        queue: [{ clanId: 10, enemyClanId: 20, members: 9, reason: 'party_capacity_wait', queuedAt: at - 300000 }] } } };
+    const waitingHtml = Ui.render(waiting, 10, { time: () => '12:30' });
+    assert(waitingHtml.includes('Roster ready · 9 members') && waitingHtml.includes('Waiting for a shared party slot'));
+    assert(waitingHtml.includes('Priority held since 12:30') && waitingHtml.includes('No military parties deployed.'));
+    assert(waitingHtml.includes('0 active'), 'a waiting roster is not a deployed expedition');
+    assert(Ui.render({ ...snapshot, campaigns: { ...snapshot.campaigns, assembly: {
+        readiness: [{ clanId: 10, reason: 'roster_not_ready' }] } } }, 10).includes('Waiting for a healer and two fighters'));
     const hostile = { ...snapshot, clans: [{ id: 20, name: '<img src=x onerror=alert(1)>' }],
         campaigns: { ...snapshot.campaigns, operations: [{ ...operation, targetName: '<script>evil()</script>' }] } };
     const safe = Ui.render(hostile, 10);

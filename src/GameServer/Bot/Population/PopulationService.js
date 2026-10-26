@@ -862,7 +862,7 @@ async function createAndCommitBackgroundParty(members = [], objectiveOverride = 
         if (members.length < partyLimitsForObjective(objective).minSize) return null;
     }
     let release = partyAdmission.reserve(BackgroundPartyState.admitted(), Config);
-    if (!release && ClanPartyCapacity.required(objective)) {
+    if (!release && ClanPartyCapacity.required(objective) && partyAdmission.canReclaim(BackgroundPartyState.admitted(), Config)) {
         const limits = partyLimitsForObjective(objective);
         if (ClanRaidRoster.selectMembers(members, objective, limits).length < limits.minSize) return null;
         const reclaimed = await ClanPartyCapacity.reclaim(objective, {
@@ -1496,6 +1496,8 @@ const PopulationService = {
             clans: invoke('GameServer/Clan/ClanService'), war: invoke('GameServer/Clan/ClanWarRuntime'),
             social: invoke('GameServer/Clan/ClanSocialRuntime').view, memory: invoke('GameServer/Social/InteractionMemoryRuntime'),
             personaFor: state => BotPersona.of(state), form: (members, operation) => this.formClanWarParty(members, operation),
+            updateDemand: ids => partyAdmission.syncWarRequests(Config.backgroundPartyEnabled && this.started ? ids : []),
+            formationStatus: () => this.lastClanWarFormation,
             actions: ColdSimulationCoordinator.competitionActions,
             canContinue: () => this.started && ClanSimulationConfig.enabled !== false,
             canWork: () => this.started && ClanSimulationConfig.enabled !== false && !this.resolving && !this.partyFormationRunning
@@ -3582,11 +3584,17 @@ const PopulationService = {
         const ids = members.map(s => s.characterId);
         try {
             const fenced = await Promise.all(ids.map(id => ColdSimulationCoordinator.fenceBot(id)));
-            if (fenced.some(r => !r.ok)) return null;
+            if (fenced.some(r => !r.ok)) {
+                this.lastClanWarFormation = { at: Date.now(), clanId: operation.clanId, reason: 'member_busy' };
+                return null;
+            }
             await LifeState.settleWrites(ids);
             const current = ids.map(id => LifeState.cachedState(id));
             if (!this.started || current.some(s => !s || s.party?.partyId || s.partyId
-                || !require('../../Clan/ClanWarPolicy').available(s, Date.now()))) return null;
+                || !require('../../Clan/ClanWarPolicy').available(s, Date.now()))) {
+                this.lastClanWarFormation = { at: Date.now(), clanId: operation.clanId, reason: 'roster_changed' };
+                return null;
+            }
             const leader = PartyComposition.chooseLeader(current), timestamp = Date.now();
             const party = { partyId: `war_${timestamp.toString(36)}_${leader.characterId}`, leaderId: leader.characterId,
                 memberIds: ids, spotId: leader.spotId, status: 'active', startedAt: timestamp, nextResolveAt: timestamp + 1000,

@@ -70,8 +70,14 @@ or forms 3–9 uncommitted generated bots with a healer and two damage roles in 
 compatible level band. Required economic/quest parties and player companions
 are not commandeered. Ready military demand waits for the next genuinely free
 shared party slot before ordinary formation; it never exceeds the existing cap
-or evicts a required contract. Abandoned demand expires after one minute. At
-most four autonomous operations run together by default. Formation fences the members and commits membership
+or evicts a required contract. Every five seconds a separate cached readiness
+pass preserves FIFO priority while the roster, mutual war and witnessed target
+remain eligible. Loss of readiness, shutdown or disabling wars releases priority.
+Each pass checks at most four queued clans and four other warring clans; one
+formation attempt may run under the existing database/worker/loop-lag gates.
+Waiting alone performs no SQL writes. Diplomatic reviews keep their own slower
+round-robin schedule and cannot consume a military retry. At most four autonomous
+operations run together by default. Formation fences the members and commits membership
 atomically; declaration state is rechecked inside the membership transaction.
 
 Normal trip builders, duration, geodata placement and whole-party arrival move
@@ -100,6 +106,9 @@ future multiple-party fronts can coordinate several of these bounded operations.
 GET /observer/api/clans/wars returns declarations and campaign decisions,
 sightings, operation references and the last attempted encounter. It is a
 read-only Observer endpoint.
+It also exposes the bounded military queue, readiness reasons and the duration
+of its latest cached refresh. A queued roster is displayed separately from a
+deployed expedition and does not establish that travel or combat has occurred.
 The Clans page displays mutual and one-sided declarations, current outgoing and
 incoming expeditions, living roster counts, destinations, travel/combat/return
 phases and recent persisted declarations/withdrawals. It polls every ten seconds
