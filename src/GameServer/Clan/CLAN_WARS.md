@@ -100,12 +100,20 @@ future multiple-party fronts can coordinate several of these bounded operations.
 GET /observer/api/clans/wars returns declarations and campaign decisions,
 sightings, operation references and the last attempted encounter. It is a
 read-only Observer endpoint.
+The Clans page displays mutual and one-sided declarations, current outgoing and
+incoming expeditions, living roster counts, destinations, travel/combat/return
+phases and recent persisted declarations/withdrawals. It polls every ten seconds
+while the clan page is visible and live updates are enabled; failed updates retain
+the last snapshot with a stale-data notice. The endpoint shares a two-second cache
+and reads at most eighty recent diplomatic events per build.
 
 The default suite includes test_clan_war_rules.js, test_clan_war_native.js,
 test_clan_war_operations.js and test_clan_war_campaign.js. They cover eligibility,
 directionality, persistence, white-target kill classification, neutral parties,
 independent acceptance, raised hostility, stale impact rollback, discipline,
 viewer masks, movement/arrival, party revision fences and return conditions.
+test_world_observer_clan_wars.js covers bounded cached history, incoming raid
+visibility, native movement/combat phases, escaped names and polling/error races.
 
 For a real-world fixture, run scripts/clan-war-fixture.js with explicit --source
 and --out paths. It creates a consistent SQLite backup and raises hostility only

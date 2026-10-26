@@ -255,11 +255,20 @@ class ClanWarDirector {
     }
     inspect() {
         return { active: this.active, plans: [...this.plans].map(([clanId, plan]) => ({ clanId, ...plan })), lastCombat: this.lastCombat,
-            operations: this.parties.admitted().filter(p => p.stats?.warOperation).map(p => ({ partyId: p.partyId,
-                ...p.stats.warOperation, memberIds: p.memberIds, mode: p.status === 'hot' ? 'hot' : 'cold',
-                phase: p.stats.warOperation.status === 'returning' ? 'returning' : p.stats.travel ? 'traveling'
-                    : p.memberIds.some(id => this.life.cachedState(id)?.stats?.pvpEncounter) ? 'fighting' : p.stats.warOperation.status,
-                arrivalAt: p.stats.travel?.arrivalAt || null })) };
+            operations: this.parties.admitted().filter(p => p.stats?.warOperation).map(p => {
+                const hot = p.status === 'hot', members = p.memberIds.map(id => hot
+                    ? invoke('GameServer/World/World').registeredActorById(id) : this.life.cachedState(id));
+                const fighting = members.some(m => hot ? m?.session?.pvpDefense || m?.session?.pvpRevenge || m?.session?.pvpEncounter
+                    : m?.stats?.pvpEncounter);
+                const traveling = p.stats.travel || members.some(m => m?.session?.spotRelocation);
+                const arrivals = members.map(m => Number(m?.session?.spotRelocation?.completesAt || 0));
+                return { partyId: p.partyId, ...p.stats.warOperation, memberIds: p.memberIds, mode: hot ? 'hot' : 'cold',
+                    phase: p.stats.warOperation.status === 'returning' ? 'returning' : fighting ? 'fighting'
+                        : traveling ? 'traveling' : p.stats.warOperation.status,
+                    livingMembers: members.every(m => hot ? m?.actor : m?.vitals)
+                        ? members.filter(m => hot ? m.actor.fetchHp?.() > 0 : m.vitals.hp > 0).length : null,
+                    arrivalAt: p.stats.travel?.arrivalAt || Math.max(0, ...arrivals) || null };
+            }) };
     }
 }
 module.exports = { ClanWarDirector, near };
