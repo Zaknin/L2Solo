@@ -45,7 +45,7 @@ const event = type => {
         'unloaded field memory cannot silently turn a remembered killer into a stranger');
     Runtime.accept(snapshot);
     assert(assessBoth().every(r => r.available), 'known legacy partners remain eligible with loaded neutral field memory');
-    assert.strictEqual(inviteRolls.length, 2, 'hot and cold use the native invite policy after relationship admission');
+    assert.strictEqual(inviteRolls.length, 0, 'player invitations do not roll persona tendencies');
     assert(inviteRolls.every(parts => parts[1] === botId && parts[2] === 501),
         'the controlled invitation roll retains the original bot and player identities');
     event('killed'); at += 60000; event('killed'); at += 60000; event('killed');
@@ -58,10 +58,10 @@ const event = type => {
     }
     ClanService.findById = id => Number(id) === 77 ? { members: [{ id: botId }] } : null;
     hot.actor = actor(botId, 77); player.actor = actor(501, 77); cold.stats.clanId = 77;
-    assert(assessBoth().every(r => r.available), 'clan invitations take priority over personal hostility');
+    assert(assessBoth().every(r => r.reason === 'relationship_hostile'), 'clan membership does not erase hostility');
     assert(assessBoth().every(r => r.relationship === 'hostile'), 'invitation priority preserves personal history');
-    assert(Availability.evaluate(player, hot, { timestamp: at, forceFriend: true }).available,
-        'the explicit const-friend override remains authoritative');
+    assert.strictEqual(Availability.evaluate(player, hot, { timestamp: at, forceFriend: true }).reason,
+        'relationship_hostile', 'friend invitations obey the same relationship rule');
     hot.actor = actor(botId); player.actor = actor(501); cold.stats.clanId = 0;
     at += 14 * 86400000; event('resurrected');
     assert(assessBoth().every(r => r.available), 'real reconciliation repairs admission without rewriting legacy history');
@@ -74,7 +74,7 @@ const event = type => {
     assert.strictEqual(Bridge.combine({ trust: 4, familiarity: 1 }, partial).memory.trust, 4,
         'overlapping positive evidence is not double credited');
     legacy = { trust: 0, familiarity: 0, recentlyAbandonedAt: at };
-    assert(assessBoth().every(r => r.reason === 'recently_abandoned'), 'legacy party-specific facts remain actionable');
+    assert(assessBoth().every(r => r.available), 'a recent departure alone is not a hostile relationship');
     const hostileClan = Bridge.combine({ trust: 20 }, { ready: true, personal: null,
         effective: { trust: -8, hostility: 20, familiarity: 1 } });
     assert.strictEqual(hostileClan.reason, 'relationship_hostile', 'shared clan reputation reaches player party admission too');

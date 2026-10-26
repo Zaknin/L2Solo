@@ -116,7 +116,8 @@ function* prepareNative(state, economy, options) {
     const Town = invoke('GameServer/Bot/Economy/MarketTownPolicy');
     const townOptions = { context: ctx, tripCost: options.tripCost || ctx.tripCost, timestamp: options.now,
         prepareTrip: options.prepareTrip, findSpot: options.findSpot, onDecision: options.onTownDecision };
-    const listings = Listing.prioritizeListings(sale.listings);
+    const listings = Listing.prioritizeListings(sale.listings, { board: options.board,
+        characterId: state.characterId, timestamp: options.now });
     const standingShop = own.find(line => line.kind === 'shop' && line.storeType === SELL);
     const visitTown = state.activity === 'shopping' && invoke('GameServer/Bot/Economy/ShopPlaces').hasPlaza(state.currentRegion)
         ? state.currentRegion : null;

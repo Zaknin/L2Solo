@@ -431,10 +431,14 @@ function clearPendingSupportApproach(session, bot, { abortMove = false } = {}) {
     return true;
 }
 
-function queueSupportSkillOn(session, bot, Generics, target, skill, ctrl, kind, announcement = null, { allowApproach = true } = {}) {
+function supportCastRange(skill) {
     const skillDistance = Number(skill.fetchDistance?.()) || 0;
-    const partyAura = skill.fetchTargetKind?.() === 'party' && skillDistance < 0;
-    const castRange = partyAura ? Infinity : Math.max(0, skillDistance);
+    const partyAura = ['party', 'ally'].includes(skill.fetchTargetKind?.()) && skillDistance < 0;
+    return partyAura ? (Number(skill.fetchSemantic?.()?.radius) || Infinity) : Math.max(0, skillDistance);
+}
+
+function queueSupportSkillOn(session, bot, Generics, target, skill, ctrl, kind, announcement = null, { allowApproach = true } = {}) {
+    const castRange = supportCastRange(skill);
     if (point(bot).distance(point(target)) <= castRange) {
         clearPendingSupportApproach(session, bot, { abortMove: true });
         castSkillOn(session, bot, Generics, target, skill, ctrl, announcement);
@@ -530,6 +534,15 @@ function rememberAggressionAttempt(session, target) {
     };
 }
 
+function canHealParty(bot, leaderSession) {
+    const role = BotRoles.inferRole(bot);
+    if (role === 'healer') return true;
+    // A living healer owns this job; otherwise buffers cover it using only
+    // their learned healing skills, without changing their party role.
+    return role === 'buffer' && BotSkillCapabilities.healSkills(bot).length > 0
+        && !PartyAwareness.partyActors(leaderSession).some((actor) => BotRoles.isHealer(actor));
+}
+
 function pendingSupportShouldYield(session, bot, leaderSession, pullerActor, partyThreat) {
     const pending = session.pendingSupportApproach;
     if (!pending) return false;
@@ -542,18 +555,28 @@ function pendingSupportShouldYield(session, bot, leaderSession, pullerActor, par
 
     const targetHpRatio = ratio(target.fetchHp(), target.fetchMaxHp());
     const targetMpRatio = ratio(target.fetchMp(), target.fetchMaxMp());
-    if (pending.kind === 'top_off' && targetHpRatio >= 0.70) return true;
+    const fallbackGroup = BotRoles.inferRole(bot) === 'buffer';
+    const pendingHeal = ['top_off', 'group_heal', 'emergency_heal', 'self_preservation'].includes(pending.kind);
+    if (pendingHeal && !canHealParty(bot, leaderSession)) return true;
+    if (pendingHeal && targetHpRatio >= 0.70) return true;
+    if (pendingHeal && !BotSkillCapabilities.selectHealSkill(bot, {
+        target, group: pending.kind === 'group_heal', fallbackGroup
+    })) return true;
     if (pending.kind === 'restore_mp' && targetMpRatio >= 0.55) return true;
     if (partyThreat && pending.kind === 'restore_mp') return true;
     if (partyThreat && String(pending.kind || '').startsWith('buff:')) return true;
 
-    if (BotRoles.inferRole(bot) !== 'healer') return false;
-    const emergency = weakestPartyMember(leaderSession, bot, pullerActor);
+    if (!canHealParty(bot, leaderSession)) return false;
+    const canHealTarget = target => [false, true].some(emergency => {
+        const skill = BotSkillCapabilities.selectHealSkill(bot, { target, emergency, fallbackGroup });
+        return skill && bot.canUseSkill?.(skill) !== false && bot.fetchMp() >= skill.fetchConsumedMp();
+    });
+    const emergency = weakestPartyMember(leaderSession, bot, pullerActor, 900, canHealTarget);
     if (emergency?.hpRatio < 0.45) return (
         pending.kind !== 'emergency_heal' ||
         Number(pending.targetId) !== Number(emergency.actor.fetchId())
     );
-    return ratio(bot.fetchHp(), bot.fetchMaxHp()) < 0.55 &&
+    return ratio(bot.fetchHp(), bot.fetchMaxHp()) < 0.55 && canHealTarget(bot) &&
         Number(pending.targetId) !== Number(bot.fetchId());
 }
 
@@ -1456,30 +1479,39 @@ const FollowingState = {
                 PartyPulling.supportProviders(playerSession)
             )
         ));
-        const routineHealCandidate = role === 'healer' ? BotSkillCapabilities.selectHealSkill(bot) : null;
-        const emergencyHealCandidate = role === 'healer' ? BotSkillCapabilities.selectHealSkill(bot, { emergency: true }) : null;
+        const healingSupport = canHealParty(bot, playerSession);
+        const learnedHeals = healingSupport ? BotSkillCapabilities.healSkills(bot) : [];
+        const selectHeal = (options = {}) => healingSupport
+            ? BotSkillCapabilities.selectHealSkill(bot, { fallbackGroup: role === 'buffer', ...options }) : null;
         const rechargeSkill = role === 'healer' ? BotSkillCapabilities.manaRechargeSkill(bot) : null;
-        const healCandidates = [emergencyHealCandidate, routineHealCandidate].filter(Boolean);
-        const reachablePatient = target => !healCandidates.length || healCandidates.some(skill => {
-            const range = Number(skill.fetchDistance?.()) || 0;
-            return (skill.fetchTargetKind?.() === 'party' && range < 0) || point(bot).distance(point(target)) <= range ||
-                (!personalSupportThreat && !impairments.rooted &&
-                    !!PartySupportMovement.supportDestination(session, bot, target, Math.max(0, range)));
-        });
-        const woundedPartyMember = role === 'healer'
+        const reachablePatient = target => {
+            if (!learnedHeals.length) return true;
+            return [selectHeal({ target }), selectHeal({ target, emergency: true })].filter(Boolean).some(skill => {
+                const range = supportCastRange(skill);
+                return point(bot).distance(point(target)) <= range ||
+                    (!personalSupportThreat && !impairments.rooted &&
+                        !!PartySupportMovement.supportDestination(session, bot, target, Math.max(0, range)));
+            });
+        };
+        const woundedPartyMember = healingSupport
             ? weakestPartyMember(playerSession, bot, pulling.puller?.actor, 900, reachablePatient)
             : null;
-        const woundedPartyCount = role === 'healer'
+        const woundedPartyCount = healingSupport
             ? partyMembersInSupportRange(playerSession, bot).filter((entry) => entry.hpRatio < 0.70).length
             : 0;
-        const groupHealCandidate = role === 'healer' && woundedPartyCount >= 2
-            ? BotSkillCapabilities.selectHealSkill(bot, { group: true })
+        const healTarget = woundedPartyMember?.actor || bot;
+        const routineHealCandidate = selectHeal({ target: healTarget });
+        const emergencyHealCandidate = selectHeal({ target: healTarget, emergency: true });
+        const groupHealCandidate = healingSupport && woundedPartyCount >= 2
+            ? selectHeal({ group: true, target: healTarget })
             : null;
         const canAffordHeal = (skill) => !!skill && bot.canUseSkill?.(skill) !== false && bot.fetchMp() >= skill.fetchConsumedMp();
         const routineHealSkill = routineHealCandidate;
         const emergencyHealSkill = canAffordHeal(emergencyHealCandidate) ? emergencyHealCandidate : routineHealCandidate;
         const groupHealSkill = canAffordHeal(groupHealCandidate) ? groupHealCandidate : null;
         const topOffHealSkill = groupHealSkill || routineHealSkill;
+        const selfHealCandidate = selectHeal({ target: bot, emergency: true });
+        const selfHealSkill = canAffordHeal(selfHealCandidate) ? selfHealCandidate : selectHeal({ target: bot });
         const safeManaPartyMember = role === 'healer' && rechargeSkill && !partyThreat && !leaderTargetId
             ? lowestManaPartyMember(playerSession, bot, pulling.puller?.actor)
             : null;
@@ -1494,10 +1526,10 @@ const FollowingState = {
         const manaPartyMember = emergencyTankManaMember || safeManaPartyMember;
         // Healing is the healer's first obligation.  Do not queue a regular
         // party buff and then overwrite it with a heal in this same AI tick.
-        const healerNeedsAction = role === 'healer' && (
+        const healerNeedsAction = healingSupport && (
             (woundedPartyMember?.hpRatio < 0.45 && canAffordHeal(emergencyHealSkill)) ||
             (woundedPartyMember?.hpRatio < 0.70 && botVitals.mpRatio >= 0.35 && canAffordHeal(topOffHealSkill)) ||
-            (botVitals.hpRatio < 0.55 && botVitals.mpRatio >= 0.25 && canAffordHeal(emergencyHealSkill))
+            (botVitals.hpRatio < 0.55 && botVitals.mpRatio >= 0.25 && canAffordHeal(selfHealSkill))
         );
         if (healerNeedsAction && !impairments.silenced) {
             preemptForPriorityHeal(session, bot);
@@ -1569,16 +1601,16 @@ const FollowingState = {
             }
         }
 
-        if (!acted && role === 'healer') {
+        if (!acted && healingSupport) {
             if (woundedPartyMember?.hpRatio < 0.45 && healerCanCast(emergencyHealSkill)) {
                 acted = true;
                 recordRoleDecision(session, bot, 'heal_party', 'emergency_heal', { targetId: woundedPartyMember.actor.fetchId() });
                 queueSupport(woundedPartyMember.actor, emergencyHealSkill, 'emergency_heal', { kind: 'emergency_heal' });
                 returnToPartyAfterSupport(session, bot, player, woundedPartyMember.actor);
-            } else if (botVitals.hpRatio < 0.55 && botVitals.mpRatio >= 0.25 && healerCanCast(emergencyHealSkill)) {
+            } else if (botVitals.hpRatio < 0.55 && botVitals.mpRatio >= 0.25 && healerCanCast(selfHealSkill)) {
                 acted = true;
                 recordRoleDecision(session, bot, 'heal_self', 'self_preservation', { targetId: bot.fetchId() });
-                queueSupport(bot, emergencyHealSkill, 'self_preservation');
+                queueSupport(bot, selfHealSkill, 'self_preservation');
             } else if (woundedPartyMember?.hpRatio < 0.70 && botVitals.mpRatio >= 0.35 && healerCanCast(topOffHealSkill)) {
                 acted = true;
                 const groupHeal = topOffHealSkill?.fetchTargetKind?.() === 'party';

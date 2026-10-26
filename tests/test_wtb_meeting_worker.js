@@ -11,7 +11,7 @@ const source = `
 const { workerData } = require('node:worker_threads');
 require(workerData.workerPath);
 invoke('GameServer/Bot/Economy/EconomyContext').forState = (state, options) => ({
-    network: {}, projection: {}, hourAdena: 1000, worth: () => 34454032, price: () => 34454032,
+    network: { quantityPrepared: true, queue: [] }, projection: {}, hourAdena: 1000, worth: () => 34454032, price: () => 34454032,
     trip: invoke('GameServer/Bot/Economy/EconomicTrip').preparedReader(options.routeRows, { hourAdena: 1000 }),
     kitCost: () => 0
 });

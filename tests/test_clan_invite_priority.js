@@ -20,7 +20,7 @@ const dependencies = {
     'GameServer/SpeckMath': { Point3D: class { distance() { return 100000; } } },
     'GameServer/Social/InteractionMemoryRuntime': { assess: () => ({ ready: true }) },
     'GameServer/Clan/ClanService': { findById: id => id === 77 ? { members } : null },
-    // Honest travel off (the default): a trip stays a busy reason.
+    // Travel affects the diagnostic location only.
     'GameServer/Bot/Population/ColdTrip': { travellerAnswers: () => false, positionAt: state => state.loc }
 };
 const context = {
@@ -46,7 +46,12 @@ for (const activity of ['dead', 'shopping', 'merchant', 'crafting', 'traveling',
                 vitals: { hp: activity === 'dead' ? 0 : 100 }, stats };
             const result = availability.evaluateState(player, state);
             assert.equal(result.clanmate, true, `${activity}: current roster must override stale stats`);
-            assert.equal(result.available, true, `${activity}: ${relation}`);
+            assert.equal(result.reason, relation || 'relationship_hostile', `${activity}: ${relation}`);
+            memory.trust = 0;
+            const neutral = availability.evaluateState(player, state);
+            assert.equal(neutral.reason, relation || 'level_gap_too_large', 'clan membership cannot bypass level compatibility');
+            assert.equal(availability.evaluateState(player, { ...state, level: 20 }).reason, relation || 'available');
+            memory.trust = -10;
             assert.equal(availability.evaluateState(player, { ...state, staticService: true }).reason, 'merchant_duty');
             cases++;
         }
@@ -54,12 +59,13 @@ for (const activity of ['dead', 'shopping', 'merchant', 'crafting', 'traveling',
 }
 assert.equal(personaCalls, 0);
 relationshipReason = 'relationship_hostile';
-assert.equal(availability.evaluate(player, { actor: actor(2, 77) }).available, true);
+assert.equal(availability.evaluate(player, { actor: actor(2, 77) }).reason, 'relationship_hostile');
 assert.equal(availability.evaluate(player, { actor: actor(2, 88) }).reason, 'relationship_hostile');
 relationshipReason = null;
 members = [];
-const formerMember = { characterId: 2, activity: 'dead', stats: { clanId: 77 }, vitals: { hp: 0 } };
+memory.trust = 0;
+const formerMember = { characterId: 2, activity: 'dead', level: 20, stats: { clanId: 77 }, vitals: { hp: 0 } };
 assert.equal(availability.evaluateState(player, formerMember).clanmate, false);
-assert.equal(availability.evaluateState(player, formerMember).reason, 'bot_dead');
+assert.equal(availability.evaluateState(player, formerMember).reason, 'available');
 assert.equal(availability.evaluateState({ actor: actor(1, 0) }, formerMember).clanmate, false);
-console.log(`Passed ${cases} cold clan invite cases and membership/priority guards.`);
+console.log(`Passed ${cases} cold clan invite cases and membership and shared player-invite guards.`);

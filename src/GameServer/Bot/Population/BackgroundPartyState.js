@@ -341,7 +341,7 @@ const BackgroundPartyState = {
             `DELETE FROM ${TABLE}
              WHERE partyId IN (
                 SELECT parties.partyId FROM ${TABLE} parties
-                WHERE status <> 'active'
+                WHERE status NOT IN ('active', 'const_paused')
                   AND parties.updatedAt <= ?
                   AND NOT EXISTS (
                       SELECT 1 FROM bot_life_state life

@@ -998,15 +998,13 @@ try {
         const nativeAnswerSession = fakeSession('bot_native_party_answer', nativeAnswerBot);
         const nativeDeclineBot = fakeActor(2000046, { locX: 70, locY: 0 });
         const nativeDeclineSession = fakeSession('bot_native_party_decline', nativeDeclineBot);
-        // This test exercises the accepted invite lifecycle. Make the
-        // persona choice explicit now that ordinary invites are persona-aware.
-        const socialPersona = {
-            primaryDrive: 'social',
-            archetype: 'party_regular',
-            traits: { sociability: 0.82, empathy: 0.66, commitment: 0.66 }
+        // Ordinary player invites remain eligible even for solitary bots.
+        const solitaryPersona = {
+            primaryDrive: 'wealth',
+            traits: { sociability: 0, empathy: 0, commitment: 0 }
         };
-        inviteBotSession.persona = socialPersona;
-        nativeAnswerSession.persona = socialPersona;
+        inviteBotSession.persona = solitaryPersona;
+        nativeAnswerSession.persona = solitaryPersona;
         const MemoryPolicy = require('../src/GameServer/Social/InteractionMemoryPolicy');
         for (const member of [inviteBotSession, nativeAnswerSession, nativeDeclineSession]) {
             invoke('GameServer/Social/InteractionMemoryRuntime').accept(MemoryPolicy.empty(Number(member.actor.fetchId())));
@@ -1048,7 +1046,7 @@ try {
         BotSocialMemory.recordEvent = originalSocialRecordEvent;
         PartyCompanionService.bringToLeader = originalBringToLeader;
     }
-    assert.strictEqual(inviteTell, 'Gladly. A steady party is better than going alone.', 'an accepted persona-aware invite should acknowledge the party without promising another rest');
+    assert.strictEqual(inviteTell, "I'm with you. Lead the way.", 'an accepted invite should acknowledge the party without promising another rest');
     assert.strictEqual(inviteBotSession.plan, 'following', 'attaching a resting bot should resume party follow after instant recovery');
     inviteBot.level = 17;
     inviteBot.hp = 40;

@@ -1,0 +1,2380 @@
+{
+  "timestamp": 1793007661106,
+  "states": [
+    {
+      "characterId": 2007229,
+      "accountName": "bot_pop_mvgq4i49",
+      "name": "KanliBicak",
+      "level": 47,
+      "exp": 30823382,
+      "sp": 1805677,
+      "adena": 1347780,
+      "phase": "cold",
+      "activity": "shopping",
+      "homeRegion": "Wandering",
+      "currentRegion": "Giran",
+      "spotId": "12_31",
+      "loc": {
+        "locX": 83396,
+        "locY": 147904,
+        "locZ": -3404
+      },
+      "vitals": {
+        "hp": 1004.6182892069704,
+        "maxHp": 1004.6182892069704,
+        "mp": 269.1930576681833,
+        "maxMp": 621.4765191453226
+      },
+      "timing": {
+        "activityStartedAt": 1793007133864,
+        "lastResolvedAt": 1793007657822,
+        "nextResolveAt": 1793007777810,
+        "lastHotAt": null
+      },
+      "party": {
+        "partyId": null
+      },
+      "stats": {
+        "role": "tank",
+        "classId": 33,
+        "race": 2,
+        "route": null,
+        "build": {
+          "role": "tank",
+          "classId": 33,
+          "level": 47,
+          "grade": "c",
+          "tier": "c_grade_tank",
+          "classFamily": null,
+          "armor": "heavy",
+          "weapon": "one_handed_sword_or_blunt",
+          "statPriority": [
+            "pDef",
+            "shield_defense",
+            "hp",
+            "aggro_control"
+          ],
+          "specialAbilities": [
+            "health"
+          ],
+          "skills": [
+            {
+              "name": "Aggression",
+              "intent": "protect_party",
+              "minLevel": 20
+            },
+            {
+              "name": "Shield Stun",
+              "intent": "control_dangerous_mobs",
+              "minLevel": 20
+            },
+            {
+              "name": "hold aggro",
+              "intent": "tier_priority",
+              "minLevel": 40
+            },
+            {
+              "name": "stun dangerous mobs",
+              "intent": "tier_priority",
+              "minLevel": 40
+            }
+          ],
+          "exampleGear": [
+            "one-handed sword/blunt + Health",
+            "Full Plate/Composite heavy",
+            "shield"
+          ],
+          "consumables": [
+            "soulshots"
+          ],
+          "partyNeed": "healer_and_damage_dealers",
+          "playstyle": "party_frontline",
+          "warnings": [
+            "solo is reliable but slow"
+          ],
+          "source": "c4_guide_hints"
+        },
+        "classProgressionLevel": 47,
+        "classProgressionClassId": 33,
+        "generatedCold": true,
+        "generatedIndex": 1792503201465,
+        "levelBand": "wave_8",
+        "populationWave": 8,
+        "starterRegion": "dark_elf",
+        "equipment": [
+          {
+            "selfId": 849,
+            "name": "Tiger's Eye Earring",
+            "slot": 1,
+            "rank": "d",
+            "kind": "Armor.Jewel",
+            "enchant": 0
+          },
+          {
+            "selfId": 847,
+            "name": "Red Crescent Earring",
+            "slot": 2,
+            "rank": "d",
+            "kind": "Armor.Jewel",
+            "enchant": 0
+          },
+          {
+            "selfId": 910,
+            "name": "Necklace of Devotion",
+            "slot": 3,
+            "rank": "d",
+            "kind": "Armor.Jewel",
+            "enchant": 0
+          },
+          {
+            "selfId": 885,
+            "name": "Ring of Ages",
+            "slot": 4,
+            "rank": "c",
+            "kind": "Armor.Jewel",
+            "enchant": 0
+          },
+          {
+            "selfId": 890,
+            "name": "Ring of Devotion",
+            "slot": 5,
+            "rank": "d",
+            "kind": "Armor.Jewel",
+            "enchant": 0
+          },
+          {
+            "selfId": 46,
+            "name": "Bronze Helmet",
+            "slot": 6,
+            "rank": "d",
+            "kind": "Armor.Wear",
+            "enchant": 0
+          },
+          {
+            "selfId": 72,
+            "name": "Stormbringer",
+            "slot": 7,
+            "rank": "c",
+            "kind": "Weapon.Sword",
+            "enchant": 0
+          },
+          {
+            "selfId": 2496,
+            "name": "Dwarven Chain Shield",
+            "slot": 8,
+            "rank": "c",
+            "kind": "Armor.Shield",
+            "enchant": 0
+          },
+          {
+            "selfId": 2452,
+            "name": "Reinforced Mithril Gloves",
+            "slot": 9,
+            "rank": "c",
+            "kind": "Armor.Wear",
+            "enchant": 0
+          },
+          {
+            "selfId": 64,
+            "name": "Composite Boots",
+            "slot": 12,
+            "rank": "c",
+            "kind": "Armor.Wear",
+            "enchant": 0
+          },
+          {
+            "selfId": 60,
+            "name": "Composite Armor",
+            "slot": 15,
+            "rank": "c",
+            "kind": "Armor.Chain",
+            "enchant": 0
+          }
+        ],
+        "lastReason": "equipment_exchange_continue",
+        "pveEncounter": null,
+        "travel": null,
+        "karma": 0,
+        "fightsWon": 1103,
+        "fightsResolved": 1170,
+        "deaths": 47,
+        "expEarned": 33502152,
+        "spEarned": 1805674,
+        "adenaEarned": 4735468,
+        "spotRisk": {
+          "version": 2,
+          "spotId": "12_31",
+          "enteredAt": 1793006228178,
+          "deathsAtEntry": 47,
+          "fightsAtEntry": 1151,
+          "winsAtEntry": 1084,
+          "windowFights": 7,
+          "windowWins": 7,
+          "windowDeaths": 0,
+          "recoveryWins": 12,
+          "unrecoveredDeaths": 0,
+          "failedHuntRecoveryWins": 3,
+          "failedHunts": 0
+        },
+        "huntingRecovery": {
+          "levelPenalty": 4,
+          "cleanWins": 7,
+          "resumeExp": 30386642
+        },
+        "playedHours": 138.26942694444494,
+        "economyClock": 1793007657822,
+        "frustration": 0.05247878653821522,
+        "lifelongKills": 1103,
+        "stepCount": 6684,
+        "classTransitions": [
+          32,
+          33
+        ],
+        "restUntil": null,
+        "coldShare": {
+          "spotId": "12_31",
+          "carry": 0.766
+        },
+        "huntEfficiency": [
+          {
+            "spotId": "12_31",
+            "signature": "net-income-v3:33:46:solo:50:50:50:50:2426:0:2452:0:2496:0:347:0:376:0:46:0:72:0:847:0:849:0:890:0:910:0",
+            "at": 1793006886869,
+            "samples": 7,
+            "exp": 106000,
+            "cycleMs": 83785.79809570312,
+            "adena": 16372,
+            "loot": 2020,
+            "costs": 187.8662109375,
+            "kills": 2.97,
+            "noise": 0.6541145337252664,
+            "partyRoster": null,
+            "source": "cold_round"
+          },
+          {
+            "spotId": "13_13",
+            "signature": "net-income-v3:33:46:solo:50:50:50:50:2426:0:2452:0:2496:0:347:0:376:0:46:0:72:0:847:0:849:0:890:0:910:0",
+            "at": 1793005983694,
+            "samples": 2,
+            "exp": -89100,
+            "cycleMs": 39205.25,
+            "adena": 0,
+            "loot": 0,
+            "costs": 82.5,
+            "kills": 0,
+            "noise": 0.09228070175438596,
+            "partyRoster": null,
+            "source": "cold_round"
+          },
+          {
+            "spotId": "14_37",
+            "signature": "net-income-v3:33:46:solo:50:50:50:50:2426:0:2452:0:2496:0:347:0:376:0:46:0:72:0:847:0:849:0:890:0:910:0",
+            "at": 1793005285039,
+            "samples": 5,
+            "exp": 61300,
+            "cycleMs": 163866.9765625,
+            "adena": 24133,
+            "loot": 3518,
+            "costs": 175.78125,
+            "kills": 0.609,
+            "noise": 0.9348915673691984,
+            "partyRoster": null,
+            "source": "cold_round"
+          }
+        ],
+        "huntClock": {
+          "at": 1793006886869,
+          "cycleMs": 96582,
+          "onSpot": 12704917,
+          "total": 21611100
+        },
+        "shotDemand": null,
+        "hennas": [
+          null,
+          null,
+          null
+        ],
+        "townVisit": {
+          "town": "Giran",
+          "startedAt": 1793007073706,
+          "reason": "improving",
+          "completed": true
+        },
+        "marketReturn": {
+          "loc": {
+            "locX": 75201,
+            "locY": 189676,
+            "locZ": -3408
+          },
+          "regionName": "Ogre fields",
+          "spotId": "12_31"
+        },
+        "economyCommit": [
+          107,
+          1,
+          "2b1ad7b1-5307-45aa-9f7d-ef1e490e0f8e",
+          4,
+          1,
+          1800,
+          599400,
+          0,
+          22064036,
+          null
+        ],
+        "visitEvery": [
+          138.13,
+          0.21
+        ],
+        "partyMarketReturn": null,
+        "shopTown": null,
+        "townLook": {
+          "at": 1793005897913,
+          "n": 83
+        },
+        "deathExperience": {
+          "expBeforeDeath": 30208538,
+          "expLost": 89052,
+          "expAfterDeath": 30119486,
+          "penaltyAppliedAt": 1793005983694,
+          "pendingRestoration": false,
+          "deathContext": {
+            "timestamp": 1793005983694,
+            "cold": true
+          },
+          "resolutionReason": "restart_to_town"
+        },
+        "lastRespawnAt": 1793006040243,
+        "forcedMarketCleanup": null,
+        "marketSellRetryAfter": 1793005722444,
+        "targetCombat": {
+          "targetNpcId": 75,
+          "resolves": 1,
+          "defeated": 5,
+          "targetKills": 3,
+          "interruptions": 2,
+          "lastDefeatedNpcIds": [
+            745,
+            75,
+            745,
+            75,
+            75
+          ],
+          "lastResolvedAt": 1792581119029,
+          "populationTargets": {
+            "75": {
+              "resolves": 1,
+              "defeated": 5,
+              "targetKills": 3,
+              "interruptions": 2,
+              "lastDefeatedNpcIds": [
+                745,
+                75,
+                745,
+                75,
+                75
+              ],
+              "lastResolvedAt": 1792581119029
+            },
+            "81": {
+              "resolves": 4,
+              "defeated": 0,
+              "targetKills": 0,
+              "interruptions": 0,
+              "lastDefeatedNpcIds": [],
+              "lastResolvedAt": 1792546331920
+            },
+            "85": {
+              "resolves": 7,
+              "defeated": 4,
+              "targetKills": 0,
+              "interruptions": 4,
+              "lastDefeatedNpcIds": [],
+              "lastResolvedAt": 1792547924410
+            },
+            "191": {
+              "resolves": 12,
+              "defeated": 10,
+              "targetKills": 10,
+              "interruptions": 0,
+              "lastDefeatedNpcIds": [
+                191
+              ],
+              "lastResolvedAt": 1792545688802
+            },
+            "231": {
+              "resolves": 24,
+              "defeated": 25,
+              "targetKills": 0,
+              "interruptions": 25,
+              "lastDefeatedNpcIds": [],
+              "lastResolvedAt": 1792557245516
+            },
+            "234": {
+              "resolves": 5,
+              "defeated": 7,
+              "targetKills": 0,
+              "interruptions": 7,
+              "lastDefeatedNpcIds": [
+                226,
+                229
+              ],
+              "lastResolvedAt": 1792557303052
+            },
+            "315": {
+              "resolves": 5,
+              "defeated": 3,
+              "targetKills": 0,
+              "interruptions": 3,
+              "lastDefeatedNpcIds": [
+                70
+              ],
+              "lastResolvedAt": 1792540946167
+            },
+            "400": {
+              "resolves": 2,
+              "defeated": 5,
+              "targetKills": 5,
+              "interruptions": 0,
+              "lastDefeatedNpcIds": [
+                400,
+                400,
+                400
+              ],
+              "lastResolvedAt": 1792510433302
+            },
+            "485": {
+              "resolves": 22,
+              "defeated": 21,
+              "targetKills": 0,
+              "interruptions": 21,
+              "lastDefeatedNpcIds": [],
+              "lastResolvedAt": 1792543631708
+            },
+            "740": {
+              "resolves": 14,
+              "defeated": 36,
+              "targetKills": 0,
+              "interruptions": 36,
+              "lastDefeatedNpcIds": [],
+              "lastResolvedAt": 1792515674755
+            }
+          }
+        },
+        "clanId": 0,
+        "soulCrystalQuest": false,
+        "spotBackoffs": [
+          {
+            "spotId": "13_13",
+            "deaths": 2,
+            "fights": 2,
+            "wins": 0,
+            "deathRate": 1,
+            "winRate": 0,
+            "reason": "death_pressure",
+            "startedAt": 1793005983694,
+            "attempts": 1,
+            "untilStep": 6721
+          },
+          {
+            "spotId": "14_37",
+            "deaths": 2,
+            "fights": 5,
+            "wins": 3,
+            "deathRate": 0.4,
+            "winRate": 0.6,
+            "reason": "death_pressure",
+            "startedAt": 1793005285039,
+            "attempts": 1,
+            "untilStep": 6708
+          },
+          {
+            "spotId": "13_37",
+            "deaths": 2,
+            "fights": 7,
+            "wins": 5,
+            "deathRate": 0.2857142857142857,
+            "winRate": 0.7142857142857143,
+            "reason": "death_pressure",
+            "startedAt": 1792999670725,
+            "attempts": 2,
+            "untilStep": 6704
+          },
+          {
+            "spotId": "13_31",
+            "deaths": 2,
+            "fights": 5,
+            "wins": 3,
+            "deathRate": 0.4,
+            "winRate": 0.6,
+            "reason": "death_pressure",
+            "startedAt": 1793001840354,
+            "attempts": 1,
+            "untilStep": 6667
+          }
+        ],
+        "pvpEncounter": null,
+        "peoplePoints": 16,
+        "standIn": null,
+        "lastBuffServicePurchase": {
+          "providerId": 2006269,
+          "price": 24509,
+          "count": 7,
+          "at": 1793003349176
+        },
+        "leaderId": 2007229,
+        "backgroundPartyId": null,
+        "partyWaitUntil": null,
+        "partyBreakReason": "clan_priority",
+        "tradeMeeting": [
+          46429,
+          1
+        ],
+        "decisionSeq": 799,
+        "activityLeaf": 1174283077,
+        "wishFocus": [
+          "power:883:5",
+          138.23589305555606,
+          37206
+        ],
+        "wishDirty": 0,
+        "dormantWishes": [
+          [
+            "power:885:5",
+            "superseded",
+            0,
+            73776,
+            138.23589305555606,
+            0.79
+          ],
+          [
+            "power:60:15",
+            "superseded",
+            0,
+            0,
+            138.12902805555606,
+            0.79
+          ],
+          [
+            "stock:shots",
+            "superseded",
+            0,
+            20184,
+            138.0604183333338,
+            0.79
+          ],
+          [
+            "power:382:11",
+            "superseded",
+            0,
+            942780,
+            137.25197750000044,
+            0.79
+          ]
+        ],
+        "money": [
+          2640477,
+          3.79e-7,
+          0,
+          0,
+          0.0000401,
+          37206,
+          883,
+          0.00000379,
+          119886,
+          915,
+          0.00000266,
+          237546,
+          854,
+          0.00000266,
+          355206,
+          854
+        ],
+        "stockTargets": [
+          1061,
+          0,
+          1464,
+          1846,
+          1917
+        ]
+      },
+      "inventory": {
+        "46": {
+          "selfId": 46,
+          "name": "Bronze Helmet",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            6
+          ],
+          "stackable": false,
+          "slot": 6,
+          "rank": "d",
+          "kind": "Armor.Wear",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 11260021,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 6
+            }
+          ]
+        },
+        "57": {
+          "selfId": 57,
+          "name": "Adena",
+          "amount": 1347780,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": true,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.None",
+          "enchant": 0
+        },
+        "60": {
+          "selfId": 60,
+          "name": "Composite Armor",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            15
+          ],
+          "stackable": false,
+          "slot": 15,
+          "rank": "c",
+          "kind": "Armor.Chain",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13383982,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 15
+            }
+          ]
+        },
+        "64": {
+          "selfId": 64,
+          "name": "Composite Boots",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            12
+          ],
+          "stackable": false,
+          "slot": 12,
+          "rank": "c",
+          "kind": "Armor.Wear",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13383360,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 12
+            }
+          ]
+        },
+        "72": {
+          "selfId": 72,
+          "name": "Stormbringer",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            7
+          ],
+          "stackable": false,
+          "slot": 7,
+          "rank": "c",
+          "kind": "Weapon.Sword",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13283667,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 7
+            }
+          ]
+        },
+        "347": {
+          "selfId": 347,
+          "name": "Ring Mail Breastplate",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": false,
+          "slot": 0,
+          "rank": "d",
+          "kind": "Armor.Chain",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 11336542,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": false,
+              "slot": 0
+            }
+          ]
+        },
+        "604": {
+          "selfId": 604,
+          "name": "Crafted Leather Gloves",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": false,
+          "slot": 0,
+          "rank": "d",
+          "kind": "Armor.Wear",
+          "enchant": 1,
+          "instances": [
+            {
+              "id": 13342045,
+              "amount": 1,
+              "enchant": 1,
+              "equipped": false,
+              "slot": 0
+            }
+          ]
+        },
+        "605": {
+          "selfId": 605,
+          "name": "Leather Gauntlets",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": false,
+          "slot": 0,
+          "rank": "d",
+          "kind": "Armor.Wear",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 11390342,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": false,
+              "slot": 0
+            }
+          ]
+        },
+        "627": {
+          "selfId": 627,
+          "name": "Aspis",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": false,
+          "slot": 0,
+          "rank": "d",
+          "kind": "Armor.Shield",
+          "enchant": 1,
+          "instances": [
+            {
+              "id": 13383434,
+              "amount": 1,
+              "enchant": 1,
+              "equipped": false,
+              "slot": 0
+            }
+          ]
+        },
+        "736": {
+          "selfId": 736,
+          "name": "Scroll of Escape",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": true,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.Scroll",
+          "enchant": 0
+        },
+        "847": {
+          "selfId": 847,
+          "name": "Red Crescent Earring",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            2
+          ],
+          "stackable": false,
+          "slot": 1,
+          "rank": "d",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 11164358,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 2
+            }
+          ]
+        },
+        "849": {
+          "selfId": 849,
+          "name": "Tiger's Eye Earring",
+          "amount": 1,
+          "kind": "Armor.Jewel",
+          "rank": "d",
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            1
+          ],
+          "slot": 1,
+          "stackable": false
+        },
+        "885": {
+          "selfId": 885,
+          "name": "Ring of Ages",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            4
+          ],
+          "stackable": false,
+          "slot": 4,
+          "rank": "c",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13384094,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 4
+            }
+          ]
+        },
+        "890": {
+          "selfId": 890,
+          "name": "Ring of Devotion",
+          "amount": 2,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            5
+          ],
+          "stackable": false,
+          "slot": 5,
+          "rank": "d",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 11183486,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 5
+            },
+            {
+              "id": 11147615,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": false,
+              "slot": 0
+            }
+          ]
+        },
+        "910": {
+          "selfId": 910,
+          "name": "Necklace of Devotion",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            3
+          ],
+          "stackable": false,
+          "slot": 3,
+          "rank": "d",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 11198144,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 3
+            }
+          ]
+        },
+        "1123": {
+          "selfId": 1123,
+          "name": "Blue Buckskin Boots",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": false,
+          "slot": 0,
+          "rank": "d",
+          "kind": "Armor.Wear",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13360038,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": false,
+              "slot": 0
+            }
+          ]
+        },
+        "1341": {
+          "selfId": 1341,
+          "name": "Bone Arrow",
+          "amount": 491,
+          "kind": "Other.Arrow",
+          "rank": "none",
+          "stackable": true
+        },
+        "1458": {
+          "selfId": 1458,
+          "name": "Crystal: D-Grade",
+          "amount": 13,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": true,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.None",
+          "enchant": 0
+        },
+        "1464": {
+          "selfId": 1464,
+          "name": "Soulshot: C-grade",
+          "amount": 1917,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": true,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.Shot",
+          "enchant": 0
+        },
+        "1825": {
+          "selfId": 1825,
+          "name": "Recipe: Oriharukon",
+          "amount": 1,
+          "kind": "Other.Recipe",
+          "rank": "none",
+          "stackable": true
+        },
+        "1866": {
+          "selfId": 1866,
+          "name": "Suede",
+          "amount": 3,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "1867": {
+          "selfId": 1867,
+          "name": "Animal Skin",
+          "amount": 4,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "1872": {
+          "selfId": 1872,
+          "name": "Animal Bone",
+          "amount": 4,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "1874": {
+          "selfId": 1874,
+          "name": "Oriharukon Ore",
+          "amount": 1,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "1878": {
+          "selfId": 1878,
+          "name": "Braided Hemp",
+          "amount": 2,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "1884": {
+          "selfId": 1884,
+          "name": "Cord",
+          "amount": 2,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "1885": {
+          "selfId": 1885,
+          "name": "High Grade Suede",
+          "amount": 2,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "1941": {
+          "selfId": 1941,
+          "name": "Brigandine Temper",
+          "amount": 2,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "1945": {
+          "selfId": 1945,
+          "name": "Mithril Stocking Design",
+          "amount": 2,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "2017": {
+          "selfId": 2017,
+          "name": "Saber Blade",
+          "amount": 2,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": true,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.Material",
+          "enchant": 0
+        },
+        "2185": {
+          "selfId": 2185,
+          "name": "Recipe: Iron Boots",
+          "amount": 1,
+          "kind": "Other.Recipe",
+          "rank": "none",
+          "stackable": true
+        },
+        "2250": {
+          "selfId": 2250,
+          "name": "Recipe: Bone Arrow",
+          "amount": 1,
+          "kind": "Other.Recipe",
+          "rank": "none",
+          "stackable": true
+        },
+        "2285": {
+          "selfId": 2285,
+          "name": "Recipe: Claymore",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": true,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.Recipe",
+          "enchant": 0
+        },
+        "2452": {
+          "selfId": 2452,
+          "name": "Reinforced Mithril Gloves",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            9
+          ],
+          "stackable": false,
+          "slot": 9,
+          "rank": "c",
+          "kind": "Armor.Wear",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13360459,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 9
+            }
+          ]
+        },
+        "2496": {
+          "selfId": 2496,
+          "name": "Dwarven Chain Shield",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            8
+          ],
+          "stackable": false,
+          "slot": 8,
+          "rank": "c",
+          "kind": "Armor.Shield",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13359920,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 8
+            }
+          ]
+        },
+        "2918": {
+          "selfId": 2918,
+          "name": "Mithril Scale Gaiters Material",
+          "amount": 2,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "2924": {
+          "selfId": 2924,
+          "name": "Brigandine Boots Design",
+          "amount": 1,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "5473": {
+          "selfId": 5473,
+          "name": "Recipe: Durable Metal Plate (100%)",
+          "amount": 2,
+          "kind": "Other.Recipe",
+          "rank": "none",
+          "stackable": true
+        },
+        "5549": {
+          "selfId": 5549,
+          "name": "Metallic Thread",
+          "amount": 1,
+          "kind": "Other.Material",
+          "rank": "none",
+          "stackable": true
+        },
+        "6667": {
+          "selfId": 6667,
+          "name": "Deluxe Chest Key - Grade 3",
+          "amount": 16,
+          "kind": "Other",
+          "rank": "none",
+          "stackable": true
+        }
+      },
+      "marketTrades": {
+        "gear none": 14,
+        "shot none": 2,
+        "gear d": 6,
+        "shot d": 6,
+        "material d": 22,
+        "material none": 12,
+        "material c": 13,
+        "shot c": 3,
+        "gear c": 2
+      },
+      "simulation": {
+        "revision": 8242
+      },
+      "updatedAt": 1793007657865
+    },
+    {
+      "characterId": 2006424,
+      "accountName": "bot_pop_mvgm8w9t",
+      "name": "Spasatel",
+      "level": 55,
+      "exp": 78565078,
+      "sp": 6491086,
+      "adena": 3092159,
+      "phase": "cold",
+      "activity": "shopping",
+      "homeRegion": "Wandering",
+      "currentRegion": "Giran",
+      "spotId": "12_11",
+      "loc": {
+        "locX": 83396,
+        "locY": 147904,
+        "locZ": -3404
+      },
+      "vitals": {
+        "hp": 1505.227328118873,
+        "maxHp": 1505.227328118873,
+        "mp": 2230.487855296743,
+        "maxMp": 2230.487855296743
+      },
+      "timing": {
+        "activityStartedAt": 1793007258784,
+        "lastResolvedAt": 1793007632892,
+        "nextResolveAt": 1793007752883,
+        "lastHotAt": null
+      },
+      "party": {
+        "partyId": null
+      },
+      "stats": {
+        "role": "buffer",
+        "classId": 51,
+        "race": 3,
+        "route": null,
+        "build": {
+          "role": "buffer",
+          "classId": 51,
+          "level": 55,
+          "grade": "b",
+          "tier": "b_grade_buffer",
+          "classFamily": "orc_buffer",
+          "armor": "robe",
+          "weapon": "caster_weapon",
+          "statPriority": [
+            "maxMp",
+            "cast_speed",
+            "buff_uptime",
+            "mp_conservation"
+          ],
+          "specialAbilities": [
+            "acumen"
+          ],
+          "skills": [
+            {
+              "name": "Heal",
+              "intent": "backup_heal_only",
+              "minLevel": 7
+            },
+            {
+              "name": "Might/Shield/Wind Walk",
+              "intent": "core_support",
+              "minLevel": 20
+            },
+            {
+              "name": "Haste/Acumen/Focus package",
+              "intent": "party_throughput",
+              "minLevel": 40
+            },
+            {
+              "name": "rebuff before pulls",
+              "intent": "tier_priority",
+              "minLevel": 52
+            },
+            {
+              "name": "conserve MP",
+              "intent": "tier_priority",
+              "minLevel": 52
+            },
+            {
+              "name": "fighter-party buff rhythm",
+              "intent": "class_family_priority",
+              "minLevel": 52
+            },
+            {
+              "name": "drain/sustain if solo",
+              "intent": "class_family_priority",
+              "minLevel": 52
+            },
+            {
+              "name": "rebuff before pulls",
+              "intent": "class_family_priority",
+              "minLevel": 52
+            }
+          ],
+          "exampleGear": [
+            "Sword of Valhalla + Acumen",
+            "Blue Wolf robe for support stats"
+          ],
+          "consumables": [
+            "spiritshots_for_backup_heals"
+          ],
+          "partyNeed": "fighter_party",
+          "playstyle": "sustained_party_support",
+          "warnings": [
+            "late parties expect buff uptime",
+            "strong in fighter parties, less suited to mage parties"
+          ],
+          "source": "c4_guide_hints"
+        },
+        "classProgressionLevel": 55,
+        "classProgressionClassId": 51,
+        "generatedCold": true,
+        "generatedIndex": 1792496687969,
+        "levelBand": "wave_2",
+        "populationWave": 2,
+        "starterRegion": "orc",
+        "equipment": [
+          {
+            "selfId": 854,
+            "name": "Earring of Binding",
+            "slot": 1,
+            "rank": "c",
+            "kind": "Armor.Jewel",
+            "enchant": 0
+          },
+          {
+            "selfId": 851,
+            "name": "Omen Beast's Eye Earring",
+            "slot": 2,
+            "rank": "d",
+            "kind": "Armor.Jewel",
+            "enchant": 0
+          },
+          {
+            "selfId": 915,
+            "name": "Aquastone Necklace",
+            "slot": 3,
+            "rank": "c",
+            "kind": "Armor.Jewel",
+            "enchant": 0
+          },
+          {
+            "selfId": 885,
+            "name": "Ring of Ages",
+            "slot": 4,
+            "rank": "c",
+            "kind": "Armor.Jewel",
+            "enchant": 0
+          },
+          {
+            "selfId": 883,
+            "name": "Aquastone Ring",
+            "slot": 5,
+            "rank": "c",
+            "kind": "Armor.Jewel",
+            "enchant": 0
+          },
+          {
+            "selfId": 46,
+            "name": "Bronze Helmet",
+            "slot": 6,
+            "rank": "d",
+            "kind": "Armor.Wear",
+            "enchant": 0
+          },
+          {
+            "selfId": 325,
+            "name": "Horn of Glory",
+            "slot": 7,
+            "rank": "c",
+            "kind": "Weapon.Etc",
+            "enchant": 0
+          },
+          {
+            "selfId": 2452,
+            "name": "Reinforced Mithril Gloves",
+            "slot": 9,
+            "rank": "c",
+            "kind": "Armor.Wear",
+            "enchant": 0
+          },
+          {
+            "selfId": 441,
+            "name": "Demon's Tunic",
+            "slot": 10,
+            "rank": "c",
+            "kind": "Armor.Fabric",
+            "enchant": 0
+          },
+          {
+            "selfId": 472,
+            "name": "Demon's Stockings",
+            "slot": 11,
+            "rank": "c",
+            "kind": "Armor.Fabric",
+            "enchant": 0
+          },
+          {
+            "selfId": 2429,
+            "name": "Chain Boots",
+            "slot": 12,
+            "rank": "c",
+            "kind": "Armor.Wear",
+            "enchant": 0
+          }
+        ],
+        "lastReason": "market_batch_continue",
+        "pveEncounter": null,
+        "travel": null,
+        "karma": 0,
+        "fightsWon": 2934,
+        "fightsResolved": 3278,
+        "deaths": 169,
+        "expEarned": 102451646,
+        "spEarned": 6491083,
+        "adenaEarned": 9830539,
+        "spotRisk": {
+          "version": 2,
+          "spotId": "12_11",
+          "enteredAt": 1793006765835,
+          "deathsAtEntry": 168,
+          "fightsAtEntry": 3276,
+          "winsAtEntry": 2933,
+          "windowFights": 2,
+          "windowWins": 1,
+          "windowDeaths": 1,
+          "recoveryWins": 0,
+          "unrecoveredDeaths": 1,
+          "failedHuntRecoveryWins": 0,
+          "failedHunts": 0
+        },
+        "huntingRecovery": {
+          "levelPenalty": 6,
+          "cleanWins": 0,
+          "resumeExp": 79065096
+        },
+        "playedHours": 138.3116694444465,
+        "economyClock": 1793007632892,
+        "frustration": 0.03429908917581527,
+        "lifelongKills": 2934,
+        "stepCount": 5645,
+        "classTransitions": [
+          50,
+          51
+        ],
+        "standIn": null,
+        "clanId": 6000116,
+        "leaderId": 2007756,
+        "backgroundPartyId": null,
+        "partyWaitUntil": null,
+        "restUntil": null,
+        "huntEfficiency": [
+          {
+            "spotId": "12_11",
+            "signature": "net-income-v3:51:55:solo:50:50:50:50:2429:0:2452:0:325:0:441:0:46:0:472:0:850:0:851:0:882:0:883:0:913:0",
+            "at": 1793006911258,
+            "samples": 1,
+            "exp": -239000,
+            "cycleMs": 100885,
+            "adena": 0,
+            "loot": 0,
+            "costs": 0,
+            "kills": 1,
+            "noise": 0,
+            "partyRoster": null,
+            "source": "cold_round"
+          },
+          {
+            "spotId": "12_19",
+            "signature": "net-income-v3:51:55:solo:50:50:50:50:2429:0:2452:0:325:0:441:0:46:0:472:0:850:0:851:0:882:0:883:0:913:0",
+            "at": 1793006457677,
+            "samples": 1,
+            "exp": -261000,
+            "cycleMs": 62066,
+            "adena": 0,
+            "loot": 0,
+            "costs": 0,
+            "kills": 0,
+            "noise": 0,
+            "partyRoster": null,
+            "source": "cold_round"
+          }
+        ],
+        "huntClock": {
+          "at": 1793006911258,
+          "cycleMs": 100885,
+          "onSpot": 10989889,
+          "total": 22016036
+        },
+        "deathExperience": {
+          "expBeforeDeath": 78826039,
+          "expLost": 260961,
+          "expAfterDeath": 78565078,
+          "penaltyAppliedAt": 1793006911258,
+          "pendingRestoration": false,
+          "deathContext": {
+            "timestamp": 1793006911258,
+            "cold": true
+          },
+          "resolutionReason": "restart_to_town"
+        },
+        "lastRespawnAt": 1793007025460,
+        "partyBreakReason": "market_break",
+        "hennas": [
+          null,
+          null,
+          null
+        ],
+        "coldShare": {
+          "spotId": "12_11",
+          "carry": 0.52
+        },
+        "marketReturn": {
+          "loc": {
+            "locX": 74460,
+            "locY": 67277,
+            "locZ": -3672
+          },
+          "regionName": "Cadeine fields",
+          "spotId": "12_11"
+        },
+        "economyCommit": [
+          194,
+          1,
+          "a3ae975b-2d98-4aba-968b-bafa7e1f17e1",
+          4,
+          1,
+          204,
+          67932,
+          0,
+          22068934,
+          null
+        ],
+        "soulCrystalQuest": false,
+        "partyMarketReturn": null,
+        "shopTown": null,
+        "townLook": {
+          "at": 1793006724520,
+          "n": 193
+        },
+        "townVisit": {
+          "town": "Giran",
+          "startedAt": 1793007228126,
+          "reason": "improving"
+        },
+        "visitEvery": [
+          138.2,
+          0.17
+        ],
+        "shotDemand": null,
+        "targetCombat": {
+          "targetNpcId": 669,
+          "resolves": 8,
+          "defeated": 69,
+          "targetKills": 53,
+          "interruptions": 16,
+          "lastDefeatedNpcIds": [
+            669,
+            669,
+            669,
+            669,
+            669,
+            669,
+            669,
+            669,
+            669
+          ],
+          "lastResolvedAt": 1793003488125,
+          "populationTargets": {
+            "8": {
+              "resolves": 5,
+              "defeated": 6,
+              "targetKills": 5,
+              "interruptions": 1,
+              "lastDefeatedNpcIds": [
+                8,
+                8
+              ],
+              "lastResolvedAt": 1792507277809
+            },
+            "64": {
+              "resolves": 9,
+              "defeated": 13,
+              "targetKills": 8,
+              "interruptions": 5,
+              "lastDefeatedNpcIds": [
+                60
+              ],
+              "lastResolvedAt": 1792568036891
+            },
+            "156": {
+              "resolves": 26,
+              "defeated": 18,
+              "targetKills": 10,
+              "interruptions": 8,
+              "lastDefeatedNpcIds": [],
+              "lastResolvedAt": 1792572788551
+            },
+            "266": {
+              "resolves": 1,
+              "defeated": 1,
+              "targetKills": 1,
+              "interruptions": 0,
+              "lastDefeatedNpcIds": [
+                266
+              ],
+              "lastResolvedAt": 1792575027798
+            },
+            "356": {
+              "resolves": 3,
+              "defeated": 1,
+              "targetKills": 1,
+              "interruptions": 0,
+              "lastDefeatedNpcIds": [
+                356
+              ],
+              "lastResolvedAt": 1792566329888
+            },
+            "711": {
+              "resolves": 18,
+              "defeated": 17,
+              "targetKills": 11,
+              "interruptions": 6,
+              "lastDefeatedNpcIds": [
+                711,
+                711,
+                711,
+                711,
+                711,
+                711,
+                711,
+                711
+              ],
+              "lastResolvedAt": 1792707554436
+            },
+            "717": {
+              "resolves": 2,
+              "defeated": 0,
+              "targetKills": 0,
+              "interruptions": 0,
+              "lastDefeatedNpcIds": [],
+              "lastResolvedAt": 1792807621510
+            },
+            "721": {
+              "resolves": 2,
+              "defeated": 5,
+              "targetKills": 0,
+              "interruptions": 5,
+              "lastDefeatedNpcIds": [
+                474,
+                474
+              ],
+              "lastResolvedAt": 1792562449425
+            },
+            "740": {
+              "resolves": 28,
+              "defeated": 34,
+              "targetKills": 0,
+              "interruptions": 34,
+              "lastDefeatedNpcIds": [
+                777
+              ],
+              "lastResolvedAt": 1792542653116
+            },
+            "923": {
+              "resolves": 3,
+              "defeated": 3,
+              "targetKills": 3,
+              "interruptions": 0,
+              "lastDefeatedNpcIds": [
+                923
+              ],
+              "lastResolvedAt": 1792575639703
+            },
+            "1152": {
+              "resolves": 1,
+              "defeated": 0,
+              "targetKills": 0,
+              "interruptions": 0,
+              "lastDefeatedNpcIds": [],
+              "lastResolvedAt": 1792999225004
+            }
+          }
+        },
+        "forcedMarketCleanup": null,
+        "marketSellRetryAfter": null,
+        "lastBuffServicePurchase": {
+          "providerId": 2007602,
+          "price": 8355,
+          "count": 12,
+          "at": 1792809958664
+        },
+        "spotBackoffs": [
+          {
+            "spotId": "10_24",
+            "deaths": 2,
+            "fights": 6,
+            "wins": 4,
+            "deathRate": 0.3333333333333333,
+            "winRate": 0.6666666666666666,
+            "reason": "death_pressure",
+            "startedAt": 1792986466473,
+            "attempts": 1,
+            "untilStep": 5436
+          },
+          {
+            "spotId": "15_1",
+            "deaths": 2,
+            "fights": 5,
+            "wins": 2,
+            "deathRate": 0.4,
+            "winRate": 0.4,
+            "reason": "death_pressure",
+            "startedAt": 1792985811816,
+            "attempts": 1,
+            "untilStep": 5427
+          },
+          {
+            "spotId": "12_11",
+            "deaths": 2,
+            "fights": 3,
+            "wins": 0,
+            "deathRate": 0.6666666666666666,
+            "winRate": 0,
+            "reason": "death_pressure",
+            "startedAt": 1792984037518,
+            "attempts": 1,
+            "untilStep": 5406
+          },
+          {
+            "spotId": "18_15",
+            "deaths": 2,
+            "fights": 3,
+            "wins": 2,
+            "deathRate": 0.3333333333333333,
+            "winRate": 0.6666666666666666,
+            "reason": "death_pressure",
+            "startedAt": 1792979509209,
+            "attempts": 1,
+            "untilStep": 5395
+          }
+        ],
+        "pvpEncounter": null,
+        "peoplePoints": 24,
+        "marketRetryAfter": 1792852235899,
+        "marketWanted": {
+          "itemId": 2511,
+          "itemName": "Spiritshot: C-grade",
+          "lastMissingAt": 1792851335899
+        },
+        "clanMembershipVersion": 1792986282793,
+        "lastClanWarehouseTransfer": {
+          "clanId": 6000116,
+          "selfId": 57,
+          "amount": -72100,
+          "at": 1793006410565
+        },
+        "clanInventoryRevision": 8795,
+        "clanGearExchangeRevision": 8373,
+        "clanHuntRisk": {
+          "version": 2,
+          "spotId": "29_2",
+          "enteredAt": 1793002272975,
+          "deathsAtEntry": 0,
+          "fightsAtEntry": 0,
+          "winsAtEntry": 0,
+          "windowFights": 14,
+          "windowWins": 14,
+          "windowDeaths": 1,
+          "recoveryWins": 0,
+          "unrecoveredDeaths": 1,
+          "failedHuntRecoveryWins": 0,
+          "failedHunts": 0
+        },
+        "clanHuntBackoffs": [],
+        "lastResurrectAt": 1793003531874,
+        "decisionSeq": 1630,
+        "activityLeaf": 223558662,
+        "wishFocus": [
+          "power:854:2",
+          138.21047222222424,
+          117660
+        ],
+        "wishDirty": 0,
+        "dormantWishes": [
+          [
+            "power:854:1",
+            "superseded",
+            0,
+            0,
+            138.21047222222424,
+            0.85
+          ],
+          [
+            "power:885:5",
+            "superseded",
+            0,
+            0,
+            138.2077505555576,
+            0.85
+          ],
+          [
+            "power:855:1",
+            "superseded",
+            0,
+            1254583,
+            138.19410833333538,
+            0.85
+          ],
+          [
+            "stock:scrolls",
+            "superseded",
+            0,
+            1242,
+            138.19120527777983,
+            0.85
+          ]
+        ],
+        "money": [
+          3426147,
+          2.92e-7,
+          0,
+          0,
+          0.0000139,
+          117660,
+          854
+        ],
+        "stockTargets": [
+          1061,
+          0,
+          2511,
+          1,
+          1
+        ]
+      },
+      "inventory": {
+        "46": {
+          "selfId": 46,
+          "name": "Bronze Helmet",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            6
+          ],
+          "stackable": false,
+          "slot": 6,
+          "rank": "d",
+          "kind": "Armor.Wear",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 11660909,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 6
+            }
+          ]
+        },
+        "57": {
+          "selfId": 57,
+          "name": "Adena",
+          "amount": 3092159,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": true,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.None",
+          "enchant": 0
+        },
+        "325": {
+          "selfId": 325,
+          "name": "Horn of Glory",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            7
+          ],
+          "stackable": false,
+          "slot": 7,
+          "rank": "c",
+          "kind": "Weapon.Etc",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 12584907,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 7
+            }
+          ]
+        },
+        "441": {
+          "selfId": 441,
+          "name": "Demon's Tunic",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            10
+          ],
+          "stackable": false,
+          "slot": 10,
+          "rank": "c",
+          "kind": "Armor.Fabric",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13373968,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 10
+            }
+          ]
+        },
+        "472": {
+          "selfId": 472,
+          "name": "Demon's Stockings",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            11
+          ],
+          "stackable": false,
+          "slot": 11,
+          "rank": "c",
+          "kind": "Armor.Fabric",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13371870,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 11
+            }
+          ]
+        },
+        "736": {
+          "selfId": 736,
+          "name": "Scroll of Escape",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": true,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.Scroll",
+          "enchant": 0
+        },
+        "850": {
+          "selfId": 850,
+          "name": "Elven Earring",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": false,
+          "slot": 0,
+          "rank": "d",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13241709,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": false,
+              "slot": 0
+            }
+          ]
+        },
+        "851": {
+          "selfId": 851,
+          "name": "Omen Beast's Eye Earring",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            2
+          ],
+          "stackable": false,
+          "slot": 2,
+          "rank": "d",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 12441813,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 2
+            }
+          ]
+        },
+        "854": {
+          "selfId": 854,
+          "name": "Earring of Binding",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            1
+          ],
+          "stackable": false,
+          "slot": 1,
+          "rank": "c",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13385364,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 1
+            }
+          ]
+        },
+        "882": {
+          "selfId": 882,
+          "name": "Mithril Ring",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": false,
+          "slot": 0,
+          "rank": "d",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13241711,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": false,
+              "slot": 0
+            }
+          ]
+        },
+        "883": {
+          "selfId": 883,
+          "name": "Aquastone Ring",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            5
+          ],
+          "stackable": false,
+          "slot": 5,
+          "rank": "c",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13376201,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 5
+            }
+          ]
+        },
+        "885": {
+          "selfId": 885,
+          "name": "Ring of Ages",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            4
+          ],
+          "stackable": false,
+          "slot": 4,
+          "rank": "c",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13385256,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 4
+            }
+          ]
+        },
+        "913": {
+          "selfId": 913,
+          "name": "Elven Necklace",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": false,
+          "slot": 0,
+          "rank": "d",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13257885,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": false,
+              "slot": 0
+            }
+          ]
+        },
+        "915": {
+          "selfId": 915,
+          "name": "Aquastone Necklace",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            3
+          ],
+          "stackable": false,
+          "slot": 3,
+          "rank": "c",
+          "kind": "Armor.Jewel",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13384686,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 3
+            }
+          ]
+        },
+        "955": {
+          "selfId": 955,
+          "name": "Scroll: Enchant Weapon (Grade D)",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": false,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.Scroll",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 13371156,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": false,
+              "slot": 0
+            }
+          ]
+        },
+        "2021": {
+          "selfId": 2021,
+          "name": "Spinebone Sword Blade",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": true,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.Material",
+          "enchant": 0
+        },
+        "2429": {
+          "selfId": 2429,
+          "name": "Chain Boots",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            12
+          ],
+          "stackable": false,
+          "slot": 12,
+          "rank": "c",
+          "kind": "Armor.Wear",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 12150644,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 12
+            }
+          ]
+        },
+        "2452": {
+          "selfId": 2452,
+          "name": "Reinforced Mithril Gloves",
+          "amount": 1,
+          "equipped": true,
+          "equippedCount": 1,
+          "equippedSlots": [
+            9
+          ],
+          "stackable": false,
+          "slot": 9,
+          "rank": "c",
+          "kind": "Armor.Wear",
+          "enchant": 0,
+          "instances": [
+            {
+              "id": 12648920,
+              "amount": 1,
+              "enchant": 0,
+              "equipped": true,
+              "slot": 9
+            }
+          ]
+        },
+        "2511": {
+          "selfId": 2511,
+          "name": "Spiritshot: C-grade",
+          "amount": 1,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": true,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.Shot",
+          "enchant": 0
+        },
+        "5790": {
+          "selfId": 5790,
+          "name": "Spiritshot: No Grade for Beginners",
+          "amount": 189,
+          "equipped": false,
+          "equippedCount": 0,
+          "equippedSlots": [],
+          "stackable": true,
+          "slot": 0,
+          "rank": "none",
+          "kind": "Other.Shot",
+          "enchant": 0
+        }
+      },
+      "marketTrades": {
+        "gear none": 6,
+        "shot none": 1,
+        "gear d": 13,
+        "shot d": 3,
+        "recipe none": 1,
+        "material none": 24,
+        "material d": 6,
+        "gear c": 3
+      },
+      "simulation": {
+        "revision": 8848
+      },
+      "updatedAt": 1793007632894
+    }
+  ],
+  "boardRows": [
+    [
+      1758043,
+      [
+        1758043,
+        "sell_ad",
+        1,
+        2007106,
+        "Giran",
+        1,
+        [
+          [
+            2245527,
+            1458,
+            0,
+            575,
+            318,
+            null,
+            0
+          ]
+        ],
+        3,
+        1,
+        0
+      ]
+    ],
+    [
+      "w:2006281:59",
+      [
+        "w:2006281:59",
+        2006281,
+        59,
+        520500,
+        "Giran",
+        82887,
+        148332,
+        -3466,
+        4
+      ]
+    ],
+    [
+      "w:2006298:40",
+      [
+        "w:2006298:40",
+        2006298,
+        40,
+        116000,
+        "Giran",
+        80971,
+        148143,
+        -3466,
+        16
+      ]
+    ]
+  ],
+  "personaRows": [
+    [
+      2006424,
+      [
+        2006424,
+        "1792496687969",
+        "social",
+        "clan_loyalist",
+        0.66,
+        0.85,
+        0.5,
+        0.63,
+        0.68,
+        0.57,
+        0.78,
+        0.26,
+        0.47,
+        0.09
+      ]
+    ],
+    [
+      2007229,
+      [
+        2007229,
+        "1792503201465",
+        "progression",
+        "steady_achiever",
+        0.33,
+        0.79,
+        0.49,
+        0.73,
+        0.46,
+        0.71,
+        0.69,
+        0.16,
+        0.17,
+        0.22
+      ]
+    ]
+  ]
+}

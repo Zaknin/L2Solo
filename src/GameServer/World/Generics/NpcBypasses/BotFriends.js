@@ -123,7 +123,25 @@ function handler(session, parts) {
             return render(session, 'friends', parts[3]);
         });
     }
-    if (mode === 'form') return BotFriendship.selected(session).then((bots) => bots.reduce((chain, bot) => chain.then(() => World.inviteFriendByName(session, session.actor, bot.characterName || bot.name, undefined, 'friend_const')), Promise.resolve()).then(() => render(session)));
+    if (mode === 'form') {
+        if (session.botFriendsForming) return;
+        const operation = session.botFriendsForming = {};
+        const current = () => session.actor === actor && session.botFriendsForming === operation;
+        let formation, formationComplete = false;
+        return BotFriendship.selected(session).then(async (bots) => {
+            if (!current()) return;
+            formation = await invoke('GameServer/Bot/AI/ConstPartySession').prepareFormation(session, actor, bots, current);
+            for (const bot of bots) {
+                if (!current()) return;
+                await World.inviteFriendByName(session, actor, bot.characterName || bot.name, undefined, 'friend_const');
+            }
+            formationComplete = true;
+            if (current()) return render(session);
+        }).finally(async () => {
+            try { if (formation && (!formationComplete || !current())) await formation.rollback(); }
+            finally { if (session.botFriendsForming === operation) session.botFriendsForming = null; }
+        });
+    }
     render(session, mode, parts[2]);
 }
 handler.render = render;

@@ -47,13 +47,14 @@ function* reservations(state) {
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
     const plan = Disposition.equipmentInputPlan(state);
+    const planInputs = {};
     for (const [id, amount] of Object.entries(Disposition.retainedEquipmentAmounts(state))) {
         reserved[id] = Math.max(Number(reserved[id] || 0), amount); yield 'ingredient';
     }
     const role = Planner.roleFor(state), classId = Number(state.stats?.classId || state.classId || 0);
     const allowed = Disposition.gradeIndex(Planner.gradeForLevel(state.level));
     if (plan?.strategy === 'luxury_exchange' && plan.status === 'active')
-        for (const row of plan.materials || []) reserved[row.selfId] = Math.max(Number(reserved[row.selfId] || 0), Number(row.amount));
+        for (const row of plan.materials || []) planInputs[row.selfId] = Math.max(Number(planInputs[row.selfId] || 0), Number(row.amount));
     const equipped = new Map(), staged = new Map();
     for (const key in state.inventory || {}) {
         const item = state.inventory[key], template = ItemIndex.find(Data.items, Number(item.selfId));
@@ -79,7 +80,7 @@ function* reservations(state) {
     }
     if (plan?.combine && ['active', 'component_ready', 'ready_to_craft', 'blocked'].includes(plan.status)) {
         for (const row of plan.combine.requirements || []) {
-            reserved[row.selfId] = Math.max(Number(reserved[row.selfId] || 0), Number(row.amount || 0)); yield 'ingredient';
+            planInputs[row.selfId] = Math.max(Number(planInputs[row.selfId] || 0), Number(row.amount || 0)); yield 'ingredient';
         }
     }
     if (['active', 'component_ready', 'ready_to_craft'].includes(plan?.status) && plan.strategy === 'craft') {
@@ -93,7 +94,7 @@ function* reservations(state) {
             if (node.at >= node.rows.length) { stack.pop(); yield 'edge'; continue; }
             const row = node.rows[node.at++], id = Number(row.selfId), required = Number(row.amount) * node.multiplier;
             if (id && !node.seen.has(id)) {
-                reserved[id] = Number(reserved[id] || 0) + required;
+                planInputs[id] = Number(planInputs[id] || 0) + required;
                 const missing = Math.max(0, required - Number(state.inventory?.[id]?.amount ?? row.owned ?? 0));
                 const recipe = missing > 0 ? Recipes.resolveByProductId(id) : null;
                 if (recipe && node.depth < 5) stack.push({ rows: recipe.materials || [], at: 0,
@@ -103,6 +104,10 @@ function* reservations(state) {
             yield 'edge';
         }
     }
+    if (plan?.status === 'active') for (const row of plan.crystalPreparation?.materials || [])
+        planInputs[row.selfId] = Math.max(Number(planInputs[row.selfId] || 0), Number(row.amount));
+    for (const [id, amount] of Object.entries(Disposition.capDeferredInputs(state.stats?.equipmentPlan, planInputs)))
+        reserved[id] = Math.max(Number(reserved[id] || 0), amount);
     const target = Number(plan?.target?.selfId || 0);
     if (target && Number(state.inventory?.[target]?.amount) > 0 && !state.inventory[target].equipped) reserved[target] = 1;
     return reserved;

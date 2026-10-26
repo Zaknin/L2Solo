@@ -242,8 +242,8 @@ const occupationPlanner = new ColdOccupationPlanner({
         stack: String(error?.stack || error).slice(0, 4096)
     }),
     sourceToken: (id, input) => input?.mode === 'meeting'
-        ? `${boardIndex.groupFingerprint(MarketCounters.counterOf(id))}|${MarketCounters.revisionOf(MarketCounters.counterOf(id))}|${digestToken(workshopScopeDigests.get(MarketCounters.counterOf(id)))}`
-        : `${boardIndex.itemRevision(id)}:${tables.rows('market').get(`i:${id}`)?.[1] || 0}:${MarketCounters.revisionOf(MarketCounters.counterOf(id))}:${workshopRevisions.get(id) || 0}`,
+        ? `${boardIndex.groupFingerprint(MarketCounters.counterOf(id))}|${MarketCounters.meetingRevisionOf(MarketCounters.counterOf(id))}|${digestToken(workshopScopeDigests.get(MarketCounters.counterOf(id)))}`
+        : `${boardIndex.itemRevision(id)}:${tables.rows('market').get(`i:${id}`)?.[1] || 0}:${tables.rows('market').get(`h:${id}`)?.[1] || 0}:${MarketCounters.revisionOf(MarketCounters.counterOf(id))}:${workshopRevisions.get(id) || 0}`,
     sourceScope: id => MarketCounters.counterOf(id),
     sourceScopeToken: scope => OccupationSources.recipeIndex(boardIndex).revision(scope),
     ownCurrent: (id, input) => !shuttingDown && (id >= 0 || routeRequests.get(-id) === input)
@@ -279,6 +279,14 @@ const occupationPlanner = new ColdOccupationPlanner({
             const request = input.meeting, ownId = Number(input.state.characterId);
             const side = request.actorA === ownId ? 0 : 1, own = request.parties[side];
             if (!EconomyCommit.sameAuthority(own, EconomyCommit.authority(input.state))) throw Error('trade_meeting_authority_changed');
+            // Public shot flow can admit another earning recipe before the
+            // old graph reads its product. At most five category dependencies
+            // cover the craftable grades, including currently absent demand.
+            const craftLevel = invoke('GameServer/Bot/Economy/CraftEligibility').craftLevelFor(input.state);
+            for (const recipeId of invoke('GameServer/Bot/Economy/ShotCraftPolicy').SHOT_RECIPE_IDS) {
+                const recipe = invoke('GameServer/Items/C4RecipeItems').resolveByRecipeId(recipeId);
+                if (recipe && recipe.level <= craftLevel) input.read(Number(recipe.productId));
+            }
             const routeRows = yield* EconomicTrip.prepare(input.state);
             const Context = invoke('GameServer/Bot/Economy/EconomyContext');
             // Fresh physical incoming is delivered in the native owner snapshot.
@@ -313,7 +321,8 @@ const occupationPlanner = new ColdOccupationPlanner({
                             town: request.town, enchant: Number(line.enchant || 0) }, input.state);
                     if (!intent) throw Error('trade_meeting_need_changed');
                     if (economyDiagnostics.active() && !intents.some(row => row.itemId === line.selfId
-                        && row.amount >= required.get(line.selfId) && Number(row.worth) >= line.price)) {
+                        && row.amount >= required.get(line.selfId)
+                        && invoke('GameServer/Bot/Economy/TradeIntent').purchaseWorth(row, economy.network.moneyPrice) >= line.price)) {
                         economyDiagnostics.count('meeting', 'purchase_consent', 'selected_quote');
                         if (economyDiagnostics.enabled(ownId)) economyDiagnostics.push({ owner: ownId,
                             trigger: request.token, phase: 'meeting_consent', reason: 'selected_quote',
@@ -361,7 +370,7 @@ const occupationPlanner = new ColdOccupationPlanner({
             }, Math.min(spendable, Number(input.state.adena || 0)));
             request.dependencies = [...occupationPlanner.slots.get(ownId).reads.keys()].map(id => {
                 const scope = MarketCounters.counterOf(id);
-                return [id, `g:${input.board.groupFingerprint(scope)}`, MarketCounters.revisionOf(scope).split('.').slice(1).join('.'),
+                return [id, `g:${input.board.groupFingerprint(scope)}`, MarketCounters.meetingRevisionOf(scope),
                     `g:${digestToken(workshopScopeDigests.get(scope))}`];
             });
             if (request.dependencies.length > 40) throw Error('trade_meeting_dependency_pressure');
@@ -748,6 +757,7 @@ tables.watch('market', {
             occupationPlanner.sourceChanged(id);
         }
         if (String(key).startsWith('i:')) occupationPlanner.sourceChanged(Number(String(key).slice(2)));
+        else if (String(key).startsWith('f:')) occupationPlanner.groupChanged(String(key).slice(2));
         else if (String(key).startsWith('c:')) occupationPlanner.scopeChanged(String(key).slice(2));
     },
     remove: key => {
@@ -758,6 +768,7 @@ tables.watch('market', {
             occupationPlanner.sourceChanged(id);
         }
         if (String(key).startsWith('i:')) occupationPlanner.sourceChanged(Number(String(key).slice(2)));
+        else if (String(key).startsWith('f:')) occupationPlanner.groupChanged(String(key).slice(2));
         else if (String(key).startsWith('c:')) occupationPlanner.scopeChanged(String(key).slice(2));
     }
 });

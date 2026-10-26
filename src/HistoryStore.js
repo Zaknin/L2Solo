@@ -36,7 +36,7 @@ const PVP_COLUMNS = ['at', 'source', 'conflictKey', 'action', 'reason', 'spotId'
     'initiatorId', 'initiatorLevel', 'initiatorArchetype', 'initiatorKarma', 'targetId', 'targetLevel', 'targetArchetype',
     'targetKarma', 'sideSizes', 'losingSide', 'kills', 'pkKills', 'durationMs', 'playerInvolved', 'actions'];
 const MARKET_TRADE_COLUMNS = ['eventKey', 'occurredAt', 'channel', 'sourceType', 'selfId', 'itemName',
-    'quantity', 'unitPrice', 'totalPrice', 'town', 'sellerCharacterId', 'sellerName', 'buyerCharacterId', 'buyerName'];
+    'quantity', 'unitPrice', 'totalPrice', 'town', 'sellerCharacterId', 'sellerName', 'buyerCharacterId', 'buyerName', 'enchant'];
 const AFK_EVENT_COLUMNS = ['shopId', 'ownerId', 'counterpartyId', 'kind', 'selfId', 'itemName', 'amount',
     'unitPrice', 'totalPrice', 'createdAt'];
 const CLAN_GOAL_EVENT_COLUMNS = ['clanId', 'eventType', 'goalType', 'plan', 'reasonCode', 'payloadJson', 'occurredAt'];
@@ -70,6 +70,11 @@ function open(file) {
     // A history file made before pvp_conflicts had the fight's actions.
     if (!connection.prepare('PRAGMA table_info(pvp_conflicts)').all().some((column) => column.name === 'actions')) {
         connection.exec('ALTER TABLE pvp_conflicts ADD COLUMN actions INTEGER NOT NULL DEFAULT 0');
+    }
+    // Legacy trades did not record quality. NULL preserves that uncertainty;
+    // replay must not interpret an unknown weapon as an unenchanted one.
+    if (!connection.prepare('PRAGMA table_info(market_trades)').all().some(column => column.name === 'enchant')) {
+        connection.exec('ALTER TABLE market_trades ADD COLUMN enchant INTEGER CHECK(enchant IS NULL OR enchant >= 0)');
     }
     return connection;
 }

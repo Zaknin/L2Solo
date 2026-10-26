@@ -858,14 +858,16 @@ function cancelCompanionAction(companionSession) {
     invoke('GameServer/Bot/AI/BotSupportPlanner').cancelSupportCast(companionSession, actor);
 }
 
-function detachState(companionSession, plan = 'hunting', preserveTakeover = false) {
+function detachState(companionSession, plan = 'hunting', preserveTakeover = false, preserveConstActivity = false) {
     try { invoke('GameServer/Bot/BotTradeService').cleanup(companionSession, 'party_detach'); } catch (_) { /* optional hot trade modules */ }
     invoke('GameServer/Bot/AI/HotBotPolicyOverlay').clearForPartyDetach(companionSession);
     cancelCompanionAction(companionSession);
     companionSession.plan = plan;
     companionSession.followPlayerSession = null;
     companionSession.partyCompanion = false;
-    if (!preserveTakeover) invoke('GameServer/Bot/Population/BotLifeState').releasePlayerPartyTakeover(companionSession);
+    const ConstSession = invoke('GameServer/Bot/AI/ConstPartySession');
+    const pausedConst = ConstSession.has(companionSession);
+    if (!preserveTakeover && !pausedConst) invoke('GameServer/Bot/Population/BotLifeState').releasePlayerPartyTakeover(companionSession);
     refreshPartyMemberships([companionSession], invoke);
     companionSession.botStay = false;
     companionSession.stayLocation = null;
@@ -875,6 +877,7 @@ function detachState(companionSession, plan = 'hunting', preserveTakeover = fals
     companionSession.partyPuller = false;
     companionSession.roleDecision = null;
     companionSession.actor?.unselect?.();
+    if (pausedConst && !preserveConstActivity) ConstSession.resume(companionSession);
 }
 
 function clearPullerIfDetached(leaderSession, companionSession) {
@@ -1246,7 +1249,7 @@ const PartyCompanionService = {
         }
 
         clearPullerIfDetached(leaderSession, companionSession);
-        detachState(companionSession, options.plan || 'hunting', options.preserveTakeover === true);
+        detachState(companionSession, options.plan || 'hunting', options.preserveTakeover === true, options.preserveConstActivity === true);
 
         if (options.message) {
             BotManager.botSay(companionSession, options.message);
@@ -1269,7 +1272,7 @@ const PartyCompanionService = {
     detachAll(leaderSession, options = {}) {
         const members = membersForLeader(leaderSession);
         const Takeover = invoke('GameServer/Bot/AI/PlayerPartyTakeover');
-        const restoration = options.restoreAutonomousParty === false
+        const restoration = options.restoreAutonomousParty === false || members.some(member => invoke('GameServer/Bot/AI/ConstPartySession').has(member))
             ? null
             : Takeover.restorationTarget(leaderSession, members);
         members.forEach((memberSession) => {
@@ -1281,6 +1284,8 @@ const PartyCompanionService = {
             });
         });
         refreshLeaderView(leaderSession, options);
+        const constResumes = members.map(member => member.constPartyResumePromise).filter(Boolean);
+        if (constResumes.length) leaderSession.constPartyResumePromise = Promise.all(constResumes);
         if (restoration) {
             const restorationPromise = Takeover.restoreAutonomousParty({
                 ...restoration,
@@ -1311,7 +1316,7 @@ const PartyCompanionService = {
         const leaderSession = companionSession?.followPlayerSession || null;
         if (!companionSession?.partyCompanion) return false;
         if (leaderSession) clearPullerIfDetached(leaderSession, companionSession);
-        detachState(companionSession, options.plan || 'hunting', options.preserveTakeover === true);
+        detachState(companionSession, options.plan || 'hunting', options.preserveTakeover === true, options.preserveConstActivity === true);
         if (leaderSession) {
             refreshLeaderView(leaderSession, options);
         }

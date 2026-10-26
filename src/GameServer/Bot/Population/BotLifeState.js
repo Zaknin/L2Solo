@@ -934,8 +934,9 @@ function save(row, options = {}) {
             -- Native takeover/release/restore owns player membership. A late
             -- actor snapshot cannot revive or remove that ownership marker.
             statsJson = json_set(json_patch(json_remove(${EconomyCommit.preserveLeafSql(
-                "json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs')")}, '$.playerPartyTakeover'),
-                json_object('playerPartyTakeover', json_extract(bot_life_state.statsJson, '$.playerPartyTakeover'))),
+                "json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs')")}, '$.playerPartyTakeover', '$.constPartySession'),
+                json_object('playerPartyTakeover', json_extract(bot_life_state.statsJson, '$.playerPartyTakeover'),
+                    'constPartySession', json_extract(bot_life_state.statsJson, '$.constPartySession'))),
                 '$.hennas', json_array(
                     (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 1),
                     (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 2),
@@ -1797,7 +1798,7 @@ const BotLifeState = {
                     (SELECT karma FROM characters WHERE id = characterId))
                 WHERE COALESCE(json_extract(statsJson, '$.karma'), 0)
                     <> (SELECT karma FROM characters WHERE id = characterId)`, []]))
-            .then(() => Database.reconcileBotClanGoals?.()).then(() => removeRetiredStaticMerchantStates()).then(() => recoverStaleHotStates()).then(() => recoverDissolvedPartyMembers()).then(() => recoverStaleCraftWaits()).then(() => migrateAcquisitionPartyWaits()).then(() => clearPassivePartyRequests()).then(() => expireStalePartyRequests()).then(() => discardInvalidEquipmentPlans()).then(() => discardFulfilledEquipmentPlans()).then(() => hydrateCache()).then((count) => {
+            .then(() => Database.reconcileBotClanGoals?.()).then(() => removeRetiredStaticMerchantStates()).then(() => Database.recoverConstPartyActivities()).then(() => recoverStaleHotStates()).then(() => recoverDissolvedPartyMembers()).then(() => recoverStaleCraftWaits()).then(() => migrateAcquisitionPartyWaits()).then(() => clearPassivePartyRequests()).then(() => expireStalePartyRequests()).then(() => discardInvalidEquipmentPlans()).then(() => discardFulfilledEquipmentPlans()).then(() => hydrateCache()).then((count) => {
             const repairs = [...cache.values()]
                 .map(canonicalizeAreaState)
                 .map(recoverOrphanedGiranState)
@@ -3521,7 +3522,8 @@ const BotLifeState = {
         candidates.forEach((candidate) => {
             const selfId = Number(candidate.selfId || 0);
             const existing = inventory[String(selfId)];
-            if (!existing || selfId === 57 || invoke('GameServer/Items/C4BeginnerShots').isRestricted(selfId)) return;
+            if (!existing || selfId === 57 || Disposition.isGradeCrystal(candidate)
+                || invoke('GameServer/Items/C4BeginnerShots').isRestricted(selfId)) return;
             const free = Disposition.saleFreeAmount(state, existing, reserved);
             const equippedCount = Math.max(0, Number(existing?.equippedCount ?? (existing?.equipped ? 1 : 0)));
             const amount = Math.min(
@@ -3640,6 +3642,17 @@ const BotLifeState = {
             return Promise.resolve(null);
         }
         return writeHeldOnRevision(member, { stats: { equipmentPlan: plan, lastReason: reason } }, reason);
+    },
+
+    retireMarketErrand(characterId, expected) {
+        const current = cache.get(Number(characterId));
+        if (!current || current.phase !== 'cold' || !expected) return Promise.resolve(null);
+        const Errands = require('./CombinedErrandPolicy');
+        const next = Errands.complete(current, expected);
+        if (JSON.stringify(next.stats.marketErrands) === JSON.stringify(current.stats.marketErrands || [])
+            && JSON.stringify(next.stats.marketErrand) === JSON.stringify(current.stats.marketErrand || null)) return Promise.resolve(null);
+        return writeHeldOnRevision(current, { stats: { marketErrands: next.stats.marketErrands,
+            marketErrand: next.stats.marketErrand, lastReason: 'market_errand_need_changed' } }, 'market_errand_need_changed');
     },
 
     acceptClanLevelSpState(row) {

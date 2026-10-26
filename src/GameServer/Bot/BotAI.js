@@ -192,7 +192,7 @@ const BotAI = {
     },
 
     scheduleTick(session, delayMs, { urgent = false } = {}) {
-        if (!session?.actor || !session.aiActive) return false;
+        if (!session?.actor || !session.aiActive || session.constActivityPaused) return false;
         this.cancelScheduledTick(session);
         const generation = Number(session.aiScheduleGeneration || 0);
         const runAiTick = () => {
@@ -218,6 +218,7 @@ const BotAI = {
     },
 
     init(session) {
+        if (session.constActivityPaused) return;
         this.cancelScheduledTick(session);
         session.aiActive = true;
         // Once per activation: a later re-init must not bring back a servitor
@@ -394,6 +395,7 @@ const BotAI = {
     },
 
     tick(session) {
+        if (session.constActivityPaused) return;
         // Position changes only when TeleportTo completes. Damage wakeups in
         // that interval must not restart actions in the previous raid region.
         if (session.pendingActorTeleport || session.followPlayerSession?.pendingActorTeleport) return;

@@ -197,6 +197,22 @@ const GoalState = {
         });
     },
 
+    abandonAccepted(characterId, expectedGoal) {
+        const id = Number(characterId), existing = this.snapshot(id);
+        if (!expectedGoal || !existing?.current || existing.current.status !== 'active'
+            || safeJson(existing.current) !== safeJson(expectedGoal)) return Promise.resolve(null);
+        const timestamp = now(), current = normalizeGoal({ ...existing.current, status: 'abandoned',
+            reviewedAt: timestamp, nextReviewAt: timestamp });
+        const snapshot = { ...existing, current, updatedAt: timestamp, inputHash: undefined };
+        return Database.execute([`UPDATE ${TABLE} SET goalJson = ?, updatedAt = ?
+            WHERE characterId = ? AND updatedAt = ? AND goalJson = ?`,
+        [safeJson(current), timestamp, id, existing.updatedAt, safeJson(existing.current)]], 'bot-goals:purchase-refused').then(result => {
+            if (Number(result?.affectedRows) !== 1) return null;
+            if (cache.get(id) === existing) store(snapshot);
+            return snapshot;
+        });
+    },
+
     // Advance only the goal accepted before the asynchronous native purchase.
     // Matching its persisted value also makes a repeated receipt a no-op.
     applyPurchase(characterId, expectedGoal, units) {

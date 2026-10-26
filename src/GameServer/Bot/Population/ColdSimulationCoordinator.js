@@ -520,7 +520,7 @@ class ColdSimulationCoordinator {
         if (!proof.dependencies?.every(([id, boardToken, marketToken, workshopToken]) => {
             const scope = Counters.counterOf(id), grouped = boardToken.startsWith('g:');
             return (grouped ? `g:${board.groupFingerprint(scope)}` : board.itemFingerprint(id)) === boardToken
-                && Counters.revisionOf(scope).split('.').slice(1).join('.') === marketToken
+                && Counters.meetingRevisionOf(scope) === marketToken
                 && (grouped ? `g:${CraftWorkshopService.publicScopeDigest(scope)}` : String(CraftWorkshopService.publicRecipeDigest(id))) === workshopToken;
         })) return false;
         return proof.sources.every(([recordId, revision]) => {

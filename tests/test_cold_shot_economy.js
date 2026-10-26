@@ -55,13 +55,13 @@ async function nativeEconomy(state, now) {
     return Life.upsertState({ ...state, stats: { ...state.stats, ...Economy.forState(state, { timestamp: now, routeRows: preparedRoutes(state) }).statsPacket } },
         'native_stock_money');
 }
-async function sell(state, id, price) {
+async function sell(state, id, price, count = 1) {
     // These production cases require executable backed supply, not future WTS interest.
     const previous = Afk.ownerRecords(state.characterId).find(row => row.kind === 'shop');
     const lines = new Map((previous?.lines || []).map(line => [line.selfId, { ...line }]));
     if (previous) await Afk.closeBotRecord(state.characterId, previous.id);
     const item = (await Database.fetchItems(state.characterId)).find(row => Number(row.selfId) === id);
-    lines.set(id, { objectId: item.id, selfId: id, name: item.name, count: 1, price,
+    lines.set(id, { objectId: item.id, selfId: id, name: item.name, count, price,
         enchant: 0, stackable: !!item.stackable, slot: Number(item.slot || 0) });
     const bag = await Database.fetchItems(state.characterId);
     await Afk.publishBot(state.characterId, { kind: 'shop', storeType: Afk.SELL, town: 'Giran',
@@ -294,6 +294,51 @@ async function images(ids) {
         assert(Policy.eligible({ ...result, level: 60, stats: { ...result.stats, classId: 57 } }, now));
         assert(!Policy.eligible({ ...result, party: { partyId: 9 } }, now));
         console.log('PASS native Maestro/Warsmith eligibility and no retired population scan');
+
+        const cRecipe = Recipes.resolveByRecipeId(21);
+        const cConsumer = await seed([cash(100000000)], { level: 55, name: 'CConsumer' });
+        await Afk.publishBot(cConsumer.characterId, { kind: 'shop', storeType: Afk.BUY, town: 'Giran', title: 'C ammunition',
+            lines: [{ selfId: cRecipe.productId, count: 5000, price: 1000, enchant: 0, stackable: true, slot: 0 }] });
+        await Database.setItem(supplier.characterId, { selfId: cRecipe.recipeItemId, amount: 1 });
+        await Life.syncExternalInventory(supplier.characterId, 'c_recipe_stock', Life.cachedState(supplier.characterId));
+        await sell(Life.cachedState(supplier.characterId), cRecipe.recipeItemId, 1);
+        await Database.setItem(supplier.characterId, { selfId: 1459, amount: 100 });
+        await Life.syncExternalInventory(supplier.characterId, 'c_crystal_stock', Life.cachedState(supplier.characterId));
+        await sell(Life.cachedState(supplier.characterId), 1459, 1, 100);
+        let cCrafter = await seed([cash(10000000),
+            { selfId: 1459, amount: 1 },
+            { selfId: 1463, amount: 1000 }, { selfId: 129, amount: 1, equipped: true, slot: 7 }],
+        { classId: 57, level: 55, name: 'CLearner' });
+        cCrafter = await measuredEconomy(cCrafter, now);
+        const cTarget = Shots.recipeTarget(cCrafter, Shots.marketSnapshot(now), [], 21);
+        assert(cTarget, 'funded C demand supports acquiring the missing C recipe');
+        cCrafter = await Shots.execute(cCrafter, { recipeTarget: 21,
+            recipeRoute: Policy.selectionFor(cTarget.route) }, now + 90000);
+        assert((await Database.fetchCharacterRecipes(cCrafter.characterId)).some(row => Number(row.recipeId) === 21));
+        assert.equal(held(await Database.fetchItems(cCrafter.characterId), cRecipe.recipeItemId), 0);
+        const gearRecipe = Recipes.resolveByProductId(95);
+        const gearPlan = { strategy: 'craft', status: 'active', recipeId: gearRecipe.recipeId,
+            target: { selfId: 95, slot: 14 }, materials: gearRecipe.materials };
+        const beforeInputs = { ...cCrafter, inventory: { ...cCrafter.inventory,
+            1459: { ...cCrafter.inventory[1459], amount: 1 } } };
+        const pausedGear = invoke('GameServer/Bot/AI/GearPlanSelection').deferredWishPlan(gearPlan, {}, beforeInputs);
+        cCrafter = await Life.upsertState({ ...cCrafter, stats: { ...cCrafter.stats, equipmentPlan: pausedGear } }, 'c_inputs_after_gear_pause');
+        assert.equal(Policy.availableMaterial(cCrafter, 1459), 0, 'the collected gear crystal stays reserved');
+        const cCandidate = Shots.craftCandidate(cCrafter, cRecipe, Shots.marketSnapshot(now + 120000));
+        assert(cCandidate?.batches > 0, 'the learned recipe reaches a finite executable production batch');
+        assert.equal(cCandidate.gear.source, 'crystals');
+        const crystalSupply = () => Afk.offers(1459, Afk.SELL).filter(row => row.sourceId === supplier.characterId)
+            .reduce((sum, row) => sum + row.count, 0);
+        const beforeCInputs = crystalSupply();
+        cCrafter = await Shots.execute(cCrafter, { craft: Policy.selectionFor(cCandidate) }, now + 120000);
+        assert.equal(cCrafter.stats.shotCraft.productId, 1464);
+        assert(cCrafter.stats.shotCraft.amount > 0);
+        assert.equal(held(await Database.fetchItems(cCrafter.characterId), 1464), cCrafter.stats.shotCraft.amount);
+        assert(held(await Database.fetchItems(cCrafter.characterId), 1459) >= 1, 'C production preserves the collected gear crystal');
+        assert(crystalSupply() < beforeCInputs,
+            'the producer physically buys its own crystals before acquiring ore and crafting');
+        assert.equal(cCrafter.stats.shotCraft.preparing, undefined, 'completed production clears its preparation facts');
+        console.log('PASS physical C recipe purchase/learning, input allocation and C shot production');
     } finally {
         if (originals) {Afk.buyFromShop = originals.buy;Database.purchaseNpcInventoryItem = originals.npc;
             Database.purchaseNpcInventoryBasket = originals.basket;

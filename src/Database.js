@@ -2481,7 +2481,7 @@ function prepareCraftReservationsUnsafe(step, recipe) {
     }, { craft: false });
 }
 
-function checkEconomyMaterialProtectionUnsafe(characterId, step, selfId, used) {
+function checkEconomyMaterialProtectionUnsafe(characterId, step, selfId, used, sale = false) {
     if (!step) return;
     const stats = SavedStats.merge(step.row.statsJson, step.row.mindJson), inventory = jsonObject(step.row.inventorySummary);
     // Bilateral market acceptance also rechecks the current gear/craft/clan
@@ -2492,7 +2492,8 @@ function checkEconomyMaterialProtectionUnsafe(characterId, step, selfId, used) {
     if (item.protected || item.acceptedCustomer || item.assignedClan || item.available === false) throw Error('economy_material_protected');
     const goalReserve = stats.equipmentPlan?.status === 'active' && Number(stats.equipmentPlan.target?.selfId) === Number(selfId) ? 1 : 0;
     const reserve = Math.max(Number(stats.clanMaterialDemand?.[selfId] || 0), goalReserve,
-        Number(step.reserved?.[selfId] || 0), Number(item.protectedAmount || 0), Number(item.starterMobLootAmount || 0), Number(item.reservedAmount || 0));
+        Number(step.reserved?.[selfId] || 0), Number(item.protectedAmount || 0), Number(item.starterMobLootAmount || 0), Number(item.reservedAmount || 0))
+        + (sale ? Number(invoke('GameServer/Bot/Economy/ItemDisposition').productionInputAmounts({ stats })[selfId] || 0) : 0);
     const available = Number(one('SELECT COALESCE(SUM(amount),0) amount FROM items WHERE characterId=? AND selfId=? AND equipped=0',
         [characterId, Number(selfId)]).amount);
     if (available - reserve < used) throw Error('economy_material_protected');
@@ -3809,6 +3810,10 @@ function openBoardRecordUnsafe(characterId, config, rows, { prepaid = false, bid
 
         let source = null;
         if (storeType === BoardRules.SELL) {
+            const life = botOwned && one('SELECT * FROM bot_life_state WHERE characterId=?', [characterId]);
+            if (life && invoke('GameServer/Bot/Economy/ItemDisposition').productionInputAmounts({
+                stats: SavedStats.merge(life.statsJson, life.mindJson) })[selfId] > 0)
+                checkEconomyMaterialProtectionUnsafe(characterId, { row: life }, selfId, count, true);
             let sourceId = Number(line.objectId || line.sourceObjectId || 0);
             // Returned nonstackable stock is one physical row per unit. Keep
             // the logical lot's metadata even when another row serves it.
@@ -4587,13 +4592,15 @@ const Database = {
         const selfId = Math.floor(Number(trade.selfId || 0));
         const quantity = Math.floor(Number(trade.quantity || 0));
         const unitPrice = Math.floor(Number(trade.unitPrice ?? trade.price));
+        const enchant = trade.enchant == null ? null : Number(trade.enchant);
         const totalPrice = quantity * unitPrice;
         const sellerName = trade.seller?.name || trade.sellerName || null;
         const buyerName = trade.buyer?.name || trade.buyerName || null;
         if (!eventKey || !Number.isSafeInteger(selfId) || selfId <= 0
             || !Number.isSafeInteger(quantity) || quantity <= 0
             || !Number.isSafeInteger(unitPrice) || unitPrice < 0
-            || !Number.isSafeInteger(totalPrice) || totalPrice < 0) {
+            || !Number.isSafeInteger(totalPrice) || totalPrice < 0
+            || enchant !== null && (!Number.isSafeInteger(enchant) || enchant < 0)) {
             return Promise.reject(new Error('invalid_market_trade'));
         }
         const record = () => {
@@ -4603,6 +4610,7 @@ const Database = {
                 channel: String(trade.channel || 'wts').slice(0, 32),
                 sourceType: String(trade.sourceType || '').slice(0, 64),
                 selfId,
+                enchant,
                 itemName: String(trade.itemName || '').slice(0, 160),
                 quantity,
                 unitPrice,
@@ -4739,16 +4747,24 @@ const Database = {
         return run('SELECT characterId,counter,deals FROM bot_market_counts', [], 'board:own-counts', true);
     },
 
+    fetchRecentFixedStoreDeals({ rangeMs = 24 * 60 * 60 * 1000 } = {}) {
+        return flushHistory().then(() => enqueue(() => History.all(`SELECT selfId, quantity, occurredAt, town, enchant
+            FROM market_trades WHERE channel = 'fixed_wts' AND unitPrice > 0
+                AND occurredAt >= (SELECT MAX(occurredAt) FROM market_trades) - ?
+            ORDER BY occurredAt ASC, id ASC`, [Math.max(0, Number(rangeMs) || 0)]),
+        { operation: 'market:recent-fixed-deals', read: true }));
+    },
+
     fetchRecentBoardDeals({ perItem = 32, rangeMs = 24 * 60 * 60 * 1000 } = {}) {
         return flushHistory().then(() => enqueue(() => {
             const rows = History.all(`WITH board AS (
-                SELECT id, selfId, unitPrice, quantity, occurredAt, sellerCharacterId, buyerCharacterId, town
+                SELECT id, selfId, unitPrice, quantity, occurredAt, sellerCharacterId, buyerCharacterId, town, enchant
                 FROM market_trades
                 WHERE sourceType IN ('afk_bot_store', 'afk_player_store', 'afk_bot_buy_store', 'afk_player_buy_store')
                     AND unitPrice > 0),
             ranked AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY selfId ORDER BY occurredAt DESC, id DESC) AS recent
                 FROM board)
-            SELECT selfId, unitPrice, quantity, occurredAt, sellerCharacterId, buyerCharacterId, town FROM ranked
+            SELECT selfId, unitPrice, quantity, occurredAt, sellerCharacterId, buyerCharacterId, town, enchant FROM ranked
             WHERE recent <= ? OR occurredAt >= (SELECT MAX(occurredAt) FROM board) - ?
             ORDER BY occurredAt ASC, id ASC`, [Math.max(1, Math.floor(Number(perItem) || 32)),
             Math.max(0, Number(rangeMs) || 0)]);
@@ -5272,7 +5288,7 @@ const Database = {
             recordMarketTradeUnsafe({
                 eventKey: `afk:${eventId}`, occurredAt: timestamp, channel: botOwned ? 'bot_wts' : 'player_wts',
                 sourceType: botOwned ? 'afk_bot_store' : 'afk_player_store', selfId: line.selfId, itemName: line.name,
-                quantity, unitPrice: line.price, totalPrice: total, town: shop.town,
+                quantity, unitPrice: line.price, totalPrice: total, town: shop.town, enchant: Number(line.enchant || 0),
                 sellerCharacterId: shop.ownerId, sellerName: owner?.name || null,
                 buyerCharacterId: buyerId, buyerName: buyer?.name || null,
                 recommendationHours: Number(details.funding?.valueHours || 0)
@@ -5329,7 +5345,7 @@ const Database = {
             if (details.expectedRevision !== undefined && Number(details.expectedRevision) !== Number(shop.revision)) throw new Error('afk_trade_shop_changed');
             const total = Number(line.price) * quantity;
             if (!Number.isSafeInteger(total) || total < 1 || Number(shop.escrowAdena) < total) throw new Error('afk_trade_budget_changed');
-            checkEconomyMaterialProtectionUnsafe(sellerId, step, line.selfId, quantity);
+            checkEconomyMaterialProtectionUnsafe(sellerId, step, line.selfId, quantity, true);
             const timestamp = now();
             const source = afkTradeTakeItemUnsafe(
                 sellerId,
@@ -5354,7 +5370,7 @@ const Database = {
             recordMarketTradeUnsafe({
                 eventKey: `afk:${eventId}`, occurredAt: timestamp, channel: 'wtb',
                 sourceType: botOwned ? 'afk_bot_buy_store' : 'afk_player_buy_store', selfId: line.selfId, itemName: line.name,
-                quantity, unitPrice: line.price, totalPrice: total, town: shop.town,
+                quantity, unitPrice: line.price, totalPrice: total, town: shop.town, enchant: Number(line.enchant || 0),
                 sellerCharacterId: sellerId, sellerName: seller?.name || null,
                 buyerCharacterId: shop.ownerId, buyerName: owner?.name || null
             }, { unique: true, recommend: true });
@@ -6146,6 +6162,24 @@ const Database = {
         }, 'bot-life:party-lifecycle');
     },
 
+    pauseConstPartyActivity(request = {}) {
+        return inTransaction(() => require('./GameServer/Bot/Population/ConstPartyActivity').native({
+            one, all, write, row: coldSimulationRow, now
+        }).pause(request), 'bot-life:const-party-pause');
+    },
+
+    releaseConstPartyActivity(request = {}) {
+        return inTransaction(() => require('./GameServer/Bot/Population/ConstPartyActivity').native({
+            one, all, write, row: coldSimulationRow, now
+        }).release(request), 'bot-life:const-party-resume');
+    },
+
+    recoverConstPartyActivities() {
+        return inTransaction(() => require('./GameServer/Bot/Population/ConstPartyActivity').native({
+            one, all, write, row: coldSimulationRow, now
+        }).recover(), 'bot-life:const-party-recovery');
+    },
+
     takeOverBackgroundParty(request = {}) {
         const members = request.members || [];
         const ids = members.map((member) => Number(member.characterId));
@@ -6722,7 +6756,7 @@ const Database = {
             const buyer = one('SELECT name FROM characters WHERE id = ?', [buyerId]);
             recordMarketTradeUnsafe({ eventKey: `private:${require('node:crypto').randomUUID()}`, occurredAt: now(),
                 channel: details.buyOrder ? 'player_wtb' : 'player_wts', sourceType: details.buyOrder ? 'private_buy_store' : 'private_store',
-                selfId: Number(source.selfId), itemName: source.name,
+                selfId: Number(source.selfId), itemName: source.name, enchant: Number(source.enchant || 0),
                 quantity, unitPrice: price, totalPrice: total, town: details.town,
                 sellerCharacterId: sellerId, sellerName: seller?.name, buyerCharacterId: buyerId, buyerName: buyer?.name,
                 recommendationHours: Number(details.funding?.valueHours || 0) }, { recommend: true });
@@ -11030,7 +11064,8 @@ const TradeMeetings = require('./GameServer/AfkTrade/TradeMeeting').create({
         const pending = Number(one('SELECT COALESCE(SUM(amount),0) amount FROM board_settlements WHERE ownerId=? AND selfId=?', [owner, item.selfId]).amount);
         if (!Number.isSafeInteger(bag + pending + count)) throw Error('trade_meeting_integer');
         return creditRecordOwnerUnsafe(owner, item, count, at);
-    }, funding: checkEconomyFundingUnsafe, protection: checkEconomyMaterialProtectionUnsafe,
+    }, funding: checkEconomyFundingUnsafe,
+    protection: (id, step, selfId, used) => checkEconomyMaterialProtectionUnsafe(id, step, selfId, used, true),
     position: tradeMeetingPositionUnsafe,
     canStartTrade: (id, state) => require('./GameServer/Bot/Population/PartyAdmission').partyTradeAllowed(
         'trade', state, invoke('GameServer/World/World').registeredActorById(id)?.session),
@@ -11065,7 +11100,7 @@ const TradeMeetings = require('./GameServer/AfkTrade/TradeMeeting').create({
         recordMarketTradeUnsafe({ eventKey: `meeting:${meeting.id}:${line.ordinal}`, occurredAt: at,
             channel: BoardRules.isBotAccount(seller?.username) ? 'bot_wts' : 'player_wts',
             sourceType: BoardRules.isBotAccount(seller?.username) ? 'afk_bot_store' : 'afk_player_store',
-            selfId: line.selfId, itemName: line.name, quantity: line.count, unitPrice: line.price,
+            selfId: line.selfId, itemName: line.name, quantity: line.count, unitPrice: line.price, enchant: line.enchant,
             totalPrice: line.count * line.price, town: meeting.town, sellerCharacterId: sellerId,
             sellerName: seller?.name || null, buyerCharacterId: buyerId, buyerName: buyer?.name || null,
             recommendationHours: intent ? intent.valueHours * line.count / intent.amount : 0

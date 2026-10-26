@@ -27,8 +27,34 @@ module.exports.nativeMeetingPreparation = async (id, timestamp, request) => {
     const own = request.actorA === Number(id) ? 0 : 1;
     Object.assign(request.parties[own], require('../Economy/EconomyCommit').authority(state));
     request.parties[own].needRevision = request.parties[own].revision;
-    return { request: await kernel.prepareMeeting(Number(id), request), forbiddenLoaded: Object.keys(require.cache)
-        .filter(key => /\/(?:Database|Network)\/|\/src\/Database\.js$|\/World\/World\.js$|\/Bot\/BotManager\.js$/.test(key)) };
+    for (const party of request.parties) party.needRevision ??= party.revision;
+    const Intent = require('../Economy/TradeIntent'), original = Intent.meetingPurchase;
+    const originalStep = occupationPlanner.step;
+    let trace, flowInjected = false, flowInvalidated = false;
+    if (workerData.duringMeetingMarket?.length) occupationPlanner.step = work => {
+        const done = originalStep(work);
+        if (!flowInjected && work.stage === WORK_STAGES.indexOf('candidate') + 1) {
+            flowInjected = true;
+            tables.apply([{ name: 'market', from: 0, to: 1, full: false, last: true, removed: [],
+                rows: workerData.duringMeetingMarket.map(row => [row[0], row]) }]);
+            flowInvalidated = occupationPlanner.slots.get(Number(id))?.dirty === true;
+        }
+        return done;
+    };
+    Intent.meetingPurchase = (...args) => {
+        const [network, intents, terms] = args;
+        trace = { terms, activity: network.activity, moneyPrice: network.moneyPrice, intents,
+            queue: network.queue.map(row => ({ key: row.key, price: row.price, valueHours: row.valueHours,
+                ratio: row.ratio, funded: row.funded, object: row.object })) };
+        return original(...args);
+    };
+    try {
+        const prepared = await kernel.prepareMeeting(Number(id), request);
+        return { request: prepared, frames: kernel.meetingResultPages(prepared, Number(id), request.token), trace,
+            flowInjected, flowInvalidated, forbiddenLoaded: Object.keys(require.cache)
+            .filter(key => /\/(?:Database|Network)\/|\/src\/Database\.js$|\/World\/World\.js$|\/Bot\/BotManager\.js$/.test(key)) };
+    } catch (error) { error.meetingTrace = trace; throw error; }
+    finally { Intent.meetingPurchase = original; occupationPlanner.step = originalStep; }
 };
 module.exports.nativeEconomyDecision = async (id, timestamp, nativeRoutes = false) => {
     const state = kernel.states.get(Number(id)).state;
@@ -48,7 +74,7 @@ module.exports.nativeEconomyDecision = async (id, timestamp, nativeRoutes = fals
     };
     return { ...(nativeRoutes ? { watchList: economy.watchList } : {}),
         warehouseAssets: invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').inventory(state),
-        decision: { ...decision }, materials: decision.materials, statsPacket: economy.statsPacket, reserveInputs,
+        decision: { ...decision }, activity: economy.network.activity, materials: decision.materials, statsPacket: economy.statsPacket, reserveInputs,
         tradeIntents: require('../Economy/TradeIntent').project(state, economy.network, economy.projection,
             id => economy.worth(id) ?? economy.price(id), 40),
         queue: economy.network.queue.map(row => ({ key: row.key, materials: row.object?.materials || [], price: row.price, ratio: row.ratio, valueHours: row.valueHours, funded: row.funded, cumulativePrice: row.cumulativePrice, object: row.object })),
@@ -64,15 +90,15 @@ parentPort.on('message', async message => {
     if (!message.nativeEconomyDecision) return;
     try { parentPort.postMessage({ probeId: message.msgId,
         value: await loaded.exports[message.meetingRequest ? 'nativeMeetingPreparation' : message.townVisit ? 'nativeTownVisit' : message.recipeEarning ? 'nativeRecipeEarning' : 'nativeEconomyDecision'](message.characterId, message.timestamp, message.meetingRequest || (message.recipeEarning ? message.refreshEconomy : message.nativeRoutes)) }); }
-    catch (error) { parentPort.postMessage({ probeId: message.msgId, error: error.stack }); }
+    catch (error) { parentPort.postMessage({ probeId: message.msgId, error: error.stack, meetingTrace: error.meetingTrace }); }
 });`;
 
 // recipes: the bot's row of main's 'recipes' table ({ recipeBook, knownShotRecipes }), if any.
 module.exports = async function workerEconomyDecision(state, { recipes = null, timestamp = Date.now(),
-    boardRows = [], extraStates = [], tablePages = [], tables = [], recipeEarning = false, refreshEconomy = false, nativeRoutes = false, townVisit = false, meetingRequest = null } = {}) {
+    boardRows = [], extraStates = [], tablePages = [], tables = [], recipeEarning = false, refreshEconomy = false, nativeRoutes = false, townVisit = false, meetingRequest = null, duringMeetingMarket = [] } = {}) {
     const epoch = `native:economy-decision:${state.characterId}`;
     const messages = [];
-    const worker = new Worker(wrapper, { eval: true, workerData: { workerEpoch: epoch,
+    const worker = new Worker(wrapper, { eval: true, workerData: { workerEpoch: epoch, duringMeetingMarket,
         workerPath: path.join(root, 'src/GameServer/Bot/Population/ColdSimulationWorker.js'), observer } });
     let fault;
     worker.on('message', message => messages.push(message)); worker.on('error', error => { fault = error; });
@@ -112,7 +138,9 @@ module.exports = async function workerEconomyDecision(state, { recipes = null, t
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'native-economy'), nativeEconomyDecision: true,
             characterId: state.characterId, timestamp, recipeEarning, refreshEconomy, nativeRoutes, townVisit, meetingRequest });
         const response = await wait(message => message.probeId === 'native-economy');
-        if (response.error) throw Error(response.error);
+        if (response.error) {
+            const error = Error(response.error); error.meetingTrace = response.meetingTrace; throw error;
+        }
         assert.deepEqual(response.value.forbiddenLoaded, [], 'native economy worker loads no World actor/network/database implementation');
         return response.value;
     } finally { await worker.terminate(); }

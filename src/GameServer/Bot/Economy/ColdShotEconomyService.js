@@ -51,11 +51,12 @@ function recheck(state, selected) {
     const scrap = sourceCode > 0 ? Recipes.resolveByRecipeId(sourceCode) : null;
     if (scrap) for (const material of scrap.materials || []) neededIds.add(Number(material.selfId));
     if (sourceCode === -1) neededIds.add(gearId);
+    const reserved = ItemDisposition.reservedEquipmentAmounts(state);
     for (const id of neededIds) {
         const row = state.inventory?.[id];
         // The worker values own stock at the same exit value (ColdOccupationSources).
         const value = Basket.drain(Source.exitValue(state, id, board));
-        const amount = row ? require('./WealthCraftDecision').freeAmount(state, row) : 0;
+        const amount = row ? require('./WealthCraftDecision').freeAmount(state, row, reserved) : 0;
         // Accepted incoming goods are the seller's own output too; the reserve
         // for its own use comes off their sum.
         const incoming = id === Number(recipe.productId) ? Number(state.acceptedIncoming?.[id] || 0) : 0;
@@ -168,7 +169,7 @@ function marketSnapshot(now = Date.now(), ownState = null) {
 function noteBuyer(state) { ShotMarketIndex.native().update(state); }
 
 function hasShotSurplus(state) {
-    if (!state?.stats?.shotCraft) return false;
+    if (!(Number(state?.stats?.shotCraft?.productId) > 0)) return false;
     const kept = ShotStock.keptAmounts(state);
     // This is only a cheap admission check. The listing policy still applies
     // reservations, funded demand and competing supply before publishing.
@@ -184,10 +185,13 @@ async function obtainRecipe(state, selected, now) {
     const maxSpend = PurchaseFunding.spendable(state, 0, { valueHours });
     const wanted = state.stats?.shotRecipeDemand;
     if (!wanted || Number(wanted.itemId) !== itemId
+        || Number(wanted.recipeId) !== Number(recipe.recipeId) || Number(wanted.batches) !== Number(route.batches)
         || maxSpend > Number(wanted.maxSpend || 0) * 1.25
         || Number(wanted.at || 0) + 15 * 60 * 1000 <= now) {
-        state = await persist({ ...state, stats: { ...(state.stats || {}),
-            shotRecipeDemand: { itemId, amount: 1, maxSpend, at: now }
+        const stats = require('../AI/DecisionEvents').applyRaise({ ...(state.stats || {}) },
+            require('./DecisionSections').sectionMask(['sources', 'benefits', 'money']));
+        state = await persist({ ...state, stats: { ...stats,
+            shotRecipeDemand: { itemId, recipeId: Number(recipe.recipeId), batches: Number(route.batches), amount: 1, maxSpend, at: now }
         } }, 'shot_recipe_demand') || state;
     }
     const affordableOffer = () => {
@@ -342,6 +346,19 @@ async function craft(state, candidate, index, now) {
     const mpPerBatch = Number(candidate.recipe.mpCost || 0);
     const batches = Math.min(Policy.batchCount(state, candidate), Number(candidate.maxBatches ?? 64));
     if (batches <= 0) return state;
+    const held = state.stats?.shotCraft?.preparing;
+    const gearTarget = Number(state.stats?.equipmentPlan?.target?.selfId || 0);
+    if (Number(held?.recipeId) !== Number(candidate.recipe.recipeId)
+        || Number(held?.batches) !== batches || Number(held?.gearTarget) !== gearTarget
+        || !held?.gearInputs || Number(held?.at) + 30 * 60 * 1000 <= now) {
+        const gearInputs = Number(held?.gearTarget) === gearTarget && held?.gearInputs
+            && Number(held.at) + 30 * 60 * 1000 > now ? held.gearInputs : ItemDisposition.collectedEquipmentInputs(state);
+        const stats = require('../AI/DecisionEvents').applyRaise({ ...(state.stats || {}) },
+            require('./DecisionSections').sectionMask(['sources', 'benefits', 'money']));
+        state = await persist({ ...state, stats: { ...stats, shotCraft: { ...state.stats?.shotCraft,
+            preparing: { recipeId: Number(candidate.recipe.recipeId), productId: Number(candidate.recipe.productId),
+                batches, gearTarget, gearInputs, at: now } } } }, 'shot_craft_preparing');
+    }
     const crystals = await obtainCrystals(state, candidate, batches);
     if (!crystals.ready || crystals.hot || hotState(crystals.state)) return hotState(crystals.state) || crystals.state;
     const ore = await buyMaterial(crystals.state, Number(candidate.ore.selfId), orePerBatch * batches, candidate.orePrice, true, candidate.r,
