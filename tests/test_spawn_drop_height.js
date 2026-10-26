@@ -109,7 +109,9 @@ try {
     assert.strictEqual(world.items.spawns.at(-1).fetchLocZ(), -4400,
         'loot resolves the corpse floor, including the six-unit actor offset');
 
-    replace(Geo, 'getRegionBuffer', () => null);
+    // Remove the synthetic data; the empty directory has no fallback region file.
+    replace(Geo, 'regions', {});
+    replace(Geo, `index_${regionKey}`, undefined);
     const fallback = SpawnNpcs.spawnNpc(world, definition); created.push(fallback);
     assert.strictEqual(fallback.fetchLocZ(), -3818, 'missing geodata retains the authored territory height');
     Rewards.call(world, session, { ...npc, fetchLocZ: () => -4394 });
