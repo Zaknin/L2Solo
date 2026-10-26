@@ -50,8 +50,13 @@ function main() {
     };
     const solo = BotBrain.applyPartyPolicy(soloSession, decision(), { playerSession }, 'wanna party?');
     assert.strictEqual(solo.action, 'say');
-    assert.match(solo.reply, /cannot join right now/i);
-    assert.match(solo.reason, /^party_policy:/);
+    assert.match(solo.reply, /open to grouping right now/i, 'a solitary persona cannot veto an eligible player invite');
+    assert.notStrictEqual(solo.reply, decision().reply, 'current willingness must replace the model promise');
+    assert.strictEqual(solo.reason, 'party_policy:available');
+    const groupedSolo = BotBrain.applyPartyPolicy({ ...soloSession, hotBackgroundPartyId: 'solo-party' },
+        decision(), { playerSession }, 'wanna party?');
+    assert.match(groupedSolo.reply, /cannot join right now/i, 'existing membership still overrides the model promise');
+    assert.strictEqual(groupedSolo.reason, 'party_policy:already_grouped');
 
     const socialSession = {
         accountId: 'bot_social_party',
