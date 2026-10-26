@@ -3596,10 +3596,16 @@ const PopulationService = {
                 return null;
             }
             const leader = PartyComposition.chooseLeader(current), timestamp = Date.now();
+            const home = { ...operation, homeSpotId: leader.spotId, homeLoc: { ...leader.loc } };
+            home.homeLoc = require('./ClanWarHome').point(home);
+            if (!home.homeLoc) {
+                this.lastClanWarFormation = { at: timestamp, clanId: operation.clanId, reason: 'home_unavailable' };
+                return null;
+            }
             const party = { partyId: `war_${timestamp.toString(36)}_${leader.characterId}`, leaderId: leader.characterId,
                 memberIds: ids, spotId: leader.spotId, status: 'active', startedAt: timestamp, nextResolveAt: timestamp + 1000,
                 roleCoverage: PartyComposition.roleCoverage(current), cohesion: 0.75, risk: 0.3,
-                stats: { formedAt: timestamp, warOperation: { ...operation, homeSpotId: leader.spotId, homeLoc: { ...leader.loc } },
+                stats: { formedAt: timestamp, warOperation: home,
                     memberNames: current.map(s => s.name), memberGoals: current.map(PartyGoalPolicy.declaration) } };
             const result = await commitPartyMembership(party, current, { characterId: leader.characterId, eventType: 'clan_war_assembly',
                 summary: 'Clan assembled a war party', meta: { operationId: operation.id, enemyClanId: operation.enemyClanId }, weight: 3, createdAt: timestamp });

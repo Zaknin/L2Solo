@@ -2,6 +2,7 @@
 const Config = require('./ClanWarConfig');
 const Policy = require('./ClanWarPolicy');
 const Rules = require('./ClanWarRules');
+const Home = require('../Bot/Population/ClanWarHome');
 const clanOf = s => Number(s?.stats?.clanId ?? s?.clanId ?? 0);
 const partyOf = s => s?.party?.partyId || s?.partyId || null;
 const near = (a, b, radius = 900) => a && b && Math.hypot(a.locX - b.locX, a.locY - b.locY) <= radius && Math.abs(a.locZ - b.locZ) <= 200;
@@ -159,7 +160,12 @@ class ClanWarDirector {
         }
         const ended = Policy.operationOutcome(op, members, this.war.view.between(op.clanId, op.enemyClanId), at);
         if (op.status === 'returning') {
-            if (members.every(s => (hot || s.spotId === op.homeSpotId) && near(s.loc, op.homeLoc, 1200))) {
+            const homeLoc = Home.point(op);
+            if (!homeLoc) return;
+            // Repair old persisted orders once, using the same anchor as the
+            // workers and visible actors. Mere timeout never completes a trip.
+            if (!Home.same(op.homeLoc, homeLoc)) { await this.setOperation(party, { ...op, homeLoc }); return; }
+            if (members.every(s => (hot || s.spotId === op.homeSpotId) && near(s.loc, homeLoc, 1200))) {
                 await this.setOperation(party, null, op.homeSpotId);
             }
             return;
@@ -240,6 +246,8 @@ class ClanWarDirector {
             kind: available.some(s => s.spotId === intel.spotId) ? 'defend_spot' : 'raid_farm', status: 'assembling',
             targetSpotId: intel.spotId, targetLoc: intel.loc, homeSpotId: home.spotId, homeLoc: { ...home.loc },
             observedAt: intel.at, observerId: intel.observerId, startedAt: at, expiresAt: at + Config.operationMs };
+        op.homeLoc = Home.point(op);
+        if (!op.homeLoc) return null;
         const party = existing ? await this.setOperation(existing, op) : await this.form(selected, op);
         if (party) await this.save(clan.id, { ...plan, nextOperationAt: at + Config.operationCooldownMs,
             lastOperation: { id: op.id, partyId: party.partyId, at, outcome: 'assembled' } });

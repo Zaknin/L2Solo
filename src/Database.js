@@ -5628,7 +5628,11 @@ const Database = {
                     || typeof canCommitHot !== 'function' || !canCommitHot()) return { ok: false, reason: 'hot_party_context_changed' };
             }
             if (review) {
-                const existing = one('SELECT status, memberIdsJson, revision FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
+                const existing = one('SELECT status, memberIdsJson, revision, statsJson FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
+                // Capacity reclamation must also respect a military order
+                // attached after its cached candidate was selected.
+                if (preserveClanOperations && jsonObject(existing?.statsJson).warOperation)
+                    return { ok: false, reason: 'clan_war_in_progress' };
                 const ids = existing ? JSON.parse(existing.memberIdsJson || '[]').map(Number) : [];
                 const retained = JSON.parse(party.memberIdsJson || '[]').map(Number);
                 if (existing?.status !== 'active' || Number(existing.revision) !== Number(expectedPartyRevision)

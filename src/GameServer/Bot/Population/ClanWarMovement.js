@@ -9,7 +9,8 @@ function route({ leader, party, members, spot, timestamp, spots, wars }) {
     if (!spotId || members.some(s => s.stats?.pvpEncounter)) return { active: true, route: null };
     const catalog = require('../AI/SpotIndex').spotById(spots, spotId);
     if (!catalog) return { active: true, route: null };
-    const loc = returning ? op.homeLoc : op.targetLoc;
+    const loc = returning ? require('./ClanWarHome').point(op, catalog) : op.targetLoc;
+    if (!loc) return { active: true, route: null };
     const arrivalSpot = loc ? { ...catalog, center: loc, arrivalPoints: [loc] } : catalog;
     const close = loc && members.every(s => s.loc && Math.hypot(s.loc.locX - loc.locX, s.loc.locY - loc.locY) <= 900
         && Math.abs(s.loc.locZ - loc.locZ) <= 200);

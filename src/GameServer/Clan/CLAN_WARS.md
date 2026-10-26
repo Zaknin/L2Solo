@@ -87,6 +87,10 @@ move within the same sector to a witnessed location.
 Every travel proposal fences the party revision, so an obsolete attack route
 cannot overwrite a newer return order. The military route temporarily takes
 precedence over an ordinary gear reroute, while economic goals remain stored.
+The recorded home must lie inside its catalogued spot. A stale town location
+paired with a farm id falls back to the farm's valid centre or arrival point;
+new orders, cold travel, visible travel and return completion use that same
+anchor. Existing persisted return orders are repaired once by the director.
 
 At the destination a bounded existing PvP encounter attacks the tagged enemy
 members. No personal revenge prerequisite or party peace vote is required.
@@ -100,6 +104,11 @@ No visible enemies for a minute counts as clearing the area. Excess losses,
 expiry, changed membership or ended war orders a physical return. Existing party
 membership is retained after return. Operations and decisions survive restart;
 future multiple-party fronts can coordinate several of these bounded operations.
+An operation's deadline orders a return; it does not release the party's shared
+slot. Capacity reclamation remains blocked while `warOperation` exists, including
+an overdue return, and the queued writer rechecks this protection atomically.
+Only physical arrival of the whole roster lets the director remove the order
+and restore ordinary party-capacity rules.
 
 ## Inspection and tests
 

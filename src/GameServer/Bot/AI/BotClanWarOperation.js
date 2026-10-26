@@ -6,8 +6,9 @@ function tick(session, bot, party, now = Date.now()) {
     if (bot.state?.fetchCasts?.() || !invoke('GameServer/Effects/EffectRestrictions').canUseBasicAction(bot)) return true;
     const returning = op.status === 'returning' || now >= op.expiresAt || Number(bot.fetchClanId?.()) !== op.clanId
         || !invoke('GameServer/Clan/ClanWarRuntime').view.between(op.clanId, op.enemyClanId).mutual;
-    const point = returning ? op.homeLoc : op.targetLoc, spotId = returning ? op.homeSpotId : op.targetSpotId;
+    const spotId = returning ? op.homeSpotId : op.targetSpotId;
     const template = invoke('GameServer/Bot/AI/SpotService').findById(spotId) || invoke('GameServer/Bot/Population/SpotProfiles').findById(spotId);
+    const point = returning ? require('../Population/ClanWarHome').point(op, template) : op.targetLoc;
     if (!point || !template) return true;
     const atPoint = Math.hypot(bot.fetchLocX() - point.locX, bot.fetchLocY() - point.locY) <= 600
         && Math.abs(bot.fetchLocZ() - point.locZ) <= 200;
