@@ -1497,6 +1497,7 @@ const PopulationService = {
             social: invoke('GameServer/Clan/ClanSocialRuntime').view, memory: invoke('GameServer/Social/InteractionMemoryRuntime'),
             personaFor: state => BotPersona.of(state), form: (members, operation) => this.formClanWarParty(members, operation),
             actions: ColdSimulationCoordinator.competitionActions,
+            canContinue: () => this.started && ClanSimulationConfig.enabled !== false,
             canWork: () => this.started && ClanSimulationConfig.enabled !== false && !this.resolving && !this.partyFormationRunning
                 && Number(Database.pending()) < 4 && Number(Metrics.currentEventLoopLag()) < 40
                 && ColdSimulationCoordinator.competitionActions.canRun()

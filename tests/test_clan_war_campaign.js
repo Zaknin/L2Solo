@@ -73,7 +73,7 @@ async function run() {
     const priorActions = Coordinator.competitionActions;
     try {
         Population.started = true;
-        Coordinator.competitionActions = { canRun: () => true, apply: async () => ({ ok: true }) };
+        Coordinator.competitionActions = { canRun: () => !DB.pending(), apply: async () => ({ ok: true }) };
         await Population.startClanWars();
         await new Promise(resolve => setImmediate(resolve));
         assert(Population.clanWars.active, 'native population startup must start the military director');
@@ -83,6 +83,16 @@ async function run() {
         const started = Population.clanWars;
         await Population.startClanWars();
         assert.strictEqual(Population.clanWars, started, 'duplicate startup does not attach a second publication subscriber');
+        started.personaFor = personaFor;
+        await started.review(Clans.findById(10), Date.now());
+        assert(War.view.between(10, 20).outgoing,
+            'a declaration admitted with an idle writer must not reject itself once its own transaction is pending');
+        const transition = DB.transitionClanWar;
+        try {
+            DB.transitionClanWar = function (...args) { Population.started = false; return transition.apply(this, args); };
+            await started.review(Clans.findById(20), Date.now());
+            assert(!War.view.between(10, 20).mutual, 'shutdown still revokes a diplomatic command before its impact');
+        } finally { DB.transitionClanWar = transition; Population.started = true; }
     } finally {
         Population.clanWars?.stop(); Population.clanWars = null; Population.started = false;
         Coordinator.competitionActions = priorActions;
@@ -90,6 +100,8 @@ async function run() {
     director = new ClanWarDirector({ database: DB, life: Life, parties: Parties, clans: Clans, war: War,
         social: Social.view, memory: Memory, personaFor, form: async () => null, actions: { apply: async () => ({ ok: true }) }, now: () => at });
     await director.start(); await new Promise(resolve => setImmediate(resolve)); at = Date.now();
+    const responderPlan = director.plans.get(20);
+    if (responderPlan) responderPlan.nextReviewAt = 0;
     assert.equal(director.states.size, 31, 'director hydrates its event-driven spatial index');
     await director.review(Clans.findById(10), at);
     assert.equal(War.view.between(10, 20).status, 'outgoing', 'three distinct grudges and a real sighting produce a declaration');

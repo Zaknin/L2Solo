@@ -7,8 +7,8 @@ const partyOf = s => s?.party?.partyId || s?.partyId || null;
 const near = (a, b, radius = 900) => a && b && Math.hypot(a.locX - b.locX, a.locY - b.locY) <= radius && Math.abs(a.locZ - b.locZ) <= 200;
 
 class ClanWarDirector {
-    constructor({ database, life, parties, clans, war, social, memory, personaFor, form, actions, canWork = () => true, now = Date.now }) {
-        Object.assign(this, { database, life, parties, clans, war, social, memory, personaFor, form, actions, canWork, now });
+    constructor({ database, life, parties, clans, war, social, memory, personaFor, form, actions, canWork = () => true, canContinue = () => true, now = Date.now }) {
+        Object.assign(this, { database, life, parties, clans, war, social, memory, personaFor, form, actions, canWork, canContinue, now });
         this.states = new Map(); this.bySpot = new Map(); this.locations = new Map();
         this.plans = new Map(); this.autonomous = new Set(); this.cursor = 0; this.running = null; this.active = false;
     }
@@ -128,7 +128,9 @@ class ClanWarDirector {
         if (decision?.target && this.active && this.canWork()) {
             const result = await this.war.transition(this.actor(clan), decision.target.id, decision.action, { autonomous: true,
                 expectedRevision: this.war.view.between(clan.id, decision.target.id).revision, reason: decision.reason,
-                admit: () => this.active && this.canWork() && this.autonomous.has(clan.id) });
+                // Resource admission happened before queuing. The writer is
+                // now busy with this command; only lifecycle/authority may revoke it.
+                admit: () => this.active && Config.enabled && this.canContinue() && this.autonomous.has(clan.id) });
             plan.lastDecision = { at, targetClanId: decision.target.id, action: decision.action, reason: decision.reason,
                 accepted: result.ok, code: result.code || null };
             if (result.ok && decision.action === 'withdraw') { plan.ceasefireUntil = at + Config.redeclareCooldownMs; plan.defeats = 0; }
