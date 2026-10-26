@@ -32,11 +32,23 @@ function healName(skill) {
     return String(skill?.fetchName?.() || skill?.model?.name || '').toLowerCase();
 }
 
-function selectHealSkill(actor, { emergency = false, group = false } = {}) {
-    const usable = healSkills(actor);
-    const pool = group
-        ? usable.filter((skill) => skill.fetchTargetKind?.() === 'party')
-        : usable.filter((skill) => skill.fetchTargetKind?.() === 'friendly');
+function selectHealSkill(actor, { emergency = false, group = false, target = null, fallbackGroup = false } = {}) {
+    const usable = healSkills(actor).filter((skill) => {
+        if (!target) return true;
+        const semantic = skill.fetchSemantic?.() || {};
+        if (semantic.hot && invoke('GameServer/Bot/AI/BotSkillIntent').equivalentActive(target, skill)) return false;
+        if (skill.fetchTargetKind?.() !== 'ally' || target === actor) return true;
+        // Paagrio healing reaches clan/alliance members, rather than every
+        // party member. Match the native ally fanout before choosing it.
+        const clanId = Number(actor.fetchClanId?.()) || 0;
+        const PledgeHelpers = invoke('GameServer/Network/Response/PledgeHelpers');
+        const allyId = PledgeHelpers.allyId(actor);
+        return (clanId > 0 && Number(target.fetchClanId?.()) === clanId)
+            || (allyId > 0 && PledgeHelpers.allyId(target) === allyId);
+    });
+    const single = usable.filter((skill) => skill.fetchTargetKind?.() === 'friendly');
+    const area = usable.filter((skill) => ['party', 'ally'].includes(skill.fetchTargetKind?.()));
+    const pool = group ? area : single.length ? single : fallbackGroup ? area : [];
     if (pool.length === 0) return null;
     return pool.sort((a, b) => {
         const aBattle = /battle heal/.test(healName(a)) ? 1 : 0;

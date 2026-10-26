@@ -816,6 +816,7 @@ const tests = [
     'tests/test_npc_decay.js',
     'tests/test_npc_respawn.js',
     'tests/test_party_companion_rest_follow.js',
+    'tests/test_party_buffer_healing.js',
     'tests/test_party_support_movement.js',
     'tests/test_party_capacity.js',
     'tests/test_party_rewards.js',
