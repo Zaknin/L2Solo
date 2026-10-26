@@ -1123,6 +1123,8 @@ const PopulationService = {
         this.startPartyAssemblyEvents();
         Promise.resolve(this.lifeReadyPromise).then(() => this.startOpportunisticRaids())
             .catch(error => utils.infoWarn('BotRaid', 'startup failed: %s', error.message));
+        Promise.resolve(this.lifeReadyPromise).then(() => this.startClanWars())
+            .catch(error => utils.infoWarn('ClanWar', 'startup failed: %s', error.message));
 
         Promise.resolve(this.lifeReadyPromise).then(() => {
             if (!this.started) return;
@@ -1167,6 +1169,8 @@ const PopulationService = {
 
     stop() {
         this.opportunisticRaids?.stop();
+        this.clanWars?.stop();
+        this.clanWars = null;
         this.opportunisticRaids = null;
         ClanActionService.stopEvents();
         this.stopPartyAssemblyEvents();
@@ -1451,6 +1455,8 @@ const PopulationService = {
             run: () => this.opportunisticRaids?.pulse() });
         registry.register({ name: 'opportunistic_raid_combat', intervalMs: 4000, offsetMs: 45000,
             run: () => this.opportunisticRaids?.maintain() });
+        registry.register({ name: 'clan_wars', intervalMs: 5000, offsetMs: 60000,
+            run: () => this.clanWars?.pulse() });
 
         if (ClanSimulationConfig.enabled !== false) {
             const clanIntervalMs = Math.max(1000, Number(ClanSimulationConfig.resolveIntervalMs) || 60000);
@@ -1480,6 +1486,24 @@ const PopulationService = {
         this.backgroundJobRegistry = registry;
         registry.start();
         return registry;
+    },
+
+    async startClanWars() {
+        if (!this.started || this.clanWars || !require('../../Clan/ClanWarConfig').enabled
+            || ClanSimulationConfig.enabled === false) return;
+        const service = new (require('../../Clan/ClanWarDirector').ClanWarDirector)({
+            database: Database, life: LifeState, parties: BackgroundPartyState,
+            clans: invoke('GameServer/Clan/ClanService'), war: invoke('GameServer/Clan/ClanWarRuntime'),
+            social: invoke('GameServer/Clan/ClanSocialRuntime').view, memory: Memory,
+            personaFor: state => BotPersona.of(state), form: (members, operation) => this.formClanWarParty(members, operation),
+            actions: ColdSimulationCoordinator.competitionActions,
+            canWork: () => this.started && ClanSimulationConfig.enabled !== false && !this.resolving && !this.partyFormationRunning
+                && Number(Database.pending()) < 4 && Number(Metrics.currentEventLoopLag()) < 40
+                && ColdSimulationCoordinator.competitionActions.canRun()
+        });
+        this.clanWars = service;
+        await service.start();
+        if (!this.started || this.clanWars !== service) service.stop();
     },
 
     async startOpportunisticRaids() {
@@ -3543,6 +3567,39 @@ const PopulationService = {
 
     reserveCompetitionPartySlot() {
         return Config.backgroundPartyEnabled ? partyAdmission.reserve(BackgroundPartyState.admitted(), Config) : null;
+    },
+
+    async formClanWarParty(members, operation) {
+        if (!this.started || this.partyFormationRunning || this.resolving || members.length < 3 || members.length > 9) return null;
+        const release = Config.backgroundPartyEnabled
+            ? partyAdmission.reserveWar(BackgroundPartyState.admitted(), Config, operation.clanId) : null;
+        if (!release) {
+            this.lastClanWarFormation = { at: Date.now(), clanId: operation.clanId, reason: 'party_capacity_wait' };
+            return null;
+        }
+        this.partyFormationRunning = true;
+        const ids = members.map(s => s.characterId);
+        try {
+            const fenced = await Promise.all(ids.map(id => ColdSimulationCoordinator.fenceBot(id)));
+            if (fenced.some(r => !r.ok)) return null;
+            await LifeState.settleWrites(ids);
+            const current = ids.map(id => LifeState.cachedState(id));
+            if (!this.started || current.some(s => !s || s.party?.partyId || s.partyId
+                || !require('../../Clan/ClanWarPolicy').available(s, Date.now()))) return null;
+            const leader = PartyComposition.chooseLeader(current), timestamp = Date.now();
+            const party = { partyId: `war_${timestamp.toString(36)}_${leader.characterId}`, leaderId: leader.characterId,
+                memberIds: ids, spotId: leader.spotId, status: 'active', startedAt: timestamp, nextResolveAt: timestamp + 1000,
+                roleCoverage: PartyComposition.roleCoverage(current), cohesion: 0.75, risk: 0.3,
+                stats: { formedAt: timestamp, warOperation: { ...operation, homeSpotId: leader.spotId, homeLoc: { ...leader.loc } },
+                    memberNames: current.map(s => s.name), memberGoals: current.map(PartyGoalPolicy.declaration) } };
+            const result = await commitPartyMembership(party, current, { characterId: leader.characterId, eventType: 'clan_war_assembly',
+                summary: 'Clan assembled a war party', meta: { operationId: operation.id, enemyClanId: operation.enemyClanId }, weight: 3, createdAt: timestamp });
+            this.lastClanWarFormation = { at: timestamp, clanId: operation.clanId, reason: result.party ? 'formed' : result.reason || 'membership_refused' };
+            return result.party || null;
+        } finally {
+            this.partyFormationRunning = false; release();
+            ids.map(id => LifeState.cachedState(id)).filter(Boolean).forEach(s => ColdSimulationCoordinator.notifyState(s));
+        }
     },
 
     async formCompetitionParty(members, event, options = {}) {

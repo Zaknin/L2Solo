@@ -1887,6 +1887,7 @@ function applySchemaMigrations() {
     migrations.push([77, () => require('./DatabaseRecommendations').install(connection)]);
     // Older progress inferred time between kills, including offline gaps.
     migrations.push([78, () => connection.exec('DELETE FROM recommendation_hunts')]);
+    migrations.push([79, () => require('./GameServer/Clan/ClanWarRepository').install(connection)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -4151,6 +4152,7 @@ function commitClanSocialUnsafe(batch, timestamp) {
             const previous = clanSnapshots.get(clanId);
             const previousRevision = previous.revision;
             const next = ClanSocialPolicy.apply(previous, event, timestamp, {
+                authorisedWar: require('./GameServer/Clan/ClanWarRepository').authorisedEvidence(one, event),
                 leaderTraits: jsonObject(clan.traitsJson), targetLeaderId: targetLeader?.leaderId,
                 currentTargetClanId: Number(currentMember?.clanId || 0), mutable: true
             });
@@ -5602,6 +5604,14 @@ const Database = {
         if (jsonObject(party.statsJson).raidAdmission) return Promise.resolve({ ok: false, reason: 'raid_roster_not_opened' });
 
         return inTransaction(() => {
+            const warOperation = jsonObject(party.statsJson).warOperation;
+            if (warOperation && !review) {
+                const from = one('SELECT * FROM clan_war_declarations WHERE fromClanId=? AND toClanId=?', [warOperation.clanId, warOperation.enemyClanId]);
+                const to = one('SELECT * FROM clan_war_declarations WHERE fromClanId=? AND toClanId=?', [warOperation.enemyClanId, warOperation.clanId]);
+                if (!require('./GameServer/Clan/ClanWarRules').relation(from, to).mutual
+                    || !one("SELECT clanId FROM clan_simulation_clans WHERE clanId=? AND mode='autonomous'", [warOperation.clanId])
+                    || characterIds.some(id => one('SELECT clanId FROM characters WHERE id=?', [id])?.clanId !== warOperation.clanId)) return { ok: false, reason: 'war_changed' };
+            }
             if (!['cold', 'hot'].includes(expectedPhase)) return { ok: false, reason: 'invalid_membership_phase' };
             if (expectedPhase === 'hot') {
                 const declared = JSON.parse(party.memberIdsJson || '[]').map(Number);
@@ -5800,6 +5810,7 @@ const Database = {
                 || [...expectedIds].some((id) => !presentIds.has(id));
             let reason = failure ? 'party_group_incomplete' : null;
             const pvpContext = group[0]?.atomicGroup?.pvpContext;
+            const warContext = group[0]?.atomicGroup?.warContext;
             const raidCommit = group[0]?.atomicGroup?.raidCommit;
             if (!failure && raidCommit) {
                 const saved = one('SELECT revision FROM bot_raid_encounters WHERE raidKey = ?', [raidCommit.key]);
@@ -5819,6 +5830,13 @@ const Database = {
                         || Number(rows[i].clanId || 0) !== m.clanId || Number(rows[i].karma || 0) !== m.karma)
                     || pvpContext[0].some(a => pvpContext[1].some(b => a.clanId > 0 && a.clanId === b.clanId));
                 if (failure) reason = 'pvp_context_changed';
+            }
+            if (!failure && warContext) {
+                const forward = one('SELECT * FROM clan_war_declarations WHERE fromClanId=? AND toClanId=?', [warContext.fromClanId, warContext.toClanId]);
+                const reverse = one('SELECT * FROM clan_war_declarations WHERE fromClanId=? AND toClanId=?', [warContext.toClanId, warContext.fromClanId]);
+                const war = require('./GameServer/Clan/ClanWarRules').relation(forward, reverse);
+                failure = !war.mutual || war.revision !== warContext.revision;
+                if (failure) reason = 'war_context_changed';
             }
             const memberRows = new Map();
             if (!failure) {
@@ -11046,6 +11064,7 @@ const Database = {
 };
 
 const ClanLevelSp = require('./GameServer/Clan/ClanLevelSpRepository')({ one, write, run, withCharacterFlushes });
+Object.assign(Database, require('./GameServer/Clan/ClanWarRepository').create({ one, all, write, enqueue, inTransaction, withCharacterFlushes, now }));
 const Recommendations = require('./DatabaseRecommendations').create({ one, all, write, enqueue, inTransaction, withCharacterFlushes, now });
 for (const name of ['refreshRecommendations', 'giveRecommendation', 'fetchRecommendationEvents', 'recommendationHead', 'pruneRecommendations']) {
     Database[name] = Recommendations[name];

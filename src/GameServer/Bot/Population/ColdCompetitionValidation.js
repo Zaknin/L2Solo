@@ -50,9 +50,10 @@ function member(state, characterId, participant, event, { party: group, resume =
     const fail = (detail, context) => failed(retreat ? 'member_busy_or_changed' : 'party_member_busy_or_changed', detail, participant, characterId, context);
     if (!state) return fail('member_missing');
     if (state.phase !== 'cold') return fail('member_not_cold', { actual: state.phase });
-    const activities = resume || group ? ['grouped', 'hunting', 'resting'] : retreat ? ['hunting'] : ['grouped', 'hunting'];
+    const war = (resume?.reason || event.action) === 'clan_war';
+    const activities = war ? ['grouped', 'hunting', 'resting', 'dead'] : resume || group ? ['grouped', 'hunting', 'resting'] : retreat ? ['hunting'] : ['grouped', 'hunting'];
     if (!activities.includes(state.activity)) return fail('member_activity', { actual: state.activity });
-    if (!(state.vitals?.hp > 0)) return fail('member_dead');
+    if (!(state.vitals?.hp > 0) && !war) return fail('member_dead');
     if (partyIdOf(state) !== (participant.partyId || null)) return fail('member_party_changed', { actual: partyIdOf(state) });
     if (!resume && state.spotId !== event.spotId) return fail('member_spot_changed', { expected: event.spotId, actual: state.spotId });
     if (state.stats?.travel) return fail('member_travelling');
@@ -65,7 +66,7 @@ function member(state, characterId, participant, event, { party: group, resume =
     if (!resume && !contestContextAllowed(state, event)) return fail('member_contest_context_changed');
     if (memory.revision(state.characterId) === undefined) return fail('member_memory_unavailable');
     const lastAt = Number(state.stats?.coldCompetition?.at || 0);
-    if (!resume && at - lastAt < 120000) return fail('member_decision_cooldown', { until: lastAt + 120000 });
+    if (!resume && at - lastAt < (war ? 15000 : 120000)) return fail('member_decision_cooldown', { until: lastAt + (war ? 15000 : 120000) });
     if (resume && (state.stats?.pvpEncounter?.key !== resume.key || state.stats.pvpEncounter.sequence !== resume.sequence)) return fail('member_encounter_changed');
     if (!resume && !revenge && !group) {
         if (!retreat && state.activity !== 'hunting') return fail('member_not_hunting');

@@ -161,7 +161,7 @@ class ColdSimulationCoordinator {
             contestContextAllowed: (state, event) => {
                 const physical = SpotService.findCurrentSpot(state.loc);
                 const spot = SpotProfiles.findById(event.spotId);
-                return physical?.id === event.spotId && (event.action === 'revenge' || !!spot?.npcEntries?.some(row => Number(row.selfId) === event.npcId));
+                return physical?.id === event.spotId && (['revenge', 'clan_war'].includes(event.action) || !!spot?.npcEntries?.some(row => Number(row.selfId) === event.npcId));
             },
             participantAllowed: id => !this.fencedBots.has(Number(id)),
             releaseForecasts: events => this.post('competition_release', { events: events.map(e => ({ at: e.at, action: e.action,
@@ -323,6 +323,7 @@ class ColdSimulationCoordinator {
             await BackgroundPartyState.purgeHistory();
             await invoke('GameServer/Bot/Population/ColdRaidAuthority').init();
             await ClanSocial.refresh(true);
+            await invoke('GameServer/Clan/ClanWarRuntime').refresh(true);
             invoke('GameServer/Bot/Population/ColdOccupationSources').initialise();
             this.queue.start();
             this.startWorker();
@@ -1342,6 +1343,7 @@ class ColdSimulationCoordinator {
         // An incremental continuation has no final initial-ready marker.
         if (initial) this.snapshotBootstrapPending = true;
         await ClanSocial.refresh();
+        await invoke('GameServer/Clan/ClanWarRuntime').refresh();
         await ClanSocial.enforceOne(this);
         ClanSocial.send(this);
         if (this.snapshotInFlight || this.criticalSnapshotInFlight) {

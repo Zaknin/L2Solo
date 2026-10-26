@@ -1,10 +1,21 @@
 // All formation paths share this admission budget. Historical origin labels
 // never grant slots or protect a party; reservations include in-flight commits.
 class PartyAdmission {
-    constructor() { this.pending = 0; }
-    reserve(parties, config) {
+    constructor() { this.pending = 0; this.warWaiters = new Map(); }
+    reserveWar(parties, config, clanId, now = Date.now()) {
+        this.warWaiters.set(clanId, now + 60000);
+        return this.reserve(parties, config, { warClanId: clanId, now });
+    }
+    reserve(parties, config, { warClanId = null, now = Date.now() } = {}) {
+        for (const [id, until] of this.warWaiters) if (until <= now) this.warWaiters.delete(id);
         const limit = Math.max(0, Math.floor(Number(config.maxBackgroundParties) || 0));
         if (parties.length + this.pending >= limit) return null;
+        // Accepted military demand waits for a real free slot. It cannot
+        // exceed the shared cap or interrupt an existing required contract.
+        if (warClanId !== null) {
+            if (this.warWaiters.keys().next().value !== warClanId) return null;
+            this.warWaiters.delete(warClanId);
+        } else if (limit - parties.length - this.pending <= this.warWaiters.size) return null;
         this.pending++;
         let released = false;
         return () => { if (!released) { released = true; this.pending--; } };

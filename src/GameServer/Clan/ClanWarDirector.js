@@ -1,0 +1,265 @@
+'use strict';
+const Config = require('./ClanWarConfig');
+const Policy = require('./ClanWarPolicy');
+const Rules = require('./ClanWarRules');
+const clanOf = s => Number(s?.stats?.clanId ?? s?.clanId ?? 0);
+const partyOf = s => s?.party?.partyId || s?.partyId || null;
+const near = (a, b, radius = 900) => a && b && Math.hypot(a.locX - b.locX, a.locY - b.locY) <= radius && Math.abs(a.locZ - b.locZ) <= 200;
+
+class ClanWarDirector {
+    constructor({ database, life, parties, clans, war, social, memory, personaFor, form, actions, canWork = () => true, now = Date.now }) {
+        Object.assign(this, { database, life, parties, clans, war, social, memory, personaFor, form, actions, canWork, now });
+        this.states = new Map(); this.bySpot = new Map(); this.locations = new Map();
+        this.plans = new Map(); this.autonomous = new Set(); this.cursor = 0; this.running = null; this.active = false;
+    }
+    index(state, id) {
+        const prior = this.locations.get(id);
+        if (prior) {
+            this.bySpot.get(prior.spot)?.delete(id);
+            if (!this.bySpot.get(prior.spot)?.size) this.bySpot.delete(prior.spot);
+        }
+        this.states.delete(id); this.locations.delete(id);
+        if (!state) return;
+        this.states.set(id, state);
+        const spot = state.spotId;
+        this.locations.set(id, { spot });
+        if (spot) { if (!this.bySpot.has(spot)) this.bySpot.set(spot, new Set()); this.bySpot.get(spot).add(id); }
+    }
+    async start() {
+        await this.war.refresh(true);
+        const [rows, autonomous] = await Promise.all([this.database.fetchClanWarPlans(), this.database.execute([
+            "SELECT clanId FROM clan_simulation_clans WHERE mode='autonomous'"])]);
+        this.autonomous = new Set(autonomous.map(r => r.clanId));
+        rows.forEach(r => this.plans.set(r.clanId, { revision: r.revision, ...JSON.parse(r.stateJson) }));
+        this.active = true;
+        this.unsubscribe = this.life.subscribePublications(packet => {
+            if (!this.active) return;
+            if (packet.kind === 'reset') { this.states.clear(); this.bySpot.clear(); this.locations.clear(); return; }
+            const id = Number(packet.characterId); this.index(this.life.cachedState(id), id);
+        }, { replay: true });
+    }
+    stop() { this.active = false; this.unsubscribe?.(); }
+    async save(clanId, state) {
+        const previous = this.plans.get(clanId), { revision, ...json } = state;
+        const result = await this.database.saveClanWarPlan(clanId, previous?.revision || 0, json);
+        if (result.ok) this.plans.set(clanId, { ...json, revision: result.row.revision });
+        return result.ok;
+    }
+    observe(clan, previous, at) {
+        const sightings = new Map((previous || []).filter(r => at - r.at < Config.intelTtlMs).map(r => [`${r.enemyClanId}:${r.spotId}`, r]));
+        const add = (observerId, enemyClanId, spotId, id, loc) => {
+            if (!spotId || !enemyClanId || enemyClanId === clan.id) return;
+            const key = `${enemyClanId}:${spotId}`, old = sightings.get(key), enemyIds = old?.at === at ? old.enemyIds : [];
+            if (!enemyIds.includes(id)) enemyIds.push(id);
+            sightings.set(key, { enemyClanId, spotId, at, observerId, loc: { ...loc }, enemyIds: enemyIds.slice(0, 18) });
+        };
+        for (const member of clan.members) {
+            const source = this.states.get(member.id);
+            if (source?.phase === 'hot') {
+                const World = invoke('GameServer/World/World'), registered = World.registeredActorById(source.characterId);
+                const actor = registered?.actor;
+                if (!actor || actor.isDead?.() || actor.fetchIsOnline?.() === false) continue;
+                const loc = { locX: actor.fetchLocX(), locY: actor.fetchLocY(), locZ: actor.fetchLocZ() };
+                if (utils.isInPeaceZone(loc.locX, loc.locY)) continue;
+                for (const session of World.fetchVisibleUsers(registered.session, actor) || []) {
+                    const target = session.actor, id = Number(target?.fetchId?.());
+                    if (!target || target.isDead?.() || target.state?.fetchDead?.() || target.fetchIsOnline?.() === false) continue;
+                    const there = { locX: target.fetchLocX(), locY: target.fetchLocY(), locZ: target.fetchLocZ() };
+                    if (!near(loc, there)) continue;
+                    const spotId = invoke('GameServer/Bot/AI/SpotService').findCurrentSpot(there)?.id
+                        || session.coldLifeState?.spotId;
+                    add(source.characterId, this.clans.clanOfMember(id)?.id, spotId, id, there);
+                }
+                continue;
+            }
+            if (!source || source.phase !== 'cold' || !(source.vitals?.hp > 0) || source.stats?.travel
+                || utils.isInPeaceZone(source.loc.locX, source.loc.locY)) continue;
+            for (const id of this.bySpot.get(source.spotId) || []) {
+                const target = this.states.get(id), enemyClanId = this.clans.clanOfMember(id)?.id;
+                if (!target || target.phase !== 'cold' || target.stats?.travel || !(target.vitals?.hp > 0)
+                    || !enemyClanId || enemyClanId === clan.id || !near(source.loc, target.loc)) continue;
+                add(source.characterId, enemyClanId, source.spotId, id, target.loc);
+            }
+        }
+        const weight = sighting => (this.war.view.between(clan.id, sighting.enemyClanId).mutual ? 1000 : 0)
+            + Number(this.social.indexes?.get(clan.id)?.get(`clan:${sighting.enemyClanId}`)?.hostility || 0);
+        return [...sightings.values()].sort((a, b) => weight(b) - weight(a) || b.at - a.at).slice(0, 12);
+    }
+    ownMembers(clan, at) { return clan.members.map(m => this.states.get(m.id)).filter(s => Policy.available(s, at)); }
+    actor(clan) { return { fetchId: () => clan.leaderId, fetchClanId: () => this.clans.clanOfMember(clan.leaderId)?.id || 0 }; }
+    async review(clan, at) {
+        const previous = this.plans.get(clan.id) || { revision: 0, intel: [] };
+        if (at < Number(previous.nextReviewAt || 0)) return;
+        const plan = { ...previous, intel: this.observe(clan, previous.intel, at), nextReviewAt: at + Config.reviewMs };
+        const members = this.ownMembers(clan, at), leader = this.states.get(clan.leaderId);
+        const traits = this.personaFor(leader || { characterId: clan.leaderId })?.traits || {};
+        const snapshot = this.social.clans.get(clan.id);
+        const histories = (snapshot?.relations || []).filter(r => r.kind === 'character').flatMap(r => r.evidence || []);
+        const relations = (snapshot?.relations || []).filter(r => r.kind === 'clan').map(row => ({ row,
+            target: this.clans.findById(row.targetId), feeling: Policy.grievance({ ...row,
+                evidence: [...(row.evidence || []), ...histories.filter(e => e.subjectClanId === row.targetId)] }, traits, at, Config) }))
+            .filter(r => r.target).sort((a, b) => b.feeling.hostility - a.feeling.hostility);
+        const incoming = this.war.view.all().filter(r => r.active && r.toClanId === clan.id && !this.war.view.between(clan.id, r.fromClanId).outgoing);
+        let decision = null;
+        if (at >= Number(plan.ceasefireUntil || 0)) for (const row of incoming) {
+            const target = this.clans.findById(row.fromClanId), feeling = relations.find(r => r.target.id === row.fromClanId)?.feeling;
+            const sighting = plan.intel.find(r => r.enemyClanId === row.fromClanId);
+            if (target && Policy.accepts({ traits, ownMembers: members.length, enemyMembers: sighting?.enemyIds.length || 0,
+                hostility: feeling?.hostility || 0 })) {
+                decision = { target, action: 'declare', reason: 'accept_war' }; break;
+            }
+        }
+        if (!decision && at >= Number(plan.ceasefireUntil || 0) && members.length >= Config.minMembers) for (const entry of relations) {
+            const state = this.war.view.between(clan.id, entry.target.id);
+            if (!entry.feeling.ready || state.outgoing
+                || Rules.declaration({ ...clan, members: clan.members.length }, { ...entry.target, members: entry.target.members.length })) continue;
+            decision = { target: entry.target, action: 'declare', reason: 'repeated_clan_aggression' }; break;
+        }
+        if (!decision) for (const row of this.war.view.all()) {
+            if (!row.active || row.fromClanId !== clan.id || at - row.declaredAt < Config.reviewMs) continue;
+            const feeling = relations.find(r => r.target.id === row.toClanId)?.feeling;
+            const combatAt = Math.max(plan.combatAt?.[row.toClanId] || 0, this.war.combatAt(clan.id, row.toClanId));
+            if (combatAt) plan.combatAt = { ...(plan.combatAt || {}), [row.toClanId]: combatAt };
+            const quiet = at - Math.max(row.declaredAt, feeling?.lastHarmAt || 0, combatAt) >= Config.quietWithdrawMs;
+            if (quiet || Number(plan.defeats || 0) >= 3) {
+                decision = { target: this.clans.findById(row.toClanId), action: 'withdraw', reason: quiet ? 'conflict_cooled' : 'war_losses' }; break;
+            }
+        }
+        if (decision?.target && this.active && this.canWork()) {
+            const result = await this.war.transition(this.actor(clan), decision.target.id, decision.action, { autonomous: true,
+                expectedRevision: this.war.view.between(clan.id, decision.target.id).revision, reason: decision.reason,
+                admit: () => this.active && this.canWork() && this.autonomous.has(clan.id) });
+            plan.lastDecision = { at, targetClanId: decision.target.id, action: decision.action, reason: decision.reason,
+                accepted: result.ok, code: result.code || null };
+            if (result.ok && decision.action === 'withdraw') { plan.ceasefireUntil = at + Config.redeclareCooldownMs; plan.defeats = 0; }
+        }
+        await this.save(clan.id, plan);
+    }
+    async setOperation(party, operation, spotId = null) {
+        const result = await this.database.setClanWarPartyOperation(party.partyId, party.revision, operation, spotId);
+        return result.ok ? this.parties.acceptRow(result.row) : null;
+    }
+    async maintain(party, at) {
+        const op = party.stats.warOperation, hot = party.status === 'hot';
+        const World = hot ? invoke('GameServer/World/World') : null;
+        let members = party.memberIds.map(id => this.life.cachedState(id));
+        if (!['active', 'hot'].includes(party.status) || members.some(s => !s || s.stats?.pvpEncounter || s.stats?.travel)) return;
+        if (hot) {
+            const actors = party.memberIds.map(id => World.registeredActorById(id));
+            if (actors.some(r => !r?.actor || r.session?.pvpDefense || r.session?.pvpRevenge || r.session?.spotRelocation)) return;
+            members = members.map((s, i) => ({ ...s, loc: { locX: actors[i].actor.fetchLocX(), locY: actors[i].actor.fetchLocY(), locZ: actors[i].actor.fetchLocZ() },
+                vitals: { ...s.vitals, hp: actors[i].actor.fetchHp() }, stats: { ...s.stats, clanId: this.war.clanId(actors[i].actor) } }));
+        }
+        const ended = Policy.operationOutcome(op, members, this.war.view.between(op.clanId, op.enemyClanId), at);
+        if (op.status === 'returning') {
+            if (members.every(s => (hot || s.spotId === op.homeSpotId) && near(s.loc, op.homeLoc, 1200))) {
+                await this.setOperation(party, null, op.homeSpotId);
+            }
+            return;
+        }
+        if (ended) {
+            await this.setOperation(party, { ...op, status: 'returning', outcome: ended, expiresAt: at + Config.operationMs });
+            const plan = this.plans.get(op.clanId) || { revision: 0, intel: [] };
+            await this.save(op.clanId, { ...plan, nextOperationAt: at + Config.operationCooldownMs,
+                defeats: Number(plan.defeats || 0) + Number(ended === 'losses'), lastOperation: { id: op.id, at, outcome: ended } });
+            return;
+        }
+        const leader = members.find(s => s.characterId === party.leaderId && s.vitals.hp > 0) || members.find(s => s.vitals.hp > 0);
+        if (!leader || (!hot && leader.spotId !== op.targetSpotId) || hot && !near(leader.loc, op.targetLoc, 900)
+            || !members.every(s => near(s.loc, leader.loc, 900))) return;
+        if (hot && party.spotId !== op.targetSpotId) {
+            await this.setOperation(party, { ...op, status: 'searching' }, op.targetSpotId); return;
+        }
+        const enemies = hot ? (World.fetchVisibleUsers(World.registeredActorById(leader.characterId)?.session,
+            World.registeredActorById(leader.characterId)?.actor) || []).filter(s => s.actor && !s.actor.isDead?.()
+                && this.war.clanId(s.actor) === op.enemyClanId
+                && near(leader.loc, { locX: s.actor.fetchLocX(), locY: s.actor.fetchLocY(), locZ: s.actor.fetchLocZ() }))
+            : [...(this.bySpot.get(leader.spotId) || [])].map(id => this.life.cachedState(id)).filter(s => s?.phase === 'cold'
+                && s.vitals?.hp > 0 && !s.stats?.pvpEncounter && !s.stats?.travel && clanOf(s) === op.enemyClanId && near(leader.loc, s.loc));
+        if (!enemies.length) {
+            if (!op.clearSince) await this.setOperation(party, { ...op, status: 'holding', clearSince: at });
+            else if (at - op.clearSince >= 60000) {
+                await this.setOperation(party, { ...op, status: 'returning', outcome: 'spot_cleared', expiresAt: at + Config.operationMs });
+                const plan = this.plans.get(op.clanId) || { revision: 0, intel: [] };
+                await this.save(op.clanId, { ...plan, nextOperationAt: at + Config.operationCooldownMs,
+                    defeats: Math.max(0, Number(plan.defeats || 0) - 1), lastOperation: { id: op.id, at, outcome: 'spot_cleared' } });
+            }
+            return;
+        }
+        if (op.clearSince) { await this.setOperation(party, { ...op, status: 'engaging', clearSince: null }); return; }
+        if (hot) return; // Visible combat belongs to the actors' native tactical ticks.
+        const target = enemies[0], otherParty = partyOf(target) ? this.parties.find(partyOf(target)) : null;
+        const ids = [...party.memberIds, ...(otherParty?.memberIds || [target.characterId])];
+        if (ids.some(id => this.life.cachedState(id)?.phase !== 'cold')) return;
+        await this.memory.ensureMany(ids);
+        if (!this.active || !this.canWork()) return;
+        const participant = s => { const p = partyOf(s) ? this.parties.find(partyOf(s)) : null;
+            return { id: s.characterId, partyId: p?.partyId || null, size: p?.memberIds.length || 1,
+                partyRevision: p?.revision, revision: s.simulation?.revision || 0, memoryRevision: this.memory.revision(s.characterId) }; };
+        const result = await this.actions.apply({ key: `clan-war:${op.id}:${at}`, at, pressure: 3,
+            action: 'clan_war', pvpIntent: true, spotId: leader.spotId, npcId: 0,
+            actor: participant(this.life.cachedState(leader.characterId)), peer: participant(this.life.cachedState(target.characterId)) });
+        this.lastCombat = { at, operationId: op.id, ok: result.ok, reason: result.reason, pvp: !!result.pvp };
+        if (result.ok && result.pvp) {
+            const plan = this.plans.get(op.clanId) || { revision: 0, intel: [] };
+            await this.save(op.clanId, { ...plan, combatAt: { ...(plan.combatAt || {}), [op.enemyClanId]: at } });
+        }
+    }
+    async assemble(clan, plan, at) {
+        if (this.parties.admitted().filter(p => p.stats?.warOperation).length >= Config.maxActiveOperations) return;
+        if (at < Number(plan.nextOperationAt || 0) || this.parties.admitted().some(p => p.stats?.warOperation?.clanId === clan.id)) return;
+        const intel = (plan.intel || []).find(i => at - i.at < Config.intelTtlMs && this.war.view.between(clan.id, i.enemyClanId).mutual);
+        if (!intel) return;
+        const available = this.ownMembers(clan, at);
+        const role = s => invoke('GameServer/Bot/AI/BotRoles').inferRole(s);
+        const existing = this.parties.active().find(p => !p.stats?.warOperation && p.stats?.objective?.priority !== 'required'
+            && !p.stats?.objective?.clanGoalKey && !p.stats?.objective?.helpDeal
+            && p.memberIds.length >= Config.minMembers && p.memberIds.every(id => available.some(s => s.characterId === id))
+            && p.memberIds.some(id => role(this.life.cachedState(id)) === 'healer')
+            && p.memberIds.filter(id => !['healer', 'buffer'].includes(role(this.life.cachedState(id)))).length >= 2);
+        const free = available.filter(s => !partyOf(s) && !invoke('GameServer/Bot/AI/BotServiceIdentity').isStaticService(s));
+        const selected = existing ? existing.memberIds.map(id => this.life.cachedState(id))
+            : Policy.roster(free, role, Config.minMembers, Config.maxMembers);
+        if (selected.length < Config.minMembers || !selected.some(s => role(s) === 'healer')
+            || selected.filter(s => !['healer', 'buffer'].includes(role(s))).length < 2) return;
+        const home = selected.find(s => s.characterId === existing?.leaderId) || selected[0];
+        const op = { id: `${clan.id}:${at}`, clanId: clan.id, enemyClanId: intel.enemyClanId,
+            kind: available.some(s => s.spotId === intel.spotId) ? 'defend_spot' : 'raid_farm', status: 'assembling',
+            targetSpotId: intel.spotId, targetLoc: intel.loc, homeSpotId: home.spotId, homeLoc: { ...home.loc },
+            observedAt: intel.at, observerId: intel.observerId, startedAt: at, expiresAt: at + Config.operationMs };
+        const party = existing ? await this.setOperation(existing, op) : await this.form(selected, op);
+        if (party) await this.save(clan.id, { ...plan, nextOperationAt: at + Config.operationCooldownMs,
+            lastOperation: { id: op.id, partyId: party.partyId, at, outcome: 'assembled' } });
+    }
+    pulse(at = this.now()) {
+        if (!this.active || this.running || !Config.enabled || !this.canWork()) return this.running;
+        this.running = (async () => {
+            if (this.membershipRevision !== this.clans.membershipRevision()) {
+                this.membershipRevision = this.clans.membershipRevision();
+                const rows = await this.database.execute(["SELECT clanId FROM clan_simulation_clans WHERE mode='autonomous'"]);
+                this.autonomous = new Set(rows.map(r => r.clanId));
+            }
+            const clans = this.clans.all().filter(c => this.autonomous.has(c.id));
+            for (let n = 0; n < Math.min(4, clans.length) && this.active && this.canWork(); n++) {
+                const clan = clans[(this.cursor++) % clans.length];
+                await this.review(clan, at);
+                const plan = this.plans.get(clan.id);
+                if (plan && this.active && this.canWork()) await this.assemble(clan, plan, at);
+            }
+            for (const party of this.parties.admitted().filter(p => p.stats?.warOperation)) {
+                if (!this.active || !this.canWork()) break;
+                await this.maintain(party, at);
+            }
+        })().finally(() => { this.running = null; });
+        return this.running;
+    }
+    inspect() {
+        return { active: this.active, plans: [...this.plans].map(([clanId, plan]) => ({ clanId, ...plan })), lastCombat: this.lastCombat,
+            operations: this.parties.admitted().filter(p => p.stats?.warOperation).map(p => ({ partyId: p.partyId,
+                ...p.stats.warOperation, memberIds: p.memberIds, mode: p.status === 'hot' ? 'hot' : 'cold',
+                phase: p.stats.warOperation.status === 'returning' ? 'returning' : p.stats.travel ? 'traveling'
+                    : p.memberIds.some(id => this.life.cachedState(id)?.stats?.pvpEncounter) ? 'fighting' : p.stats.warOperation.status,
+                arrivalAt: p.stats.travel?.arrivalAt || null })) };
+    }
+}
+module.exports = { ClanWarDirector, near };

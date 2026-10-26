@@ -2743,6 +2743,12 @@ function serveWorldReads(request, response, url) {
         return true;
     }
 
+    if (url.pathname === '/observer/api/clans/wars') {
+        if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return true; }
+        sendJson(response, { ...invoke('GameServer/Clan/ClanWarRuntime').inspect(),
+            campaigns: invoke('GameServer/Bot/Population/PopulationService').clanWars?.inspect() || null });
+        return true;
+    }
     if (url.pathname === '/observer/api/clans/social') {
         if (request.method !== 'GET') { response.writeHead(405, { Allow: 'GET' }); response.end(); return true; }
         sendJson(response, (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Clan/ClanSocialRuntime').inspect() : { enabled: false });

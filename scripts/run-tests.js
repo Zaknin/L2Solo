@@ -16,6 +16,10 @@ const notRunTests = new Map([
 ]);
 
 const tests = [
+    'tests/test_clan_war_rules.js',
+    'tests/test_clan_war_campaign.js',
+    'tests/test_clan_war_operations.js',
+    'tests/test_clan_war_native.js',
     'tests/test_recommendations.js',
     'tests/test_recommendation_lifecycle.js',
     'tests/test_clan_strategy.js',
