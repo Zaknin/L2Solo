@@ -7,6 +7,7 @@ require('../src/Global'); isolated.assertConfigured(options.default);
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Database = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState'), Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Combat = invoke('GameServer/Bot/Population/ColdCombatProfile'), Gear = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const Roster = require('../src/GameServer/Clan/ClanRaidRoster');
 const Formation = require('../src/GameServer/Bot/Population/RequiredPartyFormation');
@@ -71,6 +72,8 @@ function nativeSessions(states) {
             return new Item(state.characterId * 100 + i, { ...definition.template, ...definition.stats, ...definition.etc, ...row });
         });
         actor.skillset.populateSnapshot(state.stats.coldCombat.skills);
+        invoke('GameServer/Actor/Generics').calculateStats(session, actor);
+        actor.setHp(actor.fetchMaxHp()); actor.setMp(actor.fetchMaxMp());
         actor.automation.replenishVitals = () => {};
         actor.automation.stopReplenish = () => {};
         session.actor = actor;
@@ -132,8 +135,9 @@ async function nativeImpactCases(sessions, registry) {
         // Spawn the actual current canonical classes, rather than old actors.
         sessions.forEach(session => session.actor.setClassId(members.find(member => member.characterId === session.actor.fetchId()).classId));
         const assigned = members.map(member => Life.preparePartyAssignment(member, prepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
-        assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
-        Life.acceptPartyAssignments(assigned); party = Parties.acceptCommit(prepared); await phase('hot');
+        const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+        assert(formed.ok);
+        Life.acceptPartyAssignments(assigned, formed.lifeRows); party = Parties.acceptRow(formed.partyRow); await phase('hot');
         sessions.forEach(session => { session.hotBackgroundPartyId = party.partyId; session.actor.state.setCasts(false); session.actor.state.setHits(false); });
         boss.setHp(1000); boss.state.setDead(false); boss.setDestId(base); boss.raidInstanceId = marker.raidInstanceId;
         const opened = await Lifecycle.openMarkedRaid(party, sessions);
@@ -159,6 +163,14 @@ async function nativeImpactCases(sessions, registry) {
     }
     try {
         await freshParty('melee');
+        const recovering = sessions[2], recoveringMp = recovering.actor.fetchMp();
+        recovering.actor.setMp(recovering.actor.fetchMaxMp() * 0.2);
+        Hot.tick(recovering, recovering.actor, invoke('GameServer/Actor/Generics'), {});
+        assert.equal(recovering.lastDecision.action, 'raid_recovery', 'a visible admitted healer sits before the first attack');
+        assert(recovering.actor.state.fetchSeated());
+        assert.equal(recovering.actor.fetchMp(), recovering.actor.fetchMaxMp() * 0.2, 'recovery uses native regeneration, not a free refill');
+        assert(!Roster.held(Parties.find(party.partyId)));
+        recovering.actor.setMp(recoveringMp); recovering.actor.state.setSeated(false);
         sessions[0].raidOpenedBossId = boss.fetchId();
         assert(!Roster.nativeHotStarted(party), 'defensive autoaggro/tactical flag does not earn opening');
         sessions.forEach(session => { session.actor.state.setCasts(true); Hot.tick(session, session.actor, invoke('GameServer/Actor/Generics'), {}); });
@@ -170,6 +182,9 @@ async function nativeImpactCases(sessions, registry) {
         healer.actor.attack.queueTimer = callback => { healTimers.push(callback); return null; };
         healer.actor.attack.remoteHit(healer, healer.actor, healer.actor.skillset.fetchSkill(1015));
         healTimers.at(-1)(); assert(!Roster.held(Parties.find(party.partyId))); assert.equal(openingWrites, 0);
+        // The real heal refreshes native maxima in this compact actor fixture.
+        // Recover those vitals before testing unrelated first-impact races.
+        sessions.forEach(session => { session.actor.setHp(session.actor.fetchMaxHp()); session.actor.setMp(session.actor.fetchMaxMp()); });
         await denied('logout ninth', () => registry.delete(base + 8), () => registry.set(base + 8, { actor: sessions[8].actor, session: sessions[8] }));
         await denied('party change', () => { sessions[8].hotBackgroundPartyId = 'foreign'; }, () => { sessions[8].hotBackgroundPartyId = party.partyId; });
         await denied('membership race', () => query('UPDATE characters SET clanId=0 WHERE id=?', [base + 8]),
@@ -181,6 +196,9 @@ async function nativeImpactCases(sessions, registry) {
             () => query("UPDATE clan_simulation_clans SET stateJson=json_set(stateJson,'$.productionGoal.fullRoster.generation',?) WHERE clanId=?", [marker.generation, marker.clanId]));
         const item = sessions[8].actor.backpack.fetchItems()[0], enchant = item.fetchEnchantLevel();
         await denied('gear race', () => item.setEnchantLevel(enchant + 1), () => item.setEnchantLevel(enchant));
+        const support = sessions[2].actor, manaBefore = support.fetchMp(), hpBefore = support.fetchHp();
+        await denied('MP spent after admission', () => support.setMp(support.fetchMaxMp() * 0.2), () => support.setMp(manaBefore));
+        await denied('HP lost after admission', () => support.setHp(support.fetchMaxHp() * 0.5), () => support.setHp(hpBefore));
         const learned = healer.actor.skillset.skills;
         await denied('learned capability race', () => { healer.actor.skillset.skills = []; }, () => { healer.actor.skillset.skills = learned; });
         await denied('arrival race', () => sessions[8].actor.setLocX(5000), () => sessions[8].actor.setLocX(0));
@@ -197,13 +215,17 @@ async function nativeImpactCases(sessions, registry) {
         assert(Roster.nativeHotStarted(party)); assert.equal(openingWrites, 1);
         assert.equal(captures, 9, 'one compact pass for the opening event'); assert.equal(fullCaptures, 0); assert.equal(ownerReads, 2);
         const heldProof = structuredClone(party.stats.raidAdmission);
+        const heldMana = sessions[2].actor.fetchMp();
+        sessions[2].actor.setMp(sessions[2].actor.fetchMaxMp() * 0.2);
         registry.delete(base + 8); queuedMelee()(); registry.set(base + 8, { actor: sessions[8].actor, session: sessions[8] });
+        sessions[2].actor.setMp(heldMana);
         assert.equal(boss.fetchHp(), 980, 'legitimate post-opening departure does not require nine alive again');
         assert.equal(captures, 9); assert.equal(ownerReads, 2); assert.equal(openingWrites, 1);
         assert.deepEqual(party.stats.raidAdmission, heldProof);
         await freshParty('magic');
         const caster = sessions[5], attack = caster.actor.attack, timers = [];
         const skill = caster.actor.skillset.fetchSkill(1184);
+        caster.actor.setMp(caster.actor.fetchMaxMp() * 0.95);
         attack.queueTimer = callback => { timers.push(callback); return null; };
         attack.prepareSkillDamage = () => 10;
         attack.remoteHit(caster, boss, skill); registry.delete(base + 8); timers.at(-1)();
@@ -214,8 +236,11 @@ async function nativeImpactCases(sessions, registry) {
         const beforeExp = caster.actor.fetchExp();
         timers.length = 0; boss.setHp(5); caster.actor.state.setCasts(false);
         caster.actor.skillReuseUntil.delete(skill.fetchSelfId()); // Fixture advances past the native reuse before its next cast.
+        caster.actor.setMp(caster.actor.fetchMaxMp() * 0.95);
         attack.remoteHit(caster, boss, skill);
         timers.at(-1)(); party = Parties.find(party.partyId);
+        assert(caster.actor.fetchMp() < caster.actor.fetchMaxMp() * 0.95,
+            'native magic can open from the 95% boundary while paying its own cost without any refill');
         assert(boss.state.fetchDead()); assert.equal(boss.fetchDestId(), undefined);
         assert.equal(loot, 1); assert.equal(experience, 9); await goalCompletion;
         assert(caster.actor.fetchExp() > beforeExp, 'actual native party EXP reaches the killer after durable opening');
@@ -250,6 +275,18 @@ function productionResolverCases(members) {
     const ownerGone = run(members, null);
     assert.equal(ownerGone.partyPatch.status, 'dissolved'); assert.equal(ownerGone.debug.reason, 'raid_roster_owner_changed');
     assert(ownerGone.memberResults.every(row => row.result.materialize.exp === 0 && row.result.materialize.items.length === 0));
+    const resting = members.map(state => ({ ...state, activity: 'resting',
+        vitals: { ...state.vitals, mp: 0 }, stats: { ...state.stats, restUntil: at - 1 } }));
+    const restingParty = { ...party, stats: { ...party.stats, restUntil: at - 1,
+        raidPreparation: { status: 'preparing', passes: 1, remainingBuffs: 31 } } };
+    const recovered = run(resting, currentOwner, restingParty);
+    assert.equal(recovered.debug.activity, 'resting',
+        'the marked roster must apply its native MP recovery before checking readiness to hunt');
+    assert(recovered.memberResults.every(row => row.result.patch.vitals.mp > 0));
+    assert.equal(recovered.debug.fights, 0, 'recovery never opens combat');
+    assert(!recovered.partyPatch.stats.raidAdmission, 'only actual combat earns the marked admission');
+    assert.equal(run(resting.slice(0, 8), currentOwner, restingParty).debug.reason, 'raid_roster_incomplete');
+    assert.equal(run(resting, null, restingParty).debug.reason, 'raid_roster_owner_changed');
     const previous = { prepare: Solo.prepareRaidParty, fight: Solo.resolvePartyFight };
     let attempts = 0;
     try {
@@ -262,6 +299,15 @@ function productionResolverCases(members) {
                 debug: { actions: 1, mobSelfId: 10137, remainingHp: 500 } };
         };
         const readyParty = { ...party, stats: { ...party.stats, raidPreparation: { status: 'ready' } } };
+        const exhausted = members.map(state => ({ ...state, vitals: { ...state.vitals,
+            mp: state.vitals.maxMp * 0.2 } }));
+        const recovery = run(exhausted, currentOwner, readyParty);
+        assert.equal(attempts, 0, 'finished buffs with ordinary-party mana cannot start a raid');
+        assert.equal(recovery.debug.fights, 0);
+        assert(recovery.memberResults.some(row => row.result.patch.activity === 'resting'));
+        assert(!recovery.partyPatch.stats.raidAdmission, 'paid recovery does not earn the first attack');
+        assert(recovery.memberResults.every(row => row.result.patch.vitals.mp >= row.state.vitals.mp),
+            'the native rest path actually regenerates mana instead of polling admission');
         const opened = run(members, currentOwner, readyParty);
         assert.equal(attempts, 1, 'production marked resolver reaches exactly one native fight leaf');
         assert.equal(opened.partyPatch.stats.raidAdmission.startedAt, at);
@@ -270,38 +316,37 @@ function productionResolverCases(members) {
         assert.equal(opened.memberResults.length, 9);
     } finally { Solo.prepareRaidParty = previous.prepare; Solo.resolvePartyFight = previous.fight; Encounter.resetForTests(); }
 }
+let proposals = 0;
 async function propose(proof, { reward = 100, status = 'active' } = {}) {
     const members = await refreshed();
-    const { grants } = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
-    assert.equal(grants.length, 9);
     const [raid] = await query('SELECT revision FROM bot_raid_encounters WHERE raidKey=?', ['raid:10137']);
     const revision = Number(raid?.revision || 0);
-    const atomicGroup = { id: `full:${grants[0].leaseId}`, memberIds: ids,
-        partyChanges: [{ partyId: party.partyId, memberIds: ids, expectedUpdatedAt: party.updatedAt,
+    const atomicGroup = { id: `full:${++proposals}`, memberIds: ids,
+        partyChanges: [{ partyId: party.partyId, memberIds: ids, expectedPartyRevision: party.revision,
             updatedAt: Math.max(Date.now(), party.updatedAt + 1), status, nextResolveAt: Date.now() + 30000,
             statsJson: JSON.stringify({ ...party.stats, raidAdmission: proof }) }],
         raidCommit: { key: 'raid:10137', expectedRevision: revision, revision: revision + 1,
             snapshot: { key: 'raid:10137', raidInstanceId: marker.raidInstanceId, status: 'active', hp: 500,
                 participants: { [party.partyId]: proof.startedAt }, updatedAt: Date.now() } } };
     const entries = members.map(member => ({ nextState: { ...member, exp: member.exp + reward },
-        token: grants.find(grant => grant.characterId === member.characterId), atomicGroup,
-        proposal: { baseState: member }, options: { allowParty: true, allowLifecycle: true } }));
-    return { entries, grants };
+        revision: member.simulation.revision, atomicGroup,
+        proposal: InventorySummary.bagChange(member.inventory, member.inventory), options: { allowParty: true, allowLifecycle: true } }));
+    return { entries };
 }
 async function reject(proof, mutation, restore, detail) {
     const prepared = await propose(proof);
     const before = await query('SELECT characterId,exp FROM bot_life_state ORDER BY characterId');
     try {
         await mutation();
-        const result = await Owner.commitAndReleaseBatch(prepared.entries);
+        const result = await Owner.commitBatch(prepared.entries);
         assert(result.every(row => !row.ok && row.detail === detail), JSON.stringify(result.map(row => [row.reason, row.detail])));
         assert.deepEqual(await query('SELECT characterId,exp FROM bot_life_state ORDER BY characterId'), before);
-    } finally { await Owner.releaseBatch(prepared.grants, { releaseInvalidated: true }); await restore(); }
+    } finally { await restore(); }
 }
 async function phase(to) {
     const states = await refreshed(), at = Date.now();
     const result = await Database.transitionBackgroundParty({ partyId: party.partyId, expectedStatus: party.status,
-        expectedUpdatedAt: party.updatedAt, expectedPhase: states[0].phase, phase: to,
+        expectedPartyRevision: party.revision, expectedPhase: states[0].phase, phase: to,
         nextResolveAt: to === 'hot' ? null : at + 30000, statsJson: JSON.stringify(party.stats),
         members: states.map(state => ({ characterId: state.characterId, expectedRevision: state.simulation.revision,
             expectedUpdatedAt: state.updatedAt, patch: Owner.persistencePatch({ ...state, phase: to }, at) })) });
@@ -338,9 +383,12 @@ async function main() {
         const prepared = Parties.prepareCommit({ partyId: 'full-native', leaderId: base, memberIds: ids, spotId: spot.id,
             status: 'active', startedAt: Date.now(), nextResolveAt: Date.now() + 30000, stats: { objective } });
         const assigned = ungrouped.map(member => Life.preparePartyAssignment(member, prepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
-        assert((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
-        Life.acceptPartyAssignments(assigned); party = Parties.acceptCommit(prepared); members = await refreshed();
+        const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+        assert(formed.ok);
+        Life.acceptPartyAssignments(assigned, formed.lifeRows); party = Parties.acceptRow(formed.partyRow); members = await refreshed();
         const checked = admission(members); assert(checked.ok, checked.reason); const proof = checked.proof;
+        assert.equal(Roster.admission(party, members, spot, { owner: { ...owner(), raidBlocked: true }, arrived: true }).reason,
+            'raid_failure_blocked', 'a ready nine cannot open a boss blocked by its clan failure memory');
         assert(Buffer.byteLength(JSON.stringify(proof)) <= 1024);
         for (const count of [7, 8]) assert(!admission(members.slice(0, count)).ok);
         assert(!admission([...members.slice(0, 8), members[0]]).ok);
@@ -385,17 +433,16 @@ async function main() {
                     memberResults: input.members.map(state => ({ state, result: { events: [] } })), events: [] };
             } });
         try {
-            const grants = new Map(members.map(member => [member.characterId, { characterId: member.characterId,
-                ownerId: Owner.OWNER_ID, leaseId: 'full-wire', revision: 1, leaseUntil: at + 30000 }]));
-            for (const member of members) { kernel.upsert({ state: member, context: member.characterId === base ? { raidOwner: currentOwner } : {} });
-                kernel.inFlight.set(member.characterId, { state: member, grant: grants.get(member.characterId), partyId: party.partyId, claimRequestId: 'full-claim' }); }
-            kernel.partyRuns.set(party.partyId, { party, members, spot, requestId: 'full-claim', grants });
-            await kernel.resolvePartyGrant(party.partyId);
+            for (const member of members) { kernel.upsert({ state: member });
+                kernel.inFlight.set(member.characterId, { state: member, startedAt: at, partyId: party.partyId }); }
+            // The run carries the raid owner its parties table row published.
+            kernel.partyRuns.set(party.partyId, { party, members, spot, startedAt: at, raidOwner: currentOwner });
+            await kernel.resolvePartyStep(party.partyId);
             const proposals = messages.filter(message => message.type === 'proposal_batch').flatMap(message => message.data.proposals);
             assert.equal(proposals.length, 9);
             assert(proposals.every(proposal => JSON.parse(proposal.atomicGroup.partyChanges[0].statsJson).raidAdmission.members.length === 9));
             kernel.onCommitAck({ results: proposals.map(proposal => ({ characterId: proposal.characterId, raidStepId: proposal.raidStepId,
-                ok: false, inputToken: proposal.token, proposalId: proposal.proposalId })) });
+                ok: false, proposalId: proposal.proposalId })) });
         } finally { await kernel.shutdown(); EncounterWire.resetForTests(); }
         await reject(proof, () => query('UPDATE characters SET classId=21 WHERE id=?', [base + 2]),
             () => query('UPDATE characters SET classId=15 WHERE id=?', [base + 2]), 'raid_roster_member_changed');
@@ -405,17 +452,21 @@ async function main() {
             goal: { ...goal, fullRoster: { ...marker, generation: 'replacement' } } }),
         () => Database.updateAutonomousClanGoal({ clanId: marker.clanId, ownerSection: marker.ownerSection, goal }), 'raid_roster_owner_changed');
         await reject(proof, async () => { spot.raidInstanceId = 'respawn'; }, async () => { spot.raidInstanceId = marker.raidInstanceId; }, 'raid_roster_source_changed');
+        await reject(proof, async () => {
+            await query("UPDATE clan_simulation_clans SET stateJson=json_set(stateJson,'$.raidFailures',json(?)) WHERE clanId=?",
+                [JSON.stringify({ [marker.npcId]: { bossTemplateId: marker.npcId, retryAllowed: false, failedAt: 100 } }), marker.clanId]);
+        }, async () => {
+            await query("UPDATE clan_simulation_clans SET stateJson=json_remove(stateJson,'$.raidFailures') WHERE clanId=?", [marker.clanId]);
+        }, 'raid_failure_blocked');
         const stale = await propose(proof);
         const noReward = await query('SELECT characterId,exp FROM bot_life_state ORDER BY characterId');
-        stale.entries[0] = { ...stale.entries[0], token: { ...stale.entries[0].token, leaseId: 'stale-lease' } };
-        assert((await Owner.commitAndReleaseBatch(stale.entries)).every(row => !row.ok && row.detail === 'lease_changed'));
+        stale.entries[0].revision -= 1;
+        assert((await Owner.commitBatch(stale.entries)).every(row => !row.ok && row.detail === 'stale_revision'));
         assert.deepEqual(await query('SELECT characterId,exp FROM bot_life_state ORDER BY characterId'), noReward);
-        await Owner.releaseBatch(stale.grants, { releaseInvalidated: true });
         // No prior native opening provenance: a held-looking proof alone is rejected.
         const forged = await propose(proof); delete forged.entries[0].atomicGroup.raidCommit.snapshot.participants;
-        assert((await Owner.commitAndReleaseBatch(forged.entries)).every(row => !row.ok && row.detail === 'raid_roster_not_opened'));
-        await Owner.releaseBatch(forged.grants, { releaseInvalidated: true });
-        const success = await propose(proof); const result = await Owner.commitAndReleaseBatch(success.entries);
+        assert((await Owner.commitBatch(forged.entries)).every(row => !row.ok && row.detail === 'raid_roster_not_opened'));
+        const success = await propose(proof); const result = await Owner.commitBatch(success.entries);
         assert(result.every(row => row.ok), JSON.stringify(result.map(row => [row.reason, row.detail])));
         party = Parties.acceptRow(result[0].raidPartyRow); assert(Roster.held(party, spot));
         assert.equal(await Parties.createOrUpdate({ ...party, stats: { ...party.stats, raidAdmission: null } }), null,
@@ -424,10 +475,9 @@ async function main() {
         const nextStats = JSON.parse(lostMarker.entries[0].atomicGroup.partyChanges[0].statsJson);
         delete nextStats.objective.fullRoster;
         lostMarker.entries[0].atomicGroup.partyChanges[0].statsJson = JSON.stringify(nextStats);
-        assert((await Owner.commitAndReleaseBatch(lostMarker.entries)).every(row => !row.ok && row.detail === 'raid_roster_held_changed'),
+        assert((await Owner.commitBatch(lostMarker.entries)).every(row => !row.ok && row.detail === 'raid_roster_held_changed'),
             'held atomic update cannot erase marker and reopen as legacy7');
-        await Owner.releaseBatch(lostMarker.grants, { releaseInvalidated: true });
-        assert((await Owner.commitAndReleaseBatch(success.entries)).every(row => !row.ok), 'native replay fences suppress another result');
+        assert((await Owner.commitBatch(success.entries)).every(row => !row.ok), 'native replay fences suppress another result');
         const persisted = (await query('SELECT * FROM bot_background_parties WHERE partyId=?', [party.partyId]))[0];
         party = Parties.acceptRow(persisted); assert(Roster.held(party, spot), 'restart reconstruction preserves original9 proof');
         await Database.updateAutonomousClanGoal({ clanId: marker.clanId, ownerSection: 'goal', goal: { status: 'completed', goalKey: 'unrelated-cash' } });
@@ -447,7 +497,7 @@ async function main() {
             stats: { ...current.stats, classId: session.actor.fetchClassId(), coldCombat: Combat.capture(session.actor), hennas: session.hennas || [] } });
         const admittedParty = { ...party, stats: { ...party.stats, raidAdmission: { ...proof, startedAt: null } } };
         let targetId = base, instance = marker.raidInstanceId;
-        Index.bossByTemplateId = () => ({ raidInstanceId: instance, fetchId: () => 998877, fetchDestId: () => targetId });
+        Index.bossByTemplateId = () => ({ raidInstanceId: instance, fetchId: () => 998877, fetchSelfId: () => spot.raidBossTemplateId, fetchDestId: () => targetId });
         assert(!Roster.nativeHotStarted(admittedParty), 'autoaggro while admission pending is not opening provenance');
         registry.delete(base + 8);
         assert.equal(Hot.roster(sessions[0]).length, 8);
@@ -468,10 +518,23 @@ async function main() {
             status: 'active', startedAt: Date.now(), nextResolveAt: Date.now() + 30000, stats: { objective } });
         const hotAssigned = members.map(member => Life.preparePartyAssignment({ ...member,
             stats: { ...member.stats, clanPartyObjective: objective, partyRequest: objective } }, hotPrepared.row.partyId, Gear.roleFor(member), base, Date.now() + 30000));
-        assert((await Database.commitBackgroundPartyMembership({ party: hotPrepared.row, members: hotAssigned })).ok);
-        Life.acceptPartyAssignments(hotAssigned); party = Parties.acceptCommit(hotPrepared); await phase('hot');
+        const hotFormed = await Database.commitBackgroundPartyMembership({ party: hotPrepared.row, members: hotAssigned });
+        assert(hotFormed.ok);
+        Life.acceptPartyAssignments(hotAssigned, hotFormed.lifeRows); party = Parties.acceptRow(hotFormed.partyRow); await phase('hot');
         sessions.forEach(session => { session.hotBackgroundPartyId = party.partyId; delete session.raidOpenedBossId; });
         Runtime.start();
+        const openingRows = await query('SELECT * FROM bot_background_parties WHERE partyId=?', [party.partyId]);
+        const manaBeforeOpening = sessions.map(session => session.actor.fetchMp());
+        sessions.forEach(session => session.actor.setMp(session.actor.fetchMaxMp() * 0.2));
+        const deniedOpening = await Lifecycle.openMarkedRaid(party, sessions);
+        assert.equal(deniedOpening.ok, false, 'a visible nine at 20% MP cannot open the raid');
+        assert.equal(deniedOpening.reason, 'raid_resources_not_ready');
+        assert.deepEqual(await query('SELECT * FROM bot_background_parties WHERE partyId=?', [party.partyId]), openingRows,
+            'denied admission does not write an opening proof');
+        sessions.forEach((session, index) => {
+            assert.equal(session.actor.fetchMp(), session.actor.fetchMaxMp() * 0.2, 'admission grants no free recovery');
+            session.actor.setMp(manaBeforeOpening[index]);
+        });
         const opened = await Lifecycle.openMarkedRaid(party, sessions);
         assert(opened.ok, opened.reason); party = opened.party;
         assert(Roster.admitted(party)); assert(!Roster.held(party));
@@ -481,47 +544,8 @@ async function main() {
         // Admission before any hit also survives phase transfer without
         // manufacturing an active encounter or earned fight.
         await phase('cold'); assert(!Roster.held(party));
-        const Legacy = require('../src/GameServer/Bot/Population/ColdRaidLegacyCommit');
-        const Resolver = require('../src/GameServer/Bot/Population/BackgroundPartyResolver');
-        const Encounter = require('../src/GameServer/Bot/Population/ColdRaidEncounter');
-        const Authority = require('../src/GameServer/Bot/Population/ColdRaidAuthority');
-        const Bridge = require('../src/GameServer/Bot/Population/ColdRaidWorldBridge');
-        const originalResolve = Resolver.resolve, originalCommit = Database.commitAndReleaseColdSimulationLeases;
-        const originalSettle = Bridge.settle, originalDecorate = Scope.decorateSpot, originalPrepare = Authority.prepare;
-        let bridgeCalls = 0, race = true;
-        try {
-            Scope.decorateSpot = () => ({ ...spot, raidAuthorityRevision: Authority.get('raid:10137').revision,
-                raidAuthority: Authority.get('raid:10137').snapshot });
-            Authority.prepare = () => true; // Native world physics is outside this isolated SQLite fixture.
-            Bridge.settle = async () => { bridgeCalls++; assert.equal((await query('SELECT status FROM bot_background_parties WHERE partyId=?', [party.partyId]))[0].status, 'dissolved'); };
-            Resolver.resolve = input => {
-                const accepted = Roster.admission(input.party, input.members, input.spot, { owner: input.raidOwner, arrived: true, timestamp: input.timestamp });
-                if (!accepted.ok) return { memberResults: input.members.map(state => ({ state, result: { patch: {}, events: [],
-                    materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: null } })), events: [], nextResolveAt: null,
-                    partyPatch: { status: 'dissolved', stats: { partyBreakReason: accepted.reason } }, debug: { fights: 0, wins: 0 } };
-                const snapshot = Encounter.record(input.party, Encounter.begin(input.party, input.spot, 10137, input.timestamp),
-                    { won: true, encounter: null }, input.timestamp);
-                return { memberResults: input.members.map(state => ({ state, result: { patch: {}, events: [],
-                    materialize: { exp: 100, sp: 0, adena: 0, items: [] }, nextResolveAt: Date.now() + 30000 } })), events: [],
-                nextResolveAt: null, partyPatch: { status: 'dissolved', stats: { raidEncounter: snapshot, raidAdmission: accepted.proof } }, debug: { fights: 1, wins: 1 } };
-            };
-            Database.commitAndReleaseColdSimulationLeases = async requests => {
-                if (race) { race = false; await query('UPDATE characters SET classId=21 WHERE id=?', [base + 2]); }
-                return originalCommit.call(Database, requests);
-            };
-            const denied = await Legacy.resolve({ party, members: await refreshed(), spot, targetNpcId: 10137, elapsedMs: 60000 });
-            assert(!denied.ok && denied.detail === 'raid_roster_member_changed', JSON.stringify(denied)); assert.equal(bridgeCalls, 0);
-            await query('UPDATE characters SET classId=15 WHERE id=?', [base + 2]);
-            const won = await Legacy.resolve({ party, members: await refreshed(), spot, targetNpcId: 10137, elapsedMs: 60000 });
-            assert(won.ok, JSON.stringify(won)); assert.equal(bridgeCalls, 1);
-            const replay = await Legacy.resolve({ party, members: await refreshed(), spot, targetNpcId: 10137, elapsedMs: 60000 });
-            assert(!replay.ok); assert.equal(bridgeCalls, 1, 'replay never reaches world bridge a second time');
-        } finally {
-            Resolver.resolve = originalResolve; Database.commitAndReleaseColdSimulationLeases = originalCommit;
-            Bridge.settle = originalSettle; Scope.decorateSpot = originalDecorate; Authority.prepare = originalPrepare;
-        }
         await nativeImpactCases(sessions, registry);
-        console.log('Full clan raid roster: native formation/worker, exact9 admission, atomic races/replay, held casualties/recovery/handoff and hot first-strike race passed');
+        console.log('Full clan raid roster: native formation/worker, exact9 admission, held casualties/recovery/handoff and hot first-strike race passed');
     } finally {
         Catalog.findById = old.find; Scope.projectSource = old.project; invoke('GameServer/Bot/AI/SpotService').containsLocation = old.contains;
         World.registeredActorById = old.registered; Index.bossByTemplateId = old.boss; Life.partySessionSnapshot = old.snapshot;

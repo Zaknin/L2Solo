@@ -94,6 +94,14 @@ const replay = () => Database.fetchRecentBoardDeals({ perItem: MarketCounters.RE
     assert(live > 1 && Math.abs(MarketCounters.counter('material none', now).perHour - live) < 1e-9,
         'the buyers per hour stand as the running server had them at the stop');
 
+    await trade(now - 600000, { selfId: 1464, channel: 'fixed_wts', sourceType: 'configured_store', unitPrice: 750, quantity: 1000 });
+    await trade(now - 300000, { selfId: 1464, channel: 'fixed_wts', sourceType: 'configured_store', unitPrice: 750, quantity: 1000 });
+    await trade(now - 1000, { selfId: 1464, channel: 'npc_buy', sourceType: 'npc', unitPrice: 750, quantity: 999999 });
+    const fixed = await Database.fetchRecentFixedStoreDeals();
+    assert.strictEqual(fixed.length, 2, 'public supply replay includes fixed purchases and excludes private NPC receipts');
+    MarketCounters.reset(); MarketCounters.load(await replay(), fixed);
+    assert(require('../src/GameServer/Bot/Economy/ShotTradeDemand').forecast(1464, 'Giran', now));
+    assert.strictEqual(MarketCounters.itemDeals(1464).deals, 0, 'supply replay leaves board counters alone');
     MarketCounters.reset();
     await Database.close();
     clean();

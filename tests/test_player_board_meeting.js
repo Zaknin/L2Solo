@@ -10,6 +10,9 @@ const Data = invoke('GameServer/DataCache');
 const Response = invoke('GameServer/Network/Response');
 const Board = require('../src/GameServer/AfkTrade/PlayerBoardWindow');
 const Meetings = require('../src/GameServer/AfkTrade/TradeMeetingService');
+const TableChannel = require('../src/GameServer/Bot/Population/ColdTableChannel').shared;
+// The meetings table row the worker receives for a bot the player waits for.
+const meetingRow = id => TableChannel.full(TableChannel.tables.get('meetings')).rows.find(([key]) => key === id)?.[1];
 const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 const HtmlLink = invoke('GameServer/Network/Request/HtmlLink');
 const seller = 730501, buyer = 730502, follower = 730503;
@@ -91,6 +94,10 @@ const waitFor = async (predicate, label, timeoutMs = 30000) => {
                 nextResolveAt: dueAt, roleCoverage: { dps: 2 }, stats: {} });
         };
         const html = () => session.packets.filter(packet => packet[0] === 0x0f).at(-1)?.subarray(5).toString('utf16le') || '';
+        // Private messages to this player (kind 2). A bot's public chat is not
+        // one: on a slow run the seller's ambient global shout (kind 1,
+        // BotGlobalChat, a random roll on its resolves) came during the
+        // delivery and counted as a second tell.
         const tells = () => session.packets.filter(packet => packet[0] === 0x4a && packet.readInt32LE(5) === 2).map(packet => ({
             sender: packet.readInt32LE(1), kind: packet.readInt32LE(5),
             name: packet.subarray(9).toString('utf16le').split('\0')[0],
@@ -172,9 +179,8 @@ const waitFor = async (predicate, label, timeoutMs = 30000) => {
         // Restore a pre-update overlap only after native consent; new grouped
         // deals are prohibited, but saved custody must still reach its buyer.
         await restoreLegacyParty('legacy_meeting_party_fixture');
-        assert.equal(Meetings.isPlayerWaiting(seller), true, 'accepted custody prioritizes the merchant while the human waits at the point');
-        assert.equal(Coordinator.contextFor(Life.cachedState(seller)).playerWaiting, true,
-            'the real coordinator carries waiting-player priority into the worker context');
+        assert.deepEqual(meetingRow(seller), { characterId: seller },
+            'accepted custody: the meetings table carries waiting-player priority to the worker');
         assert.equal(tells().length, 1, 'the accepted remote merchant privately acknowledges the reservation');
         assert.equal(tells()[0].sender, seller);
         assert.equal(tells()[0].kind, 2, 'meeting acknowledgement uses the private C4 chat channel');
@@ -201,7 +207,7 @@ const waitFor = async (predicate, label, timeoutMs = 30000) => {
         assert.equal(await fixture.amount(seller, 57), 1000000 + 4079 + 4080);
         assert.equal(Life.cachedState(seller).party.partyId, 'retained-meeting-party',
             'real worker claims and commits finish the individual obligation without erasing party membership');
-        await waitFor(() => !Meetings.isPlayerWaiting(seller), 'retired waiting-player priority');
+        await waitFor(() => !meetingRow(seller), 'retired waiting-player priority');
         await waitFor(() => boughtBucklers() === 2, 'second delivered item receipt');
         assert.equal(status().filter(text => /Trade completed/.test(text)).length, 2);
         assert.equal(pickups().length, 2, 'receiving one more Buckler reports one item, not the bag total of two');
@@ -224,18 +230,18 @@ const waitFor = async (predicate, label, timeoutMs = 30000) => {
             } },
             timing: { lastResolvedAt: Date.now(), nextResolveAt: merchantArrival } }, 'cancelled_merchant_fixture');
         const cancelStock = (await Database.fetchItems(seller)).find(row => row.selfId === 20);
-        const cancelSale = await Database.createAfkTradeShop(seller, { kind: 'sell_ad', storeType: 1, town: 'Giran', ...point,
+        // Through the owner: the ad moves the seller's far row and its cache.
+        const cancelSale = await Afk.publishBot(seller, { kind: 'sell_ad', storeType: 1, town: 'Giran', ...point,
             lines: [{ objectId: cancelStock.id, selfId: 20, count: 1, price: 4081 }] });
-        Afk.refreshRecord(cancelSale.shop);
         Board.show(session, { side: 1, town: 'Giran' });
-        await click(new RegExp('action="bypass -h (board answer sell_ad ' + cancelSale.shop.id + ' [^"]+)"').exec(html())[1]);
+        await click(new RegExp('action="bypass -h (board answer sell_ad ' + cancelSale.id + ' [^"]+)"').exec(html())[1]);
         await click('board agree');
         await waitFor(() => !session.playerBoardAgreePending, 'cancellable merchant agreement');
-        assert.equal(Meetings.isPlayerWaiting(seller), true);
+        assert(meetingRow(seller), 'a separate accepted trade sets waiting-player priority');
         assert.equal(tells().length, 2, 'a separate accepted trade receives its own private acknowledgement');
         assert.match(tells()[1].text, /on my way.*About 3 min/, 'an existing trip reports its remaining time rather than restarting the route estimate');
         await click('board cancel');
-        await waitFor(() => !Meetings.isPlayerWaiting(seller), 'cancelled waiting-player priority');
+        await waitFor(() => !meetingRow(seller), 'cancelled waiting-player priority');
         await waitFor(() => status().some(text => /Trade cancelled/.test(text)), 'cancelled trade system message');
         assert.equal(status().filter(text => /Trade cancelled/.test(text)).length, 1);
         assert.equal(pickups().length, 2, 'returning reserved payment on cancellation is not new loot');
@@ -262,7 +268,7 @@ const waitFor = async (predicate, label, timeoutMs = 30000) => {
                 stats: { ...Life.cachedState(seller).stats, restUntil: null, travel: null },
                 timing: { lastResolvedAt: Date.now(), nextResolveAt: Date.now() + 3600000 } }, 'field_merchant_fixture');
             Board.show(session, { side: 1, town: 'Giran' });
-            await click(new RegExp('action="bypass -h (board answer sell_ad ' + cancelSale.shop.id + ' [^"]+)"').exec(html())[1]);
+            await click(new RegExp('action="bypass -h (board answer sell_ad ' + cancelSale.id + ' [^"]+)"').exec(html())[1]);
             await click('board agree');
             await waitFor(() => !session.playerBoardAgreePending, 'field merchant agreement');
             await restoreLegacyParty('legacy_field_party_fixture');

@@ -37,6 +37,19 @@ function spotById(spots, spotId) {
     return Array.isArray(spots) ? tableFor(spots).get(String(spotId)) || null : null;
 }
 
+// A spot's place in its list (by identity, its first row), -1 for a spot
+// the list does not hold: the index of a per-spot array a reader keeps over
+// the list (GearAcquisitionPlanner.sourceGround). Built at the first ask.
+function ordinalFor(spots, spot) {
+    if (!Array.isArray(spots)) return -1;
+    const built = indexFor(spots);
+    if (!built.ordinals) {
+        built.ordinals = new Map();
+        for (let at = 0; at < spots.length; at++) if (!built.ordinals.has(spots[at])) built.ordinals.set(spots[at], at);
+    }
+    return built.ordinals.get(spot) ?? -1;
+}
+
 // Physical topology uses the same canonical last row as spotById, without
 // constructing a loot/planner view. Build only when this reverse is requested.
 function spotsForNpc(spots, npcId) {
@@ -80,4 +93,4 @@ function npcWeights(spot, npcId) {
     return { count: built.byNpc.get(Number(npcId)) || 0, totalCount: built.totalCount };
 }
 
-module.exports = { tableFor, strictTableFor, spotById, spotsForNpc, npcWeights };
+module.exports = { tableFor, strictTableFor, spotById, ordinalFor, spotsForNpc, npcWeights };

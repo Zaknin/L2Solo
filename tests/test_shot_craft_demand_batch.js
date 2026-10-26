@@ -27,14 +27,22 @@ Market.useSpots(() => invoke('GameServer/Bot/Population/SpotProfiles').ensure())
             loc: { locX: 83396, locY: 147904, locZ: -3400 }, stats: { classId: 57, money: [1000, .001, 0, 0] } };
         state.persona = invoke('GameServer/Bot/AI/BotPersona').generate(state);
         const batches = [];
-        for (const quantity of [100, 10000]) {
+        const receipts = [{ quantity: 100 }, { quantity: 10000 },
+            ...(recipeId === 21 ? [{ quantity: 10000, fixed: true }] : [])];
+        for (const { quantity, fixed } of receipts) {
             Market.reset();
-            Market.deal(recipe.productId, 100, quantity, timestamp - 600000, 12, 'Giran', 13);
-            Market.deal(recipe.productId, 100, quantity, timestamp - 300000, 14, 'Giran', 15);
+            if (fixed) {
+                Market.supplyDeal(recipe.productId, quantity, 'Giran', timestamp - 600000);
+                Market.supplyDeal(recipe.productId, quantity, 'Giran', timestamp - 300000);
+                assert.equal(Market.itemDeals(recipe.productId).deals, 0, 'the producer starts without any peer shot sale');
+            } else {
+                Market.deal(recipe.productId, 100, quantity, timestamp - 600000, 12, 'Giran', 13);
+                Market.deal(recipe.productId, 100, quantity, timestamp - 300000, 14, 'Giran', 15);
+            }
             let rows;
             Market.publish({ register: (_name, source) => { rows = source.allRows(); }, changed: () => {} });
             const result = await probe(state, { recipeEarning: true, timestamp,
-                context: { recipeBook: Codec.pack([recipeId]), knownShotRecipes: [recipeId] },
+                recipes: { recipeBook: Codec.pack([recipeId]), knownShotRecipes: [recipeId] },
                 tablePages: [{ tables: [
                     { name: 'board', from: null, to: 0, full: true, rows: [], removed: [], last: true },
                     { name: 'market', from: null, to: 0, full: true, rows: rows.map(row => [row[0], row]), removed: [], last: true }
@@ -54,7 +62,7 @@ Market.useSpots(() => invoke('GameServer/Bot/Population/SpotProfiles').ensure())
                     'existing unsold output prevents another large production batch');
             }
             batches.push(native.batches);
-            console.log(JSON.stringify({ recipeId, observedPurchase: quantity,
+            console.log(JSON.stringify({ recipeId, observedPurchase: quantity, fixed: !!fixed,
                 batches: native.batches, output: native.batches * recipe.productCount }));
         }
         assert(batches[1] > batches[0], 'stronger observed demand produces a larger shot batch');

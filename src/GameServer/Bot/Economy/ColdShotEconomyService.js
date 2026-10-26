@@ -22,6 +22,7 @@ const { personalOfferAllowed } = require('../Population/PartyAdmission');
 const ColdMarket = () => invoke('GameServer/Bot/Economy/ColdMarketService');
 
 const Policy = require('./ShotCraftPolicy');
+const ShotMarketIndex = require('./ShotMarketIndex');
 const { SHOT_RECIPE_IDS, SHOT_PRODUCT_IDS, SHOT_RECIPE_ITEM_IDS, CRYSTAL_BY_RANK,
     availableMaterial, fundedDemand, recipeTarget, scrapCraftRoutes, craftCandidate } = Policy;
 const CRYSTAL_SKILL_LEVEL = { d: 1, c: 2, b: 3, a: 4, s: 5 };
@@ -50,11 +51,12 @@ function recheck(state, selected) {
     const scrap = sourceCode > 0 ? Recipes.resolveByRecipeId(sourceCode) : null;
     if (scrap) for (const material of scrap.materials || []) neededIds.add(Number(material.selfId));
     if (sourceCode === -1) neededIds.add(gearId);
+    const reserved = ItemDisposition.reservedEquipmentAmounts(state);
     for (const id of neededIds) {
         const row = state.inventory?.[id];
         // The worker values own stock at the same exit value (ColdOccupationSources).
         const value = Basket.drain(Source.exitValue(state, id, board));
-        const amount = row ? require('./WealthCraftDecision').freeAmount(state, row) : 0;
+        const amount = row ? require('./WealthCraftDecision').freeAmount(state, row, reserved) : 0;
         // Accepted incoming goods are the seller's own output too; the reserve
         // for its own use comes off their sum.
         const incoming = id === Number(recipe.productId) ? Number(state.acceptedIncoming?.[id] || 0) : 0;
@@ -115,7 +117,7 @@ function recheck(state, selected) {
         const onlyTown = id === gearId && sourceCode === -3 ? hintedTown : null;
         const npcOffers = query.npc === true && Production.allowsNpcShot(id) ? Source.npcOffersFor(id) : [];
         const best = OfferQuery.cheapestTown(board, id, { amount, cost: trip, excludeOwner: state.characterId,
-            quoteDepth: Price.QUOTE_DEPTH, towns: onlyTown ? [onlyTown] : null, npcOffers,
+            quoteDepth: Price.QUOTE_DEPTH, sampleWhole: true, towns: onlyTown ? [onlyTown] : null, npcOffers,
             accept: line => !Number(line.enchant || 0) && personalOfferAllowed(line, state) });
         return best?.whole ? { ...best, tripDetails: trip.details?.(best.town), selfId: Number(id) } : null;
     };
@@ -160,47 +162,18 @@ function recheck(state, selected) {
 
 function marketSnapshot(now = Date.now(), ownState = null) {
     Workshops.init();
-    const index = require('./ShotMarketIndex').native();
+    const index = ShotMarketIndex.native();
     return { ...index.marketSnapshot(now, ownState), offersFor: (...args) => index.offersFor(...args) };
 }
 
-function noteBuyer(state) { require('./ShotMarketIndex').native().update(state); }
+function noteBuyer(state) { ShotMarketIndex.native().update(state); }
 
 function hasShotSurplus(state) {
-    if (!state?.stats?.shotCraft) return false;
+    if (!(Number(state?.stats?.shotCraft?.productId) > 0)) return false;
     const kept = ShotStock.keptAmounts(state);
     // This is only a cheap admission check. The listing policy still applies
     // reservations, funded demand and competing supply before publishing.
     return [...SHOT_PRODUCT_IDS].some(id => Number(state.inventory?.[id]?.amount || 0) > Number(kept[id] || 0));
-}
-
-async function reviewDemand(state, now) {
-    if (!state || state.phase !== 'cold' || !['hunting', 'resting', 'shopping', 'grouped'].includes(state.activity)) return state;
-    // The stock rule and prices need no wish network; only the worth of a
-    // missing stack does (L25).
-    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    const basics = Economy.basics(state, { timestamp: now });
-    const stock = basics.stock('shots');
-    const missing = stock.survivalMissing + stock.missing;
-    if (!stock.needed || !missing) {
-        if (!state.stats?.shotDemand) return state;
-        return await persist({ ...state, stats: { ...state.stats, shotDemand: null } }, 'shot_market_demand_filled') || state;
-    }
-    const price = basics.price(stock.itemId);
-    if (!(price > 0)) return state;
-    const context = require('../Population/ColdEconomyDecision').economyFor(state, { timestamp: now });
-    const worth = context.worth(stock.itemId);
-    const maxSpend = Math.min(require('./PurchaseFunding').spendable(state, 0,
-        { itemId: stock.itemId, survivalCost: basics.kitCost(stock.itemId) }), missing * (worth ?? price));
-    const wanted = state.stats?.shotDemand;
-    if (!wanted || wanted.itemId !== stock.itemId || wanted.amount !== missing || wanted.maxSpend !== maxSpend) {
-        state = await persist({ ...state, stats: { ...state.stats,
-            shotDemand: { itemId: stock.itemId, amount: missing, maxSpend, at: now } } }, 'shot_market_demand') || state;
-    }
-    // The core's root stock:shots (the same stock rule) is executed by its
-    // card: board deals and buy ads by the economy plan, the trip and the
-    // NPC remainder by its goal and the town visit. Main plans no purchase.
-    return state;
 }
 
 async function obtainRecipe(state, selected, now) {
@@ -212,10 +185,13 @@ async function obtainRecipe(state, selected, now) {
     const maxSpend = PurchaseFunding.spendable(state, 0, { valueHours });
     const wanted = state.stats?.shotRecipeDemand;
     if (!wanted || Number(wanted.itemId) !== itemId
+        || Number(wanted.recipeId) !== Number(recipe.recipeId) || Number(wanted.batches) !== Number(route.batches)
         || maxSpend > Number(wanted.maxSpend || 0) * 1.25
         || Number(wanted.at || 0) + 15 * 60 * 1000 <= now) {
-        state = await persist({ ...state, stats: { ...(state.stats || {}),
-            shotRecipeDemand: { itemId, amount: 1, maxSpend, at: now }
+        const stats = require('../AI/DecisionEvents').applyRaise({ ...(state.stats || {}) },
+            require('./DecisionSections').sectionMask(['sources', 'benefits', 'money']));
+        state = await persist({ ...state, stats: { ...stats,
+            shotRecipeDemand: { itemId, recipeId: Number(recipe.recipeId), batches: Number(route.batches), amount: 1, maxSpend, at: now }
         } }, 'shot_recipe_demand') || state;
     }
     const affordableOffer = () => {
@@ -370,6 +346,19 @@ async function craft(state, candidate, index, now) {
     const mpPerBatch = Number(candidate.recipe.mpCost || 0);
     const batches = Math.min(Policy.batchCount(state, candidate), Number(candidate.maxBatches ?? 64));
     if (batches <= 0) return state;
+    const held = state.stats?.shotCraft?.preparing;
+    const gearTarget = Number(state.stats?.equipmentPlan?.target?.selfId || 0);
+    if (Number(held?.recipeId) !== Number(candidate.recipe.recipeId)
+        || Number(held?.batches) !== batches || Number(held?.gearTarget) !== gearTarget
+        || !held?.gearInputs || Number(held?.at) + 30 * 60 * 1000 <= now) {
+        const gearInputs = Number(held?.gearTarget) === gearTarget && held?.gearInputs
+            && Number(held.at) + 30 * 60 * 1000 > now ? held.gearInputs : ItemDisposition.collectedEquipmentInputs(state);
+        const stats = require('../AI/DecisionEvents').applyRaise({ ...(state.stats || {}) },
+            require('./DecisionSections').sectionMask(['sources', 'benefits', 'money']));
+        state = await persist({ ...state, stats: { ...stats, shotCraft: { ...state.stats?.shotCraft,
+            preparing: { recipeId: Number(candidate.recipe.recipeId), productId: Number(candidate.recipe.productId),
+                batches, gearTarget, gearInputs, at: now } } } }, 'shot_craft_preparing');
+    }
     const crystals = await obtainCrystals(state, candidate, batches);
     if (!crystals.ready || crystals.hot || hotState(crystals.state)) return hotState(crystals.state) || crystals.state;
     const ore = await buyMaterial(crystals.state, Number(candidate.ore.selfId), orePerBatch * batches, candidate.orePrice, true, candidate.r,
@@ -417,7 +406,6 @@ async function review(state, now = Date.now(), options = {}) {
     if (active.has(id)) return { state };
     active.add(id);
     try {
-        state = await reviewDemand(state, now);
         Workshops.register(state);
         noteBuyer(state);
         // Gone for its restock, or another errand waits: no craft now.
@@ -478,7 +466,7 @@ async function execute(state, step, now = Date.now()) {
     return state;
 }
 
-module.exports = { review, reviewDemand, marketSnapshot, craftCandidate, recipeTarget,
+module.exports = { review, marketSnapshot, craftCandidate, recipeTarget,
     fundedDemand, scrapCraftRoutes, hasShotSurplus, SHOT_RECIPE_IDS, craft, obtainRecipe, execute, recheck,
     _resetForTests() { active.clear(); }
 };

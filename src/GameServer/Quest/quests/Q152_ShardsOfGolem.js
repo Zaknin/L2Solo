@@ -29,7 +29,7 @@ module.exports = {
     await s.set("cond", 1);
     await Q().giveItem(s.session, R1, 1);
     s.playSound("ItemSound.quest_accept");
-    return p("Harris", "Take this receipt to Altran.");
+    return p("Harrys", "Take this receipt to Altran.");
   },
   async onTalk(s, x) {
     const id = Number(x.fetchSelfId()),
@@ -40,35 +40,39 @@ module.exports = {
     if (!s.isStarted())
       return id === H && Number(s.session.actor.fetchLevel()) >= 10
         ? p(
-            "Harris",
+            "Harrys",
             "Can you recover the golem shards?",
             '<a action="bypass -h quest 152 start">Accept.</a>',
           )
-        : p("Harris", "Return at level 10.");
+        : p("Harrys", "Return at level 10.");
     if (id === A && c === 1) {
-      await q.takeItem(s.session, R1);
+      if (!(await q.takeItem(s.session, R1)))
+        return p("Altran", "You do not have Harrys's 1st Receipt.");
       await q.giveItem(s.session, R2, 1);
       await s.set("cond", 2);
       s.playSound("ItemSound.quest_middle");
       return p("Altran", "Bring five golem shards.");
     }
     if (id === A && c === 3) {
+      if (n(s, SHARD) < 5)
+        return p("Altran", "You do not have five Golem Shards.");
       await q.takeItem(s.session, SHARD, -1);
       await q.giveItem(s.session, BOX, 1);
       await s.set("cond", 4);
       s.playSound("ItemSound.quest_middle");
-      return p("Altran", "Take this tool box to Harris.");
+      return p("Altran", "Take this tool box to Harrys.");
     }
     if (id === H && c === 4 && n(s, BOX)) {
-      await q.takeItem(s.session, R2);
+      if (!(await q.takeItem(s.session, R2)))
+        return p("Harrys", "You do not have Harrys's 2nd Receipt.");
       await q.takeItem(s.session, BOX);
       await q.giveItem(s.session, ARMOR, 1);
       await q.rewardExpSp(s.session, 5000, 0);
       s.playSound("ItemSound.quest_finish");
       await s.exit(false);
-      return p("Harris", "Excellent work.");
+      return p("Harrys", "Excellent work.");
     }
-    return p(id === A ? "Altran" : "Harris", "Continue your task.");
+    return p(id === A ? "Altran" : "Harrys", "Continue your task.");
   },
   async onKill(s) {
     if (s.getInt("cond") !== 2 || Math.random() >= 0.3 || n(s, SHARD) >= 5)

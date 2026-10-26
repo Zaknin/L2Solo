@@ -24,7 +24,6 @@ function member(characterId, classId, overrides = {}) {
         classId,
         level: 50,
         phase: 'cold',
-        simulationOwner: 'legacy_main',
         ...overrides
     };
 }
@@ -72,7 +71,7 @@ try {
 
     const backedOff = members.map((entry, index) => index === 0 ? {
         ...entry,
-        stats: { clanHuntBackoffs: [{ spotId: 'raid:1', until: Date.now() + 60000 }] }
+        stats: { clanHuntBackoffs: [{ spotId: 'raid:1', untilStep: 60 }] }
     } : entry);
     assert.equal(RaidPolicy.assessment({ members: backedOff }, profile).ready, false,
         'a raid-specific safety backoff must keep a required role out of a new raid plan');

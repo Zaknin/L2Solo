@@ -1,6 +1,6 @@
 // Q333 Black Lion Hunt. Source: l2j-lisvus fdc7e33 333_BlackLionHunt.
 //
-// Mercenary Sophia (7735) hires holders of the black lion mark (1369, granted
+// Mercenary Sophya (7735) hires holders of the black lion mark (1369, granted
 // by Q326) onto one of four fronts; proofs (undead ash 3848, bloody-axe
 // insignias 3849, delu fangs 3850, stakato talons 3851) pay 35 per proof with
 // lion claws at 20/50/100. Redfoot (7736) opens cargo boxes for 650 adena and
@@ -102,17 +102,17 @@ module.exports = {
             if (npcId !== SOPHIA) return null;
             if (count(state, MARK)) {
                 if (Number(state.session.actor.fetchLevel()) <= 24) {
-                    return page('Sophia', 'The Black Lion Hunt needs seasoned fighters. Level 25 and the mark of the troop.');
+                    return page('Sophya', 'The Black Lion Hunt needs seasoned fighters. Level 25 and the mark of the troop.');
                 }
-                return page('Sophia', 'A brother of the black lions! Our mission is to drive the evil spirits from this area, and our ranks are thin. Fight with us.',
+                return page('Sophya', 'A brother of the black lions! Our mission is to drive the evil spirits from this area, and our ranks are thin. Fight with us.',
                     link('start', 'Join the fight.'));
             }
-            return page('Sophia', 'Mercenary work begins with a test. See Castellan Marcius in Gludin and bring back the mark of the black lions.');
+            return page('Sophya', 'Mercenary work begins with a test. See Castellan Marcius in Gludin and bring back the mark of the black lions.');
         }
         if (npcId === SOPHIA) {
             const p = part(state);
             if (!p) {
-                return page('Sophia', 'The war with the evil spirits has already started!',
+                return page('Sophya', 'The war with the evil spirits has already started!',
                     `${link('p1t', 'Clean out the undead at the Execution Ground.')}`
                     + `<br>${link('p2t', 'Drive the ol mahum from the Partisan Hideaway.')}`
                     + `<br>${link('p3t', 'Break the delu lizardmen on the southern shore.')}`
@@ -130,14 +130,14 @@ module.exports = {
                 gives.push([ADENA, adena(35 * held)]);
                 takes.push([proof, held]);
                 if (claws) gives.push([CLAW, claws]);
-                body = `Sophia pays ${35 * held} gold for your proofs${claws ? ` and counts you ${claws} lion claw(s)` : ''}.`;
+                body = `Sophya pays ${35 * held} gold for your proofs${claws ? ` and counts you ${claws} lion claw(s)` : ''}.`;
             } else if (boxes) {
                 body = 'A cargo box? The trading companies would rather not see it again. Redfoot opens boxes, quietly.';
             } else {
                 body = 'Back already, without proofs of victory? The battlefield is that way.';
             }
             if (takes.length || gives.length) await step(state, { takes, gives, variables: { ...state.variables } });
-            return page('Sophia', body,
+            return page('Sophya', body,
                 `${link('p1t', 'Execution Ground.')}<br>${link('p2t', 'Partisan Hideaway.')}`
                 + `<br>${link('p3t', 'Southern shore.')}<br>${link('p4t', 'Cruma Marshlands.')}`
                 + `<br>${link('continue', 'Exchange claws for lion eyes.')}`
@@ -198,7 +198,7 @@ module.exports = {
             // exitQuest(1); the repo simply keeps the item in place.
             await step(state, { variables: { ...state.variables, cond: '1' } });
             state.playSound('ItemSound.quest_accept');
-            return page('Sophia', 'Four fronts: choose your battlefield.');
+            return page('Sophya', 'Four fronts: choose your battlefield.');
         }
         if (!state.isStarted()) return null;
         const p = part(state);
@@ -206,7 +206,7 @@ module.exports = {
         if (['p1t', 'p2t', 'p3t', 'p4t'].includes(event)) {
             const wanted = Number(event[1]);
             if (p && p !== wanted) {
-                return page('Sophia', 'Finish the mission in hand before taking another.');
+                return page('Sophya', 'Finish the mission in hand before taking another.');
             }
             const letter = LETTERS[wanted];
             const hasLetter = count(state, letter) > 0;
@@ -214,11 +214,11 @@ module.exports = {
                 ...(hasLetter ? {} : { gives: [[letter, 1]] }),
                 variables: { ...state.variables, part: String(wanted) }
             });
-            return page('Sophia', 'The order is written down. Bring back the proofs of victory and they will be paid per piece.');
+            return page('Sophya', 'The order is written down. Bring back the proofs of victory and they will be paid per piece.');
         }
         if (event === 'continue') {
             const clawSets = Math.floor(count(state, CLAW) / 10);
-            if (!clawSets) return page('Sophia', 'Ten lion claws make one lion eye. Bring me ten.');
+            if (!clawSets) return page('Sophya', 'Ten lion claws make one lion eye. Bring me ten.');
             const eyesBefore = count(state, EYE);
             const eyes = eyesBefore + clawSets;
             const tier = eyes > 9 ? { [PRIZE.ALACRITY]: 4, [PRIZE.SOULSHOT]: 400, [PRIZE.SCROLL]: 30, [PRIZE.SPIRITSHOT]: 200, [PRIZE.POTION]: 50 }
@@ -237,7 +237,7 @@ module.exports = {
                 variables: { ...state.variables }
             });
             state.playSound('ItemSound.quest_itemget');
-            return page('Sophia', eyesBefore
+            return page('Sophya', eyesBefore
                 ? `The mark of the lion's eye - ${clawSets} exchanged, and new supplies issued.`
                 : `The mark of the lion's eye is awarded to you. New supplies have been issued.`);
         }
@@ -246,7 +246,7 @@ module.exports = {
             const takes = [];
             if (letter && count(state, letter)) takes.push([letter, 1]);
             await step(state, { takes, variables: { ...state.variables, part: '0' } });
-            return page('Sophia', 'Even a lion needs a break. Rest, or take up a fresh mission.');
+            return page('Sophya', 'Even a lion needs a break. Rest, or take up a fresh mission.');
         }
         if (event === 'exit') {
             const takes = [];
@@ -257,7 +257,7 @@ module.exports = {
             if (eyes) takes.push([EYE, eyes]);
             await step(state, { takes, status: 'created', variables: {} });
             state.playSound('ItemSound.quest_finish');
-            return page('Sophia', 'So the black lions lose a brother. Take discharge pay... no, merely our regards. The mark stays with the troop.');
+            return page('Sophya', 'So the black lions lose a brother. Take discharge pay... no, merely our regards. The mark stays with the troop.');
         }
         if (event === 'news') {
             const told = Number(state.get('newsTold') || 0);

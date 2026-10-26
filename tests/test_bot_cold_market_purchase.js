@@ -771,7 +771,6 @@ async function run() {
         Admission.configureTradeAdmission(id => BotLifeState.cachedState(Number(id)),
             id => World.registeredActorById(Number(id))?.session);
     }
-    assert.deepStrictEqual(Economy.summary().mainColdForState, {}, 'all consumption avoids a main cold wish build');
     console.log('Bot cold market purchase checks passed');
 }
 

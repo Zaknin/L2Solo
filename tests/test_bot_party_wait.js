@@ -123,10 +123,20 @@ async function run() {
     assert.strictEqual(missingWorker.state.stats.partyRequest, undefined);
     assert.strictEqual(PopulationService.planDeferred, beforeDeferred + 1);
     assert.strictEqual(retiredPlannerCalls, 0);
+    // A worker plan carries the request the worker built with the bot's
+    // economy: main takes it as sent and builds none of its own.
+    const workerRequest = { status: 'open', priority: 'required', objectiveKey: 'farm:unsafe_target:77', spotId: 'unsafe_target',
+        npcId: 77, itemId: 88, targetId: 88, requestedAt: Date.now(), attempts: 3 };
+    const fromWorker = await PopulationService.resolveColdState(state,
+        { precomputedPlan: { acquisitionPlan: requiredPlan, partyRequest: workerRequest } });
+    assert.strictEqual(fromWorker.ok, true);
+    assert.deepStrictEqual(applied.stats.partyRequest, workerRequest, 'main keeps the worker\'s request as sent');
     // Historical already-admitted acquisition metadata, not a fabricated
-    // current worker leaf. The real PartyRequestPlanner and fallback reader
-    // still own its required/preferred request and recruitment cooldown.
-    const historicalRequired = { ...state, stats: { ...state.stats, equipmentPlan: requiredPlan } };
+    // current worker leaf: without a worker plan main keeps the saved request
+    // (the worker builds it), and the fallback reader routes on it.
+    const historicalRequired = { ...state, stats: { ...state.stats, equipmentPlan: requiredPlan,
+        partyRequest: { status: 'open', priority: 'required', objectiveKey: 'farm:unsafe_target:77', spotId: 'unsafe_target',
+            npcId: 77, itemId: 88, targetId: 88, requestedAt: Date.now(), attempts: 0 } } };
     const result = await PopulationService.resolveColdState(historicalRequired);
     assert.strictEqual(result.ok, true);
     assert.strictEqual(applied.activity, 'hunting', 'a required party request must keep the bot progressing solo');
@@ -246,7 +256,7 @@ async function run() {
             }
         }
     };
-    const deferred = PopulationService.partyRequestForPlan(oldRequestState, requestPlan, timestamp);
+    const deferred = invoke('GameServer/Bot/Population/PartyRequestPlanner').partyRequestForPlan(oldRequestState, requestPlan, timestamp, { economy: { worth: () => 0 } });
     assert.strictEqual(deferred.status, 'deferred', 'an unmatched request must leave the open queue after its TTL');
     assert(deferred.deferredUntil > timestamp, 'deferred request must carry a cooldown deadline');
     assert.strictEqual(
@@ -254,25 +264,17 @@ async function run() {
         null,
         'deferred requests must not keep a formation objective alive'
     );
-    const duringCooldown = PopulationService.partyRequestForPlan({
+    const duringCooldown = invoke('GameServer/Bot/Population/PartyRequestPlanner').partyRequestForPlan({
         ...oldRequestState,
         stats: { ...oldRequestState.stats, partyRequest: deferred }
-    }, requestPlan, timestamp + 1000);
+    }, requestPlan, timestamp + 1000, { economy: { worth: () => 0 } });
     assert.strictEqual(duringCooldown.status, 'deferred', 'a request must stay deferred during its cooldown');
-    const reopened = PopulationService.partyRequestForPlan({
+    const reopened = invoke('GameServer/Bot/Population/PartyRequestPlanner').partyRequestForPlan({
         ...oldRequestState,
         stats: { ...oldRequestState.stats, partyRequest: deferred }
-    }, requestPlan, deferred.deferredUntil + 1);
+    }, requestPlan, deferred.deferredUntil + 1, { economy: { worth: () => 0 } });
     assert.strictEqual(reopened.status, 'open', 'a deferred request must be eligible for a fresh formation attempt');
 
-    assert.strictEqual(PopulationService.partySessionExpired({ startedAt: timestamp - Config.partySessionMaxMs - 1 }, timestamp), true);
-    assert.strictEqual(PopulationService.partySessionExpired({ startedAt: timestamp - 1000 }, timestamp), false);
-    assert.strictEqual(PopulationService.partySessionExpired({
-        startedAt: timestamp - Config.partySessionMaxMs - 60000,
-        stats: { sessionExpiresAt: timestamp + 60000 }
-    }, timestamp), false, 'a staggered session expiry must override the nominal party age');
-    assert.strictEqual(PopulationService.partySessionExpired({ stats: { sessionExpiresAt: timestamp - 1 } }, timestamp), true, 'an explicit staggered session expiry must rotate the party');
-    assert.strictEqual(PopulationService.partySessionExpired({ partyId: 'missing-session-metadata' }, timestamp), false, 'missing session metadata must not expire a party immediately');
     SpotProfiles.findForState = (candidate) => {
         assert.strictEqual(candidate.stats.equipmentPlan.phase, 'leveling');
         return fallbackSpot;

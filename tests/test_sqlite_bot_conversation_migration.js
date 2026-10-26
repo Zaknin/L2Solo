@@ -152,21 +152,19 @@ Database.init();
     );
     const lifeStateColumns = await Database.execute(['PRAGMA table_info(bot_life_state)'], 'test:owner-migration-columns');
     const lifeStateColumnNames = lifeStateColumns.map((column) => column.name);
-    for (const column of ['simulationOwner', 'simulationRevision', 'simulationLeaseId', 'simulationLeaseUntil']) {
-        assert(lifeStateColumnNames.includes(column), `legacy lifecycle table must receive ${column}`);
+    assert(lifeStateColumnNames.includes('simulationRevision'), 'legacy lifecycle table must receive simulationRevision');
+    for (const column of ['simulationOwner', 'simulationLeaseId', 'simulationLeaseUntil']) {
+        assert(!lifeStateColumnNames.includes(column), `migration 72 must drop ${column}`);
     }
     const ownerIndex = await Database.execute([
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_simulation_owner_lease'"
     ], 'test:owner-migration-index');
-    assert.strictEqual(ownerIndex.length, 1, 'ownership index must be created only after migration columns exist');
-    const migratedOwner = (await Database.execute([
-        'SELECT simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil FROM bot_life_state WHERE characterId = 42'
+    assert.strictEqual(ownerIndex.length, 0, 'the loan index leaves with its columns');
+    const migratedRevision = (await Database.execute([
+        'SELECT simulationRevision FROM bot_life_state WHERE characterId = 42'
     ], 'test:owner-migration-defaults'))[0];
-    assert.deepStrictEqual(
-        [migratedOwner.simulationOwner, migratedOwner.simulationRevision, migratedOwner.simulationLeaseId, migratedOwner.simulationLeaseUntil],
-        ['legacy_main', 0, null, 0],
-        'legacy lifecycle rows must remain main-owned with revision zero after migration'
-    );
+    assert.strictEqual(migratedRevision.simulationRevision, 0,
+        'legacy lifecycle rows keep revision zero after migration');
 
     const migratedMessage = await Database.execute([
         'SELECT turnOrdinal, messageOrder, compacted FROM bot_conversation_messages WHERE turnId = ?',

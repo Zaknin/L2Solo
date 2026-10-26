@@ -218,27 +218,15 @@ assert.strictEqual(travel.activity, 'traveling');
 assert.strictEqual(travel.stats.travel.reason, 'market_sale_inventory');
 assert.strictEqual(travel.stats.travel.arrivalActivity, 'shopping');
 
-const proposalTravel = PopulationService.prepareInventoryCleanupProposal(state, now, {
-    ownerId: 'test-owner',
-    revision: 1,
-    leaseId: 'test-lease',
-    leaseUntil: now + 30000
-});
+const proposalTravel = PopulationService.prepareInventoryCleanupProposal(state, now, { revision: 1 });
 assert(proposalTravel, 'worker proposal commit must also start a market trip');
 assert.strictEqual(proposalTravel.activity, 'traveling');
-assert.deepStrictEqual(proposalTravel.simulation, {
-    ownerId: 'test-owner',
-    revision: 1,
-    leaseId: 'test-lease',
-    leaseUntil: now + 30000
-});
+assert.deepStrictEqual(proposalTravel.simulation, { revision: 1 });
 assert.strictEqual(proposalTravel.stats.forcedMarketCleanup.cleanupReason, 'inventory_capacity',
     'worker cleanup travel must carry durable intent through arrival');
-assert.deepStrictEqual(proposalTravel.cleanup, {
-    itemCount: need.slots,
-    npcOnlySlots: need.npcOnlySlots,
-    cleanupReason: 'inventory_capacity'
-}, 'forced cleanup keeps the independently evaluated physical bag intent');
+assert.strictEqual(proposalTravel.cleanup.itemCount, need.slots,
+    'forced cleanup keeps the independently evaluated physical bag intent');
+assert.strictEqual(proposalTravel.cleanup.cleanupReason, 'inventory_capacity');
 
 const staleRecoverIntent = PopulationService.marketListingIntent({
     ...proposalTravel,
@@ -357,6 +345,54 @@ assert.strictEqual(GoalExecutor.beginMarketTravel({
     type: 'sell_inventory',
     plan: { kind: 'market_sell', expectedBenefit: 'market_sale_inventory' }
 }, now), null, 'ordinary market sales must still respect the retry cooldown');
+
+// Weight penalty 1 (half of the max load) only slows the walk: during the sale
+// retry it waits like a half-full bag and the bot hunts on; penalty 2 stays the floor.
+const SurvivalFloor = invoke('GameServer/Bot/Population/SurvivalFloor');
+const BackgroundResolver = invoke('GameServer/Bot/Population/BackgroundResolver');
+const maxLoad = invoke('GameServer/Bot/Population/ColdCombatProfile').profileFor(state, now).maxLoad;
+const heavyStack = DataCache.items.find((item) => item?.etc?.stackable === true
+    && Number(item?.template?.mass) >= 10 && item?.template?.kind === 'Other.Material');
+assert(maxLoad > 0 && heavyStack, 'the datapack must contain a heavy stackable material');
+const loadedBag = (share, retryAfter, extra = {}) => ({
+    ...state,
+    inventory: { [heavyStack.selfId]: { selfId: heavyStack.selfId, name: heavyStack.template.name,
+        kind: heavyStack.template.kind, stackable: true,
+        amount: Math.ceil(share * maxLoad / Number(heavyStack.template.mass)) }, ...extra },
+    stats: { marketSellRetryAfter: retryAfter }
+});
+const retryUntil = now + 30 * 60 * 1000;
+for (const [share, penalty] of [[0.55, 1], [0.7, 2]]) {
+    const floor = SurvivalFloor.forState(loadedBag(share, now - 1), now);
+    assert.strictEqual(floor?.reason, 'overweight');
+    assert.strictEqual(floor.weightPenalty, penalty, `a ${share} load is weight penalty ${penalty}`);
+}
+assert.strictEqual(SurvivalFloor.forState(loadedBag(0.55, retryUntil), now), null,
+    'a weight penalty 1 bag is no floor during the sale retry');
+assert.strictEqual(SurvivalFloor.forState(loadedBag(0.7, retryUntil), now)?.weightPenalty, 2,
+    'a weight penalty 2 bag stays the floor during the sale retry');
+const weightTrip = (share, retryAfter, extra) => PopulationService.prepareInventoryCleanupProposal(loadedBag(share, retryAfter, extra), now);
+assert.strictEqual(weightTrip(0.55, retryUntil), null,
+    'a weight penalty 1 cleanup must wait for the sale retry');
+assert(weightTrip(0.7, retryUntil), 'a weight penalty 2 cleanup must bypass the sale retry');
+assert(weightTrip(0.55, now - 1), 'a weight penalty 1 cleanup travels once the retry has passed');
+assert(!NeedsEvaluator.evaluate(loadedBag(0.55, retryUntil), { now }).some((candidate) => candidate.type === 'sell_inventory'),
+    'the planner adds no sale goal for a weight penalty 1 bag during the retry');
+const npcJunk = { [spellbook.selfId]: { selfId: spellbook.selfId, name: spellbook.template.name,
+    kind: spellbook.template.kind, stackable: false, amount: 1,
+    instances: [{ id: 9100000, amount: 1, equipped: false, slot: 0 }] } };
+assert.strictEqual(ItemDisposition.inventoryCleanupNeed(loadedBag(0.55, retryUntil, npcJunk), { now })?.reason,
+    'npc_only_inventory');
+assert(weightTrip(0.55, retryUntil, npcJunk), 'NPC-only junk in a weight penalty 1 bag still bypasses the sale retry');
+const huntSpot = { id: 'starter_gremlin', name: 'Gremlin field', avgLevel: 1, density: 1, npcSelfIds: [1],
+    rewards: { exp: 10, sp: 2, adenaMin: 7, adenaMax: 10 }, mob: { hp: 8, damage: 1 } };
+const hunt = (share) => BackgroundResolver.resolveSolo({ state: { ...loadedBag(share, retryUntil), level: 1, levelBand: '1-3',
+    currentRegion: undefined, loc: undefined, party: { role: 'dps' } }, spot: huntSpot, elapsedMs: 60000, timestamp: now, rng: () => 0 });
+const slowHunt = hunt(0.55);
+assert(slowHunt.debug?.reason !== 'survival_overweight' && slowHunt.debug?.fights > 0,
+    `a weight penalty 1 bot hunts during the sale retry: ${JSON.stringify(slowHunt.debug)}`);
+assert.strictEqual(hunt(0.7).debug?.reason, 'survival_overweight',
+    'a weight penalty 2 bot still stops to unload');
 
 const soldInventoryState = {
     ...state,

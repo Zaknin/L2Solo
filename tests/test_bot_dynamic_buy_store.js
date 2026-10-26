@@ -11,7 +11,6 @@ require('../src/Global');
 fixture.assertConfigured(options.default);
 const nativeChoice = require('./helpers/nativeMarketChoice');
 const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
-const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 
 const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const Database = invoke('Database');
@@ -209,7 +208,6 @@ async function run() {
     assert.strictEqual((await bagAmount(stemBuyer, 57)) + (await bagAmount(seller.characterId, 57)), 2000);
     assert.strictEqual((await AfkTrade.closeBotRecord(stemBuyer, record.id)).closed, false,
         'the native remaining escrow is refunded only once');
-    assert.deepStrictEqual(Economy.summary().mainColdForState, {});
     console.log(JSON.stringify({ boundary: 'genuine no-funded-bid plus independent native public DAO settlement',
         buyerOriginalWallet: 2000, goalItem: 1864, goalAmount: 5, authoredQuote: executionQuote,
         peerQuantity: 2, peerPaid: 2 * executionQuote.price, remainingEscrow,

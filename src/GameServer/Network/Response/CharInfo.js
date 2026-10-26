@@ -119,8 +119,8 @@ function charInfo(actor) {
     packet
         .writeC(0x00)  // Party matching
         .writeD(EffectStore.abnormalMask(actor))  // Abnormal effect
-        .writeC(0x00)  // Recommendations left
-        .writeH(0x00)  // Recommendations won
+        .writeC(actor.fetchRecRemain?.() || 0)  // Recommendations left
+        .writeH(actor.fetchEvalScore?.() || 0)  // Client derives blue name intensity
         .writeD(1000000 + (actor.fetchMountNpcId?.() || actor.mountNpcId || 0))  // Mount NPC ID
         .writeD(actor.fetchClassId())
         .writeD(0x00)  // Special effects

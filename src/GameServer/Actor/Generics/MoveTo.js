@@ -108,11 +108,12 @@ function activeMoveGoal(session, actor, now = Date.now()) {
     return goal.stalledSamples >= MOVE_STALL_SAMPLES ? null : goal;
 }
 
-function beginMoveGoal(session, actor, requestedTo, targetActor = null) {
+function beginMoveGoal(session, actor, requestedTo, targetActor = null, routeGuard = null) {
     const goal = {
         generation: Number(session.moveRouteGeneration || 0),
         requestedTo: { ...requestedTo },
         targetId: Number(targetActor?.fetchId?.()) || null,
+        routeGuard,
         startedAt: Date.now(),
         lastProgressSampleAt: Date.now(),
         lastProgressLoc: locOf(actor),
@@ -134,6 +135,17 @@ function shouldSkipInitialWaypoint(index, path, distance, dz) {
 }
 
 function startPathMovement({ session, actor, path, isClose, approachingObservers, moveGoal }) {
+    const routeAllowed = (route, complete) => !moveGoal?.routeGuard || moveGoal.routeGuard(route, { complete }) !== false;
+    const rejectRoute = () => {
+        session.lastPathfinding.routeUsable = false;
+        session.lastPathfinding.movementRejected = true;
+        actor.state.setTowards(false);
+        clearMoveGoal(session, moveGoal);
+    };
+    if (!routeAllowed(path, true)) {
+        rejectRoute();
+        return;
+    }
     const moveAlongPath = (index) => {
         if (moveGoal && session.activeMoveGoal !== moveGoal) return;
         if (index >= path.length) {
@@ -146,6 +158,11 @@ function startPathMovement({ session, actor, path, isClose, approachingObservers
 
         const currentLoc = locOf(actor);
         const nextLoc = path[index];
+        // Recheck live party position and new hazards between native legs.
+        if (!routeAllowed([currentLoc, nextLoc], false)) {
+            rejectRoute();
+            return;
+        }
         const dx = nextLoc.locX - currentLoc.locX;
         const dy = nextLoc.locY - currentLoc.locY;
         const dz = nextLoc.locZ - currentLoc.locZ;
@@ -416,7 +433,7 @@ function moveTo(session, actor, coords) {
 
         let pathTarget = { ...requestedTo };
         const pathStartedAt = invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true ? Date.now() : null;
-        const moveGoal = previewOnly ? null : beginMoveGoal(session, actor, requestedTo, coords.targetActor);
+        const moveGoal = previewOnly ? null : beginMoveGoal(session, actor, requestedTo, coords.targetActor, coords.routeGuard);
         if (moveGoal && townName) {
             moveGoal.town = townName;
             moveGoal.observers = onlinePlayers;

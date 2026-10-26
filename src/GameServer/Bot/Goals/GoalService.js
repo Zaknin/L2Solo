@@ -2,6 +2,10 @@ const GoalState = invoke('GameServer/Bot/Goals/GoalState');
 const NeedsEvaluator = invoke('GameServer/Bot/Goals/NeedsEvaluator');
 const GoalPlanner = invoke('GameServer/Bot/Goals/GoalPlanner');
 
+// A far solo bot's goal has no timer: every consumer of it (tryPurchase,
+// beginMarketTravel, reconcile, standingBuyNeed in PopulationService;
+// BotAfkMarketService) sits in the command path and calls review() first.
+
 function reviewSpot(state, explicitSpot = null, existingGoal = null) {
     if (explicitSpot) return explicitSpot;
     const spotId = state?.stats?.travel?.spotId
@@ -30,6 +34,10 @@ function reviewDecision(state, existing, options, timestamp) {
     });
     const marketCandidate = candidates.find(isMarketGoal);
     const activeMarketGoal = isMarketGoal(existing?.current);
+    // The inputHash is the economy build's input name: its decided facts and
+    // market reads, not the bot's own plan (trip, town rhythm), a constant or
+    // the caller. So this "unchanged" shortcut now keeps a goal whose economy
+    // facts did not move where a moved own-plan value made it re-evaluate before.
     if (existing?.current?.nextReviewAt > timestamp && existing.current.status === 'active'
         && !marketCandidate && !activeMarketGoal
         && Number.isSafeInteger(existing.inputHash) && candidates[0]?.inputHash === existing.inputHash) return { result: existing, unchanged: true, goal: null, candidates, economy };
@@ -38,7 +46,7 @@ function reviewDecision(state, existing, options, timestamp) {
     if (!goal) {
         if (existing?.current?.type === 'sell_inventory'
             && ['planned', 'active', 'blocked'].includes(existing.current.status)
-            && economy && !economy.intentPending && !economy.routePending && !state.incomingPending) {
+            && economy && !economy.intentPending && !state.incomingPending) {
             return { result: null, unchanged: false, candidates, economy,
                 goal: { ...existing.current, status: 'abandoned', reviewedAt: timestamp, nextReviewAt: timestamp } };
         }
@@ -69,6 +77,10 @@ const GoalService = {
 
     snapshot(characterId) {
         return GoalState.snapshot(characterId);
+    },
+
+    revision(characterId) {
+        return GoalState.revision(characterId);
     },
 
     current(characterId) {
@@ -104,41 +116,6 @@ const GoalService = {
         };
 
         return (cached ? Promise.resolve(cached) : GoalState.load(state.characterId)).then(choose);
-    },
-
-    reviewBatch(states = [], options = {}) {
-        const candidates = (states || []).filter((state) => state?.characterId && state.phase !== 'hot');
-        if (!candidates.length) return Promise.resolve([]);
-        const timestamp = Number(options.now) || Date.now();
-        return Promise.all(candidates.map((state) => {
-            const cached = GoalState.snapshot(state.characterId);
-            return cached ? Promise.resolve(cached) : GoalState.load(state.characterId);
-        })).then((existingGoals) => {
-            const decisions = candidates.map((state, index) => {
-                const stateOptions = typeof options.optionsForState === 'function'
-                    ? { ...options, ...(options.optionsForState(state) || {}) }
-                    : options;
-                return {
-                    state,
-                    previous: existingGoals[index]?.current,
-                    decision: reviewDecision(state, existingGoals[index], stateOptions, timestamp)
-                };
-            });
-            const pending = decisions.filter(({ decision }) => !decision.unchanged).map(({ state, decision }) => ({
-                characterId: state.characterId,
-                goal: decision.goal, inputHash: decision.candidates[0]?.inputHash
-            }));
-            return GoalState.setBatch(pending).then((saved) => {
-                const savedById = new Map(saved.map((snapshot) => [Number(snapshot.characterId), snapshot]));
-                for (const { state, decision, previous } of decisions) {
-                    const result = savedById.get(Number(state.characterId));
-                    if (!decision.unchanged && result) invoke('GameServer/Bot/AI/BotClanChat').onGoal(state, result.current, previous, timestamp);
-                }
-                return decisions.map(({ state, decision }) => withCandidates(
-                    decision.unchanged ? decision.result : savedById.get(Number(state.characterId)) || null,
-                    decision.candidates, decision.economy));
-            });
-        });
     }
 };
 

@@ -3,16 +3,28 @@
 const Rules = require('../../AfkTrade/BoardRules');
 const Places = require('./ShopPlaces');
 const Funding = require('./PurchaseFunding');
+const { withinCap } = require('./BuyAdPolicy');
 const { marketBuyStoreTitle } = require('./MarketStoreTitle');
+const AfkTradeService = invoke('GameServer/AfkTrade/AfkTradeService');
+const BotImprovementService = invoke('GameServer/Bot/Economy/BotImprovementService');
+const ColdMarketListingService = invoke('GameServer/Bot/Economy/ColdMarketListingService');
 const key = line => `${Number(line.selfId)}:${Number(line.enchant || 0)}`;
+
+// The held bids ask for the same items and counts: their prices are the
+// bot's own look's (MarketPricing.look), kept while within the prepared cap;
+// a prepared cheaper price is a limit, not a reprice.
+function sameBuyOrder(held, lines) {
+    return held.length === lines.length && held.every(line => lines.some(wanted => key(wanted) === key(line)
+        && Number(line.count) === Number(wanted.count)
+        && withinCap(line.price, wanted.purchaseCap)));
+}
 
 // The wish queue already ordered and priced these bids. Allocate custody;
 // never choose another price, need, or town on the main thread.
 async function publish(state, wanted, town, { priority = 0, expectedAuthority = null, appearance } = {}) {
-    const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
     const ownerId = Number(state.characterId);
-    const current = Afk.findOwnerProjection(ownerId)?.shop || null;
-    const records = Afk.ownerRecords(ownerId);
+    const current = AfkTradeService.findOwnerProjection(ownerId)?.shop || null;
+    const records = AfkTradeService.ownerRecords(ownerId);
     const ads = records.filter(record => record.kind === 'buy_ad');
     const escrow = current?.storeType === Rules.BUY ? Number(current.escrowAdena) : 0;
     const budgetState = { ...state, adena: Funding.budget(state, escrow) };
@@ -20,7 +32,7 @@ async function publish(state, wanted, town, { priority = 0, expectedAuthority = 
     let money = Funding.spendable(budgetState, 0, { upperBound: true, survivalCost: kit });
     const shopLines = [], meetings = [], roots = new Set();
     const mayUseShop = priority !== Rules.SELL && (!current || current.storeType === Rules.BUY || priority === Rules.BUY);
-    const inTown = state.currentRegion === town && invoke('GameServer/Bot/Economy/BotImprovementService').inTown(state);
+    const inTown = state.currentRegion === town && BotImprovementService.inTown(state);
     const mayOpen = state.phase === 'cold' && Places.hasPlaza(town) && (current?.town === town || inTown);
     let loc = null;
     if (wanted.length && mayUseShop && mayOpen) {
@@ -39,10 +51,18 @@ async function publish(state, wanted, town, { priority = 0, expectedAuthority = 
             money -= cost;
         } else if (meetings.length < Rules.BOT_RECORDS.buy_ad) meetings.push(line);
     }
-    const center = invoke('GameServer/Bot/Economy/ColdMarketListingService').townCenter(town) || { locX: 0, locY: 0, locZ: 0 };
+    const center = ColdMarketListingService.townCenter(town) || { locX: 0, locY: 0, locZ: 0 };
     try {
+        // Unchanged order: no write. A side flip never matches: a sale shop is
+        // no BUY shop, and a BUY shop the split left without lines closes.
+        const held = current?.storeType === Rules.BUY ? current.lines.filter(line => Number(line.count) > 0) : null;
+        const shopSame = shopLines.length ? !!held && current.town === town && sameBuyOrder(held, shopLines) : !held;
+        if (shopSame && ads.every(ad => ad.town === town) && sameBuyOrder(ads.flatMap(ad => ad.lines), meetings)) {
+            return { shop: shopLines.length ? current : ads.find(ad => meetings.length && key(ad.lines[0]) === key(meetings[0])) || null,
+                changed: false };
+        }
         const look = shopLines.length ? current?.appearance || await appearance() : null;
-        const result = await Afk.replaceBotRecords(ownerId, 'buy_ad', meetings.map(line => ({
+        const result = await AfkTradeService.replaceBotRecords(ownerId, 'buy_ad', meetings.map(line => ({
             storeType: Rules.BUY, title: marketBuyStoreTitle([line]), town, ...center, lines: [line]
         })), {
             expected: Object.fromEntries(ads.map(ad => [ad.id, ad.revision])), expectedAuthority,
@@ -53,7 +73,7 @@ async function publish(state, wanted, town, { priority = 0, expectedAuthority = 
         return { shop: result.shop || result.retained?.[0] || result.opened[0] || null,
             changed: !!(result.closed.length || result.changed?.length || result.opened.length) };
     } finally {
-        Afk.restorePlace(ownerId);
+        AfkTradeService.restorePlace(ownerId);
     }
 }
 

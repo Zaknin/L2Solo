@@ -1,6 +1,7 @@
 const assert=require('assert');
 require('../src/Global');
 const World=invoke('GameServer/World/World');
+const {registerSessions}=require('./helpers/worldSessions');
 const Bots=invoke('GameServer/Bot/BotManager');
 const Loot=invoke('GameServer/Bot/AI/PartyCompanionService');
 const Policy=invoke('GameServer/Bot/AI/PartyCombatLootPolicy');
@@ -27,7 +28,7 @@ function session(id,x,classId,player=false) {
 }
 const leader=session(2400001,0,5,true),support=session(2400002,-300,30),fighter=session(2400003,-380,5);
 for(const s of [support,fighter]) Object.assign(s,{partyCompanion:true,followPlayerSession:leader,partyCombatLootReadyAt:Date.now()});
-World.user={sessions};Bots.sessions=[support,fighter];World.items={spawns:[]};
+registerSessions(sessions);Bots.sessions=[support,fighter];World.items={spawns:[]};
 const enemy={x:800,y:0,z:0,hostile:true,targetId:leader.actor.fetchId(),attacking:true,range:40,skills:[],
     fetchId:()=>3400001,fetchAttackable:()=>true,isDead:()=>false,
     fetchHostile(){return this.hostile;},fetchDestId(){return this.targetId;},fetchStateAttack(){return this.attacking;},

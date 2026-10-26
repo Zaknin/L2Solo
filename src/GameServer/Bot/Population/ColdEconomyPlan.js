@@ -8,10 +8,19 @@ const { COMMAND_HEADER_BYTES, MAX_SHOT_PAYLOAD_BYTES } = require('./ColdEconomyD
 const MAX_PLAN_PAYLOAD_BYTES = MAX_BYTES - COMMAND_HEADER_BYTES - 32 - 8;
 const BoardRules = require('../../AfkTrade/BoardRules');
 const MAX_BUYS = BoardRules.BOT_SHOP_LINES + BoardRules.BOT_RECORDS.buy_ad;
+const EconomyContext = require('../Economy/EconomyContext');
+const Listing = require('../Economy/MarketListingPolicy');
+const Ready = require('../Economy/ReadyTradeChoice');
+const Alternative = require('../Economy/BidPurchaseAlternative');
+const NeedsEvaluator = require('../Goals/NeedsEvaluator');
+const BuyAds = require('../Economy/BuyAdPolicy');
+const TradeIntent = require('../Economy/TradeIntent');
+const Shots = require('../Economy/ShotCraftPolicy');
 
 // Arrival and recovery are natural decision points; ordinary counts/XP/wallet
-// changes do not schedule main-thread economic work.
-function edges(before, after, context = {}, timestamp = Date.now(), options = {}) {
+// changes do not schedule main-thread economic work. options.buyOrderEscrow:
+// the adena the bot's buy orders hold (the worker's board sum).
+function edges(before, after, options = {}) {
     if (!after || ['resting', 'traveling'].includes(after.activity)
         || after.party?.partyId || after.partyId) return 0;
     const oldBag = before?.inventory || {}, bag = after.inventory || {};
@@ -20,19 +29,19 @@ function edges(before, after, context = {}, timestamp = Date.now(), options = {}
         const id = Number(row.selfId || key);
         if (id !== 57 && Number(row.amount) > 0 && !(Number(oldBag[id]?.amount) > 0)) { bits |= 1; break; }
     }
-    const stockFor = options.stockFor || ((state, kind) => require('../Economy/EconomyContext').stockFor(state, kind));
+    const stockFor = options.stockFor || EconomyContext.stockFor;
     for (const kind of ['shots', 'potions']) {
         const stock = stockFor(after, kind);
         const id = Number(stock?.itemId), keep = Number(stock?.keep ?? stock?.target);
         if (!(id > 0) || !(keep > 0)) continue;
         if ((Number(oldBag[id]?.amount || 0) >= keep) !== (Number(bag[id]?.amount || 0) >= keep)) bits |= 2;
     }
-    if (!Funding.moneyReached(before) && Funding.moneyReached(after)) bits |= 4;
-    if (Number(context.goalReviewAt) > Number(before?.timing?.lastResolvedAt || 0)
-        && Number(context.goalReviewAt) <= timestamp) bits |= 8;
+    if (!Funding.moneyReached(before, options.buyOrderEscrow)
+        && Funding.moneyReached(after, options.buyOrderEscrow)) bits |= 4;
     if (after.activity === 'shopping' && before?.activity === 'traveling') bits |= 8;
-    // Rest blocks actions, so stock/loot changes and a goal deadline may have
-    // passed without preparation. Reconsider them once the bot can act again.
+    // Rest blocks actions, so stock/loot changes may have passed without
+    // preparation. Reconsider them once the bot can act again. A goal change
+    // is the decision point's (ColdEconomyDecision.refusal 'goal').
     if (after.activity === 'hunting' && before?.activity === 'resting') bits |= 8;
     if (Number(after.level) > Number(before?.level)) bits |= 16;
     if (after.activity === 'dead' && before?.activity !== 'dead') bits |= 32;
@@ -67,9 +76,7 @@ function* measured(iterator) {
     }
 }
 function* prepareNative(state, economy, options) {
-    const Listing = require('../Economy/MarketListingPolicy');
-    const Ready = require('../Economy/ReadyTradeChoice');
-    const canAct = !economy.intentPending && !economy.routePending
+    const canAct = !economy.intentPending
         && !['dead', 'resting', 'traveling', 'crafting'].includes(state.activity)
         && !state.stats?.tradeMeeting && !state.incomingPending
         && !invoke('GameServer/Bot/Population/SurvivalFloor').forState(state, Number(options.now) || Date.now());
@@ -79,7 +86,6 @@ function* prepareNative(state, economy, options) {
     // A selected trade can keep succeeding or retrying for several visits.
     // It must not bypass corrections of the owner's other standing bids.
     if (!options.showcaseOnly) {
-        const Alternative = require('../Economy/BidPurchaseAlternative');
         const bidCtx = economy.trip?.details ? { ...ctx, travelDetails: economy.trip.details } : ctx;
         for (const line of own.filter(row => row.storeType === 3 && row.count > 0 && row.pricing).slice(0, MAX_BUYS)) {
             const ceiling = Math.min(Alternative.forLine(line, bidCtx), Alternative.cashCap(line, bidCtx));
@@ -115,7 +121,8 @@ function* prepareNative(state, economy, options) {
     const Town = invoke('GameServer/Bot/Economy/MarketTownPolicy');
     const townOptions = { context: ctx, tripCost: options.tripCost || ctx.tripCost, timestamp: options.now,
         prepareTrip: options.prepareTrip, findSpot: options.findSpot, onDecision: options.onTownDecision };
-    const listings = Listing.prioritizeListings(sale.listings);
+    const listings = Listing.prioritizeListings(sale.listings, { board: options.board,
+        characterId: state.characterId, timestamp: options.now });
     const standingShop = own.find(line => line.kind === 'shop' && line.storeType === SELL);
     const visitTown = state.activity === 'shopping' && invoke('GameServer/Bot/Economy/ShopPlaces').hasPlaza(state.currentRegion)
         ? state.currentRegion : null;
@@ -151,10 +158,9 @@ function* prepareNative(state, economy, options) {
     const plan = { sell, withdraw, ...(showcaseChanged ? { shop: shopTown } : {}), travel: null, ...bidLimits };
     let goal, money;
     if (!options.showcaseOnly) {
-        const needs = require('../Goals/NeedsEvaluator').evaluate(state, { ...options, economy, errand: null, now: options.now, saleTown: shopTown });
+        const needs = NeedsEvaluator.evaluate(state, { ...options, economy, errand: null, now: options.now, saleTown: shopTown });
         goal = needs[0];
         const buyState = { ...state, adena: Funding.budget(state, options.buyOrderEscrow || 0) };
-        const BuyAds = require('../Economy/BuyAdPolicy');
         money = BuyAds.goalMoney(state, goal, options.buyOrderEscrow || 0, economy);
         const lines = BuyAds.linesFor(buyState, goal, { ...options, economy,
             townFor: items => Town.buyAdTown(state, items, own),
@@ -170,7 +176,19 @@ function* prepareNative(state, economy, options) {
         try { batch = buyBatch(lines); }
         catch (_) { batch = { buyAds: [null] }; }
         Object.assign(plan, batch, { travel: goal?.plan?.marketTown ? goal.plan.wishKey || null : null });
-        if (economy.intentPending || plan.buyAds.some(row => row === null)) { delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps; plan.d = 1; }
+        // A buy part not prepared (the held build's intent pending, or a
+        // line buyBatch refused) is absent from the packet, not a page: a
+        // refresh on main's next state copy reads the same build, so only
+        // the bot's next step, which rebuilds, can prepare it. An incoming
+        // delivery still pending is main's: its settlement is a state copy
+        // that rebuilds, so it stays a page.
+        const unprepared = !economy.intentPending ? (plan.buyAds.some(row => row === null) ? 'buy_error' : null)
+            : state.incomingPending ? 'intent_incoming' : 'intent_root';
+        if (unprepared) {
+            delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps;
+            if (unprepared === 'intent_incoming') plan.d = 1;
+            if (Diagnostics.active()) Diagnostics.count('economy_plan', 'deferred', unprepared);
+        }
         const shot = decideShot(state, economy, { ...options, ownLines: own });
         if (shot) plan.shot = shot;
     }
@@ -179,6 +197,7 @@ function* prepareNative(state, economy, options) {
     if (Buffer.byteLength(JSON.stringify({ buyAds: plan.buyAds, buyKit: plan.buyKit, buyCaps: plan.buyCaps,
         bidLimits: plan.bidLimits })) > MAX_PLAN_PAYLOAD_BYTES) {
         delete plan.buyAds; delete plan.buyKit; delete plan.buyCaps; plan.d = (plan.d || 0) | 1;
+        if (Diagnostics.active()) Diagnostics.count('economy_plan', 'deferred', 'bytes');
     }
     while (Buffer.byteLength(JSON.stringify(plan)) > MAX_PLAN_PAYLOAD_BYTES) {
         if (plan.sell.length) {
@@ -194,13 +213,14 @@ function* prepareNative(state, economy, options) {
         else if (plan.shot) { delete plan.shot; plan.d = (plan.d || 0) | 16; }
         else throw Error('economy_plan_payload_overflow');
     }
+    if (plan.d > 1 && Diagnostics.active()) Diagnostics.count('economy_plan', 'deferred', `bytes_${plan.d & ~1}`);
     if (Diagnostics.active() && Diagnostics.enabled(state.characterId)) {
         const trace = { owner: state.characterId, caller: options.caller || 'cold_plan',
             trigger: options.trigger || 'plan_request', phase: 'plan_compute',
             inputHash: economy.inputHash ?? fnv1a32(economy.inputKey || ''),
             decisionSeq: economy.network?.decisionSeq ?? state.stats?.decisionSeq,
             activityLeaf: economy.network?.activityLeaf ?? state.stats?.activityLeaf,
-            goalRevision: goal?.revision, wishKey: goal?.plan?.wishKey,
+            wishKey: goal?.plan?.wishKey,
             wallet: state.adena, escrow: options.buyOrderEscrow,
             budget: money, available: money, reserve: state.stats?.money?.[2] };
         Diagnostics.push({ ...trace, reason: plan.travel ? 'travel_planned' : 'plan_prepared', town: goal?.plan?.marketTown });
@@ -215,7 +235,7 @@ function* prepareNative(state, economy, options) {
 // these scalars, never another route or price calculation.
 function buyBatch(lines) {
     const rows = lines.slice(0, MAX_BUYS);
-    const buyAds = rows.map(row => row.intent ? require('../Economy/TradeIntent').encode(row.intent) : [row.selfId, row.count, row.price]);
+    const buyAds = rows.map(row => row.intent ? TradeIntent.encode(row.intent) : [row.selfId, row.count, row.price]);
     const buyKit = rows.map(row => Number(row.survivalCost) || 0);
     const buyCaps = rows.map(row => Number.isFinite(row.purchaseCap) ? Math.floor(row.purchaseCap) : null);
     return { buyAds, ...(buyKit.some(Boolean) ? { buyKit } : {}),
@@ -227,7 +247,6 @@ function decide(state, economy, options = {}) {
     return next.value;
 }
 function decideShot(state, economy, options = {}) {
-    const Shots = require('../Economy/ShotCraftPolicy');
     if (!invoke('GameServer/Bot/Economy/CraftShopService').isServiceCrafter(state)) return null;
     if (Object.hasOwn(options, 'preparedCraft')) {
         // The worker has already streamed every recipe/input/exit/batch unit.

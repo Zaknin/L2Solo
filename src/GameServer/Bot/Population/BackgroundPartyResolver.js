@@ -1,5 +1,11 @@
 const PveEncounter = require('./ColdPveEncounter');
 const Assembly = require('./PartyHuntingAssembly');
+const ColdCompetitionWait = require('./ColdCompetitionWait');
+const Material = require('./CraftMaterialParty');
+const Roster = require('../../Clan/ClanRaidRoster');
+const PartyAgreement = require('./PartyAgreement');
+const PartyGoalPolicy = require('./PartyGoalPolicy');
+const PartySpotRiskPolicy = require('./PartySpotRiskPolicy');
 const ProgressionRates = invoke('GameServer/ProgressionRates');
 const BackgroundResolver = invoke('GameServer/Bot/Population/BackgroundResolver');
 const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -52,7 +58,7 @@ function distributeRewards({ members, spot, wins, defeatedNpcIds = [], overhitCo
     const expMultiplier = Number(pressure?.expMultiplier || 1);
     const rates = ProgressionRates.profile();
     const levels = members.map((state) => Number(state.level || 1));
-    const profiles = members.map((state) => ColdCombatProfile.profileFor(state, timestamp));
+    const profiles = members.map((state) => ColdCombatProfile.fightProfile(state, timestamp));
     const spoilerIndex = members.findIndex((state) => BotRoles.isSpoiler(state));
     const kills = Array.from({ length: wins }, (_, index) => ({
         npcSelfId: defeatedNpcIds[index],
@@ -155,7 +161,6 @@ const BackgroundPartyResolver = {
                 debug: { reason: 'missing_party_members_or_spot' }
             };
         }
-        const Material = require('./CraftMaterialParty');
         const materialHunt = Material.isObjective(party.stats?.objective);
         if (materialHunt && !party.stats.pveEncounter && !Material.needs(members, party.stats.objective, party.stats.agreement).length) {
             return { memberResults: members.map(state => ({ state, result: { patch: {}, events: [],
@@ -170,13 +175,17 @@ const BackgroundPartyResolver = {
             && party.stats?.objective?.sourceKind === 'raid'
             && Number(party.stats.objective.raidBossTemplateId || party.stats.objective.npcId)
                 === Number(spot.raidBossTemplateId);
-        const Roster = require('../../Clan/ClanRaidRoster');
         const marked = !!Roster.markerFor(party);
         const admission = marked ? Roster.admission(party, members, spot, { owner: raidOwner, timestamp,
-            arrived: require('./PartyHuntingAssembly').ready(party, members, spot) }) : null;
-        if (marked && (!admission.ok || !admission.held && party.stats?.raidEncounter?.status === 'defeated')) {
+            arrived: Assembly.ready(party, members, spot) }) : null;
+        // Sitting is not hunting readiness. A complete, current roster must
+        // still run the recovery below; rejecting it here drops every MP/HP
+        // tick and leaves preparation permanently waiting for its own rest.
+        const recoveringAssembly = admission?.reason === 'party_assembling'
+            && members.some(member => member.activity === 'resting') && !party.stats?.raidEncounter?.encounter;
+        if (marked && (!admission.ok && !recoveringAssembly || !admission.held && party.stats?.raidEncounter?.status === 'defeated')) {
             const reason = admission.reason || 'raid_roster_not_opened';
-            const cancelled = ['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened'].includes(reason);
+            const cancelled = Roster.CANCEL_REASONS.includes(reason);
             const nextResolveAt = cancelled ? null : timestamp + 30000;
             return { atomic: true, memberResults: members.map(state => ({ state, result: { patch: {}, events: [],
                 materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt } })), events: [], nextResolveAt,
@@ -227,7 +236,13 @@ const BackgroundPartyResolver = {
         // A party shares its hunting cadence.  If even one member is resting,
         // pause the whole group: otherwise the resolver keeps granting fights
         // and draining the exhausted member on every cold tick.
-        if (members.some((state) => state.activity === 'resting') && !raidCombatActive) {
+        // Buff completion is not resource readiness. The ordinary party's
+        // 18% MP floor can admit an exhausted healer after paid raid buffs,
+        // while the clan estimate budgets 85% of maximum mana. Finish the
+        // native recovery (95% HP/required MP) before opening a new raid.
+        const raidRecovery = marked && raidObjective && !raidCombatActive && !admission?.held && party.stats?.raidPreparation?.status === 'ready'
+            && members.some(state => !invoke('GameServer/Bot/AI/RestPolicy').raidReady(state));
+        if ((members.some((state) => state.activity === 'resting') || raidRecovery) && !raidCombatActive) {
             const partyRestUntil = Math.max(
                 Number(party.stats?.restUntil || 0),
                 ...members.map((state) => Number(state.stats?.restUntil || 0))
@@ -303,14 +318,15 @@ const BackgroundPartyResolver = {
         }
 
         const raid = raidObjective;
-        const raidComposition = raid ? ClanRaidPolicy.composition(members) : null;
+        const raidComposition = raid ? (party.stats?.objective?.opportunisticRaid
+            ? require('./OpportunisticRaidPolicy').composition(members) : ClanRaidPolicy.composition(members)) : null;
         const understaffed = !admission?.held && party.stats?.objective?.clanGoalKey
             && members.length < Math.max(2, Number(party.stats.objective.minPartySize) || 3);
         const raidRosterIncomplete = raid && !admission?.held && !raidComposition.ready;
         const assemblyMembers = raidCombatActive || admission?.held
             ? members.filter(member => !admission?.held || Number(member.vitals?.hp) > 0).map((member) => ({ ...member, activity: 'grouped' }))
             : members;
-        if (understaffed || raidRosterIncomplete || !require('./PartyHuntingAssembly').ready(party, assemblyMembers, spot)) {
+        if (understaffed || raidRosterIncomplete || !Assembly.ready(party, assemblyMembers, spot)) {
             // No route may mean admission is temporarily unavailable. Do not
             // turn that into remote combat or rewrite a member's physical spot.
             const nextResolveAt = timestamp + 30000;
@@ -332,6 +348,14 @@ const BackgroundPartyResolver = {
             };
         }
 
+        if (party.stats?.objective?.opportunisticRaid) {
+            // Travel/rest are simulated; this roster opens its encounter only
+            // as native actors, including actual adds, healing and shot use.
+            return { memberResults: members.map(state => ({ state, result: { patch: {}, events: [],
+                materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: timestamp + 10000 } })),
+                atomic: true, events: [], partyPatch: {}, nextResolveAt: timestamp + 10000,
+                debug: { reason: 'raid_wait_native_activation', fights: 0, wins: 0 } };
+        }
         if (raid && !raidCombatActive) {
             const preparation = BackgroundResolver.prepareRaidParty(members, timestamp);
             const previous = party.stats?.raidPreparation || {};
@@ -391,6 +415,7 @@ const BackgroundPartyResolver = {
         const overhitContexts = [];
         let losses = 0;
         let combatActions = 0;
+        let combatMs = 0;
         let skillUses = 0;
         let heals = 0;
         let musicUses = 0;
@@ -406,6 +431,9 @@ const BackgroundPartyResolver = {
             ...state,
             vitals: pending ? { ...state.vitals } : BackgroundResolver.applyStandingRegen(state, state.vitals, elapsedMs, timestamp)
         }));
+        // Raid preparation casts its own buffs; an ordinary hunt casts them between fights (F23).
+        const huntBuffs = raid || pending ? null : BackgroundResolver.castHuntPartyBuffs(combatMembers, timestamp);
+        if (huntBuffs) combatMembers = huntBuffs.members;
         for (let i = 0; i < fightBudget; i++) {
             const encounter = BackgroundResolver.resolvePartyFight({
                 members: combatMembers,
@@ -428,6 +456,7 @@ const BackgroundPartyResolver = {
             if (encounter.won || !pending) fights += 1;
             for (const help of encounter.help || []) combatHelp.set(`${help.sourceId}:${help.targetId}:${help.type}`, help);
             combatActions += Number(encounter.debug?.actions || 0);
+            combatMs += Number(encounter.debug?.durationMs || 0);
             skillUses += encounter.members.reduce((sum, member) => sum + Number(member.skillUses || 0), 0);
             heals += encounter.members.reduce((sum, member) => sum + Number(member.heals || 0), 0);
             musicUses += encounter.members.reduce((sum, member) => sum + Number(member.musicUses || 0), 0);
@@ -449,7 +478,7 @@ const BackgroundPartyResolver = {
                 stats: {
                     ...(member.state.stats || {}),
                     coldCombat: {
-                        ...(member.state.stats?.coldCombat || member.profile),
+                        ...(member.state.stats?.coldCombat || ColdCombatProfile.seedSnapshot(member.state, timestamp)),
                         effects: member.profile.effects || member.state.stats?.coldCombat?.effects || [],
                         cooldowns: member.cooldowns,
                         charges: member.charges || 0,
@@ -476,10 +505,17 @@ const BackgroundPartyResolver = {
         // remain eligible next resolve; committed pairs are skipped by cooldown.
         const helpEvents = invoke('GameServer/Social/ColdCombatHelpMemory').eventsFor([...combatHelp.values()],
             episodeId, timestamp, assessRelationship, id => members.find(m => Number(m.characterId) === id));
-        const huntEvents = wins > 0 && losses === 0 && combatMembers.every(member => Number(member.vitals?.hp) > 0)
+        const HuntActivity = require('../../Social/SharedHuntActivity');
+        const noLosses = losses === 0 && combatMembers.every(member => Number(member.vitals?.hp) > 0);
+        const aliveHunt = !raid && noLosses;
+        const huntActivity = HuntActivity.coldProgress(party.stats?.recommendationHunt, members,
+            aliveHunt ? Math.min(Math.max(0, elapsedMs), PARTY_RESOLVE_MAX_MS, combatMs) : 0, timestamp);
+        const huntEvents = wins > 0 && noLosses
             ? invoke('GameServer/Social/SharedHuntMemory').eventsForGroup(members.map(member => Number(member.characterId)),
-                episodeId, timestamp, assessRelationship, id => members.find(m => Number(m.characterId) === id)) : [];
+                episodeId, timestamp, assessRelationship, id => members.find(m => Number(m.characterId) === id),
+                (source, target) => huntActivity.pending[HuntActivity.pairKey(source, target)]) : [];
         const memoryEvents = [...helpEvents, ...huntEvents].slice(0, 64);
+        HuntActivity.consumeCold(huntActivity, memoryEvents);
 
         rewards.forEach(({ state, exp, sp, adena, items }, index) => {
             const resolved = combatMembers[index] || state;
@@ -566,14 +602,14 @@ const BackgroundPartyResolver = {
                         shotActions: memberShotActions.get(Number(state.characterId)) || 0,
                         // The worker delivers member results, not the outer
                         // aggregate. Carry combat totals on this owner only.
-                        ...(index === 0 ? { combatActions, skillUses, heals } : {})
+                        ...(index === 0 ? { combatActions, skillUses, heals, partyBuffCasts: huntBuffs?.buffCasts || 0 } : {})
                     }
                 }
             });
         });
 
-        const lootDistribution = require('./PartyAgreement').allocate(memberResults, party.stats?.agreement,
-            { rng, needScore: require('./PartyGoalPolicy').itemNeed }) || PartyLootAllocator.transferGearDrops(memberResults);
+        const lootDistribution = PartyAgreement.allocate(memberResults, party.stats?.agreement,
+            { rng, needScore: PartyGoalPolicy.itemNeed }) || PartyLootAllocator.transferGearDrops(memberResults);
         let distributedMemberResults = lootDistribution.memberResults;
         let partyRestUntil = null;
 
@@ -710,6 +746,7 @@ const BackgroundPartyResolver = {
                     ...(lootDistribution.agreement ? { agreement: lootDistribution.agreement } : {}),
                     ...(materialHunt ? { materialTargetNpcId: targetNpcId } : {}),
                     pveEncounter: raid ? null : pending,
+                    recommendationHunt: huntActivity,
                     ...(raid ? { raidEncounter: raidSnapshot } : {}),
                     ...(marked && attemptedFights > 0 ? { raidAdmission: admission.proof } : {}),
                     assemblyWait: null,
@@ -750,6 +787,7 @@ const BackgroundPartyResolver = {
                 skillUses,
                 heals,
                 musicUses,
+                partyBuffCasts: huntBuffs?.buffCasts || 0,
                 summonUses,
                 summonActions,
                 potionsUsed,
@@ -767,7 +805,7 @@ const BackgroundPartyResolver = {
 const resolveParty = BackgroundPartyResolver.resolve;
 BackgroundPartyResolver.resolve = (options = {}) => {
     const timestamp = options.timestamp ?? Date.now();
-    const competition = require('./ColdCompetitionWait').consumeParty(options.party, options.members || [], options.elapsedMs ?? 60000, timestamp);
+    const competition = ColdCompetitionWait.consumeParty(options.party, options.members || [], options.elapsedMs ?? 60000, timestamp);
     const hadWait = [options.party, ...(options.members || [])].some(state => state?.stats?.coldCompetition?.wait);
     const paused = competition.waiting || (hadWait && competition.elapsedMs === 0);
     const members = competition.members || options.members || [];
@@ -792,6 +830,6 @@ BackgroundPartyResolver.resolve = (options = {}) => {
     return result;
 };
 const resolveWithCompetition = BackgroundPartyResolver.resolve;
-BackgroundPartyResolver.resolve = (options = {}) => require('./PartySpotRiskPolicy').record(
+BackgroundPartyResolver.resolve = (options = {}) => PartySpotRiskPolicy.record(
     options.party, resolveWithCompetition(options), options.timestamp ?? Date.now());
 module.exports = BackgroundPartyResolver;

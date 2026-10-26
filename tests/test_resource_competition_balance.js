@@ -2,7 +2,7 @@ const assert = require('assert');
 require('../src/Global');
 const Persona = invoke('GameServer/Bot/AI/BotPersona');
 const Policy = require('../src/GameServer/Social/ResourceCompetitionPolicy');
-const { seeded } = require('../src/GameServer/Bot/Population/ColdCompetitionMonitor');
+const { seeded } = require('../src/GameServer/Bot/AI/TendencyRoll');
 const people = Array.from({ length: 1700 }, (_, i) => Persona.generate({ characterId: 2000000 + i, stats: { generatedIndex: i } }));
 const neutral = { ready: true, personal: null };
 const grievance = { ready: true, personal: { affinity: -8, trust: -8, hostility: 12, fear: 2 } };

@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
@@ -54,14 +55,13 @@ async function main() {
         const originalPreset = process.env.L2NODE_PROGRESSION_RATE;
         try {
             for (const preset of ['x1', 'x10', 'x50']) {
-                process.env.L2NODE_PROGRESSION_RATE = preset;
+                useRate(preset);
                 const before = count(fragment);
                 await kill(mob);
                 assert.strictEqual(count(fragment), before + 1, `one map piece per kill at ${preset}, with a working quest queue`);
             }
         } finally {
-            if (originalPreset === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-            else process.env.L2NODE_PROGRESSION_RATE = originalPreset;
+            useRate(originalPreset);
         }
         for (let i = 0; i < 30 && count(fragment) < 30; i++) await kill(mob);
         assert.strictEqual(count(fragment), 30);

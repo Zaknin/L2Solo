@@ -1,10 +1,12 @@
 process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture asserts the optional worker telemetry bridge.
 const assert = require('node:assert/strict');
+const { useRate, useGeneral } = require('./helpers/progressionRate');
 require('./helpers/databaseIsolation');
 const fixture = require('./helpers/isolatedSocialDatabase')('worker-shot-plan');
 const path = require('node:path');
 const fs = require('node:fs');
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 fixture.assertConfigured(options.default);
 const { DatabaseSync } = require('node:sqlite');
 const { Worker } = require('node:worker_threads');
@@ -22,8 +24,8 @@ Config.economyDiagnostics = true; Config.economyDiagnosticsBotIds = '710021';
 // Keep the original native fixture and assertions, with both literal UUID
 // database paths configured and asserted before the first connection.
 async function createWorld(characters) {
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
-    Object.assign(options.default.General, { questExpRate: 1, questSpRate: 1, questAdenaRate: 1 });
+    useRate('x1');
+    useGeneral({ questExpRate: 1, questSpRate: 1, questAdenaRate: 1 });
     DataCache.init();
     fixture.assertConfigured(options.default);
     const seed = new DatabaseSync(fixture.world);
@@ -42,8 +44,8 @@ async function createWorld(characters) {
 const observer = String.raw`
 module.exports.shotProbe = async () => {
     const entry = kernel.states.get(710021), state = entry.state, timestamp = Date.now();
-    entry.context.goalReviewAt = timestamp;
-    const result = await kernel.projectResolve(state, { patch: {}, materialize: { exp: 0, sp: 0, adena: 0, items: [] },
+    // New loot (an edge) runs the round's action plan.
+    const result = await kernel.projectResolve(state, { patch: {}, materialize: { exp: 0, sp: 0, adena: 0, items: [{ selfId: 1864, amount: 1 }] },
         debug: {}, events: [], nextResolveAt: timestamp + 60000 }, timestamp);
     const index = require('../Economy/ShotMarketIndex').native(), market = index.marketSnapshot(timestamp);
     const economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(result.state, { timestamp });
@@ -52,20 +54,19 @@ module.exports.shotProbe = async () => {
     const candidate = require('../Economy/ShotCraftPolicy').craftCandidate(result.state, recipe, { ...market, offersFor: (...args) => index.offersFor(...args), context: { ...economy, mpPerHour: regen.mp * 1200 } });
     const crafted = { ...state, stats: { ...state.stats, shotCraft: { recipeId: 20 } },
         inventory: { ...state.inventory, 1463: { selfId: 1463, amount: 1000000 } } };
-    kernel.upsert({ state: crafted, context: entry.context });
+    kernel.upsert({ state: crafted });
     const before = index.marketSnapshot(timestamp, crafted).unlistedSupply.get(1463);
     const proposed = { ...crafted, inventory: { ...crafted.inventory, 1463: { selfId: 1463, amount: 1000100 } } };
     const overlay = index.marketSnapshot(timestamp, proposed).unlistedSupply.get(1463);
     const held = index.marketSnapshot(timestamp).unlistedSupply.get(1463);
-    kernel.upsert({ state: proposed, context: entry.context });
+    kernel.upsert({ state: proposed });
     const committed = index.marketSnapshot(timestamp).unlistedSupply.get(1463);
-    kernel.upsert({ state: proposed, context: entry.context });
+    kernel.upsert({ state: proposed });
     const duplicate = index.marketSnapshot(timestamp).unlistedSupply.get(1463);
     kernel.remove(state.characterId);
     const removed = index.marketSnapshot(timestamp).unlistedSupply.get(1463);
     return { indexHooks: { before, overlay, held, committed, duplicate, removed }, candidate, hour: economy.hourAdena, regen, demand: [...market.shotDemand.get(1463)], orePrice: market.npcPrice.get(1785), fixed: require('../Economy/StaticMerchantPricing').botPurchasePrice(1463), recipe, plan: result.economyPlan, edges: result.economyEdges, state: result.state,
-        forbiddenLoaded: Object.keys(require.cache).filter(key => /\/(?:Database|Network)\/|\/World\/World\.js$/.test(key)),
-        known: entry.context.knownShotRecipes };
+        forbiddenLoaded: Object.keys(require.cache).filter(key => /\/(?:Database|Network)\/|\/World\/World\.js$/.test(key)) };
 };`;
 const wrapper = String.raw`
 const fs = require('node:fs'), path = require('node:path'), Module = require('node:module');
@@ -115,7 +116,7 @@ parentPort.on('message', message => {
                 adena: 100, exp: 10, kills: 1, timestamp: now }) } };
         state = await Life.upsertState(state, 'shot_plan_measured_income');
         const epoch = 'native:shot-plan', messages = []; let fault;
-        worker = new Worker(wrapper, { eval: true, workerData: { workerEpoch: epoch,
+        worker = new Worker(wrapper, { eval: true, workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: epoch,
             workerPath: root + '/src/GameServer/Bot/Population/ColdSimulationWorker.js', observer } });
         const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
         const diagnosticCoordinator = new ColdSimulationCoordinator(); diagnosticCoordinator.worker = worker; diagnosticCoordinator.workerEpoch = epoch;
@@ -143,14 +144,14 @@ parentPort.on('message', message => {
             require('../src/GameServer/AfkTrade/BoardIndex').rowOf(Afk.recordStore(shop.id))]);
         send('table_page', { tables: [{ name: 'board', from: null, to: 0, full: true, rows: boardRows,
             removed: [], last: true }, { name: 'market', from: null, to: 0, full: true, rows: [], removed: [], last: true }] });
-        send('snapshot_page', { rows: [{ state, context: { knownShotRecipes: [], buyOrderEscrow: 0 } }], ack: true }, 'state');
+        send('snapshot_page', { rows: [{ state }], ack: true }, 'state');
         await wait(message => message.type === 'ready' && message.msgId === 'state');
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'probe'), shotProbe: true });
         const response = await wait(message => message.probeId === 'probe'); if (response.error) throw Error(response.error);
         const result = response.value;
         console.log(JSON.stringify({ edges: result.edges, shot: result.plan?.shot, huntHour: result.hour, forbiddenLoaded: result.forbiddenLoaded }));
         const selectedStep = Policy.unpackStep(result.plan?.shot);
-        assert(result.edges & 8); assert(selectedStep?.recipeTarget > 0, 'native worker with no known recipe selects a profitable executable recipe');
+        assert(result.edges & 1); assert(selectedStep?.recipeTarget > 0, 'native worker with no known recipe selects a profitable executable recipe');
         assert(messages.some(message => message.type === 'economy_diagnostics'), 'worker emits sampled decision telemetry on the separate developer bridge');
         assert.deepEqual(result.forbiddenLoaded, [], 'pure craft decision loads no World actor, Network or database implementation');
         assert.equal(result.indexHooks.overlay, result.indexHooks.before + 100, 'projected own stock has a transient overlay');
@@ -217,7 +218,9 @@ parentPort.on('message', message => {
         assert.equal(heldBook.adena, beforeLearn);
         assert.equal((await Database.fetchItems(id)).filter(row => row.selfId === ownedRecipe.recipeItemId).reduce((sum, row) => sum + row.amount, 0), 1);
         await invoke('HistoryDatabase').flush();
-        const diagnostics = fs.readFileSync(path.join(fixture.directory, 'logs/economy-diagnostics.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+        // The history worker may still be appending a later bridged batch while
+        // this reads: only newline-terminated (whole) rows are parsed.
+        const diagnostics = fs.readFileSync(path.join(fixture.directory, 'logs/economy-diagnostics.jsonl'), 'utf8').split('\n').slice(0, -1).map(JSON.parse);
         // The bridge is bounded (64 records a second): whether the later town
         // choice survives depends on the wall-clock second it lands in, so the
         // check is that this bot's worker records reach the writer at all.

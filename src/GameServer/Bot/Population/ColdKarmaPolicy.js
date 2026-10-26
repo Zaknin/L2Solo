@@ -44,18 +44,20 @@ function plan(state, spots, timestamp = Date.now()) {
         if (!routeOptions.matchupProfiles) routeOptions.matchupProfiles = TargetMatchup.stateProfiles(clean, routeOptions);
         return LevelingRoutes.isSpotAllowedForState(spot, clean, routeOptions);
     };
-    const candidates = spots.filter(spot => {
-        const point = spot.center;
-        return spot.raidBoss !== true && point
+    const eligible = spot => {
+        const point = spot?.center;
+        return spot?.raidBoss !== true && point
             && Number(spot.minLevel || 1) <= Number(state.level || 1)
             && Number(spot.maxLevel || spot.minLevel || 1) >= Math.max(1, Number(state.level || 1) - 8)
             && !excludedSpotIds.has(spot.id) && !utils.isInPeaceZone(point.locX, point.locY)
             && allowed(spot);
-    });
-    const current = candidates.find(spot => spot.id === state.spotId
-        && Math.hypot(Number(spot.center.locX) - Number(state.loc?.locX),
-            Number(spot.center.locY) - Number(state.loc?.locY)) < 4500);
-    const spot = current || LevelingRoutes.bestSpot(candidates, clean)?.spot || null;
+    };
+    // The bot's own spot first (the index's row for its id): only a bot that
+    // left it judges every spot for the best one.
+    const own = SpotIndex.spotById(spots, state.spotId);
+    const current = own && Math.hypot(Number(own.center?.locX) - Number(state.loc?.locX),
+        Number(own.center?.locY) - Number(state.loc?.locY)) < 4500 && eligible(own) ? own : null;
+    const spot = current || LevelingRoutes.bestSpot(spots.filter(eligible), clean)?.spot || null;
     clean.stats.travel = null;
     if (state.activity === 'dead') return { targetNpcId: 0, plannedState: clean, spot };
     if (current && !utils.isInPeaceZone(state.loc?.locX, state.loc?.locY)) {

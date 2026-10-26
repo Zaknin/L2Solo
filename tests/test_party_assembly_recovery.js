@@ -40,7 +40,7 @@ for (const state of review.states) {
     assert.deepStrictEqual(state.vitals, members[0].vitals);
     assert.deepStrictEqual(state.inventory, {});
     assert(Recovery.coolingDown(state, timestamp));
-    assert.strictEqual(Requests.partyRequestForPlan(state, state.stats.equipmentPlan, timestamp).status, 'deferred');
+    assert.strictEqual(Requests.partyRequestForPlan(state, state.stats.equipmentPlan, timestamp, { economy: { worth: () => 0 } }).status, 'deferred');
     assert.strictEqual(Requests.partyObjectiveForState(state), null);
     for (const activity of ['traveling', 'shopping', 'resting', 'hunting']) {
         assert.strictEqual(Requests.partyRequestForPlan({ ...state, activity },
@@ -54,7 +54,7 @@ assert.deepStrictEqual(Composition.selectMembers(review.states, { timestamp, min
 assert.deepStrictEqual(Composition.selectRecruits([members[0]], [review.states[1]], { timestamp }), []);
 assert.strictEqual(Composition.selectMembers(review.states, { timestamp: timestamp + Recovery.RETRY_MS, minSize: 2 }).length, 2);
 assert.strictEqual(Requests.partyRequestForPlan(review.states[0], members[0].stats.equipmentPlan,
-    timestamp + Recovery.RETRY_MS).status, 'open');
+    timestamp + Recovery.RETRY_MS, { economy: { worth: () => 0 } }).status, 'open');
 
 const gathered = members.map(s => ({ ...s, loc: { ...members[0].loc } }));
 const rescued = Lifecycle.review(restored, gathered, timestamp);

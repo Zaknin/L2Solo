@@ -14,6 +14,7 @@ const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const World = invoke('GameServer/World/World');
 
 const databasePath = path.join(process.cwd(), 'tmp', 'test-board-money-journal.sqlite');
@@ -106,20 +107,24 @@ async function run() {
     await AfkTrade.sellToShop(seller, AfkTrade.recordStore(buyAd.id), 1864, 20, { objectId: answer.objectId });
     await AfkTrade.publishBot(seller, ad('sell_ad', [await stemLine(seller, 10, 90)]));
     const leasedAd = await AfkTrade.publishBot(leased, { ...ad('sell_ad', [await stemLine(leased, 20, 100)]), kind: 'shop' });
-    const claim = await Owner.claim(LifeState.cachedState(leased), { timestamp: Date.now(), leaseMs: 30000 });
-    assert(claim.ok);
+    // A far bot's step starts from its row; the player's deal moves the
+    // revision, so that step's commit is refused and the next step, from the
+    // dealt row, commits the hunt.
+    const stepRevision = LifeState.cachedState(leased).simulation.revision;
     await AfkTrade.buyFromShop(player, AfkTrade.recordStore(leasedAd.id), 1864, 7);
     const leasedState = LifeState.cachedState(leased);
     const hunted = structuredClone(leasedState.inventory);
     hunted['57'].amount += 30;
-    const [commit] = await Owner.commitAndReleaseBatch([{ token: claim,
+    const hunt = revision => Owner.commitBatch([{ revision,
         nextState: { ...leasedState, adena: hunted['57'].amount, inventory: hunted,
-            simulation: { ...leasedState.simulation, ownerId: Owner.OWNER_ID, revision: claim.revision } },
-        proposal: { baseState: { inventory: leasedState.inventory } } }], { timestamp: Date.now() });
+            simulation: { ...leasedState.simulation, revision } },
+        proposal: InventorySummary.bagChange(leasedState.inventory, hunted) }], { timestamp: Date.now() });
+    const [refused] = await hunt(stepRevision);
+    assert.strictEqual(refused.reason, 'stale_revision', 'the deal moved the revision under the step');
     // Small lots are no longer pruned by a fixed minimum (45a13735): the 13
-    // remaining Stems stay listed, the owner's bag is untouched, and the
-    // worker's commit merges the sale's settlement.
-    assert(commit.ok && commit.settled, 'the commit merges the leased bot\'s deal');
+    // remaining Stems stay listed and the owner's bag is untouched.
+    const [commit] = await hunt(leasedState.simulation.revision);
+    assert(commit.ok, 'the step from the dealt row commits');
     await AfkTrade.settleOwners([leased]);
     const expiring = await AfkTrade.publishBot(leaver, ad('sell_ad', [await stemLine(leaver, 10, 300)]));
     await AfkTrade.publishBot(leaver, ad('buy_ad', [{ selfId: 1865, name: 'Varnish', count: 10, price: 400, stackable: true }]));

@@ -5,18 +5,37 @@ const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const NpcSellRules = invoke('GameServer/Items/NpcSellRules');
 const MarketPricing = invoke('GameServer/Bot/Economy/MarketPricing');
 const MarketTownPolicy = invoke('GameServer/Bot/Economy/MarketTownPolicy');
+const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
+const ColdEconomyDecision = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+const KnowledgeLearning = invoke('GameServer/Bot/AI/KnowledgeLearning');
 const { MAX_GEAR_COPIES_PER_TYPE } = require('./WarehouseRules');
+const TradeDemand = require('./MarketTradeDemand');
 
 
 function isGear(item = {}) {
     return String(item.kind || '').startsWith('Weapon.') || String(item.kind || '').startsWith('Armor.');
 }
 
-// A showcase has three places. Rank unit asks, not stack totals: a cheap
-// bulk lot must not displace a valuable single item. Stable ties keep the
-// same selection on the worker and at a native town visit.
-function prioritizeListings(listings = []) {
-    return listings.slice().sort((left, right) => Number(right.price || 0) - Number(left.price || 0)
+// Public interest and recent completed purchases earn scarce board space.
+// Quote depth is a ranking signal, never funded or guaranteed receipts.
+// Unobserved stock uses the old stable price order only for spare places.
+function prioritizeListings(listings = [], { board, characterId = 0, timestamp = Date.now() } = {}) {
+    const score = item => {
+        let bidUnits = 0, bidPrice = 0;
+        for (const line of board?.list(item.selfId, BoardRules.BUY) || []) {
+            if (Number(line.ownerId) === Number(characterId) || Number(line.enchant || 0) !== Number(item.enchant || 0)) continue;
+            bidUnits += Number(line.count); bidPrice = Math.max(bidPrice, Number(line.price));
+        }
+        const flow = !item.enchant ? TradeDemand.forecast(item.selfId, null, timestamp) : null;
+        const count = Math.max(0, Number(item.count) || 0), price = Math.max(0, Number(item.price) || 0);
+        return [bidUnits > 0 && bidPrice >= price ? 2 : bidUnits > 0 || flow ? 1 : 0,
+            Math.max(Math.min(count, bidUnits) * Math.min(price, bidPrice),
+                Math.min(count, flow?.applicableUnits || 0) * price)];
+    };
+    const scores = new Map(listings.map(item => [item, score(item)]));
+    return listings.slice().sort((left, right) => scores.get(right)[0] - scores.get(left)[0]
+        || scores.get(right)[1] - scores.get(left)[1]
+        || Number(right.price || 0) - Number(left.price || 0)
         || Number(right.enchant || 0) - Number(left.enchant || 0)
         || Number(isGear(right)) - Number(isGear(left))
         || Number(left.selfId) - Number(right.selfId));
@@ -46,7 +65,7 @@ function classify(state, item) {
 function traderContext(state, options = {}) {
     return MarketPricing.traderContext(state, {
         timestamp: Number(options.now) || Date.now(),
-        persona: options.persona ?? invoke('GameServer/Bot/AI/BotPersona').of(state),
+        persona: options.persona ?? BotPersona.of(state),
         board: Object.hasOwn(options, 'board') ? options.board : invoke('GameServer/AfkTrade/AfkTradeService').boardIndex(),
         npcOffersFor: options.npcOffersFor
             || ((selfId) => invoke('GameServer/Bot/Economy/MarketOpportunity').npcOffersAll(selfId)),
@@ -62,14 +81,33 @@ function traderContext(state, options = {}) {
     });
 }
 
+// What main knows for pricing from the worker's accepted card, without a
+// forecast: the persona, the money packet and the card's worths; no hunt,
+// stock or recipe build. A reader of economy.price (an enchanted line's
+// belief, MarketPricing.beliefFor) takes traderContext. options as
+// MarketPricing.traderContext's deps (board, npcOffersFor, canSell, ...).
+function cardTraderContext(state, options = {}) {
+    const persona = BotPersona.of(state), packet = state.stats?.money;
+    // lazy: worker the coordinator's accepted decisions live on main only
+    const prepared = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.decided?.(state);
+    const worth = id => ColdEconomyDecision.preparedCardWorth(prepared,
+        id, state, Number(packet?.[1]), persona?.understanding, KnowledgeLearning.knowledgeEnabled());
+    return MarketPricing.traderContext(state, {
+        npcOffersFor: selfId => invoke('GameServer/Bot/Economy/MarketOpportunity').npcOffersAll(selfId), // lazy: worker main-only NPC shops
+        ...options,
+        board: Object.hasOwn(options, 'board') ? options.board : invoke('GameServer/AfkTrade/AfkTradeService').boardIndex(), // lazy: worker main-only board
+        persona, preparedWorth: worth, preparedBuffer: prepared?.data,
+        economy: { persona, hourAdena: Number(packet?.[0]), moneyPrice: Number(packet?.[1]), gapHorizonHours: NaN, worth } });
+}
+
 // Board slots of a bot (user, 2026-10-05): 3 shop lines + 5 sell ads.
 const BOARD_SLOTS = BoardRules.BOT_SHOP_LINES + BoardRules.BOT_RECORDS.sell_ad;
 
 // The bot's sale at a market visit or a review (group E): the author's hard
 // rules first; every other item goes by one expected-value decision (the
 // board at its best ask, the NPC buy-back now, a buy ad answered in its town,
-// or keeping it), one roll. The highest unit asks take the market's bounded
-// slots, including held listings, so new valuable loot can replace cheap stock.
+// or keeping it), one roll. Public interest and recent purchases rank the
+// bounded slots, including held listings, before the unknown waiting stock.
 // A line the bot already has keeps its price
 // (its own look reprices it or takes it back, MarketPricing.look). options: now
 // (the decision point), slots (board slots), kept (selfId -> price of its
@@ -92,6 +130,7 @@ function evaluate(state, options = {}) {
     const decisions = [];
     const forBoard = [];
     for (const item of candidates) {
+        const marketOnly = ItemDisposition.isGradeCrystal(item);
         const hard = classify(state, item);
         if (hard.action !== 'market') {
             decisions.push({ ...hard, item });
@@ -123,13 +162,15 @@ function evaluate(state, options = {}) {
         const chosen = MarketPricing.disposition(item, ctx, {
             // A market quote can wait for a buyer even when this adventurer
             // otherwise liquidates surplus instead of warehousing it.
-            town, room: options.stockQuotes === true ? 1 : liquidate ? 0 : roomFor(item, options.stored),
-            stockQuote: options.stockQuotes === true,
+            town, room: options.stockQuotes === true || marketOnly ? 1 : liquidate ? 0 : roomFor(item, options.stored),
+            stockQuote: options.stockQuotes === true || marketOnly,
             rollKey: ['dispose', ctx.characterId, item.selfId, decisionPoint]
         });
         // A valid ask without a known buyer waits on the market. It creates
         // no assumed receipts; physical reservations were removed above.
-        const action = chosen.priced?.ask?.stockQuote && chosen.action !== 'ad' ? 'list'
+        const ask = chosen.priced?.ask;
+        const action = (ask?.stockQuote || marketOnly && ask?.price > 0 && !ask.npc) && chosen.action !== 'ad' ? 'list'
+            : marketOnly && ['keep', 'npc'].includes(chosen.action) ? 'keep'
             : chosen.action === 'keep' ? liquidate ? 'npc' : 'warehouse' : chosen.action;
         const decision = { action,
             reason: chosen.priced?.ask?.stockQuote ? 'stock_quote' : 'expected_value', item,
@@ -146,10 +187,12 @@ function evaluate(state, options = {}) {
             pricing: MarketPricing.lineState(decision.item.selfId, ctx, { price, storeType: BoardRules.SELL, enchant: decision.item.enchant || 0 }) };
     }
     const slots = Math.max(0, Math.floor(Number(options.slots ?? BOARD_SLOTS)));
-    const chosen = new Set(prioritizeListings(decisions.filter(row => row.action === 'list').map(row => row.item)).slice(0, slots));
+    const chosen = new Set(prioritizeListings(decisions.filter(row => row.action === 'list').map(row => row.item), ctx).slice(0, slots));
     for (const decision of decisions) {
         if (decision.action !== 'list' || chosen.has(decision.item)) continue;
-        decision.action = liquidate ? 'npc' : 'warehouse';
+        // Grade crystals wait for a market slot; cleanup must not turn them
+        // into NPC receipts when more expensive loot fills the board.
+        decision.action = ItemDisposition.isGradeCrystal(decision.item) ? 'keep' : liquidate ? 'npc' : 'warehouse';
         decision.reason = 'no_board_slot';
     }
     return {
@@ -211,6 +254,7 @@ module.exports = {
     isGear,
     prioritizeListings,
     traderContext,
+    cardTraderContext,
     actorState,
     npcSaleForActor
 };

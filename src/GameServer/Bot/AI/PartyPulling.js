@@ -8,6 +8,10 @@ const BotPartyChat = invoke('GameServer/Bot/AI/BotPartyChat');
 const BotRaidSafety = invoke('GameServer/Bot/AI/BotRaidSafety');
 const HuntingVisibility = invoke('GameServer/Bot/AI/BotHuntingVisibility');
 const NpcObjectIndex = require('../../World/NpcObjectIndex');
+const BotPullEstimate = invoke('GameServer/Bot/AI/BotPullEstimate');
+const SocialAggro = invoke('GameServer/Npc/SocialAggro');
+const NpcAggro = invoke('GameServer/Npc/NpcAggro');
+const MinionManager = invoke('GameServer/World/RaidBossMinionManager');
 
 const PULL_SEARCH_RADIUS = 2200;
 const PULL_CONTACT_DISTANCE = 260;
@@ -288,26 +292,8 @@ function travellingPullerAwayFromCamp(leaderSession, pulling) {
 }
 
 function hasDeadPartyMember(leaderSession) {
-    let members;
-    if (World.pvpPartyMembershipIndex === true) {
-        if (typeof World.pvpPartySessionsForKey !== 'function' || typeof World.registeredActorById !== 'function') {
-            throw new TypeError('invalid_party_membership_index');
-        }
-        if (leaderSession?.hotBackgroundPartyId) {
-            members = invoke('GameServer/Bot/AI/HotBackgroundParty').roster(leaderSession);
-        } else {
-            members = World.pvpPartySessionsForKey(leaderSession);
-            const current = World.registeredActorById(leaderSession?.actor?.fetchId?.());
-            if (current && current.session === leaderSession && current.actor === leaderSession.actor
-                && !members.includes(leaderSession)) members.push(leaderSession);
-        }
-    } else {
-        members = World.user?.sessions || [];
-    }
-    return members.some((memberSession) => (
-        PartyAwareness.isPartySession(memberSession, leaderSession) &&
-        memberSession.actor?.isDead?.() === true
-    ));
+    return PartyAwareness.partySessions(leaderSession, { includeDead: true })
+        .some(memberSession => memberSession.actor?.isDead?.() === true);
 }
 
 function rejectedTargetUntil(leaderSession, targetId) {
@@ -334,18 +320,21 @@ function partyReferenceLevel(leaderSession) {
     return levels[Math.floor((levels.length - 1) / 2)];
 }
 
+let pullJoiners = null;
+
+// The live idle mobs that come with the target, by the one pull rule of hot
+// and cold bots (BotPullEstimate), and the crowd standing at the target.
 function socialRisk(target) {
-    const clan = String(target.fetchClanName?.() || '').trim();
     const helpRadius = Math.max(0, Number(target.fetchClanHelpRadius?.()) || 0);
-    const radius = Math.max(PULL_SOCIAL_RISK_RADIUS, helpRadius);
+    const radius = Math.max(PULL_SOCIAL_RISK_RADIUS, helpRadius, NpcAggro.AGGRO_RADIUS);
     const nearby = World.fetchNpcsInRadius(target.fetchLocX(), target.fetchLocY(), radius)
         .filter((npc) => npc !== target && !BotRaidSafety.isProtectedRaidEntity(npc) && npc.fetchAttackable?.() && !npc.isDead?.() && !npc.fetchDestId?.());
-    const socialAllies = clan && helpRadius > 0
-        ? nearby.filter((npc) => (
-            String(npc.fetchClanName?.() || '').trim() === clan &&
-            distance2d(point(target), point(npc)) <= helpRadius
-        )).length
-        : 0;
+    pullJoiners = pullJoiners || BotPullEstimate.minionJoiners(MinionManager.groupsByBoss);
+    const socialAllies = BotPullEstimate.pullSize(BotPullEstimate.record(target), nearby.map(BotPullEstimate.record), {
+        assistZ: SocialAggro.MAX_ASSIST_Z_DIFFERENCE,
+        aggroRadius: NpcAggro.AGGRO_RADIUS,
+        aggroZ: NpcAggro.MAX_AGGRO_Z_DIFFERENCE
+    }, pullJoiners.get(Number(target.fetchSelfId?.() || 0))) - 1;
     const crowd = nearby.filter((npc) => distance2d(point(target), point(npc)) <= PULL_SOCIAL_RISK_RADIUS).length;
     return { socialAllies, crowd };
 }

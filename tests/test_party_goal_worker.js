@@ -2,6 +2,8 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
+require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const Calculation = require('../src/GameServer/Bot/Population/PartyGoalCalculation');
 const timestamp = Date.now();
@@ -9,7 +11,7 @@ const epoch = 'party-goal-native';
 const members = [701, 702].map(characterId => ({ characterId, phase: 'cold', updatedAt: timestamp,
     level: 20, activity: 'resting', adena: 10000, inventory: {},
     spotId: 'execution-ground', stats: { classId: 0 }, timing: { nextResolveAt: timestamp + 3600000 },
-    simulation: { ownerId: 'legacy_main', revision: 2, leaseId: null },
+    simulation: { revision: 2 },
     vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 } }));
 const party = { partyId: 'goal-worker', memberIds: [701, 702], leaderId: 701,
     stats: { objective: { clanGoalKey: 'clan-native', spotId: 'protected' } } };
@@ -43,7 +45,7 @@ const loaded=new Module(workerData.workerPath,module);loaded.filename=workerData
 loaded.paths=Module._nodeModulePaths(path.dirname(workerData.workerPath));
 loaded._compile(fs.readFileSync(workerData.workerPath,'utf8')+workerData.observer,workerData.workerPath);`;
 const worker = new Worker(wrapper, { eval: true,
-    workerData: { workerEpoch: epoch, observer, workerPath: path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js') },
+    workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: epoch, observer, workerPath: path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js') },
     resourceLimits: { maxOldGenerationSizeMb: 256 } });
 const messages = []; let fault;
 worker.on('message', message => messages.push(message)); worker.on('error', error => { fault = error; });
@@ -62,7 +64,10 @@ function post(type, payload, id) { worker.postMessage(Protocol.envelope(type, ep
     post('init', { config: { pvpAggression: 0 } }, 'init');
     await wait(message => message.type === 'ready' && message.payload.phase === 'running');
     post('pause', {}, 'pause');
-    post('snapshot_page', { rows: members.map(state => ({ state, context: { recipeBook: null, knownShotRecipes: [999] } })),
+    // An older 'recipes' row the query's own knowledge must replace.
+    post('table_page', { tables: [{ name: 'recipes', from: null, to: 0, full: true, removed: [], last: true,
+        rows: members.map(state => [state.characterId, { characterId: state.characterId, recipeBook: null, knownShotRecipes: [999] }]) }] });
+    post('snapshot_page', { rows: members.map(state => ({ state })),
         initial: true, done: true, ack: true }, 'snapshot');
     await wait(message => message.msgId === 'snapshot');
     const request = { party, members, escrows: [0, 0], recipeKnowledge: members.map(() => ({ recipeBook: null, knownShotRecipes: [] })),
@@ -94,20 +99,11 @@ function post(type, payload, id) { worker.postMessage(Protocol.envelope(type, ep
     assert.equal(admission.payload.joint.incomeReviews.length, 2);
     assert(admission.payload.joint.incomeReviews.every(review => !review.accept), 'a missing camp forecast refuses unsafe formation in the worker');
     assert(Protocol.validateEnvelope(admission, 'worker').ok, 'material admission uses the bounded existing review packet');
-    post('party_goal_request', { ...request, members: materialMembers, party: { ...party,
-        stats: { objective: materialObjective, agreement: materialAgreement, recruitmentReview: true } },
-        replyBy: Date.now() + 5000 }, 'material-recruitment');
-    const recruited = await wait(message => message.type === 'party_goal_result' && message.msgId === 'material-recruitment');
-    assert.equal(recruited.payload.ok, true, recruited.payload.reason);
-    assert.equal(recruited.payload.joint.memberGoals.filter(goal => goal.amount === 12).length, 2);
-    assert.equal(recruited.payload.joint.incomeReviews.length, 2);
-    assert(recruited.payload.joint.incomeReviews.every(review => !review.accept));
-    assert(Protocol.validateEnvelope(recruited, 'worker').ok, 'native worker recruitment checks the complete prospective roster');
     worker.postMessage({ queryProbe: 'canonical' });
     const prepared = await wait(message => message.probe === 'canonical');
     assert.equal(prepared.slots.filter(row => row.id > 0).length, 2);
     assert(prepared.slots.filter(row => row.id > 0).every(row => row.knownShotRecipes.length === 0),
-        'current query knowledge replaces the old worker recipe context');
+        'current query knowledge replaces the worker\'s recipes row');
     const incomeSpot = { id: '-10_10', minLevel: 14, maxLevel: 14, avgLevel: 14, density: 20,
         tagsAuthoritative: true, tags: ['starter', 'normal_hp'], npcEntries: [], center: { locX: 0, locY: 0 } };
     post('catalog_page', { catalog: 'spots', rows: [incomeSpot], done: true }, 'income-spots');

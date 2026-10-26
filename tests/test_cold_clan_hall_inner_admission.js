@@ -50,7 +50,7 @@ async function seed() {
 async function inner(mode) {
     const id = await seed(), state = clone(Life.snapshot(id)), time = Date.now();
     const request = { kind: 'lifecycle', characterId: id, commandId: `inner:${serial}`,
-        commandCheckpoint: Protocol.commandCheckpoint(state), state, context: {},
+        commandCheckpoint: Protocol.commandCheckpoint(state), state,
         precomputedPlan: null,
         precomputedResult: { patch: {}, events: [],
             materialize: { exp: 0, sp: 0, adena: 0, items: [] }, nextResolveAt: time + 30000 } };
@@ -67,13 +67,12 @@ async function inner(mode) {
     const worker = label => ({ terminate: async () => {}, postMessage(message) {
         sent.push({ label, message: clone(message) });
         if (message.type === 'fence') setImmediate(() => c.onMessage(Protocol.envelope('fence_ack',
-            message.workerEpoch, { characterId: id, proposal: null, token: null }, message.msgId), c.worker, c.workerEpoch));
+            message.workerEpoch, { characterId: id, proposal: null }, message.msgId), c.worker, c.workerEpoch));
         if (message.type === 'shutdown') setImmediate(() => c.onMessage(Protocol.envelope('drained',
             message.workerEpoch, { ok: true }, message.msgId), c.worker, c.workerEpoch));
     } });
     c.worker = worker('A');
     const originalWorker = c.worker, originalEpoch = c.workerEpoch;
-    c.contextIndex = () => ({}); c.contextFor = () => ({});
     c.population = { executeWorkerLifecycleCommand(...args) {
         calls.push(args[0]); admissions.push(args[2]?.workerAdmission);
         const work = Population.executeWorkerLifecycleCommand(...args);
@@ -149,7 +148,7 @@ async function inner(mode) {
   catch(error) { failures.push(mode); console.error('FAIL hall native '+mode+': '+error.stack); }
  }
  const id = await seed(), state = Life.snapshot(id), at = Date.now();
- const request = {kind:'lifecycle',characterId:id,commandId:'hall-manual',commandCheckpoint:Protocol.commandCheckpoint(state),state,context:{},precomputedPlan:null,precomputedResult:{patch:{},events:[],materialize:{exp:0,sp:0,adena:0,items:[]},nextResolveAt:at+30000}};
+ const request = {kind:'lifecycle',characterId:id,commandId:'hall-manual',commandCheckpoint:Protocol.commandCheckpoint(state),state,precomputedPlan:null,precomputedResult:{patch:{},events:[],materialize:{exp:0,sp:0,adena:0,items:[]},nextResolveAt:at+30000}};
  const applied = await Population.executeWorkerLifecycleCommand(state,request);
  assert.equal(applied.ok,true,'optional-absent manual hall compatibility');
  const manual = await facts(id); assert.equal(manual.cache.stats.clanHallVisit,null); assert.equal(manual.cache.activity,'hunting'); assert(manual.history.some(row=>row.characterId===id && row.eventType==='clan_hall_visit'));

@@ -24,7 +24,7 @@ const spot = (id, level, density) => ({ id, name: id, minLevel: level, maxLevel:
 const far = spot('sparse-far', 26, 2);
 const near = spot('sparse-near', 29, 2);
 const fit = spot('fit', 29, 8);
-const options = { matchupProfiles: [mage], occupancy: {}, timestamp: at };
+const options = { matchupProfiles: [mage], timestamp: at };
 const target = Routes.targetLevelForState(state, options);
 
 const original = Spots.cache;
@@ -47,11 +47,7 @@ try {
 
     Spots.cache = [far, near, fit];
     assert(SpotService.isSuitable(fit, target), 'fixture: suitable camp');
-    assert.strictEqual(Spots.findForState(state, options)?.id, 'fit', 'a suitable camp with room still wins');
-    const full = { fit: { count: 99, reservedCount: 99, capacity: 9, retained: new Set(), reservedKeys: new Set(),
-        reservationKeys: new Set(), retainedReservationKeys: new Set() } };
-    assert.strictEqual(Spots.findForState(state, { ...options, occupancy: full })?.id, 'sparse-far',
-        'a full suitable camp leaves the bot where it is');
+    assert.strictEqual(Spots.findForState(state, options)?.id, 'fit', 'a suitable camp still wins');
 } finally { Spots.cache = original; }
 
 console.log('unsuitable spot stay tests passed');

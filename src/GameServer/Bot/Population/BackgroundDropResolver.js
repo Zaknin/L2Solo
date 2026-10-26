@@ -132,19 +132,11 @@ function rollSpoilForFight({ spot, killerLevel, npcSelfId = 0, rng = Math.random
             killerLevel: Number(killerLevel || 0)
         }, rng);
         if (!groupRoll.hit) continue;
-        const roll = rng() * 100;
-        let partition = 0;
-        const item = (group.items || []).find((candidate) => {
-            partition += Math.max(0, Number(candidate.chance) || 0);
-            return roll <= partition;
-        });
-        if (!item) continue;
-        const min = Math.max(1, Math.floor(Number(item.min) || 1));
-        const max = Math.max(min, Math.floor(Number(item.max) || min));
-        const baseAmount = min === max ? min : Math.floor(rng() * (max - min + 1)) + min;
-        const amount = ProgressionRates.scaleAmount(baseAmount, groupRoll.amountMultiplier, rng);
-        const snapshot = itemSnapshot(item, amount, defeatedNpcLevel);
-        if (snapshot) spoils.push(snapshot);
+        for (const { item, amount } of ProgressionRates.rollSpoilGroup(group, groupRoll.amountMultiplier, rng)) {
+            if (spoils.length >= maxItems) break;
+            const snapshot = itemSnapshot(item, amount, defeatedNpcLevel);
+            if (snapshot) spoils.push(snapshot);
+        }
     }
     return spoils;
 }

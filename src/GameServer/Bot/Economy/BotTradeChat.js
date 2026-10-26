@@ -3,7 +3,9 @@ const Voice = invoke('GameServer/Bot/AI/BotChatVoice');
 const Speech = invoke('GameServer/Bot/AI/BotSpeechTemplates');
 const Identity = invoke('GameServer/Bot/AI/BotServiceIdentity');
 const AfkTradeChatSelection = invoke('GameServer/Bot/Economy/AfkTradeChatSelection');
+const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
+const Diagnostics = require('./EconomyDiagnostics');
 
 const HISTORY_LIMIT = 2048;
 const AFK_RECHECK_MS = 30000;
@@ -14,6 +16,11 @@ let nextGlobalAt = 0;
 let nextFlushAt = 0;
 let nextAfkScanAt = 0;
 let afkAdsSent = 0;
+// The board's books and candidates (AfkTradeChatSelection.index), rebuilt only
+// after a board change event or a new minimum lot value.
+let boardIndex = null;
+let boardChanged = true;
+let boardSubscribed = false;
 
 function id(source) { return Number(source?.actor?.fetchId?.() || source?.characterId || 0); }
 function price(value) {
@@ -99,12 +106,28 @@ function deliver(source, text, now = Date.now()) {
     return true;
 }
 
+function afkBoardIndex() {
+    if (!boardSubscribed) {
+        boardSubscribed = true;
+        AfkTrade.subscribeBoardChanges(() => { boardChanged = true; });
+    }
+    const minLotValue = AfkTradeChatSelection.minLotValue();
+    if (!boardChanged && boardIndex?.minLotValue === minLotValue) {
+        Diagnostics.count('trade_chat', 'books', 'reused');
+        return boardIndex;
+    }
+    boardChanged = false;
+    boardIndex = AfkTradeChatSelection.index(AfkTrade.activeShops(), minLotValue);
+    Diagnostics.count('trade_chat', 'books', 'rebuilt');
+    return boardIndex;
+}
+
 function announceAfk(now) {
     if (now < nextAfkScanAt) return false;
+    // The recheck stays a time wait: the cooldowns it waits for expire by time.
     nextAfkScanAt = now + AFK_RECHECK_MS;
-    const shops = invoke('GameServer/AfkTrade/AfkTradeService').activeShops();
     const preferredSide = afkAdsSent % 3 === 2 ? 3 : 1;
-    const candidate = AfkTradeChatSelection.choose(shops, {
+    const candidate = AfkTradeChatSelection.pick(afkBoardIndex(), {
         now, lastItemAt, lastOwnerAt: history, lastTownAt, preferredSide
     });
     if (!candidate) return false;
@@ -143,4 +166,4 @@ module.exports = { price, offerText, ready, deliver, flush: safe(flush),
     reset() { history.clear(); lastItemAt.clear(); lastTownAt.clear();
         nextGlobalAt = 0; nextFlushAt = 0;
         nextAfkScanAt = 0;
-        afkAdsSent = 0; } };
+        afkAdsSent = 0; boardIndex = null; boardChanged = true; } };

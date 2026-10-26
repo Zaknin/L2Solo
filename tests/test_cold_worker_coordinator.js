@@ -8,7 +8,6 @@ require('../src/Global');
 const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const databasePath = path.join(process.cwd(), 'tmp', 'test-cold-worker-coordinator.sqlite');
 
@@ -48,7 +47,9 @@ let coordinator = null;
     assert.strictEqual(await LifeState.init(), true);
     const initial = LifeState.cachedState(characterId);
     assert(initial, 'startup hydration must expose the copied cold row to the coordinator');
-    assert.strictEqual(initial.simulation.ownerId, Owner.LEGACY_OWNER_ID);
+    // Progress is read against the row the boot loaded: the boot shift moved
+    // the fixture's timers by the pause since its last write.
+    const loadedResolvedAt = Number(initial.timing.lastResolvedAt);
     // Start with a native learned kit. A subsequent automatic grant correctly
     // retires a decision built before that skill publication.
     const trained = await LifeState.reviewTrainingAfterCommit(initial);
@@ -59,9 +60,6 @@ let coordinator = null;
     await coordinator.start({
         executeWorkerLifecycleCommand() {
             throw new Error('main_resolver_must_not_run_for_simple_lifecycle');
-        },
-        resolveBackgroundParty() {
-            throw new Error('party_resolver_must_not_run_for_simple_lifecycle');
         }
     });
 
@@ -69,11 +67,11 @@ let coordinator = null;
     let row = null;
     while (Date.now() < deadline) {
         [row] = await Database.execute([
-            `SELECT activity, lastResolvedAt, nextResolveAt, simulationOwner,
-                    simulationRevision, simulationLeaseId, simulationLeaseUntil, statsJson
+            `SELECT activity, lastResolvedAt, nextResolveAt,
+                    simulationRevision, statsJson
              FROM bot_life_state WHERE characterId = ?`, [characterId]
         ]);
-        if (Number(row?.simulationRevision || 0) >= 2 && Number(row?.lastResolvedAt || 0) > dueAt) break;
+        if (Number(row?.simulationRevision || 0) >= 2 && Number(row?.lastResolvedAt || 0) > loadedResolvedAt) break;
         await wait(100);
     }
     let snapshot = coordinator.snapshot();
@@ -86,10 +84,7 @@ let coordinator = null;
     assert(Number(snapshot.worker.resolved || 0) >= 1, 'worker thread must perform the resolve');
     assert(Number(snapshot.queue.committed || 0) >= 1, 'main gateway must durably commit worker progress');
     assert(Number(row.simulationRevision) >= 2, 'claim plus commit/release must advance revision twice');
-    assert(Number(row.lastResolvedAt) > dueAt, 'authoritative DB progress must advance lastResolvedAt');
-    assert.strictEqual(row.simulationOwner, Owner.LEGACY_OWNER_ID);
-    assert.strictEqual(row.simulationLeaseId, null);
-    assert.strictEqual(Number(row.simulationLeaseUntil), 0, 'successful commit must not leak a lease');
+    assert(Number(row.lastResolvedAt) > loadedResolvedAt, 'authoritative DB progress must advance lastResolvedAt');
     const persistedStats = JSON.parse(row.statsJson || '{}');
     const equipmentPlan = persistedStats.equipmentPlan;
     if (equipmentPlan?.strategy === 'market') {

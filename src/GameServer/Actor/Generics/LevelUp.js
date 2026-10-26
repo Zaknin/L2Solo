@@ -2,6 +2,7 @@ const ServerResponse = invoke('GameServer/Network/Response');
 const DataCache      = invoke('GameServer/DataCache');
 const ConsoleText    = invoke('GameServer/ConsoleText');
 const CharacterWriteQueue = invoke('GameServer/Persistence/CharacterWriteQueue');
+const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
 
 function levelUp(session, actor, nextLevel) {
     // Update stats
@@ -43,6 +44,8 @@ function levelUp(session, actor, nextLevel) {
             // members need the normal character refresh after a profession.
             session.dataSendToOthers?.(ServerResponse.charInfo(actor), actor);
             CharacterWriteQueue.vitals(id, actor.fetchHp(), actor.fetchMaxHp(), actor.fetchMp(), actor.fetchMaxMp());
+            // After the new skills: one post carries the level and the kit.
+            BotLifeState.notifyNearFacts(session, 'level');
         }
     })
 

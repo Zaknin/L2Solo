@@ -262,7 +262,7 @@ Config.coldHonestTravel = false;
             timestamp: t0 + 100, knowledgeEnabled: false });
         // N79 derives current OwnWorth from native usefulness/money price.
         // These original empty-bag inputs need no Stem, so a new ad is refused.
-        const nativeWorth = ctx.economy.itemUsefulness(STEM) / ctx.economy.network.moneyPrice;
+        const nativeWorth = ctx.economy.itemUsefulness(STEM) / ctx.economy.moneyPrice;
         assert.strictEqual(ctx.economy.worth(STEM), nativeWorth);
         assert.strictEqual(nativeWorth, 0, 'no native Stem use is manufactured from legacy metadata');
         assert.strictEqual(MarketPricing.bid(STEM, ctx, { units: 20, worth: 400, cap: 400, rollKey: ['b'] }), null,

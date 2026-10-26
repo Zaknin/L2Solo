@@ -4,6 +4,9 @@ const DataCache = invoke('GameServer/DataCache');
 const Database  = invoke('Database');
 const BotEconomyPricing = invoke('GameServer/Bot/Economy/BotEconomyPricing');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
+const World = invoke('GameServer/World/World');
+const PrivateStoreTrade = invoke('GameServer/PrivateStoreTrade');
 const storePurchaseQueues = new WeakMap();
 const actorPurchaseQueues = new WeakMap();
 // Runtime-only source identity: object spread preserves this symbol, JSON
@@ -304,7 +307,7 @@ function findAfkBuyerForActor(actor, town, state = null, options = {}) {
     seller.inventory = { ...LifeState.inventorySummaryFromItems(items),
         ...(seller.inventory['57'] ? { 57: seller.inventory['57'] } : {}) };
     const records = new Map();
-    const board = invoke('GameServer/Bot/Economy/MarketOpportunity').liveBuyBoard(town?.name, actor.fetchId());
+    const board = MarketOpportunity.liveBuyBoard(town?.name, actor.fetchId());
     for (const answer of ListingPolicy.evaluate(seller, { unlimited: true, now: options.now, board }).answers) {
         if (answer.line.town !== town?.name) continue;
         const record = records.get(answer.line.recordId) || { line: answer.line, score: 0, sale: {} };
@@ -370,10 +373,10 @@ async function buyFromStore(actor, store, selfId, qty, options = {}) {
     }
 
     const liveSeller = store.kind === 'player'
-        ? (invoke('GameServer/World/World').user?.sessions || []).find(session => Number(session.actor?.fetchId?.()) === Number(store.ownerId))
+        ? (World.user?.sessions || []).find(session => Number(session.actor?.fetchId?.()) === Number(store.ownerId))
         : null;
     return withTradeQueues(store, selfId, [actor, liveSeller?.actor], async () => {
-        if (store.kind === 'player') return invoke('GameServer/PrivateStoreTrade').buy(actor, liveSeller, store, selfId, qty, options);
+        if (store.kind === 'player') return PrivateStoreTrade.buy(actor, liveSeller, store, selfId, qty, options);
         store.activePurchases = Math.max(0, Number(store.activePurchases || 0)) + 1;
         try {
             if (store.repricing === true) {
@@ -454,10 +457,10 @@ async function sellToStore(actor, store, selfId, qty, options = {}) {
         throw new Error("This store is not buying items.");
     }
     const buyerActor = store.kind === 'player'
-        ? (invoke('GameServer/World/World').user?.sessions || []).find(session => Number(session.actor?.fetchId?.()) === Number(store.ownerId))?.actor
+        ? (World.user?.sessions || []).find(session => Number(session.actor?.fetchId?.()) === Number(store.ownerId))?.actor
         : store.budgetBacked === true ? options.buyerActor || null : null;
     return withTradeQueues(store, selfId, [actor, buyerActor], async () => {
-        if (store.kind === 'player') return invoke('GameServer/PrivateStoreTrade').sell(actor, buyerActor?.session, store, selfId, qty, options);
+        if (store.kind === 'player') return PrivateStoreTrade.sell(actor, buyerActor?.session, store, selfId, qty, options);
         store.activePurchases = Math.max(0, Number(store.activePurchases || 0)) + 1;
         try {
             if (store.repricing === true) {

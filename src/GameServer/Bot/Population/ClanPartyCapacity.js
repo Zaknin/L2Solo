@@ -14,7 +14,6 @@ function safeMembers(party, members) {
     return members.length > 0 && members.length === party.memberIds.length
         && members.every(member => party.memberIds.includes(member.characterId)
             && member.phase === 'cold' && member.party?.partyId === party.partyId
-            && String(member.simulation?.ownerId || 'legacy_main') === 'legacy_main'
             && ['hunting', 'grouped', 'resting', 'party_wait'].includes(member.activity)
             && !member.stats?.clanPartyObjective && !member.stats?.equipmentPlan?.clanGoal
             && !member.stats?.pvpEncounter && !member.stats?.partyMarketReturn
@@ -34,14 +33,14 @@ async function reclaim(objective, { parties, life, database, metrics }, now = Da
             Lifecycle.releaseMember(member, now, 'clan_priority')));
         if (!preparedParty || prepared.some(member => !member)) continue;
         const result = await database.commitBackgroundPartyMembership({ party: preparedParty.row, members: prepared,
-            review: true, preserveClanOperations: true, expectedPartyUpdatedAt: party.updatedAt,
+            review: true, preserveClanOperations: true, expectedPartyRevision: party.revision,
             event: { characterId: party.leaderId, eventType: 'party_capacity_reclaimed',
                 summary: 'Background party released capacity for a required clan hunt', weight: 1, createdAt: now,
                 meta: { partyId: party.partyId, clanId: objective.clanId, clanGoalKey: objective.clanGoalKey } } });
         // A worker claim or membership change wins over this stale decision.
         if (!result?.ok) continue;
         life.acceptPartyAssignments(prepared, result.lifeRows);
-        parties.acceptCommit(preparedParty);
+        parties.acceptRow(result.partyRow);
         metrics.recordPartyDissolution();
         return true;
     }

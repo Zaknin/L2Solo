@@ -72,11 +72,16 @@ async function run() {
     stub(Response, 'speak', (actor, data) => ({ ...data, id: actor.fetchId() }));
     stub(Clan, 'findById', id => ({ id, members: clanIds.map(id => ({ id })) }));
     stub(Life, 'statesByIds', async (ids, options) => {
-        reads++; assert(options.excludeReserved); assert.strictEqual(options.ownerId, 'legacy_main');
+        reads++; assert(options.excludeReserved);
         return rows.filter(row => ids.includes(row.characterId));
     });
     stub(Life, 'statesForParty', async id => rows.filter(row => row.party?.partyId === id));
     stub(Parties, 'active', () => parties);
+    // The leader read goes through the party index; here it filters the stubbed active().
+    stub(Parties, 'activeByLeaders', leaders => {
+        const ids = new Set([...leaders].map(Number));
+        return parties.filter(party => ids.has(Number(party.leaderId)));
+    });
     stub(Parties, 'find', id => parties.find(p => p.partyId === id));
     stub(Spots, 'findById', id => id ? { id, minLevel: id === 'danger' ? 40 : 15, maxLevel: 25 } : null);
     stub(Risk, 'backoffForStates', (members, spot) => members.some(m => m.stats.badSpot === spot));
@@ -150,14 +155,13 @@ async function run() {
     const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
     const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
     stub(Population, 'resolving', false); stub(Population, 'partyFormationRunning', false);
-    stub(Population, 'partyRequestCleanupRunning', false);
     stub(Config, 'enabled', true); stub(Config, 'backgroundPartyEnabled', true);
-    stub(Database, 'stats', () => ({ pending: 1 }));
+    stub(Database, 'pending', () => 1);
     stub(Coordinator, 'snapshot', () => ({ ready: true, snapshotsLoaded: true, queue: {} }));
     stub(Metrics, 'currentEventLoopLag', () => 0);
     Help.request(1, 11, now); await Population.helpClanParty(now);
     assert.strictEqual(reads, 0, 'player protection defers lookup while DB is busy');
-    Database.stats = () => ({ pending: 0 });
+    Database.pending = () => 0;
     stub(Help, 'processOne', async () => {
         assert(Population.partyFormationRunning, 'membership lock held throughout help transaction');
         throw new Error('commit probe');

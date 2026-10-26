@@ -6,6 +6,7 @@ const {createTrialWorld,H,Service,DataCache,withRandom,reloadActor,finishRoute,m
 const Profession=invoke('GameServer/SecondProfession');
 const NpcTalk=invoke('GameServer/World/Generics/NpcTalk');
 const Transfer=invoke('GameServer/World/Generics/NpcBypasses/SecondProfession');
+const Dialogue=require('./npcDialogueHarness');
 
 async function award(c,q,npc,mark,exp,sp,diamonds=0) {
     const before=await c.world.character(c.id),dd=await c.amount(7562);
@@ -107,6 +108,11 @@ async function magus(c,reverse=false) {
 }
 async function witchcraft(c,reverse=false) {
     await c.level(39);await c.click(229,'start',7630);await c.click(229,'handin',7098);
+    for(const npc of [7631,7632]) {
+        await Dialogue.talk(c.session,c.world,npc);
+        assert.match(c.world.page(c.session),/Ismell entered the Execution Grounds and never returned/);
+        assert.equal(c.cond(229),2,'the wardens give clues without consuming quest progress');
+    }
     await c.click(229,'handin',7110);
     for(const mob of [557,565,577])await c.kill(mob,21);
     await c.click(229,'handin',7110);await c.click(229,'handin',7476);

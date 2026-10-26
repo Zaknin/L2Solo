@@ -14,7 +14,6 @@ const Database = invoke('Database');
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const PartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
-const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 
 DataCache.init();
@@ -94,13 +93,6 @@ const originalCachedState = LifeState.cachedState;
     });
     assert(party, 'active orphan fixture party must persist');
 
-    const claim = await Owner.claim(LifeState.cachedState(memberIds[0]), {
-        allowParty: true,
-        allowLifecycle: true,
-        timestamp: Date.now()
-    });
-    assert.strictEqual(claim.ok, true, `fixture must include a cold-owned member: ${JSON.stringify(claim)}`);
-
     // Simulate the coordinator's actual orphan detector: the party is active,
     // but none of its declared members are present in the worker snapshot.
     LifeState.cachedState = () => null;
@@ -114,7 +106,7 @@ const originalCachedState = LifeState.cachedState;
     assert.strictEqual(persistedParty[0].status, 'dissolved');
 
     const persistedMembers = await Database.execute([
-        `SELECT partyId, activity, nextResolveAt, statsJson, simulationOwner, simulationRevision
+        `SELECT partyId, activity, nextResolveAt, statsJson
          FROM bot_life_state WHERE characterId IN (?, ?, ?) ORDER BY characterId`,
         memberIds
     ]);
@@ -126,9 +118,7 @@ const originalCachedState = LifeState.cachedState;
         assert(Number(member.nextResolveAt) > Date.now(), 'released member must receive a bounded solo due time');
         assert.strictEqual(stats.backgroundPartyId, null, 'runtime dissolve must clear backgroundPartyId');
         assert.strictEqual(stats.partyBreakReason, 'orphaned_dissolved_party');
-        assert.strictEqual(member.simulationOwner, 'legacy_main', 'cold-owned member must hand off before release');
     });
-    assert(Number(persistedMembers[0].simulationRevision) > 0, 'cold-owned member handoff must advance revision');
 
     console.log('Cold orphan party durable member release checks passed');
 })().catch((error) => {

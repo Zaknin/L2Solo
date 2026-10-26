@@ -32,6 +32,7 @@ const Resolver = invoke('GameServer/Bot/Population/BackgroundPartyResolver');
 const Background = invoke('GameServer/Bot/Population/BackgroundResolver');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Raid = invoke('GameServer/Bot/Population/ColdRaidEncounter');
 const Protocol = invoke('GameServer/Bot/Population/ColdSimulationProtocol');
 const at = Date.now();
@@ -43,7 +44,7 @@ const tables = ['characters', 'bot_life_state', 'items', 'skills', 'warehouse_it
     'bot_background_parties', 'bot_raid_encounters', 'character_death_experience'];
 const outcomes = [], observations = [];
 let party, ids, produced, expectedDuration, expectedDeadline;
-let grants = [], batch = null;
+let stages = 0, batch = null;
 
 function image() {
     const connection = new DatabaseSync(isolated.world, { readOnly: true });
@@ -121,10 +122,7 @@ async function seed(index, classId) {
 
 async function prepareBatch(deadlineOverride) {
     const members = ids.map(id => Life.cachedState(id));
-    const claims = await Owner.claimBatch(members, { allowParty: true, allowLifecycle: true });
-    grants = claims.grants;
-    assert.equal(grants.length, 7);
-    const stageId = `raid-deadline:${grants[0].leaseId}`;
+    const stageId = `raid-deadline:${++stages}`;
     const stage = await Raid.stage({ key: 'raid:10372', id: stageId, memberIds: ids }, () =>
         Resolver.resolve({ party, members, spot, targetNpcId: 10372, elapsedMs: 60000, timestamp: at }));
     const resolution = stage.result;
@@ -132,7 +130,7 @@ async function prepareBatch(deadlineOverride) {
     const nextParty = { ...party, ...resolution.partyPatch, stats: { ...party.stats, ...resolution.partyPatch.stats },
         nextResolveAt: deadlineOverride ?? resolution.nextResolveAt, updatedAt: Math.max(at, party.updatedAt + 1) };
     const atomicGroup = { id: stageId, memberIds: ids,
-        partyChanges: [{ partyId: party.partyId, memberIds: ids, expectedUpdatedAt: party.updatedAt,
+        partyChanges: [{ partyId: party.partyId, memberIds: ids, expectedPartyRevision: party.revision,
             updatedAt: nextParty.updatedAt, nextResolveAt: nextParty.nextResolveAt,
             statsJson: JSON.stringify(nextParty.stats), status: 'active' }],
         raidCommit: { key: 'raid:10372', expectedRevision: 0, revision: 1, snapshot: stage.snapshot } };
@@ -140,22 +138,15 @@ async function prepareBatch(deadlineOverride) {
         const nextState = await Life.prepareResolve(state, result,
             { persist: false, projectClassProgression: true, timestamp: at });
         if (deadlineOverride !== undefined) nextState.timing.nextResolveAt = deadlineOverride;
-        return { token: grants.find(grant => grant.characterId === state.characterId), nextState, atomicGroup,
-            options: { allowParty: true, allowLifecycle: true }, proposal: { baseState: state, result } };
+        return { revision: state.simulation.revision, nextState, atomicGroup,
+            options: { allowParty: true, allowLifecycle: true }, proposal: { ...InventorySummary.bagChange(state.inventory, nextState.inventory), result } };
     }));
     return { entries, stageId, resolution, before: image() };
 }
 
-async function releaseBatch() {
-    const beforeRelease = ids?.length && Database.isReady() ? image() : null;
-    const stageId = batch?.stageId || null;
-    const heldGrants = copy(grants);
+// A refused batch leaves no write to undo: only its raid stage is dropped.
+function abandonBatch() {
     if (batch) Raid.abort(batch.stageId);
-    const releases = grants.length ? await Owner.releaseBatch(grants) : [];
-    observations.push({ stage: 'explicit_authority_release', stageId, grants: heldGrants,
-        results: copy(releases), before: beforeRelease,
-        after: ids?.length && Database.isReady() ? image() : null });
-    grants = [];
     batch = null;
 }
 
@@ -175,9 +166,10 @@ async function main() {
         const state = Life.cachedState(id);
         return Life.preparePartyAssignment(state, prepared.row.partyId, Roles.inferRole(state.stats.classId), ids[0], at + 45000);
     });
-    assert.equal((await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok, true);
-    Life.acceptPartyAssignments(assigned);
-    party = Parties.acceptCommit(prepared);
+    const formed = await Database.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+    assert.equal(formed.ok, true);
+    Life.acceptPartyAssignments(assigned, formed.lifeRows);
+    party = Parties.acceptRow(formed.partyRow);
     const members = ids.map(id => Life.cachedState(id));
     const inputs = copy(members);
     const buffer = members[1];
@@ -216,17 +208,17 @@ async function main() {
     });
     await check('malformed outgoing party deadline still refuses with whole-image conservation', async () => {
         batch = await prepareBatch(at + expectedDuration);
-        const results = await Owner.commitAndReleaseBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
+        const results = await Owner.commitBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
         observations.push({ stage: 'malformed_group_refusal', results: copy(results),
             before: batch.before, after: image() });
         assert.equal(results.length, 7);
         assert(results.every(result => !result.ok));
         assert.deepEqual(image(), batch.before);
-        await releaseBatch();
+        abandonBatch();
     });
     await check('genuine BackgroundParty→Life→SQL batch and final ACK conserve physical state', async () => {
         batch = await prepareBatch();
-        const results = await Owner.commitAndReleaseBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
+        const results = await Owner.commitBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
         observations.push({ stage: 'actual_commit', results: copy(results), before: batch.before, after: image() });
         assert.equal(results.length, 7);
         assert(results.every(result => result.ok), JSON.stringify(results));
@@ -247,8 +239,6 @@ async function main() {
             assert.equal(row.exp, member.exp);
             assert.equal(row.sp, member.sp);
             assert.equal(row.adena, 1000);
-            assert.equal(row.simulationOwner, 'legacy_main');
-            assert.equal(row.simulationLeaseId, null);
             assert(Protocol.commandCheckpoint(Life.cachedState(member.characterId)), 'durable/cache checkpoint accepted');
         }
         assert.equal(after.tables.bot_background_parties[0].nextResolveAt, expectedDeadline);
@@ -262,10 +252,9 @@ async function main() {
         const completed = await Raid.stage({ key: 'raid:10372', id: 'after-final', memberIds: ids }, () => null);
         assert.equal(completed.result, null);
         Raid.abort('after-final');
-        const replay = await Owner.commitAndReleaseBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
+        const replay = await Owner.commitBatch(batch.entries, { timestamp: at, journalReason: 'raid' });
         assert(replay.every(result => !result.ok));
         assert.deepEqual(image(), after, 'replay pays no MP twice and grants no reward');
-        grants = [];
         batch = null;
     });
 }
@@ -274,7 +263,7 @@ main().catch(error => {
     outcomes.push({ name: 'fixture setup/native chain', status: 'FAIL', error: error.stack });
     console.error(error);
 }).finally(async () => {
-    await releaseBatch();
+    abandonBatch();
     Raid.resetForTests();
     await Database.close();
     assert.equal(History.stats().running, false, 'native history worker joined');

@@ -1,6 +1,7 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 
-process.env.L2NODE_PROGRESSION_RATE = 'x1';
+useRate('x1');
 
 delete process.env.L2NODE_SHARED_CONFIG_FILE;
 process.env.L2NODE_CONFIG_FILE = 'config/default.ini';

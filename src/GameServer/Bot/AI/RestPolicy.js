@@ -20,4 +20,15 @@ function needsRest(subject, hpRatio, mpRatio, options = {}) {
     return hpRatio < limits.hp || (mpRatio < limits.mp && restsForMana(subject, options.party === true));
 }
 
-module.exports = { THRESHOLDS, restsForMana, needsRest };
+function raidReady(subject, vitals = subject?.vitals || {}, paidCost = null) {
+    // A native cast pays immediately before effects, in the same callback.
+    // Admission requires the reserve before that one payment; this credits
+    // only the executor's actual debit for the guard, never its saved vitals.
+    const hp = Number(vitals.hp) + Math.max(0, Number(paidCost?.hp) || 0), maxHp = Number(vitals.maxHp);
+    const mp = Number(vitals.mp) + Math.max(0, Number(paidCost?.mp) || 0), maxMp = Number(vitals.maxMp);
+    if (!Number.isFinite(hp) || !Number.isFinite(maxHp) || maxHp <= 0) return false;
+    if (restsForMana(subject, true) && (!Number.isFinite(mp) || !Number.isFinite(maxMp) || maxMp <= 0)) return false;
+    return !needsRest(subject, hp / maxHp, mp / maxMp, { party: true, locked: true });
+}
+
+module.exports = { THRESHOLDS, restsForMana, needsRest, raidReady };

@@ -1,6 +1,5 @@
 const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
 const BotServiceIdentity = invoke('GameServer/Bot/AI/BotServiceIdentity');
-const PersonaPartyDecisionPolicy = invoke('GameServer/Bot/AI/PersonaPartyDecisionPolicy');
 const SpeckMath = invoke('GameServer/SpeckMath');
 const InteractionMemory = invoke('GameServer/Social/InteractionMemoryRuntime');
 const PlayerPartyRelationship = require('../../Social/PlayerPartyRelationship');
@@ -104,11 +103,11 @@ function emptyResult(playerSession, botSubject, options = {}) {
     };
 }
 
-// A bot refuses a player it distrusts (trust -6 or lower, the same line as a
-// hostile shared relation) or one that ended its party in the last minutes.
-function socialRefusal(memory, at) {
-    if (Number(memory?.trust || 0) <= -6) return 'relationship_hostile';
-    if (BotSocialMemory.recentlyAbandoned(memory, at)) return 'recently_abandoned';
+// Player invitations depend on the relationship, level gap and membership.
+// Persona, income, recovery and current solo activities belong to autonomous
+// decisions and never veto joining a player's party.
+function socialRefusal(memory) {
+    if (Number(memory?.trust || 0) <= -6 || Number(memory?.hostility || 0) >= 10) return 'relationship_hostile';
     return null;
 }
 
@@ -119,10 +118,7 @@ const BotAvailability = {
         const player = playerSession?.actor;
         const bot = botSession?.actor;
         const result = emptyResult(playerSession, botSession, options);
-        const timestamp = Number(options.timestamp ?? Date.now());
-
         if (!player || !bot) return result;
-        const refusal = options.forceFriend ? null : socialRefusal(result.memory, timestamp);
 
         result.distance = distance(actorLocation(player), actorLocation(bot));
         result.clanmate = sameClan(player, bot);
@@ -130,26 +126,15 @@ const BotAvailability = {
 
         let reason = 'available';
         if (staticService) reason = 'merchant_duty';
-        else if (botSession.hotBackgroundPartyId || botSession.hotCompetitionCommit) reason = 'already_grouped';
-        else if (result.clanmate) reason = 'available';
-        else if (!options.forceFriend && result.relationshipReason) reason = result.relationshipReason;
-        else if (player.isDead && player.isDead()) reason = 'player_dead';
-        else if (bot.isDead && bot.isDead()) reason = 'bot_dead';
-        else if (!options.forceFriend && botSession.plan === 'merchant') reason = 'merchant_duty';
-        else if (!options.forceFriend && botSession.partyCompanion === true && botSession.followPlayerSession) reason = 'already_grouped';
-        else if (refusal) reason = refusal;
-        else if (!options.forceFriend && Math.abs(bot.fetchLevel() - player.fetchLevel()) > MAX_LEVEL_GAP) reason = 'level_gap_too_large';
-
-        if (reason === 'available' && !result.clanmate && !options.forceFriend) {
-            result.partyDecision = PersonaPartyDecisionPolicy.evaluate(botSession, result.memory, { peer: playerSession });
-            if (!result.partyDecision.accept) {
-                reason = result.partyDecision.reason;
-            }
-        }
+        else if (options.constParty === true) reason = 'available';
+        else if (botSession.hotBackgroundPartyId || botSession.hotCompetitionCommit || botSession.coldLifeState?.party?.partyId
+            || botSession.partyCompanion || botSession.followPlayerSession) reason = 'already_grouped';
+        else if (result.relationshipReason) reason = result.relationshipReason;
+        else if (socialRefusal(result.memory)) reason = 'relationship_hostile';
+        else if (Math.abs(bot.fetchLevel() - player.fetchLevel()) > MAX_LEVEL_GAP) reason = 'level_gap_too_large';
         result.available = reason === 'available';
         result.reason = reason;
-        result.reasonText = result.partyDecision?.reason === reason
-            ? result.partyDecision.reasonText : reasonText(reason);
+        result.reasonText = reasonText(reason);
         return result;
     },
 
@@ -158,7 +143,6 @@ const BotAvailability = {
         const result = emptyResult(playerSession, state, options);
         const timestamp = Number(options.timestamp ?? Date.now());
         if (!player || !state) return result;
-        const refusal = options.forceFriend ? null : socialRefusal(result.memory, timestamp);
 
         // With honest travel a trip is no "busy" reason (design 5.9): the
         // traveller answers from where it is now on its road.
@@ -170,26 +154,15 @@ const BotAvailability = {
 
         let reason = 'available';
         if (staticService) reason = 'merchant_duty';
-        else if (result.clanmate) reason = 'available';
-        else if (!options.forceFriend && result.relationshipReason) reason = result.relationshipReason;
-        else if (!options.forceFriend && state.activity === 'traveling' && !traveller) reason = 'in_transit';
-        else if (!options.forceFriend && state.activity === 'pk_hunting') reason = 'pk_encounter_only';
-        else if (player.isDead && player.isDead()) reason = 'player_dead';
-        else if (state.activity === 'dead' || Number(state.vitals?.hp || 1) <= 0) reason = 'bot_dead';
-        else if (!options.forceFriend && (state.activity === 'merchant' || state.activity === 'crafting')) reason = 'merchant_duty';
-        else if (refusal) reason = refusal;
-        else if (!options.forceFriend && Math.abs(Number(state.level || 1) - player.fetchLevel()) > MAX_LEVEL_GAP) reason = 'level_gap_too_large';
-
-        if (reason === 'available' && !result.clanmate && !options.forceFriend) {
-            result.partyDecision = PersonaPartyDecisionPolicy.evaluate(state, result.memory, { peer: playerSession });
-            if (!result.partyDecision.accept) {
-                reason = result.partyDecision.reason;
-            }
-        }
+        else if (options.constParty === true) reason = 'available';
+        else if (state.party?.partyId || state.partyId || state.stats?.backgroundPartyId
+            || state.stats?.playerPartyTakeover?.playerId) reason = 'already_grouped';
+        else if (result.relationshipReason) reason = result.relationshipReason;
+        else if (socialRefusal(result.memory)) reason = 'relationship_hostile';
+        else if (Math.abs(Number(state.level || 1) - player.fetchLevel()) > MAX_LEVEL_GAP) reason = 'level_gap_too_large';
         result.available = reason === 'available';
         result.reason = reason;
-        result.reasonText = result.partyDecision?.reason === reason
-            ? result.partyDecision.reasonText : reasonText(reason);
+        result.reasonText = reasonText(reason);
         return result;
     },
 

@@ -3,10 +3,14 @@ const MIN_DEATH_RATE = 0.2;
 const RISK_WINDOW_VERSION = 2;
 const RISK_WINDOW_FIGHTS = 12;
 const MAX_LOW_WIN_RATE = 0.25;
-const BACKOFF_MS = 60 * 60 * 1000;
-const MAX_BACKOFF_MS = 6 * 60 * 60 * 1000;
+// Spot marks (died here, was full) live a number of the holder's own steps
+// (stats.stepCount: +1 per far step; a party's own rounds), not a clock.
+// Today's minutes as steps: a death mark 60, doubling per repeat up to 360;
+// "was full" 1 step after the step that wrote it.
+const BACKOFF_STEPS = 60;
+const MAX_BACKOFF_STEPS = 360;
 const MAX_BACKOFFS = 8;
-const CAPACITY_BACKOFF_MS = 60000;
+const CAPACITY_BACKOFF_STEPS = 1;
 const MAX_FAILED_HUNTS = 3;
 const FAILED_HUNT_RECOVERY_WINS = 3;
 
@@ -139,13 +143,52 @@ function recordRecovery(state, { deaths = 0, wins = 0, exp, expBeforeDeath, pres
     return recovery;
 }
 
-function activeBackoffs(state = {}, timestamp = Date.now()) {
+// The holder's step counter: a bot's far steps (BotLifeState.prepareResolve),
+// a party's rounds (PartySpotRiskPolicy.state passes them as stats.stepCount).
+function stepCount(state = {}) {
+    return Math.max(0, Number(state?.stats?.stepCount) || 0);
+}
+// A mark is active while its end lies ahead of its holder's counter. A saved
+// mark of the former clock (until, no untilStep) reads as expired.
+function markActive(entry, state = {}) {
+    return Number(entry?.untilStep) > stepCount(state);
+}
+
+// One-time migration of saved wall-clock marks (until, no untilStep), run
+// where a saved row becomes a state: the time left becomes steps of the
+// holder's counter, one step ~ the default one-minute resolve period; an
+// expired mark is dropped. No decision reads a clock.
+const MIGRATION_STEP_MS = 60000;
+function clockMark(entry) {
+    return !!entry && entry.until !== undefined && entry.untilStep === undefined;
+}
+function markInSteps(entry, counter, now) {
+    if (!clockMark(entry)) return entry;
+    const left = Math.ceil(Math.max(0, Number(entry.until) - now) / MIGRATION_STEP_MS);
+    if (!(left > 0)) return null;
+    const next = { ...entry, untilStep: counter + left };
+    delete next.until;
+    return next;
+}
+function marksInSteps(stats, now = Date.now(), counter = stepCount({ stats })) {
+    if (!stats || typeof stats !== 'object') return stats;
+    for (const key of ['spotBackoffs', 'capacityBackoffs', 'clanHuntBackoffs']) {
+        if (Array.isArray(stats[key]) && stats[key].some(clockMark)) {
+            stats[key] = stats[key].map(entry => markInSteps(entry, counter, now)).filter(Boolean);
+        }
+    }
+    const avoid = stats.coldCompetition?.avoid;
+    if (clockMark(avoid)) stats.coldCompetition = { ...stats.coldCompetition, avoid: markInSteps(avoid, counter, now) };
+    return stats;
+}
+
+function activeBackoffs(state = {}) {
     return (Array.isArray(state.stats?.spotBackoffs) ? state.stats.spotBackoffs : [])
-        .filter((entry) => normalizedSpotId(entry?.spotId) && Number(entry.until || 0) > timestamp)
+        .filter((entry) => normalizedSpotId(entry?.spotId) && markActive(entry, state))
         .map((entry) => ({
             ...entry,
             spotId: normalizedSpotId(entry.spotId),
-            until: Number(entry.until)
+            untilStep: Number(entry.untilStep)
         }));
 }
 
@@ -153,9 +196,9 @@ function backoffForStates(states = [], spotId, timestamp = Date.now()) {
     const expectedSpotId = normalizedSpotId(spotId);
     if (!expectedSpotId) return null;
 
-    const stored = (states || []).flatMap((state) => activeBackoffs(state, timestamp))
+    const stored = (states || []).flatMap((state) => activeBackoffs(state))
         .filter((entry) => entry.spotId === expectedSpotId)
-        .sort((left, right) => Number(right.until) - Number(left.until))[0];
+        .sort((left, right) => right.untilStep - left.untilStep)[0];
     if (stored) return stored;
 
     const pressures = (states || [])
@@ -168,30 +211,38 @@ function backoffForStates(states = [], spotId, timestamp = Date.now()) {
         ...pressure,
         reason: pressure.reason || 'death_pressure',
         startedAt: timestamp,
-        until: timestamp + BACKOFF_MS
+        steps: BACKOFF_STEPS
     };
 }
 
-function excludedSpotIdsForStates(states = [], timestamp = Date.now()) {
+// Callers still pass a time as the second argument; marks no longer read it.
+function excludedSpotIdsForStates(states = []) {
     const excluded = new Set();
     (states || []).forEach((state) => {
-        activeBackoffs(state, timestamp).forEach((entry) => excluded.add(entry.spotId));
-        (state.stats?.capacityBackoffs || []).filter(entry => Number(entry.until) > timestamp)
+        activeBackoffs(state).forEach((entry) => excluded.add(entry.spotId));
+        (state.stats?.capacityBackoffs || []).filter(entry => markActive(entry, state))
             .forEach(entry => excluded.add(String(entry.spotId)));
         const avoid = state.stats?.coldCompetition?.avoid;
-        if (normalizedSpotId(avoid?.spotId) && Number(avoid.until) > timestamp) excluded.add(normalizedSpotId(avoid.spotId));
+        if (normalizedSpotId(avoid?.spotId) && markActive(avoid, state)) excluded.add(normalizedSpotId(avoid.spotId));
         const pressure = deathPressure(state);
         if (pressure) excluded.add(pressure.spotId);
     });
     return excluded;
 }
 
-function withCapacityBackoff(state, spotId, timestamp = Date.now()) {
+function withCapacityBackoff(state, spotId) {
+    // Each refusal renews the spots refused earlier in the same chain: with
+    // one hold between retries a bot can still pass up to MAX_BACKOFFS full
+    // spots, and congestion expires one backoff after the last refusal.
+    // The + 1 is the step being written: its own +1 at the soft point comes
+    // after this write, so the mark is still active at the next decision point.
+    const renewed = stepCount(state) + 1 + CAPACITY_BACKOFF_STEPS;
     const retained = (state.stats?.capacityBackoffs || [])
-        .filter(entry => entry.until > timestamp && String(entry.spotId) !== String(spotId));
+        .filter(entry => markActive(entry, state) && String(entry.spotId) !== String(spotId))
+        .map(entry => ({ spotId: entry.spotId, untilStep: Math.max(Number(entry.untilStep), renewed) }));
     return { ...state, stats: { ...state.stats,
         lastReason: 'route_capacity_full',
-        capacityBackoffs: [...retained, { spotId: String(spotId), until: timestamp + CAPACITY_BACKOFF_MS }]
+        capacityBackoffs: [...retained, { spotId: String(spotId), untilStep: renewed }]
             .slice(-MAX_BACKOFFS)
     } };
 }
@@ -203,29 +254,31 @@ function withBackoff(state = {}, backoff = null, timestamp = Date.now()) {
     const prior = (Array.isArray(state.stats?.spotBackoffs) ? state.stats.spotBackoffs : [])
         .filter((entry) => normalizedSpotId(entry?.spotId) === spotId)
         .sort((left, right) => Number(right.startedAt || 0) - Number(left.startedAt || 0))[0];
+    // startedAt names one episode (identity), it is never compared with a time.
     const continuing = prior
-        && Number(prior.until || 0) > timestamp
+        && markActive(prior, state)
         && Number(prior.startedAt || 0) === Number(backoff.startedAt || 0);
     const priorAttempts = prior ? Math.max(1, Number(prior.attempts || 1)) : 0;
     const attempts = continuing
         ? priorAttempts
         : Math.max(1, priorAttempts + 1);
-    const escalationMs = Math.min(MAX_BACKOFF_MS, BACKOFF_MS * (2 ** Math.min(3, attempts - 1)));
-    const retained = activeBackoffs(state, timestamp)
+    const escalationSteps = Math.min(MAX_BACKOFF_STEPS, BACKOFF_STEPS * (2 ** Math.min(3, attempts - 1)));
+    const retained = activeBackoffs(state)
         .filter((entry) => entry.spotId !== spotId);
+    // The receiver's own counter + its escalation: a mark copied from another
+    // holder (its untilStep, a new mark's steps) does not carry its end over.
     const next = {
         ...backoff,
         spotId,
         reason: backoff.reason || 'death_pressure',
         attempts,
         startedAt: Number(backoff.startedAt || timestamp),
-        until: Math.min(
-            timestamp + MAX_BACKOFF_MS,
-            Math.max(timestamp + escalationMs, Number(backoff.until || 0))
-        )
+        untilStep: stepCount(state) + escalationSteps
     };
+    delete next.until;
+    delete next.steps;
     const spotBackoffs = [...retained, next]
-        .sort((left, right) => Number(right.until) - Number(left.until))
+        .sort((left, right) => right.untilStep - left.untilStep)
         .slice(0, MAX_BACKOFFS);
     return {
         ...state,
@@ -242,10 +295,11 @@ module.exports = {
     RISK_WINDOW_VERSION,
     RISK_WINDOW_FIGHTS,
     MAX_LOW_WIN_RATE,
-    BACKOFF_MS,
-    MAX_BACKOFF_MS,
+    BACKOFF_STEPS,
+    MAX_BACKOFF_STEPS,
     MAX_BACKOFFS,
-    CAPACITY_BACKOFF_MS,
+    marksInSteps,
+    CAPACITY_BACKOFF_STEPS,
     MAX_FAILED_HUNTS,
     FAILED_HUNT_RECOVERY_WINS,
     withCapacityBackoff,
@@ -256,5 +310,7 @@ module.exports = {
     activeBackoffs,
     backoffForStates,
     excludedSpotIdsForStates,
+    stepCount,
+    markActive,
     withBackoff
 };

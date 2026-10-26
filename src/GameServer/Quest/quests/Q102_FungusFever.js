@@ -53,13 +53,19 @@ module.exports = {
           )
         : p("Alberius", "Only level 12 elves may help.");
     if (id === C && c === 1) {
-      await q.takeItem(s.session, L);
+      if (!(await q.takeItem(s.session, L)))
+        return p("Cobendell", "You do not have Alberius's Letter.");
       await q.giveItem(s.session, AM, 1);
       await s.set("cond", 2);
       s.playSound("ItemSound.quest_middle");
       return p("Cobendell", "Collect ten Dryad Tears.");
     }
     if (id === C && c === 3) {
+      if (n(s, T) < 10 || !n(s, AM))
+        return p(
+          "Cobendell",
+          "You do not have ten Dryad's Tears and the Evergreen Amulet.",
+        );
       await q.takeItem(s.session, T, -1);
       await q.takeItem(s.session, AM);
       for (const z of M) await q.giveItem(s.session, z, 1);
@@ -68,7 +74,8 @@ module.exports = {
       return p("Cobendell", "Deliver the medicines.");
     }
     if (id === A && c === 4) {
-      await q.takeItem(s.session, M[0]);
+      if (!(await q.takeItem(s.session, M[0])))
+        return p("Alberius", "You do not have Cobendell's Medicine.");
       await q.giveItem(s.session, LI, 1);
       await s.set("cond", 5);
       await s.set("medicines", 4);
@@ -89,7 +96,8 @@ module.exports = {
       return p("Elf", "Thank you for the medicine.");
     }
     if (id === A && c === 6) {
-      await q.takeItem(s.session, LI);
+      if (!(await q.takeItem(s.session, LI)))
+        return p("Alberius", "You do not have Alberius's List.");
       await q.giveItem(s.session, a.isSpellcaster?.() ? 744 : 743, 1);
       await q.giveItem(
         s.session,

@@ -2,6 +2,7 @@ const assert = require('assert');
 require('../src/Global');
 const Policy = invoke('GameServer/Bot/Population/ColdKarmaPolicy');
 const Spots = invoke('GameServer/Bot/AI/SpotService');
+const Risk = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const Routes = invoke('GameServer/Bot/AI/LevelingRoutes');
 const Resolver = invoke('GameServer/Bot/Population/BackgroundResolver');
 const Goals = invoke('GameServer/Bot/Goals/GoalExecutor');
@@ -68,11 +69,12 @@ try {
         'karma washing must leave a nearby field after repeated fights without wins');
     const backoff = rerouted.plannedState.stats.spotBackoffs.find(entry => entry.spotId === field.id);
     assert.strictEqual(backoff.reason, 'low_win_rate');
-    assert.strictEqual(backoff.until, 5000 + 60 * 60 * 1000);
+    assert.strictEqual(backoff.untilStep - Risk.stepCount(rerouted.plannedState), Risk.BACKOFF_STEPS,
+        'a first mark lives the bot\'s own steps');
     const enRoute = Policy.plan(rerouted.plannedState, [field, alternate], 6000);
     assert.deepStrictEqual(enRoute.plannedState.stats.travel, rerouted.plannedState.stats.travel,
         'an ongoing safe walk must keep its original arrival deadline');
-    assert.strictEqual(enRoute.plannedState.stats.spotBackoffs[0].until, backoff.until,
+    assert.strictEqual(enRoute.plannedState.stats.spotBackoffs[0].untilStep, backoff.untilStep,
         'planning during travel must not extend an existing backoff');
     const dying = { ...failed, stats: { ...failed.stats,
         spotRisk: { version: 2, spotId: field.id, windowFights: 5, windowWins: 0, windowDeaths: 2 } } };

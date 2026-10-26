@@ -1,10 +1,15 @@
+'use strict';
+
 const ItemTemplateIndex = require('./Item/ItemTemplateIndex');
 const validateSchema = require('jsonschema').validate;
 const ClassProgression = invoke('GameServer/ClassProgression');
 const RaidBossBalance = invoke('GameServer/RaidBoss/RaidBossBalance');
 
 const DataCache = {
-    init: () => {
+    // validate: false loads the same files without the schema check, which only warns:
+    // the cold worker re-reads the datapack the main thread checked at startup.
+    init: ({ validate = true } = {}) => {
+        const validateModel = (filepath) => loadModel(filepath, validate);
         const path = '../data/';
         // Generated NPC templates predate the source AI enum; merge the
         // source-backed profile before any NPC instance is spawned.
@@ -288,12 +293,24 @@ const DataCache = {
 
         invoke('GameServer/Npc/NpcSkills').prepareThreats(DataCache.npcs);
         invoke('GameServer/Items/ItemAcquisitionCatalog').prepare();
+        // Last step: spawn definitions borrow these rows instead of cloning
+        // them. The arrays stay open (ItemTemplateIndex and tests swap or
+        // append whole rows); strict-mode writers into a row now throw.
+        DataCache.npcs.forEach(deepFreeze);
+        DataCache.npcSpawns.forEach(deepFreeze);
         utils.infoSuccess('Datapack', 'cached');
     },
 
+    // The shared frozen row; callers that write take fetchNpcFromSelfId's copy.
+    npcRow(selfId) {
+        const row = ItemTemplateIndex.findStrict(DataCache.npcs, selfId);
+        if (!row) utils.infoWarn('Datapack', 'unknown Npc SelfId %d', selfId);
+        return row;
+    },
+
     fetchNpcFromSelfId(selfId, callback) {
-        const item = structuredClone(ItemTemplateIndex.findStrict(DataCache.npcs, selfId));
-        item ? callback(item) : utils.infoWarn('Datapack', 'unknown Npc SelfId %d', selfId);
+        const row = DataCache.npcRow(selfId);
+        if (row) callback(structuredClone(row));
     },
 
     fetchNpcRewardsFromSelfId(selfId, callback) {
@@ -317,6 +334,12 @@ const DataCache = {
     }
 };
 
+function deepFreeze(value) {
+    if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return;
+    Object.freeze(value);
+    for (const key of Object.keys(value)) deepFreeze(value[key]);
+}
+
 function applyNpcAiTypes(npcs, aiTypes) {
     return npcs.map((npc) => {
         const ai = npc.template?.ai ?? aiTypes?.[String(npc.selfId)];
@@ -328,9 +351,10 @@ function applyNpcAiTypes(npcs, aiTypes) {
     });
 }
 
-function validateModel(filepath) {
-    const path   = require('path').dirname(filepath);
+function loadModel(filepath, validate) {
     const model  = invoke(filepath);
+    if (!validate) return model;
+    const path   = require('path').dirname(filepath);
     const result = validateSchema(model, invoke(path + '/.schema'));
 
     if (!result.valid) {

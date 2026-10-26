@@ -25,8 +25,8 @@ parentPort.on('message',message=>{if(message.lose)parentPort.postMessage({trace:
     const until=async predicate=>{const deadline=Date.now()+10000;while(!messages.some(predicate)){if(error)throw error;if(Date.now()>deadline)throw Error('worker deadline');await new Promise(resolve=>setTimeout(resolve,10));}return messages.find(predicate);};
     const send=(type,payload,msgId)=>worker.postMessage(Protocol.envelope(type,epoch,payload,msgId));
     const entries=Array.from({length:100},(_,i)=>({state:{characterId:i+1,phase:'cold',activity:'hunting',inventory:{},stats:{},updatedAt:now,
-        simulation:{ownerId:'legacy_main',revision:1,leaseId:null,leaseUntil:0},
-        timing:{activityStartedAt:now,lastResolvedAt:now,nextResolveAt:now+3*INTERVAL_MS,lastHotAt:0}},context:{spot:{id:'safety-fixture'}}}));
+        simulation:{revision:1},
+        timing:{activityStartedAt:now,lastResolvedAt:now,nextResolveAt:now+3*INTERVAL_MS,lastHotAt:0}}}));
     const Transport=invoke('GameServer/Bot/Population/ColdSafetyTransport');
     const transport=new Transport({worker,epoch,post:(type,payload,msgId)=>{send(type,payload,msgId);return true;},
         isCurrent:()=>true,onTotals:(epoch,totals)=>Metrics.recordColdSafetyTotals(epoch,totals),now:()=>Date.now(),timeoutMs:10000});

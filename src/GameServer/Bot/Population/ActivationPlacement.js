@@ -39,14 +39,46 @@ function clearSurface(loc) {
     return center;
 }
 
+function raidSurface(loc) {
+    if (!finiteLocation(loc)) return null;
+    const z = Geo.getHeight(loc.locX, loc.locY, loc.locZ);
+    // C4 raid spawn Z can sit above the terrain. Ground only downward,
+    // within the raid's existing 500-unit floor tolerance; never onto a roof.
+    if (z > Number(loc.locZ) + 64 || Number(loc.locZ) - z > 500) return null;
+    return surface({ ...loc, locZ: z });
+}
+
 function resolve(state, options = {}) {
     const fixed = options.keepStoreLocation === true;
     const summoned = options.forceNearPlayer === true && !fixed;
-    const savedSpot = state?.spotId ? SpotService.findById(state.spotId) : null;
+    const savedSpot = state?.spotId ? SpotService.findById(state.spotId)
+        || (/^raid:\d+$/.test(state.spotId)
+            ? invoke('GameServer/RaidBoss/RaidBossSourceCatalog').findById(state.spotId) : null) : null;
     const source = fixed ? (options.storeLoc || state?.loc)
         : options.forceNearPlayer ? options.playerLoc
             : state?.loc || savedSpot?.center;
-    const anchor = surface(source);
+    let anchor = surface(source);
+    const raid = !fixed && !summoned && savedSpot?.raidBoss === true;
+    // A height-valid arrival can still be against a cliff or separated from
+    // the boss by a wall. Recover before sampling around that unusable anchor,
+    // rather than repeating the same isolated placement on every activation.
+    if (raid) {
+        const bossFloor = raidSurface(savedSpot.center);
+        if (!bossFloor) return null;
+        const reachable = point => point && SpotService.containsLocation(savedSpot, point) && connected(bossFloor, point);
+        anchor = anchor && clearSurface(anchor);
+        if (!reachable(anchor)) {
+            anchor = null;
+            for (const point of savedSpot.arrivalPoints || []) {
+                const grounded = raidSurface(point);
+                const rally = grounded && clearSurface(grounded);
+                if (reachable(rally)) {
+                    anchor = rally;
+                    break;
+                }
+            }
+        }
+    }
     if (!anchor) return null;
     const player = options.playerLoc;
     if (player && !finiteLocation(player)) return null;
@@ -56,7 +88,7 @@ function resolve(state, options = {}) {
             if (dist < (summoned ? 0 : Config.activationMinPlayerDistance) || dist > Config.activationRadius) return null;
         }
         const loc = clearSurface(point);
-        if (!loc || !connected(anchor, loc)) return null;
+        if (!loc || (raid && !SpotService.containsLocation(savedSpot, loc)) || !connected(anchor, loc)) return null;
         return { loc, spot: SpotService.findCurrentSpot(loc) || null };
     };
     if (fixed) {

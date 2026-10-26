@@ -85,6 +85,7 @@ function recordTrade(details = {}) {
         channel,
         sourceType: details.sourceType || channel,
         selfId,
+        enchant: Number.isSafeInteger(details.enchant) && details.enchant >= 0 ? details.enchant : null,
         itemName: details.itemName || `Item ${selfId || '?'}`,
         quantity,
         unitPrice,
@@ -93,6 +94,7 @@ function recordTrade(details = {}) {
         seller: party(details.sellerCharacterId, details.sellerName),
         buyer: party(details.buyerCharacterId, details.buyerName)
     };
+    if (channel === 'fixed_wts') require('./MarketCounters').supplyDeal(selfId, quantity, trade.town, trade.at, trade.enchant);
 
     if (Config.developerDiagnostics) {
     if (channel === 'static_wtb') boundedPush(recentStaticTrades, trade);
@@ -217,6 +219,7 @@ module.exports = {
             channel,
             sourceType: offer?.sourceType,
             selfId: offer?.selfId,
+            enchant: offer?.enchant,
             itemName: offer?.itemName,
             quantity: count,
             unitPrice: offer?.price,
@@ -251,6 +254,7 @@ module.exports = {
             channel: 'static_wtb',
             sourceType: 'static_buy_store',
             selfId: item.selfId,
+            enchant: item.enchant,
             itemName: item.name,
             quantity: item.count,
             unitPrice: item.npcPrice,
@@ -270,6 +274,7 @@ module.exports = {
             channel: 'wtb',
             sourceType: offer?.sourceType,
             selfId: offer?.selfId,
+            enchant: offer?.enchant,
             itemName: offer?.itemName,
             quantity: count,
             unitPrice: offer?.price,

@@ -18,7 +18,7 @@ const MarketListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy')
 // NPC (one rule for hot and cold bots, MarketListingPolicy.npcSaleForActor):
 // it keeps what its class uses (a D-grade dwarven recipe for the market,
 // materials for the warehouse, an enchant scroll, its healing stock
-// up to the restock target) and sells unreserved crystals, consumables no bot
+// up to the restock target), keeps grade crystals for the market and sells consumables no bot
 // uses (arrows, escape scrolls, keys, antidotes) and the potion surplus. A crafter learns a
 // recipe it can learn before the sale. A player's junk sale is unchanged.
 const D_RECIPE = 3032;
@@ -136,7 +136,7 @@ async function run() {
         // Step 3.2 (H12 narrowed): the Scrolls of Escape a bot reads for town
         // trips are kept up to their restock target (ten since 71ff0f77); the
         // surplus is sold. A no-grade recipe is a market item since b6eac2ed.
-        [[D_RECIPE, 1], [ANIMAL_BONE, 5], [HEALING_POTION, keep], [MATERIAL_RECIPE, 1],
+        [[D_RECIPE, 1], [CRYSTAL_D, 40], [ANIMAL_BONE, 5], [HEALING_POTION, keep], [MATERIAL_RECIPE, 1],
             [ESCAPE_SCROLL, ScrollStock.TARGET_AMOUNT], [ENCHANT_ARMOR_D, 1]],
         'a hot bot keeps what its class uses and sells what no bot uses, as when cold');
 

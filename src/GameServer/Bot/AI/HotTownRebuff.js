@@ -21,11 +21,37 @@ function distance2d(first, second) {
     );
 }
 
+// Whether the guide stands within the town radius of the point (an actor or
+// a plain location): the one guide-town rule.
+function guideInReach(point, guide) {
+    return !!guide && distance2d(pointOf(point), guide) <= GUIDE_TOWN_RADIUS;
+}
+
+// The closest newbie guide when it is in reach of the point, else null.
+function nearGuide(point, BotAI) {
+    const at = pointOf(point);
+    const guide = BotAI?.getClosestNewbieGuide?.(at.locX, at.locY);
+    return guideInReach(at, guide) ? guide : null;
+}
+
+// The guide a newbie-guide trip may head to from the actor, else null: the one
+// rule every trip entry and the trip itself read. A guide beyond its town
+// radius has no town path, and an abandoned trip waits for its retry time.
+function tripGuide(session, actor, BotAI) {
+    return Number(session?.newbieGuideRetryAt || 0) > Date.now() ? null : nearGuide(actor, BotAI);
+}
+
+// The guide a low-HP/MP bot may recover at: the trip rule, for levels the
+// guide still serves.
+function recoveryGuide(session, bot, BotAI) {
+    return bot.fetchLevel() <= BotBuffs.NEWBIE_GUIDE_MAX_LEVEL ? tripGuide(session, bot, BotAI) : null;
+}
+
 function currentVisit(actor, BotAI) {
     if (!BotBuffs.isNewbieEligible(actor)) return null;
     const point = pointOf(actor);
-    const guide = BotAI?.getClosestNewbieGuide?.(point.locX, point.locY);
-    if (!guide || distance2d(point, guide) > GUIDE_TOWN_RADIUS) return null;
+    const guide = nearGuide(point, BotAI);
+    if (!guide) return null;
 
     const town = TownRespawn.getClosestTown(point.locX, point.locY, point.locZ);
     const insideTown = TownPathfinder.isInsideTown(point)
@@ -63,7 +89,11 @@ module.exports = {
     GUIDE_TOWN_RADIUS,
     TOWN_CENTER_RADIUS,
     currentVisit,
+    guideInReach,
     markCompleted,
+    nearGuide,
     needsVisit,
-    syncVisit
+    recoveryGuide,
+    syncVisit,
+    tripGuide
 };

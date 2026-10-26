@@ -4,6 +4,7 @@ require('../src/Global');
 
 const Attack = invoke('GameServer/Actor/Attack');
 const World = invoke('GameServer/World/World');
+const { insertSession, registerSessions } = require('./helpers/worldSessions');
 
 function actor(id, x = 0, y = 0) {
     return {
@@ -31,7 +32,7 @@ try {
         partyCompanion: true,
         followPlayerSession: leaderSession
     };
-    World.user = { sessions: [leaderSession, casterSession, companionSession] };
+    registerSessions([leaderSession, casterSession, companionSession]);
 
     const partyBuff = {
         fetchTargetKind: () => 'party',
@@ -41,7 +42,7 @@ try {
     assert.deepStrictEqual(targets.map((target) => target.fetchId()), [1, 2, 3], 'a party buff should fan out to every active companion-party member');
 
     const newMember = actor(4, 500);
-    World.user.sessions.push({
+    insertSession({
         actor: newMember,
         partyCompanion: true,
         followPlayerSession: leaderSession
@@ -50,7 +51,7 @@ try {
     assert.deepStrictEqual(updatedTargets.map((target) => target.fetchId()), [1, 2, 3, 4], 'a party buff should include a member added after the party was formed');
 
     const distantMember = actor(5, 1001);
-    World.user.sessions.push({
+    insertSession({
         actor: distantMember,
         partyCompanion: true,
         followPlayerSession: leaderSession

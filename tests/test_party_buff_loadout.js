@@ -7,6 +7,7 @@ const Stats=invoke('GameServer/Effects/EffectStats');
 const Rules=invoke('GameServer/Skills/C4SkillRules');
 const Ticker=invoke('GameServer/Effects/EffectTicker');
 const World=invoke('GameServer/World/World');
+const {registerSessions}=require('./helpers/worldSessions');
 const Bots=invoke('GameServer/Bot/BotManager');
 const originalRefresh=Ticker.refreshEffects;
 Ticker.refreshEffects=()=>{};
@@ -37,7 +38,7 @@ try {
         dwarf=member(57,[],true),dancer=member(34,[271,272,273,274,275,276,277,309].map(id=>skill(id)));
     const rows=[leader,healer,prophet,tank,singer,orc,dwarf,dancer];leader.leader=true;
     rows.slice(1).forEach(r=>Object.assign(r.session,{partyCompanion:true,followPlayerSession:leader.session}));
-    World.user={sessions:rows.map(r=>r.session)};Bots.sessions=rows.slice(1).map(r=>r.session);
+    registerSessions(rows.map(r=>r.session));Bots.sessions=rows.slice(1).map(r=>r.session);
     const providers=rows.map(r=>r.actor),context={fire:true,poison:true};
     let selected=Planner.desiredLoadout(rows,providers,context);
     for(const row of rows) {
@@ -173,7 +174,7 @@ try {
     };
     try {
         Date.now=()=>musicNow;
-        World.user={sessions:musicRows.map(r=>r.session)};Bots.sessions=musicRows.slice(1).map(r=>r.session);
+        registerSessions(musicRows.map(r=>r.session));Bots.sessions=musicRows.slice(1).map(r=>r.session);
         const initial=Planner.desiredLoadout(musicRows,musicProviders,{});
         for(const provider of [musicSinger.actor,musicDancer.actor]) {
             const musicSkill=provider.skillset.fetchSkills()[0];

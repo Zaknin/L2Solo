@@ -4,6 +4,7 @@ require('./helpers/databaseIsolation');
 delete process.env.L2NODE_SHARED_CONFIG_FILE;
 process.env.L2NODE_CONFIG_FILE = 'config/default.ini';
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 const path = require('node:path'), { Worker } = require('node:worker_threads');
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
@@ -60,7 +61,7 @@ parentPort.on('message', message => {
 });`;
 (async () => {
     const epoch = 'native:personal-shots', messages = []; let fault;
-    const worker = new Worker(wrapper, { eval: true, workerData: { workerEpoch: epoch, observer,
+    const worker = new Worker(wrapper, { eval: true, workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: epoch, observer,
         workerPath: path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js') } });
     worker.on('message', message => messages.push(message)); worker.on('error', error => { fault = error; });
     const wait = async predicate => { const deadline = Date.now() + 60000;
@@ -84,7 +85,7 @@ parentPort.on('message', message => {
         await wait(message => message.type === 'ready' && message.payload.phase === 'running'); send('pause', {}, 'pause');
         send('table_page', { tables: [{ name: 'board', from: null, to: 0, full: true,
             rows: [], removed: [], last: true }] });
-        send('snapshot_page', { rows: [{ state, context: {} }], ack: true }, 'state');
+        send('snapshot_page', { rows: [{ state }], ack: true }, 'state');
         await wait(message => message.type === 'ready' && message.msgId === 'state');
         worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, 'probe'), personalShotProbe: id });
         const response = await wait(message => message.probeId === 'probe'); if (response.error) throw Error(response.error);

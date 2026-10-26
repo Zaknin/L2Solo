@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS characters (
     karma INTEGER NOT NULL DEFAULT 0,
     evalScore INTEGER NOT NULL DEFAULT 0,
     recRemain INTEGER NOT NULL DEFAULT 0,
+    recDay INTEGER NOT NULL DEFAULT -1,
+    recSpent INTEGER NOT NULL DEFAULT 0,
+    recRevision INTEGER NOT NULL DEFAULT 0,
     clanId INTEGER NOT NULL DEFAULT 0,
     clanPrivileges INTEGER NOT NULL DEFAULT 0,
     clanJoinExpiryTime INTEGER NOT NULL DEFAULT 0,
@@ -72,6 +75,8 @@ CREATE TABLE IF NOT EXISTS characters (
 CREATE INDEX IF NOT EXISTS characters_username ON characters(username);
 CREATE INDEX IF NOT EXISTS characters_clanId ON characters(clanId);
 CREATE INDEX IF NOT EXISTS characters_clan_level_id ON characters(clanId, level DESC, id ASC);
+-- The observer lists the persisted PKs on every world poll: only these rows are indexed.
+CREATE INDEX IF NOT EXISTS characters_karma_positive ON characters(karma) WHERE karma > 0;
 
 CREATE TABLE IF NOT EXISTS character_death_experience (
     characterId INTEGER PRIMARY KEY REFERENCES characters(id) ON DELETE CASCADE,
@@ -457,10 +462,7 @@ CREATE TABLE IF NOT EXISTS bot_life_state (
     inventorySummary TEXT,
     statsJson TEXT,
     updatedAt INTEGER NOT NULL DEFAULT 0,
-    simulationOwner TEXT NOT NULL DEFAULT 'legacy_main',
     simulationRevision INTEGER NOT NULL DEFAULT 0,
-    simulationLeaseId TEXT,
-    simulationLeaseUntil INTEGER NOT NULL DEFAULT 0,
     partyRequestStatus TEXT GENERATED ALWAYS AS (
         json_extract(statsJson, '$.partyRequest.status')
     ) VIRTUAL,
@@ -661,7 +663,8 @@ CREATE TABLE IF NOT EXISTS bot_background_parties (
     status TEXT NOT NULL DEFAULT 'active',
     roleCoverageJson TEXT,
     statsJson TEXT,
-    updatedAt INTEGER NOT NULL DEFAULT 0
+    updatedAt INTEGER NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS bot_background_parties_status_nextResolveAt ON bot_background_parties(status, nextResolveAt);
 CREATE INDEX IF NOT EXISTS bot_background_parties_status_updatedAt ON bot_background_parties(status, updatedAt);

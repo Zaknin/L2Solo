@@ -27,17 +27,34 @@ function skillAdapter(record) {
     };
 }
 
-function select(provider, recipient, timestamp = Date.now()) {
+// The gates of one sale: both bots trade here and the recipient's purchase
+// cooldown is over.
+function canServe(provider, recipient, timestamp) {
     if (!available(provider) || !available(recipient) || provider.spotId !== recipient.spotId
-        || provider.characterId === recipient.characterId || !Policy.serviceClass(provider)) return null;
-    if (timestamp - Number(recipient.stats?.lastBuffServicePurchase?.at || 0) < BUYER_COOLDOWN_MS) return null;
+        || provider.characterId === recipient.characterId || !Policy.serviceClass(provider)) return false;
+    if (timestamp - Number(recipient.stats?.lastBuffServicePurchase?.at || 0) < BUYER_COOLDOWN_MS) return false;
+    return true;
+}
+
+// The provider's sellable buffs depend only on the provider: one project
+// builds them once for all its recipients.
+function providerSkills(provider, timestamp) {
+    return (Profile.profileFor(provider, timestamp).skills || [])
+        .filter(record => !record.passive)
+        .map(skillAdapter)
+        .filter(Policy.eligibleSkill);
+}
+
+function select(provider, recipient, timestamp = Date.now()) {
+    if (!canServe(provider, recipient, timestamp)) return null;
+    return choose(provider, recipient, timestamp, providerSkills(provider, timestamp));
+}
+
+function choose(provider, recipient, timestamp, skills) {
     const active = (recipient.stats?.coldCombat?.effects || [])
         .filter(effect => Number(effect.expiresAt || 0) > timestamp + Policy.REFRESH_MS);
     const byFamily = new Map();
-    (Profile.profileFor(provider, timestamp).skills || [])
-        .filter(record => !record.passive)
-        .map(skillAdapter)
-        .filter(Policy.eligibleSkill)
+    skills
         .filter(skill => Loadout.useful(recipient, skill))
         .forEach(skill => {
             const semantic = skill.fetchSemantic();
@@ -76,13 +93,16 @@ function project(provider, recipients, timestamp = Date.now()) {
     if (!available(provider) || !Policy.serviceClass(provider)
         || timestamp - Number(provider.stats?.lastBuffService?.at || 0) < BUYER_COOLDOWN_MS) return null;
     let inspected = 0;
+    let skills = null;
     const iterator = recipients[Symbol.iterator]();
     while (inspected++ < MAX_RECIPIENTS) {
         const next = iterator.next();
         if (next.done) break;
         const entry = next.value;
         const recipient = Array.isArray(entry) ? entry[1] : entry;
-        const choice = select(provider, recipient, timestamp);
+        if (!canServe(provider, recipient, timestamp)) continue;
+        skills ||= providerSkills(provider, timestamp);
+        const choice = choose(provider, recipient, timestamp, skills);
         if (!choice) continue;
         // ARCH-NOTE: Full effect objects exceed 0.5 KB. Native id/rank tuples
         // restore the identical static effects on main without a combat review.

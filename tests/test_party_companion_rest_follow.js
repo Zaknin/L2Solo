@@ -396,6 +396,20 @@ function learnSkill(actor, data) {
 // its actor or the party group. Registration makes no SQL writes or starts World tickers.
 const publishedSessions = new Set();
 let fixtureUsers;
+// The decision the background thread takes for a near body on its post
+// (DecisionEvents.nearFields over the body's economy build), received as the
+// coordinator receives it.
+function deliverNearDecision(session) {
+    const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
+    const Decisions = invoke('GameServer/Bot/Population/ColdEconomyDecision');
+    const Events = invoke('GameServer/Bot/AI/DecisionEvents');
+    const posted = Economy.stateForActor(session.actor, session);
+    const economy = Economy.forState(posted);
+    const state = { ...posted, stats: { ...posted.stats, ...economy.statsPacket } };
+    Events.receive(session, Decisions.compact(Decisions.capture(economy, state)),
+        { ...Events.nearFields(economy, state), nearSeq: Number(session.heldNearSeq || 0) + 1, raiseSeq: 0 });
+}
+
 function publishSessions(sessions) {
     if (!fixtureUsers) { fixtureUsers = { sessions: [], revision: 0 }; World.user = fixtureUsers; }
     for (const session of [...publishedSessions]) {
@@ -537,7 +551,8 @@ try {
                     });
                     let melee = 0;
                     FollowingState.tick(member,member.actor,generics,{...ai,executeCombat(){melee++;}});
-                    assert.strictEqual(melee,1,'Warcryer with a physical weapon retains its melee defense');
+                    assert.strictEqual(melee,0,'Warcryer must remain a casting party support even with a physical weapon');
+                    assert.strictEqual(member.roleDecision.action,'retreat','a casting buffer must defend without chasing into melee');
                 }
                 if (classId===30 || classId===43) {
                     member.actor.hp = 30;
@@ -983,15 +998,13 @@ try {
         const nativeAnswerSession = fakeSession('bot_native_party_answer', nativeAnswerBot);
         const nativeDeclineBot = fakeActor(2000046, { locX: 70, locY: 0 });
         const nativeDeclineSession = fakeSession('bot_native_party_decline', nativeDeclineBot);
-        // This test exercises the accepted invite lifecycle. Make the
-        // persona choice explicit now that ordinary invites are persona-aware.
-        const socialPersona = {
-            primaryDrive: 'social',
-            archetype: 'party_regular',
-            traits: { sociability: 0.82, empathy: 0.66, commitment: 0.66 }
+        // Ordinary player invites remain eligible even for solitary bots.
+        const solitaryPersona = {
+            primaryDrive: 'wealth',
+            traits: { sociability: 0, empathy: 0, commitment: 0 }
         };
-        inviteBotSession.persona = socialPersona;
-        nativeAnswerSession.persona = socialPersona;
+        inviteBotSession.persona = solitaryPersona;
+        nativeAnswerSession.persona = solitaryPersona;
         const MemoryPolicy = require('../src/GameServer/Social/InteractionMemoryPolicy');
         for (const member of [inviteBotSession, nativeAnswerSession, nativeDeclineSession]) {
             invoke('GameServer/Social/InteractionMemoryRuntime').accept(MemoryPolicy.empty(Number(member.actor.fetchId())));
@@ -1033,7 +1046,7 @@ try {
         BotSocialMemory.recordEvent = originalSocialRecordEvent;
         PartyCompanionService.bringToLeader = originalBringToLeader;
     }
-    assert.strictEqual(inviteTell, 'Gladly. A steady party is better than going alone.', 'an accepted persona-aware invite should acknowledge the party without promising another rest');
+    assert.strictEqual(inviteTell, "I'm with you. Lead the way.", 'an accepted invite should acknowledge the party without promising another rest');
     assert.strictEqual(inviteBotSession.plan, 'following', 'attaching a resting bot should resume party follow after instant recovery');
     inviteBot.level = 17;
     inviteBot.hp = 40;
@@ -1820,7 +1833,22 @@ try {
         executeCombat(_session, _bot, _npc, _generics, options) { healerAssistOptions = options; },
         executePvPCombat() {}
     });
-    assert.strictEqual(healerAssistOptions?.basicAttackOnly, true, 'a healer with a melee weapon may assist using only a basic attack');
+    assert.strictEqual(healerAssistOptions, null, 'a healer must hold the support line even with a melee weapon');
+
+    for (const classId of [17, 49, 50, 51, 52, 97, 98, 115, 116, 21, 34, 100, 107]) {
+        const member = fakeActor(2000800 + classId, { locX: 700, classId });
+        member.backpack.fetchEquippedWeapon = () => ({ fetchKind: () => 'Weapon.Sword', fetchName: () => 'Orcish Sword' });
+        const memberSession = fakeSession(`bot_support_class_${classId}`, member);
+        Object.assign(memberSession, { followPlayerSession: healerLeaderSession, partyCompanion: true, plan: 'following' });
+        publishSessions([healerLeaderSession, memberSession]);
+        let attacks = 0;
+        FollowingState.tick(memberSession, member, {}, {
+            say() {}, executeCombat() { attacks++; }, executePvPCombat() {}
+        });
+        assert.strictEqual(attacks, BotRoles.isPartyMusicFighter(member) ? 1 : 0,
+            `class ${classId}: only music fighters may chase the party's melee target`);
+    }
+    publishSessions([healerLeaderSession, healerAssistSession]);
 
     learnSkill(healerAssistBot, { selfId: 1011, name: 'Heal', spell: true, mp: 15 });
     healerLeader.hp = 30;
@@ -2221,16 +2249,41 @@ try {
     });
     assert.strictEqual(autoPullSkillCast, false, 'a mob already attacking its tank must not be taunted again');
     assert.strictEqual(engagedPulledTarget, autoPullTarget, 'the tank should fight the mob it already pulled');
+    // In resurrection reach, as in production (the fallen companion is a bot
+    // session too): the tank revives it with a scroll instead of pulling.
     const fallenAutoPullMember = fakeActor(2000098, { locX: 60, locY: 0 });
     fallenAutoPullMember.state.dead = true;
     const fallenAutoPullSession = fakeSession('bot_auto_pull_fallen_member', fallenAutoPullMember);
     fallenAutoPullSession.followPlayerSession = healerLeaderSession;
     fallenAutoPullSession.partyCompanion = true;
     fallenAutoPullSession.plan = 'following';
+    BotManager.sessions = [autoPullTankSession, fallenAutoPullSession];
     autoPullTargetId = undefined;
     PartyAwareness.invalidateThreatProjection(healerLeaderSession);
     autoPullTankSession.currentTargetId = undefined;
     autoPullTank.unselect();
+    publishSessions([healerLeaderSession, autoPullTankSession, fallenAutoPullSession]);
+    let scrollTargetId = null;
+    autoPullTank.automation.scheduleAction = (_session, _actor, target) => { scrollTargetId = target.fetchId(); };
+    let revivingPullCombat = false;
+    FollowingState.tick(autoPullTankSession, autoPullTank, {
+        skillExec() { revivingPullCombat = true; }
+    }, {
+        say() {},
+        executeCombat() { revivingPullCombat = true; },
+        executePvPCombat() {}
+    });
+    assert.strictEqual(revivingPullCombat, false, 'a tank reviving a party member must not pull');
+    assert.strictEqual(scrollTargetId, fallenAutoPullMember.fetchId(), 'the tank casts a resurrection scroll on the fallen member in reach');
+    assert.strictEqual(healerLeaderSession.partyRevivalAttempt?.providerId, autoPullTank.fetchId());
+    assert.strictEqual(healerLeaderSession.partyRevivalAttempt?.source, 'scroll');
+    delete autoPullTank.automation.scheduleAction;
+    healerLeaderSession.partyRevivalAttempt = null;
+    autoPullTank.unselect();
+    autoPullTankSession.currentTargetId = undefined;
+
+    // Out of resurrection reach: no one can revive it this tick, so the pull rule decides.
+    fallenAutoPullMember.locX = 5000;
     publishSessions([healerLeaderSession, autoPullTankSession, fallenAutoPullSession]);
     let blockedAutoPullCombat = false;
     FollowingState.tick(autoPullTankSession, autoPullTank, {
@@ -2337,6 +2390,20 @@ try {
     assert.strictEqual(recoverySession.plan, 'getting_buffed', 'a low-level companion already in a Newbie Guide town should recover there instead of sitting');
     assert.strictEqual(recoverySession.roleDecision.reason, 'newbie_guide_recovery', 'Newbie Guide recovery should be visible in bot status');
 
+    // An abandoned guide trip waits for its retry time: the companion sits instead.
+    const retryRecoveryBot = fakeActor(2000077, { locX: -84001, locY: 243227, locZ: -3723, level: 20, hp: 20, maxHp: 100, mp: 100, maxMp: 100 });
+    const retryRecoverySession = fakeSession('bot_newbie_retry_recovery_party', retryRecoveryBot);
+    retryRecoverySession.followPlayerSession = recoveryLeaderSession;
+    retryRecoverySession.partyCompanion = true;
+    retryRecoverySession.plan = 'following';
+    retryRecoverySession.newbieGuideRetryAt = Date.now() + 60000;
+    publishSessions([recoveryLeaderSession, retryRecoverySession]);
+    FollowingState.tick(retryRecoverySession, retryRecoveryBot, {}, {
+        getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
+        say() {}, executeCombat() {}, executePvPCombat() {}
+    });
+    assert.strictEqual(retryRecoverySession.plan, 'resting', 'a companion whose guide route waits for its retry time should rest instead of retrying the trip');
+
     const fieldRecoveryBot = fakeActor(2000045, { locX: 0, locY: 0, level: 20, hp: 20, maxHp: 100, mp: 100, maxMp: 100 });
     const fieldRecoverySession = fakeSession('bot_field_recovery_party', fieldRecoveryBot);
     fieldRecoverySession.followPlayerSession = fieldRefreshLeaderSession;
@@ -2368,6 +2435,7 @@ try {
     // Original unfunded setup: retaining the rank-only weapon and no Adena
     // must neither create an errand nor manufacture inventory/money.
     publishSessions([errandLeaderSession, zeroWalletErrandSession, fakeSession('bot_shot_seller', shotSeller)]);
+    deliverNearDecision(zeroWalletErrandSession);
     FollowingState.tick(zeroWalletErrandSession, zeroWalletErrandBot, {}, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         getClosestTown: () => ({ name: 'Giran', x: 83396, y: 147904, z: -3404 }),
@@ -2386,7 +2454,7 @@ try {
     errandSession.lastCompanionEquipmentCheckAt = Date.now();
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
     publishSessions([errandLeaderSession, errandSession, fakeSession('bot_shot_seller', shotSeller)]);
-    assert(Economy.forActor(errandBot, errandSession).stock('shots').usePerHour > 0,
+    assert(Economy.basics(Economy.stateForActor(errandBot, errandSession)).stock('shots').usePerHour > 0,
         'the equipped zero-wallet control must have positive native shot use');
     FollowingState.tick(errandSession, errandBot, {}, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
@@ -2418,7 +2486,7 @@ try {
     assert.strictEqual(physicalShotQuote.price,
         Pricing.sellersOf(authoredShotInputs.shotId).find(row => row.sourceName === 'Squeesh' && row.town === 'Giran').price,
         'the scene quote must equal the independently authored static merchant price');
-    assert.strictEqual(Economy.forActor(errandBot, errandSession).stock('shots').usePerHour, authoredShotInputs.shotUse,
+    assert.strictEqual(Economy.basics(Economy.stateForActor(errandBot, errandSession)).stock('shots').usePerHour, authoredShotInputs.shotUse,
         'the native economic output must agree with the independently funded input');
 
     const assertFundedStockKitUnchanged = recordPhysicalKit(errandBot, errandSession.accountId);
@@ -2429,6 +2497,7 @@ try {
         return true;
     };
     publishSessions([errandLeaderSession, errandSession, fakeSession('bot_shot_seller', shotSeller)]);
+    deliverNearDecision(errandSession);
     FollowingState.tick(errandSession, errandBot, {}, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         getClosestTown: () => ({ name: 'Giran', x: 83396, y: 147904, z: -3404 }),
@@ -3357,10 +3426,131 @@ try {
     shoppingSession.plan = 'shopping';
     shoppingSession.shoppingTarget = { name: 'shop', locX: 1000, locY: 0, locZ: 0 };
 
-    ShoppingState.tick(shoppingSession, shoppingCompanion, {}, { say() {} });
+    // Main never builds an economy for a near bot: the build belongs to the worker.
+    const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
+    const realForState = EconomyContext.forState;
+    EconomyContext.forState = () => { throw new Error('main built a near economy'); };
+    try { ShoppingState.tick(shoppingSession, shoppingCompanion, {}, { say() {} }); }
+    finally { EconomyContext.forState = realForState; }
 
     assert.strictEqual(shoppingSession.plan, 'following', 'shopping companion should return to follow state');
     assert.strictEqual(shoppingSession.shoppingTarget, undefined, 'shopping target should be cleared for companions');
+
+    {
+        const leader = fakeActor(2000900);
+        const leaderSession = fakeSession('player_support_movement_regression', leader);
+        const support = fakeActor(2000901, { locX: 300, classId: 17 });
+        const member = fakeSession('bot_support_movement_regression', support);
+        Object.assign(member, { followPlayerSession: leaderSession, partyCompanion: true, plan: 'following' });
+        publishSessions([leaderSession, member]);
+        World.fetchNpcsInRadius = () => [];
+        const idle = () => FollowingState.tickIdleFollow({
+            session: member, bot: support, playerSession: leaderSession, player: leader, role: 'buffer',
+            distance: Math.hypot(support.locX - leader.locX, support.locY - leader.locY),
+            impairments: {}, acted: false, keepRoleDecision: false
+        });
+        support.state.setTowards('move');
+        member.lastFollowMoveTarget = { locX: 600, locY: 0, locZ: 0 };
+        idle();
+        assert.strictEqual(support.moves.at(-1).to.locX, -330,
+            'a leader reversal must replace a stale support route pointing away from the party');
+
+        let aborts = 0;
+        support.automation.abortAll = () => { aborts++; support.state.setTowards(false); };
+        support.locX = 100;
+        member.lastFollowMoveTarget = { locX: -600, locY: 0, locZ: 0 };
+        idle();
+        assert.strictEqual(aborts, 1, 'reaching the leader must cancel the obsolete native follow route');
+        assert.strictEqual(support.state.fetchTowards(), false, 'clearing an AI marker must also stop native movement');
+
+        const hazard = {
+            fetchId: () => 19001, fetchHostile: () => true, isDead: () => false,
+            fetchLocX: () => -700, fetchLocY: () => 0, fetchLocZ: () => 0
+        };
+        World.fetchNpcsInRadius = () => [hazard];
+        support.locX = 300;
+        support.moves = [];
+        idle();
+        const safeGoal = support.moves.at(-1).to;
+        assert(safeGoal.locX > -200, 'an idle hostile behind the group must override the authored rear slot');
+        assert(Math.hypot(safeGoal.locX + 700, safeGoal.locY) > 500,
+            'the fallback formation goal must stay outside native aggro range');
+
+        World.fetchNpcsInRadius = () => [];
+        const patient = fakeActor(2000902, { locX: 800, hp: 25 });
+        const patientSession = fakeSession('bot_support_movement_patient', patient);
+        Object.assign(patientSession, { followPlayerSession: leaderSession, partyCompanion: true, plan: 'following' });
+        publishSessions([leaderSession, member, patientSession]);
+        support.locX = 0;
+        support.moves = [];
+        learnSkill(support, { selfId: 1011, name: 'Heal', spell: true, mp: 15 });
+        const pending = () => {
+            member.pendingSupportApproach = { targetId: patient.id, skillId: 1011, ctrl: false,
+                kind: 'emergency_heal', startedAt: Date.now(), lastMoveAt: 0, targetLoc: { locX: 800, locY: 0, locZ: 0 } };
+            return FollowingState.tickPendingSupport({ session: member, bot: support,
+                Generics: { skillExec() { assert.fail('an out-of-range heal cannot cast'); } },
+                playerSession: leaderSession, pulling: {}, partyThreat: null, leaderTargetId: null });
+        };
+        assert.strictEqual(pending(), true);
+        assert(support.moves.at(-1).to.locX < 300,
+            'support movement must stop inside cast range instead of walking onto the patient');
+        support.moves = [];
+        patient.locX = 1600;
+        assert.strictEqual(pending(), false, 'an escaping patient must not retain the pending approach action slot');
+        assert.strictEqual(member.pendingSupportApproach, undefined, 'an unreachable patient must release its pending approach');
+        assert.strictEqual(support.moves.length, 0, 'a heal must not move the provider beyond the party leash');
+
+        patient.locX = 800;
+        member.pendingSupportApproach = { targetId: patient.id, skillId: 1011, ctrl: false,
+            kind: 'emergency_heal', startedAt: Date.now(), lastMoveAt: 0 };
+        assert.strictEqual(FollowingState.tickPendingSupport({ session: member, bot: support, Generics: {},
+            playerSession: leaderSession, pulling: {}, partyThreat: null, personalSupportThreat: hazard }), false,
+        'personal defense must preempt an out-of-range pending emergency heal');
+        assert.strictEqual(member.pendingSupportApproach, undefined);
+
+        support.classId = 15;
+        support.locX = 400;
+        member.returnToPartyAfterSupport = false;
+        patient.locX = 1200;
+        patient.hp = 10;
+        const nearbyPatient = fakeActor(2000903, { locX: 120, hp: 25 });
+        const nearbySession = fakeSession('bot_nearby_support_patient', nearbyPatient);
+        Object.assign(nearbySession, { followPlayerSession: leaderSession, partyCompanion: true, plan: 'following' });
+        publishSessions([leaderSession, member, patientSession, nearbySession]);
+        World.npc = { spawns: [] };
+        const healCalls = [];
+        const ai = { say() {}, executeCombat() { assert.fail('healer entered melee'); }, executePvPCombat() {} };
+        FollowingState.tick(member, support, { skillExec(_session, _bot, data) { healCalls.push(data); } }, ai);
+        assert.strictEqual(healCalls.at(-1)?.id, nearbyPatient.fetchId(),
+            'a critically wounded patient beyond the party leash must not starve a reachable emergency heal');
+
+        nearbyPatient.hp = 100;
+        patient.locX = 800;
+        support.locX = 0;
+        learnSkill(support, { selfId: 1201, mp: 10, semantic: { effect: 'root', effectType: 'debuff' } });
+        const attacker = fakeActor(19002, { locX: 50, destId: support.fetchId() });
+        attacker.fetchAttackable = () => true;
+        World.npc = { spawns: [attacker] };
+        World.fetchNpcsInRadius = () => [attacker];
+        member.pendingSupportApproach = { targetId: patient.id, skillId: 1011, ctrl: false,
+            kind: 'emergency_heal', startedAt: Date.now(), lastMoveAt: 0 };
+        FollowingState.tick(member, support, { skillExec(_session, _bot, data) { healCalls.push(data); } }, ai);
+        assert.strictEqual(healCalls.at(-1)?.selfId, 1201,
+            'an unreachable emergency approach must yield to personal control in the same full AI tick');
+        assert.strictEqual(healCalls.at(-1)?.id, attacker.fetchId());
+        assert.strictEqual(member.pendingSupportApproach, undefined);
+
+        support.state.setHits(true);
+        support.state.setTowards('melee');
+        let attackAborts = 0;
+        support.attack = { clearTimers() { attackAborts++; } };
+        FollowingState.tickLootAndLeaderTarget({ session: member, bot: support, Generics: {}, BotAI: ai,
+            playerSession: leaderSession, player: leader, role: 'healer', partyThreat: null,
+            leaderTargetId: attacker.fetchId(), acted: false, keepRoleDecision: false });
+        assert.strictEqual(support.state.fetchHits(), false, 'holding the support line must cancel an old weapon cycle');
+        assert.strictEqual(support.state.fetchTowards(), false, 'a selected leader target must not preserve an old melee approach');
+        assert.strictEqual(attackAborts, 1);
+    }
 
     const followingStages = HotActorLodPolicy.snapshot([]).subsystems;
     [

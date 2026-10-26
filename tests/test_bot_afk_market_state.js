@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('fs');
 const path = require('path');
 const fixtureDirectory = require('node:os').tmpdir() + '/l2solo-afk-state-' + require('node:crypto').randomUUID();
@@ -434,8 +435,8 @@ async function run() {
 
     const originalRate = process.env.L2NODE_PROGRESSION_RATE;
     try {
-        process.env.L2NODE_PROGRESSION_RATE = 'x1';
-        process.env.L2NODE_PROGRESSION_RATE = 'x10';
+        useRate('x1');
+        useRate('x10');
         assert.strictEqual(BotAfkMarket.viableSellLine({ selfId: 1865, count: 19, price: 1000 }), true);
         assert.strictEqual(BotAfkMarket.viableSellLine({ selfId: 1865, count: 20, price: 1000 }), true);
         assert.strictEqual(BotAfkMarket.viableSellLine({ selfId: 1875, count: 1, price: 25000 }), true,
@@ -449,8 +450,8 @@ async function run() {
         assert.strictEqual(BotAfkMarket.viableSellLine({ selfId: 1835, kind: 'Other.Shot', count: 499, price: 1 }), true);
         assert.strictEqual(BotAfkMarket.viableSellLine({ selfId: 1865, count: 2, price: 1 }), true);
         assert.strictEqual(BotAfkMarket.viableSellLine({ selfId: 1865, count: 0, price: 1000 }), false);
-        process.env.L2NODE_PROGRESSION_RATE = 'x50';
-        process.env.L2NODE_PROGRESSION_RATE = 'x10';
+        useRate('x50');
+        useRate('x10');
 
         await Database.createAccount('bot_afk_lot_seller', 'pw');
         const lotOwnerId = Number((await Database.createCharacter('bot_afk_lot_seller',
@@ -512,8 +513,7 @@ async function run() {
         assert.deepStrictEqual(AfkTrade.findOwnerProjection(oldOwnerId).shop.lines.map((line) => Number(line.selfId)), [1875, 1962],
             'a restart keeps valid single-unit lots');
     } finally {
-        if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-        else process.env.L2NODE_PROGRESSION_RATE = originalRate;
+        useRate(originalRate);
     }
 
     await Database.createAccount('bot_afk_gear_seller', 'pw');

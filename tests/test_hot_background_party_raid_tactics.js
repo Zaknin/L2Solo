@@ -433,6 +433,44 @@ try {
     assert.equal(owner.raidPreparationComplete, true,
         'the raid may open only after the support plan stays empty for the settle window');
 
+    // A raid admitted with tank/healer/shot forecasts must not be refused by
+    // the ordinary no-healing pull estimate when selecting its native target.
+    const Matchup = invoke('GameServer/Bot/AI/BotTargetMatchup');
+    const Spots = invoke('GameServer/Bot/AI/SpotService');
+    const Visibility = invoke('GameServer/Bot/AI/BotHuntingVisibility');
+    patch(Matchup, 'actorProfiles', () => []);
+    patch(Matchup, 'targetView', () => ({}));
+    let ordinaryChecks = 0;
+    patch(Matchup, 'soloSurvival', () => { ordinaryChecks++; return { eligible: false }; });
+    patch(Spots, 'pullSizeFor', () => 1);
+    patch(Visibility, 'select', (_owner, _key, _actor, candidates) => ({ candidate: candidates[0], pending: false }));
+    patch(Visibility, 'canSee', () => true);
+    owner.backgroundHuntTarget = null;
+    owner.nextBackgroundTargetScanAt = 0;
+    attacks.length = 0;
+    tick(owner, 13000);
+    assert.deepEqual(attacks.pop(), [tank.fetchId(), boss.fetchId()],
+        'an admitted raid must select its boss even when a no-healing hunt estimate refuses it');
+    assert.equal(ordinaryChecks, 0);
+
+    const raidObjective = party.stats.objective;
+    party.stats.objective = null;
+    owner.backgroundHuntTarget = null;
+    owner.nextBackgroundTargetScanAt = 0;
+    patch(World, 'fetchNpcsInRadius', () => [fieldMob]);
+    tick(owner, 15000);
+    assert.equal(attacks.length, 0, 'ordinary hunting must retain its survival gate');
+    assert(ordinaryChecks > 0);
+
+    party.stats.objective = raidObjective;
+    owner.nextBackgroundTargetScanAt = 0;
+    const foreignBoss = actor(999, null, 'Boss');
+    patch(World, 'fetchNpcsInRadius', () => [foreignBoss]);
+    tick(owner, 17000);
+    assert.equal(attacks.length, 0, 'the raid estimate cannot authorize another boss');
+    for (let count = 0; count < 8; count++) restores.pop()();
+    owner.backgroundHuntTarget = boss;
+
     // The servitor has its own native attack loop, even while its owner casts.
     const SummonControl = invoke('GameServer/Npc/SummonControl');
     const servitor = {

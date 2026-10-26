@@ -38,10 +38,14 @@ function result(tuple) {
     return { committed: true, replayed: true, success: tuple[4] === 1, units: tuple[5], amount: tuple[5],
         spent: tuple[6], received: tuple[7], nativeId: tuple[8], mp: tuple[9], economyCommit: tuple };
 }
+// A bot's authority: its phase, simulation revision and hot time. Any main
+// or worker write moves the revision, so no owner or loan is compared.
 function authority(state) {
-    return { phase: state?.phase, ownerId: state?.simulation?.ownerId || 'legacy_main',
-        leaseId: state?.simulation?.leaseId || null, revision: Number(state?.simulation?.revision || 0),
+    return { phase: state?.phase, revision: Number(state?.simulation?.revision || 0),
         hotAt: Number(state?.timing?.lastHotAt || 0) };
+}
+function sameAuthority(left, right) {
+    return !!left && !!right && left.phase === right.phase && left.revision === right.revision && left.hotAt === right.hotAt;
 }
 function acceptRow(row) {
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
@@ -80,6 +84,12 @@ async function admit(state, kind, original = null) {
     catch (error) { finish(id, admitted.command); throw error; }
     return { command: admitted.command, state: current, recovered: admitted.recovered || null };
 }
+// The one SQL rule for the leaf on a bot_life_state write of a whole stats
+// JSON (`incoming`, an SQL expression): the row's leaf stays, a leaf the row
+// does not hold is dropped. json_patch with a NULL member removes the key.
+function preserveLeafSql(incoming) {
+    return `json_patch(${incoming}, json_object('economyCommit', json_extract(bot_life_state.statsJson, '$.economyCommit')))`;
+}
 function finish(characterId, command) {
     const value = active.get(Number(characterId));
     // A retry may rebind the same UUID to a newer native owner. Its older
@@ -88,5 +98,5 @@ function finish(characterId, command) {
 }
 function forget(characterId) { active.delete(Number(characterId)); }
 
-module.exports = { KINDS, MAX_BYTES, MAX_ACTIVE, create, header, valid, pending, completed, result, authority, admit,
-    acceptRow, finish, forget, clear: () => active.clear(), size: () => active.size };
+module.exports = { KINDS, MAX_BYTES, MAX_ACTIVE, create, header, valid, pending, completed, result, authority, sameAuthority, admit,
+    acceptRow, preserveLeafSql, finish, forget, clear: () => active.clear(), size: () => active.size };

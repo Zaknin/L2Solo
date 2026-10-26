@@ -179,14 +179,16 @@ async function main() {
         cached = await LifeState.findByCharacterId(22);
         cached = await LifeState.upsertState({ ...cached, activity: 'grouped', party: { partyId: 'exchange-party' } }, 'test_group');
         const owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
-        const lease = await owner.claim(cached, { allowParty: true, allowLifecycle: true });
-        assert(lease.ok, JSON.stringify(lease));
+        // The worker steps this far party member from the copy it holds now.
+        const stepRevision = cached.simulation.revision;
         await deposit(104, 12);
         const afterWorkerExchange = await LifeState.findByCharacterId(22);
-        assert.strictEqual(afterWorkerExchange.stats.equipment[0].enchant, 12, 'a worker-owned party member must also exchange gear');
+        assert.strictEqual(afterWorkerExchange.stats.equipment[0].enchant, 12, 'a far party member must also exchange gear');
         assert.strictEqual(afterWorkerExchange.party.partyId, 'exchange-party', 'exchange must preserve party membership');
-        assert.strictEqual((await owner.commit(lease, cached, { allowParty: true, allowLifecycle: true })).ok, false,
-            'a pre-exchange worker proposal cannot restore the returned item');
+        const [preExchange] = await owner.commitBatch([{ revision: stepRevision, nextState: cached,
+            proposal: { revision: stepRevision }, options: { allowParty: true, allowLifecycle: true } }]);
+        assert.strictEqual(preExchange.ok, false, 'a pre-exchange worker proposal cannot restore the returned item');
+        assert.strictEqual(preExchange.reason, 'stale_revision');
 
         // Use small explicit equipment templates to cover layout decisions.
         const originalItems = DataCache.items;

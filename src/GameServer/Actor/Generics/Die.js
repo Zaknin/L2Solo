@@ -3,6 +3,7 @@ const EffectStore = invoke('GameServer/Effects/EffectStore');
 const EffectTicker = invoke('GameServer/Effects/EffectTicker');
 const calculateStats = invoke('GameServer/Actor/Generics/CalculateStats');
 const ChargeLifecycle = invoke('GameServer/Skills/ChargeLifecycle');
+const EconomyContext = invoke('GameServer/Bot/Economy/EconomyContext');
 
 function clearEffectsOnDeath(session, actor) {
     const silentMoving = Object.values(actor.effects || {}).find((effect) => effect?.stats?.silentMoving);
@@ -68,7 +69,8 @@ function die(session, actor, context = {}) {
         const prior = victimSession.coldLifeState || Life.cachedState(actor.fetchId());
         if (prior) {
             const timestamp = Number(context.timestamp || Date.now());
-            const economy = invoke('GameServer/Bot/Economy/EconomyContext').forState(prior, { timestamp });
+            // The death price and persona come from the basics: no economy build on main.
+            const economy = EconomyContext.basics(prior, { timestamp });
             const progress = invoke('GameServer/Bot/Economy/EconomicValuation').progressStats(prior, {
                 timestamp, losses: 1, lossHours: economy.deathHours, persona: economy.persona,
                 knowledgeEnabled: invoke('GameServer/Bot/AI/KnowledgeLearning').knowledgeEnabled(),
@@ -76,6 +78,7 @@ function die(session, actor, context = {}) {
             });
             victimSession.coldLifeState = { ...prior, stats: { ...prior.stats, ...progress } };
         }
+        Life.notifyNearFacts(victimSession, 'death');
         Promise.resolve(invoke('GameServer/Bot/AI/BotEventJournal').record({
             botId: actor.fetchId(),
             eventType: 'death',

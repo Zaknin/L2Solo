@@ -5,6 +5,7 @@ require('../src/Global');
 const World = invoke('GameServer/World/World');
 const BotManager = invoke('GameServer/Bot/BotManager');
 const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
+const InteractionMemory = invoke('GameServer/Social/InteractionMemoryRuntime');
 const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
 const BotMerchantStoreService = invoke('GameServer/Bot/Economy/BotMerchantStoreService');
 
@@ -44,6 +45,7 @@ async function run() {
 
     const originals = {
         snapshot: BotSocialMemory.getSnapshot,
+        assess: InteractionMemory.assess,
         recordEvent: BotSocialMemory.recordEvent,
         attach: PartyCompanionService.attach,
         withdrawForParty: BotMerchantStoreService.withdrawForParty,
@@ -55,6 +57,7 @@ async function run() {
     let attached = null;
     try {
         BotSocialMemory.getSnapshot = () => ({ trust: 8, familiarity: 8, recentlyAbandonedAt: null });
+        InteractionMemory.assess = () => ({ ready: true, personal: null });
         BotSocialMemory.recordEvent = () => Promise.resolve(null);
         BotManager.botTell = () => {};
         global.setTimeout = (callback) => { callback(); return 0; };
@@ -122,6 +125,7 @@ async function run() {
         assert.strictEqual(tells[0].targetSession, player);
     } finally {
         BotSocialMemory.getSnapshot = originals.snapshot;
+        InteractionMemory.assess = originals.assess;
         BotSocialMemory.recordEvent = originals.recordEvent;
         PartyCompanionService.attach = originals.attach;
         BotMerchantStoreService.withdrawForParty = originals.withdrawForParty;

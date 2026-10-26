@@ -1,4 +1,5 @@
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
+const Material = require('./CraftMaterialParty');
 
 // How long an open party request may wait for a group, by its priority.
 function maxAgeMs(priority) {
@@ -30,6 +31,7 @@ function expire(request, now = Date.now()) {
 // fixed bounds, any other party uses the defaults (the configured sizes
 // unless the caller gives its own).
 function limitsForObjective(objective = null, defaults = {}) {
+    if (objective?.opportunisticRaid === true) return { minSize: 9, maxSize: 9, levelRange: 7 };
     const maxSize = Number(defaults.maxSize ?? Config.partyMaxSize);
     const minSize = Number(defaults.minSize ?? Config.partyMinSize);
     if (objective?.fullRoster) return { maxSize: 9, minSize: 9, levelRange: defaults.levelRange ?? 99 };
@@ -89,7 +91,7 @@ function partyObjectiveForPlan(plan) {
 }
 
 function partyRequestEligible(state) {
-    return !state?.party?.partyId
+    return !require('./RaidSupplyPolicy').held(state) && !state?.party?.partyId
         && ['hunting', 'resting', 'party_wait'].includes(state?.activity);
 }
 
@@ -98,9 +100,10 @@ function clanPartyObjectiveForState(state) {
     return objective && ['open', 'deferred'].includes(objective.status) ? objective : null;
 }
 
+// options: spots, economy (the bot's own economy, built in the background
+// thread; required, no build here) and memo (the bot's worker record).
 function partyRequestForPlan(state, plan, timestamp = Date.now(), options = {}) {
     const previous = state?.stats?.partyRequest;
-    const Material = require('./CraftMaterialParty');
     const supplyPause = Material.supplyPause(state, plan, { ...options, timestamp });
     if (supplyPause) return supplyPause;
     // Travel and recovery are part of returning to solo hunting. Neither may
@@ -119,7 +122,7 @@ function partyRequestForPlan(state, plan, timestamp = Date.now(), options = {}) 
     let objective = clanPartyObjectiveForState(state) || partyObjectiveForPlan(plan)
         || Material.request(state, plan, { ...options, timestamp }) || sharedTarget;
     if (objective?.priority === 'required' && objective.itemId && !objective.clanGoalKey && !objective.helpDeal) {
-        const context = options.economy || invoke('GameServer/Bot/Population/ColdEconomyDecision').economyFor(state);
+        const context = options.economy;
         const amount = Math.max(1, Math.floor(Number(objective.materialParty ? objective.amount : plan?.next?.amount || 1)));
         // ARCH-NOTE: party value is pending; the help fee buys progress on its requested item.
         const fee = Math.floor(Math.min(invoke('GameServer/Bot/Economy/PurchaseFunding').spendable(state, 0, { itemId: objective.itemId }),

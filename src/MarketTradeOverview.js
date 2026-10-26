@@ -59,14 +59,26 @@ function aggregate(all, since) {
     };
 }
 
-function fetch(all, { timestamp = Date.now(), recentLimit = 200 } = {}) {
-    const current = Math.max(1, Number(timestamp) || Date.now());
+// The newest trade id: it moves when a trade is added, so it says whether windows
+// can have changed. A deleted character's trades leave at any age (HistoryStore)
+// without moving it; with the id unchanged the reused windows can over-count for
+// at most WINDOWS_MAX_MS (MarketTradeOverviewWorker.js).
+function tailId(all) {
+    return Number(all('SELECT MAX(id) AS id FROM market_trades')[0]?.id || 0);
+}
+
+function fetchRecent(all, { recentLimit = 200 } = {}) {
     const limit = Math.max(1, Math.min(500, Math.floor(Number(recentLimit) || 200)));
-    const dayAgo = current - 24 * 60 * 60 * 1000;
-    const weekAgo = current - 7 * 24 * 60 * 60 * 1000;
-    const recent = all(`SELECT * FROM market_trades
+    return all(`SELECT * FROM market_trades
         WHERE ${CANONICAL_FILTER}
         ORDER BY occurredAt DESC, id DESC LIMIT ${limit}`).map(tradeRow);
+}
+
+// The day and week aggregates: a scan of the week's trades.
+function fetchWindows(all, { timestamp = Date.now() } = {}) {
+    const current = Math.max(1, Number(timestamp) || Date.now());
+    const dayAgo = current - 24 * 60 * 60 * 1000;
+    const weekAgo = current - 7 * 24 * 60 * 60 * 1000;
     const byItem = all(`SELECT selfId, MAX(itemName) AS name, COUNT(*) AS trades,
         COALESCE(SUM(quantity), 0) AS items, COALESCE(SUM(totalPrice), 0) AS adena,
         MAX(occurredAt) AS lastTradeAt
@@ -90,16 +102,18 @@ function fetch(all, { timestamp = Date.now(), recentLimit = 200 } = {}) {
         adena: Number(row.adena || 0)
     }]));
     return {
-        scope: 'persistent_90d',
-        retentionDays: 90,
         windows: {
             day: aggregate(all, dayAgo),
             week: aggregate(all, weekAgo)
         },
-        recent,
         byItem,
         byTown
     };
 }
 
-module.exports = { fetch, CANONICAL_FILTER };
+function fetch(all, options = {}) {
+    const { windows, byItem, byTown } = fetchWindows(all, options);
+    return { scope: 'persistent_90d', retentionDays: 90, windows, recent: fetchRecent(all, options), byItem, byTown };
+}
+
+module.exports = { fetch, fetchRecent, fetchWindows, tailId, CANONICAL_FILTER };

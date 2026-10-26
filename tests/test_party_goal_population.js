@@ -28,8 +28,8 @@ const members = [901, 902].map(characterId => ({ characterId, name: `GoalPopulat
     stats: { classId: 0, role: 'dps', partyRequest: { status: 'open', priority: 'required',
         requestedAt: timestamp - 1000, spotId: 'goal-spot', npcId: 123 } },
     vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 }, timing: {},
-    simulation: { ownerId: 'legacy_main', revision: 2 } }));
-let writes = 0, announcements = 0, queries = 0, membershipWrites = 0;
+    simulation: { revision: 2 } }));
+let writes = 0, announcements = 0, queries = 0;
 const spot = { id: 'goal-spot', name: 'Goal spot', center: { locX: 1, locY: 1, locZ: 1 } };
 
 (async () => {
@@ -96,20 +96,13 @@ const spot = { id: 'goal-spot', name: 'Goal spot', center: { locX: 1, locY: 1, l
         stats: { ...member.stats, partyRequest: null } }));
     stub(Life, 'statesForParty', async () => grouped); stub(Life, 'cachedState', id => grouped.find(member => member.characterId === Number(id)));
     stub(Parties, 'find', () => active);
-    stub(Life, 'acceptPartyAssignments', prepared => prepared.map(entry => entry.snapshot));
-    stub(Database, 'commitBackgroundPartyMembership', async request => {
-        membershipWrites++; assert.equal(request.expectedPartyUpdatedAt, active.updatedAt);
-        assert(request.review); return { ok: true, lifeRows: [] };
-    });
     Coordinator.requestPartyGoals = async (party, selected) => { queries++;
         return { ok: true, sources: Calculation.sources(selected), joint: Policy.joint(party, selected) }; };
-    const reviewed = await Population.resolveBackgroundParty(active);
-    assert.equal(reviewed.ok, true, reviewed.reason); assert.equal(membershipWrites, 1); assert.equal(queries, 2);
     stub(Goal, 'snapshot', () => ({ current: { nextReviewAt: timestamp + 3600000 } }));
     stub(Market, 'reconcile', async () => null);
     stub(Parties, 'commitGoals', async (party, selected, joint) => { writes++; assert.equal(joint.memberGoals.length, 2); return party; });
     await Population.reconcileWorkerPartyGoals(active, timestamp);
-    assert.equal(queries, 3, 'active postcommit review requests the real group result');
+    assert.equal(queries, 2, 'active postcommit review requests the real group result');
     Coordinator.requestPartyGoals = async (party, selected) => ({ ok: true,
         sources: Calculation.sources(selected).map(source => ({ ...source, revision: source.revision + 1 })), joint: { memberGoals: [] } });
     const beforeStale = writes;

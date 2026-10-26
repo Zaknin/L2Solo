@@ -91,10 +91,10 @@ async function run() {
     LifeEvents.recordMany = () => Promise.resolve(null);
     GlobalChat.maybeAnnounce = () => null;
 
-    // The worker's context carries the coordinator's choice: no trip, the
-    // bot fights on its old ground.
+    // The worker's request carries no trip (its route): the bot fights on
+    // its old ground.
     const commanded = await PopulationService.resolveColdState(hunter(7401),
-        { precomputedResult: workerFight(), context: { spot: oldSpot, route: null } });
+        { precomputedResult: workerFight(), route: { needed: false, spotId: oldSpot.id } });
     assert.strictEqual(commanded.ok, true);
     assert.strictEqual(applied.length, 1, 'the worker fight is applied');
     assert.notStrictEqual(applied[0].activity, 'traveling', 'main begins no hunting trip under a worker result');
@@ -122,7 +122,7 @@ async function run() {
         tailReads++;
         return { state: value, closed: false };
     };
-    const request = { precomputedResult: workerFight(), context: { spot: oldSpot, route: null },
+    const request = { precomputedResult: workerFight(), route: { needed: false, spotId: oldSpot.id },
         precomputedPlan: { previousPlan: commandState.stats.equipmentPlan, acquisitionPlan: commandState.stats.equipmentPlan,
             statsPacket: packet, economyDecision: commandDecision } };
     assert.strictEqual((await PopulationService.resolveColdState(commandState, request)).ok, true);
@@ -140,7 +140,7 @@ async function run() {
     const prior = { status: 'complete', strategy: 'none', target: { selfId: 391 } };
     const deferredBefore = Number(PopulationService.planDeferred || 0);
     const deferred = await PopulationService.resolveColdState(hunter(7406, { equipmentPlan: prior }),
-        { precomputedResult: workerFight(), context: { spot: oldSpot, route: null } });
+        { precomputedResult: workerFight(), route: { needed: false, spotId: oldSpot.id } });
     assert.strictEqual(deferred.state.stats.equipmentPlan, prior, 'no worker plan keeps previous plan');
     assert.strictEqual(PopulationService.planDeferred, deferredBefore + 1);
     Coordinator.economyDecisions.forget(7405);
@@ -158,11 +158,11 @@ async function run() {
         loc: { locX: 83396, locY: 147904, locZ: -3400 } };
     const townResult = { ...workerFight(), patch: { activity: 'shopping', loc: town.loc, stats: {} } };
     assert.strictEqual((await PopulationService.resolveColdState(town,
-        { precomputedResult: townResult, context: { spot: oldSpot, route: null } })).ok, true);
+        { precomputedResult: townResult, route: { needed: false, spotId: oldSpot.id } })).ok, true);
     assert.deepStrictEqual(visitOrder, ['warehouse', 'listings'], 'one town release precedes listing');
     visitOrder.length = 0;
     await PopulationService.resolveColdState(hunter(7421),
-        { precomputedResult: workerFight(), context: { spot: oldSpot, route: null } });
+        { precomputedResult: workerFight(), route: { needed: false, spotId: oldSpot.id } });
     assert.deepStrictEqual(visitOrder, ['listings'], 'field command never releases the warehouse');
     Warehouse.releaseCold = originalWarehouseRelease;
     MarketService.finishTownErrands = originalFinishTownErrands;

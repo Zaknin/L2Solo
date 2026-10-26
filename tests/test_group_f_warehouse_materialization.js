@@ -57,21 +57,20 @@ async function duringMaterialization(characterId, hydrate) {
         await waiting;
         const before = await counts(characterId);
         assert.deepEqual([before.saved, before.bag, before.warehouse], [30, 10, 20]);
-        assert.equal(before.life.simulationOwner, 'legacy_main');
         assert.equal(before.life.phase, 'cold');
         assert.equal(before.life.activity, 'hunting');
         const selected = hydrate
-            ? (await Life.statesByIds([characterId], { ownerId: 'legacy_main', unassigned: true }))[0]
+            ? (await Life.statesByIds([characterId], { unassigned: true }))[0]
             : Life.cachedState(characterId);
         assert.equal(selected.inventory[STEM].amount, hydrate ? 30 : 10);
-        assert.equal(selected.simulation.revision, before.life.simulationRevision,
-            'the old cache can share the newer SQL row revision');
         // This fixture is already at Giran's service. Both attempts enter
-        // the town-only path so materialization/native bag fences, not the
-        // cheap out-of-town guard, must reject the first withdrawal.
+        // the town-only path so the native fences, not the cheap out-of-town
+        // guard, must reject the first withdrawal: the bag fence for the
+        // hydrated state, the revision the resolve's save moved for the old cache.
         const blocked = await Warehouse.releaseCold(selected, { inTown: true });
         const afterAttempt = await counts(characterId);
         assert.equal(blocked.released, false, 'warehouse waits for pending loot materialization');
+        assert.equal(blocked.reason, 'economy_state_changed');
         assert.deepEqual([afterAttempt.saved, afterAttempt.bag, afterAttempt.warehouse], [30, 10, 20]);
         assert.equal(afterAttempt.life.simulationRevision, before.life.simulationRevision);
         assert.equal(JSON.parse(afterAttempt.life.statsJson).lastWarehouseWithdrawal, undefined);
@@ -93,7 +92,7 @@ async function duringMaterialization(characterId, hydrate) {
         assert.equal(complete.life.adena, 100000);
         assert.equal(complete.life.exp, state.exp + 1000);
         assert.equal(complete.life.sp, 10);
-        console.log(`PASS native withdrawal during legacy loot materialization (${hydrate ? 'fresh SQL hydration' : 'old cache, same revision'})`);
+        console.log(`PASS native withdrawal during legacy loot materialization (${hydrate ? 'fresh SQL hydration' : 'old cache'})`);
     } finally {
         resume();
         if (resolving) await resolving;
@@ -106,18 +105,18 @@ async function staleCallerAfterMaterialization(characterId) {
     const resolved = await Life.applyResolve(oldState, outcome());
     const before = await counts(characterId);
     assert.deepEqual([before.saved, before.bag, before.warehouse], [30, 30, 20]);
-    assert.equal(oldState.simulation.revision, resolved.simulation.revision,
-        'legacy materialization does not advance simulation ownership revision');
+    assert.equal(resolved.simulation.revision, oldState.simulation.revision + 1,
+        'the resolve moves the far row once');
     const [row] = await Database.fetchWarehouseItems(characterId);
     await assert.rejects(Database.transferWarehouseToInventory(characterId, {
         id: row.id, selfId: STEM, name: 'Stem', amount: 20, stackable: true
     }, { coldState: oldState, withdrawal: { items: [{ selfId: STEM, amount: 20, reason: 'market' }], at: Date.now() } }),
-    /economy_state_changed/, 'a stale caller summary cannot plan against a newer physical bag at the same revision');
+    /economy_state_changed/, 'a stale caller summary cannot plan against a newer physical bag');
     const after = await counts(characterId);
     assert.deepEqual([after.saved, after.bag, after.warehouse], [30, 30, 20]);
     assert.equal(after.life.simulationRevision, before.life.simulationRevision);
     assert.equal(after.wallet, 100000);
-    console.log('PASS native withdrawal rejects an old caller after real materialization at the same revision');
+    console.log('PASS native withdrawal rejects an old caller after real materialization');
 }
 
 (async () => {

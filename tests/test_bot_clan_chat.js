@@ -55,7 +55,7 @@ const Speak = invoke('GameServer/Network/Request/Speak');
 const SendPacket = invoke('Packet/Send');
 const saved = { user: World.user, find: ClanService.findById, speak: Response.speak,
     items: DataCache.items, now: Date.now, random: Math.random, execute: Database.execute,
-    batch: Database.upsertBotGoalStates, evaluate: Needs.evaluate, cached: LifeState.cachedState,
+    evaluate: Needs.evaluate, cached: LifeState.cachedState,
     config: { ...Config }, warn: utils.infoWarn };
 let now = 1000000;
 let members = [101,102,103];
@@ -90,7 +90,6 @@ async function main() {
         ClanService.findById = id => id === 11 ? { id: 11, members: members.map(id => ({ id })) } : { id, members: [] };
         DataCache.items = [{ selfId: 1, template: { name: 'Sword of Revolution' } }, { selfId: 2, template: { name: 'Iron Ore' } }];
         Database.execute = async () => [];
-        Database.upsertBotGoalStates = async entries => entries.length;
         Needs.evaluate = () => [goal()];
         LifeState.cachedState = () => null;
         reset();
@@ -108,9 +107,9 @@ async function main() {
         assert(delivered[1].text.includes('Iron Ore'));
 
         reset(); Needs.evaluate = () => [goal()];
-        const batch = await GoalService.reviewBatch([source, { ...source, characterId: 102, name: 'Belen' }], { now });
-        assert.strictEqual(batch.length, 2);
-        assert.strictEqual(delivered.length, 1, 'batch updates respect the shared clan budget');
+        await GoalService.review(source, { now });
+        await GoalService.review({ ...source, characterId: 102, name: 'Belen' }, { now });
+        assert.strictEqual(delivered.length, 1, 'two goals at once respect the shared clan budget');
         assert.strictEqual(Chat.snapshot().pending, 1);
         now += 15000; Chat.flush(now);
         assert.strictEqual(delivered.length, 2, 'the second notification is delivered on an ordinary tick');
@@ -120,10 +119,6 @@ async function main() {
         assert.strictEqual(await GoalService.review(source, { now }), null);
         assert.strictEqual(delivered.length, 0, 'failed persistence must not produce a goal claim');
         Database.execute = async () => [];
-        Database.upsertBotGoalStates = async () => { throw new Error('batch failed'); };
-        await GoalService.reviewBatch([source], { now });
-        assert.strictEqual(delivered.length, 0, 'failed batch persistence must stay silent');
-        Database.upsertBotGoalStates = saved.batch;
 
         reset();
         const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
@@ -235,7 +230,7 @@ async function main() {
         clearPublishedSessions();
         Object.assign(Config, saved.config); World.user = saved.user; ClanService.findById = saved.find;
         Response.speak = saved.speak; DataCache.items = saved.items; Date.now = saved.now; Math.random = saved.random;
-        Database.execute = saved.execute; Database.upsertBotGoalStates = saved.batch; Needs.evaluate = saved.evaluate;
+        Database.execute = saved.execute; Needs.evaluate = saved.evaluate;
         LifeState.cachedState = saved.cached; utils.infoWarn = saved.warn; GoalState.reset(); Chat.reset(); Voice.reset();
     }
 }

@@ -58,14 +58,15 @@ const realRotation = Match.coldProfiles(necro, {}, at);
 assert(!Match.soloSurvival(realRotation, lizard).eligible, 'the slower native rotation rejects this fight');
 assert(Cold.npcForSpot({ npcEntries: [{ selfId: 784, count: 1 }] }, () => 0.5,
     { matchupProfiles: realRotation, soloSafety: true }).avoided, 'the executor refuses the unsafe voluntary target');
-const savedProfile = Cold.profileFor, savedSpots = Spots.cache;
+// The fight reads fightProfile, the route profileFor: both give the fixture.
+const savedProfile = Cold.profileFor, savedFight = Cold.fightProfile, savedSpots = Spots.cache;
 try {
     const owned = { ...necro, accur: 100, evasion: 0, critical: 0, mCritRate: 0,
         equipment: { ...necro.equipment, pAtkRnd: 0 }, effects: [], skills: [...necro.skills,
             { selfId: 1220, level: 1, passive: false, spell: true, power: 44, mp: 22, hitTime: 4000, reuse: 6000 },
             { selfId: 1015, level: 3, passive: false, spell: true, power: 107, mp: 32, hitTime: 2000, reuse: 3000 }
         ] };
-    Cold.profileFor = () => owned;
+    Cold.profileFor = Cold.fightProfile = () => owned;
     const ground = { id: 'solo-heal-loop', name: 'Solo heal loop', avgLevel: 36, density: 6,
         npcEntries: [{ selfId: 1639, count: 6 }], npcSelfIds: [1639] };
     Spots.cache = [ground];
@@ -79,13 +80,13 @@ try {
     assert.equal(fight.debug.died, false);
     assert.equal(fight.debug.attemptedFights, 1, 'remaining HP must be checked before the next voluntary mob');
     assert.equal(fight.patch.activity, 'resting');
-} finally { Cold.profileFor = savedProfile; Spots.cache = savedSpots; }
+} finally { Cold.profileFor = savedProfile; Cold.fightProfile = savedFight; Spots.cache = savedSpots; }
 
 // A wealthy reward forecast or a future gear target cannot admit a lethal
 // ordinary hunt. Clan membership changes neither the equipped combat profile
 // nor the ability to earn on safe mobs below the character's level.
 try {
-    Cold.profileFor = () => mage;
+    Cold.profileFor = Cold.fightProfile = () => mage;
     const safe = { id: 'safe-lower-farm', name: 'Mandragora field', minLevel: 25, maxLevel: 25,
         avgLevel: 25, density: 6, npcEntries: [{ selfId: 156, count: 6 }] };
     const unsafe = { id: 'unsafe-level-farm', name: 'Patin field', minLevel: 29, maxLevel: 29,
@@ -108,7 +109,7 @@ try {
         assert.equal(Spots.findForState(hunter, { timestamp: at, occupancy: {} })?.id, safe.id,
             'an active unsafe gear source cannot override ordinary hunt safety for a clan member or a solo bot');
     }
-} finally { Cold.profileFor = savedProfile; Spots.cache = savedSpots; }
+} finally { Cold.profileFor = savedProfile; Cold.fightProfile = savedFight; Spots.cache = savedSpots; }
 
 const bow = { role: 'archer', pAtk: 100, pDef: 100, maxHp: 1000, atkSpd: 300,
     weaponMask: 32, equipment: { weaponKind: 'Weapon.Bow' }, skills: [] };
@@ -206,10 +207,10 @@ assert(!Readiness.evaluate({ hp: 500, maxHp: 1000, mp: 1000, maxMp: 1000, level:
 assert(Readiness.evaluate({ hp: 500, maxHp: 1000, mp: 0, maxMp: 1000, level: 40,
     manaDependent: false }, { level: 35, hp: 10, maxHp: 1000 }).ready,
     'a physical finisher does not need mana or a full-target HP reserve');
-const originalProfile = Cold.profileFor;
+const originalProfile = Cold.profileFor, originalFight = Cold.fightProfile;
 const originalNpc = Cold.npcForSpot;
 try {
-    Cold.profileFor = () => ({ ...mage, accur: 100, evasion: 0, critical: 0, effects: [] });
+    Cold.profileFor = Cold.fightProfile = () => ({ ...mage, accur: 100, evasion: 0, critical: 0, effects: [] });
     Cold.npcForSpot = () => ({ ...target, level: 25, selfId: 156, accur: 100, evasion: 0, critical: 0 });
     const hurt = { ...state, spotId: easy.id, vitals: { ...state.vitals, hp: 260, mp: 300 } };
     const recover = Resolver.resolveSolo({ state: hurt, spot: easy, elapsedMs: 0, timestamp: at, rng: () => 0.5 });
@@ -226,7 +227,7 @@ try {
         accur: 100, evasion: 0, critical: 0 });
     const defense = Resolver.resolveSolo({ state: hurt, spot: easy, elapsedMs: 0, timestamp: at, rng: () => 0.5 });
     assert(defense.debug.attemptedFights > 0, 'pre-fight recovery cannot grant immunity to an aggressive interruption');
-} finally { Cold.profileFor = originalProfile; Cold.npcForSpot = originalNpc; }
+} finally { Cold.profileFor = originalProfile; Cold.fightProfile = originalFight; Cold.npcForSpot = originalNpc; }
 
 async function run() {
     let stalled = { ...state, stats: { ...state.stats, spotRisk: recoveredRisk } };
@@ -238,6 +239,7 @@ async function run() {
         }, { timestamp: at + i, persist: false, projectClassProgression: true });
     }
     assert.strictEqual(stalled.stats.spotRisk.failedHunts, 3);
+    assert.strictEqual(Risk.stepCount(stalled), Risk.stepCount(state) + 3, 'each resolved step moves the bot\'s counter by exactly one');
     assert(stalled.stats.spotBackoffs.some(entry => entry.spotId === 'danger' && entry.reason === 'failed_hunts'),
         'abandoned real fights must exclude the failing ground through the existing routing policy');
     assert.strictEqual(stalled.stats.deaths, 0, 'an abandoned fight is not a death');
@@ -250,7 +252,7 @@ async function run() {
     assert(next.exp < state.exp, 'the regression must incur the real C4 death penalty');
     assert.strictEqual(next.stats.huntEfficiency[0].exp, next.exp - state.exp,
         'the persisted efficiency sample includes actual XP loss, not just the ten XP reward');
-    assert(next.stats.spotBackoffs.some(entry => entry.spotId === 'danger' && entry.until > at),
+    assert(next.stats.spotBackoffs.some(entry => entry.spotId === 'danger' && Risk.markActive(entry, next)),
         'the failed spot is remembered before revival changes physical routing origin');
     assert(next.stats.huntingRecovery.levelPenalty > 0);
     let losing = { ...state, stats: { ...state.stats } };

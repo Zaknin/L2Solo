@@ -1,19 +1,20 @@
 const View = require('./ClanSocialView');
 const Policy = require('./ClanSocialPolicy');
+const Diagnostics = require('../Bot/Economy/EconomyDiagnostics');
+const ClanService = invoke('GameServer/Clan/ClanService');
 const view = new View();
-let cursor = 0, running = null, lastMemberships = '', lastCheck = 0;
+let cursor = 0, running = null, lastMemberships = '', lastCheck = 0, syncedRevision = -1;
 const sent = new Map();
 let sentEpoch = '', sentMembershipVersion = 0;
 let activeClanIds = [];
 let expelling = false;
 const disciplineRetryAt = new Map();
-let counts = { clans: 0, relations: 0, discipline: {} };
 async function announce(snapshot, previous) {
     if (!previous) return;
     const changed = snapshot.relations.some(r => ['warned', 'probation'].includes(r.discipline?.stage)
         && previous.relations.find(p => p.kind === r.kind && p.targetId === r.targetId)?.discipline?.stageAt !== r.discipline.stageAt);
     if (!changed || !await invoke('Database').isAutonomousClan(snapshot.clanId)) return;
-    const service = invoke('GameServer/Clan/ClanService'), clan = service.findById(snapshot.clanId);
+    const clan = ClanService.findById(snapshot.clanId);
     if (!clan) return;
     const leader = clan.members.find(m => m.id === clan.leaderId);
     if (!leader) return;
@@ -27,7 +28,7 @@ async function announce(snapshot, previous) {
         const text = d.stage === 'warned' ? `${name}, your repeated provocations are hurting our clan. This is a warning.`
             : `${name}, you are on probation. Another serious incident may cost you your place in the clan.`;
         const packet = invoke('GameServer/Network/Response').speak({ fetchId: () => leader.id, fetchName: () => leader.name }, { kind: 4, text });
-        service.onlineSessions(clan).forEach(s => s.dataSendToMe(packet));
+        ClanService.onlineSessions(clan).forEach(s => s.dataSendToMe(packet));
     }
 }
 async function enforceOne(coordinator) {
@@ -35,7 +36,7 @@ async function enforceOne(coordinator) {
     const candidate = [...view.clans.values()].flatMap(s => s.relations
         .filter(r => r.discipline && Policy.relation(r, Date.now()).discipline.stage === 'expulsion_pending').map(r => ({ s, id: r.targetId })))
         .find(({ s, id }) => Date.now() >= (disciplineRetryAt.get(id) || 0)
-            && view.memberships.get(id) === s.clanId && invoke('GameServer/Clan/ClanService').findById(s.clanId)?.leaderId !== id);
+            && view.memberships.get(id) === s.clanId && ClanService.findById(s.clanId)?.leaderId !== id);
     if (!candidate) return;
     expelling = true;
     const { s, id } = candidate;
@@ -52,7 +53,7 @@ async function enforceOne(coordinator) {
         view.accept(result.snapshot);
         const state = Life.acceptLifecycleRow(result.row);
         result.memorySnapshots.forEach(m => invoke('GameServer/Social/InteractionMemoryRuntime').accept(m));
-        invoke('GameServer/Clan/ClanService').applyDisciplineRemoval(result);
+        ClanService.applyDisciplineRemoval(result);
         coordinator.notifyState(state);
         utils.infoWarn('ClanSocial', 'clan %d expelled member %d after warning and probation', s.clanId, id);
     } finally {
@@ -61,8 +62,15 @@ async function enforceOne(coordinator) {
         expelling = false;
     }
 }
+// Rebuilds the memberships copy only when ClanService's membership revision
+// moved (its writers call this on each change; refresh() re-checks it in O(1)).
+// The signature keeps a reload that brought back the same rows from resending them.
 function syncMemberships() {
-    const clans = invoke('GameServer/Clan/ClanService').all();
+    const revision = ClanService.membershipRevision();
+    if (revision === syncedRevision) { Diagnostics.count('clan_social', 'memberships', 'unchanged'); return; }
+    Diagnostics.count('clan_social', 'memberships', 'rebuilt');
+    syncedRevision = revision;
+    const clans = ClanService.all();
     activeClanIds = clans.map(c => Number(c.id));
     const rows = clans.flatMap(c => c.members.map(m => ({ id: Number(m.id), clanId: Number(c.id) })));
     const signature = JSON.stringify([rows, activeClanIds]);
@@ -85,14 +93,18 @@ async function refresh(force = false) {
             if (view.accept(snapshot)) await announce(snapshot, previous);
             cursor = Math.max(cursor, row.updatedAt);
         }
-        counts = { clans: view.clans.size, relations: 0, discipline: {} };
-        for (const snapshot of view.clans.values()) for (const r of snapshot.relations) {
-            counts.relations++;
-            const stage = Policy.relation(r, Date.now()).discipline?.stage;
-            if (stage) counts.discipline[stage] = (counts.discipline[stage] || 0) + 1;
-        }
     })().finally(() => { running = null; });
     return running;
+}
+// Diagnostics only (the observer's diagnostics page, which checks the flag): counted when read, not on every refresh.
+function summary(at = Date.now()) {
+    const counts = { clans: view.clans.size, relations: 0, discipline: {} };
+    for (const snapshot of view.clans.values()) for (const r of snapshot.relations) {
+        counts.relations++;
+        const stage = Policy.relation(r, at).discipline?.stage;
+        if (stage) counts.discipline[stage] = (counts.discipline[stage] || 0) + 1;
+    }
+    return counts;
 }
 function projection(s) {
     return { ...s, recent: [], relations: s.relations.map(({ evidence, budget, ...r }) => r) };
@@ -115,4 +127,4 @@ function inspect(at = Date.now()) {
     return { clans: [...view.clans.values()].map(s => ({ clanId: s.clanId, revision: s.revision,
         relations: s.relations.map(r => ({ ...Policy.relation(r, at), stance: Policy.stance(r, at), evidence: undefined })) })) };
 }
-module.exports = { view, refresh, send, syncMemberships, inspect, enforceOne, summary: () => counts };
+module.exports = { view, refresh, send, syncMemberships, inspect, enforceOne, summary };

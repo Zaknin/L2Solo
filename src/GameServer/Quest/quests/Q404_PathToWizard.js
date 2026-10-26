@@ -1,4 +1,4 @@
-const GALLINT = 7391;
+const PARINA = 7391;
 const EARTH_SNAKE = 7409;
 const WASTELAND_LIZARDMAN = 7410;
 const FLAME_SALAMANDER = 7411;
@@ -46,10 +46,10 @@ module.exports = {
   id: 404,
   questItems: [1280, 1281, 1282, 1283, 1284, 1285, 1286, 1287, 1288, 1289, 1290, 1291],
   name: "Path to Wizard",
-  npcs: [GALLINT, EARTH_SNAKE, WASTELAND_LIZARDMAN, FLAME_SALAMANDER, WIND_SYLPH, WATER_UNDINE],
-  startNpcs: [GALLINT],
+  npcs: [PARINA, EARTH_SNAKE, WASTELAND_LIZARDMAN, FLAME_SALAMANDER, WIND_SYLPH, WATER_UNDINE],
+  startNpcs: [PARINA],
   killNpcs: [RED_BEAR, RATMAN_WARRIOR, WATER_SEER],
-  eventNpc: (event) => ({ start: GALLINT, feather: WASTELAND_LIZARDMAN })[event] ?? null,
+  eventNpc: (event) => ({ start: PARINA, feather: WASTELAND_LIZARDMAN })[event] ?? null,
 
   async onEvent(state, event) {
     const quest = service();
@@ -59,7 +59,7 @@ module.exports = {
       await state.setState("started");
       await state.set("cond", 1);
       state.playSound(ACCEPT);
-      return page("Gallint", "Seek the four elemental signs to prove your mastery.");
+      return page("Parina", "Seek the four elemental signs to prove your mastery.");
     }
     if (event === "feather" && state.getInt("cond") === 5 && count(state, BROKEN_BRONZE_MIRROR) && !count(state, WIND_FEATHER)) {
       await quest.giveItem(state.session, WIND_FEATHER, 1);
@@ -75,13 +75,13 @@ module.exports = {
     const quest = service();
     const cond = state.getInt("cond");
 
-    if (state.isCompleted()) return page("Gallint", "You have already completed the Path to Wizard.");
+    if (state.isCompleted()) return page("Parina", "You have already completed the Path to Wizard.");
     if (!state.isStarted()) {
       const actor = state.session.actor;
-      if (npcId !== GALLINT || Number(actor.fetchClassId()) !== 10) return page("Quest", "This path is not for your current class.");
+      if (npcId !== PARINA || Number(actor.fetchClassId()) !== 10) return page("Quest", "This path is not for your current class.");
       return Number(actor.fetchLevel()) < 19
-        ? page("Gallint", "Come back after reaching level 19.")
-        : page("Gallint", "Do you seek the path of a Wizard?", '<a action="bypass -h quest 404 start">Accept the trial.</a>');
+        ? page("Parina", "Come back after reaching level 19.")
+        : page("Parina", "Do you seek the path of a Wizard?", '<a action="bypass -h quest 404 start">Accept the trial.</a>');
     }
 
     if (npcId === FLAME_SALAMANDER) {
@@ -147,20 +147,20 @@ module.exports = {
       return page("Earth Snake", "Bring me the Rust Gold Coin and Red Soil.");
     }
 
-    if (npcId === GALLINT) {
+    if (npcId === PARINA) {
       const signs = [FLAME_EARRING, WIND_BANGLE, WATER_NECKLACE, EARTH_RING];
       if (signs.every((item) => count(state, item))) {
         const profession = await quest.awardFirstProfession(state, 11);
         if (!profession.ok) {
-          return page("Gallint", profession.reason === "level" ? `Reach level ${profession.requiredLevel} to become a Wizard.` : "Your profession could not be granted. Keep your elemental signs and try again.");
+          return page("Parina", profession.reason === "level" ? `Reach level ${profession.requiredLevel} to become a Wizard.` : "Your profession could not be granted. Keep your elemental signs and try again.");
         }
         for (const item of signs) await quest.takeItem(state.session, item);
         if (!count(state, BEAD_OF_SEASON)) await quest.giveItem(state.session, BEAD_OF_SEASON, 1);
         state.playSound(FINISH);
         await state.exit(false);
-        return page("Gallint", "You have completed the Path to Wizard and become a Wizard.");
+        return page("Parina", "You have completed the Path to Wizard and become a Wizard.");
       }
-      return page("Gallint", "Bring me the four elemental signs.");
+      return page("Parina", "Bring me the four elemental signs.");
     }
 
     return null;

@@ -2,6 +2,7 @@ const assert = require('assert'), fs = require('fs'), os = require('os'), path =
 require('../src/Global');
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Party = invoke('GameServer/Bot/Population/BackgroundPartyResolver');
 const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
@@ -14,17 +15,14 @@ let party;
 function resolve(members = states()) { return Party.resolve({ party, members, spot: { id: 'test' }, timestamp: at,
     episodeId: `revive:${at}`, assessRelationship: Memory.assess.bind(Memory) }); }
 async function commit(resolution, reject = false) {
-    const { grants } = await Owner.claimBatch(states(), { timestamp: at, allowParty: true, allowLifecycle: true });
     const entries = await Promise.all(resolution.memberResults.map(async ({ state, result }) => {
         const projection = await Life.prepareResolve(state, result, { timestamp: at, persist: false, projectClassProgression: true });
-        return { token: grants.find(g => g.characterId === state.characterId), nextState: projection,
+        return { revision: state.simulation.revision, nextState: projection,
             options: { allowParty: true, allowLifecycle: true }, atomicGroup: { id: `revive:${at}`, memberIds: [1, 2] },
-            proposal: { baseState: state, result } };
+            proposal: { ...InventorySummary.bagChange(state.inventory, projection.inventory), result } };
     }));
-    if (reject) entries[0].token = { ...entries[0].token, leaseId: 'stale' };
-    const results = await Owner.commitAndReleaseBatch(entries, { timestamp: at });
-    await Owner.releaseBatch(grants, { timestamp: at });
-    return results;
+    if (reject) entries[0].revision -= 1;
+    return Owner.commitBatch(entries, { timestamp: at });
 }
 async function run() {
     invoke('GameServer/DataCache').init(); DB.init();
@@ -46,20 +44,18 @@ async function run() {
     await Life.init(); await Parties.init(); await Memory.ensureMany([1, 2]);
     const prepared = Parties.prepareCommit({ partyId: 'revival-party', leaderId: 2, memberIds: [1, 2], status: 'active', spotId: 'test', startedAt: at, stats: {} });
     const assigned = states().map(s => Life.preparePartyAssignment(s, 'revival-party', 'dps', 2, at));
-    assert((await DB.commitBackgroundPartyMembership({ party: prepared.row, members: assigned })).ok);
-    Life.acceptPartyAssignments(assigned); party = Parties.acceptCommit(prepared);
+    const formed = await DB.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
+    assert(formed.ok);
+    Life.acceptPartyAssignments(assigned, formed.lifeRows); party = Parties.acceptRow(formed.partyRow);
     const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
     const messages = [];
     const kernel = new ColdSimulationKernel({ now: () => at, resolveSolo: () => { throw Error('party must remain together'); }, resolveParty: input => Party.resolve(input),
-        emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
+        spotOf: () => ({ id: 'test' }), emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
     const roster = states(), expired = { ...party, stats: { ...party.stats, sessionExpiresAt: at - 1 } };
-    roster.forEach(s => kernel.upsert({ state: s, context: s.characterId === 2
-        ? { isPartyLeader: true, party: expired, partyMembers: roster, spot: { id: 'test' } } : {} }));
+    roster.forEach(s => kernel.upsert({ state: s }));
+    kernel.partyPut(expired.partyId, expired);
     kernel.tick();
-    const claim = messages.find(m => m.type === 'claim_request'); assert(claim);
-    kernel.onClaimAck({ grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,
-        ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1, leaseId: `revival-${c.characterId}`,
-        leaseUntil: at + 30000, purpose: c.purpose })) }, claim.msgId);
+    assert.strictEqual(kernel.inFlight.size, 2, 'the party steps at once');
     await kernel.resolveChain;
     const batch = messages.find(m => m.type === 'proposal_batch'); assert(batch, JSON.stringify(messages));
     assert(batch.payload.proposals.every(p => p.atomicGroup?.memberIds.length === 2), 'the real worker groups revival and MP writes even without gratitude');

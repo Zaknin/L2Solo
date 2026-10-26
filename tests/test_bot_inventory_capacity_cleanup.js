@@ -38,4 +38,15 @@ const actor = { fetchRace: () => 4, fetchMaxLoad: () => 1000000,
 assert.equal(Floor.bagMarks(actor).full, 0, 'hot bag flags use the same expanded native limit');
 actor.skillset.fetchSkill = () => null;
 assert.equal(Floor.bagMarks(actor).full, 1, 'removing the expansion makes the hot bag full');
+// E308: a hot solo hunter keeps the cold rule. Weight penalty 1 waits through the
+// sale retry kept in its session life state; penalty 2 and a full bag stay the floor.
+const heavy = (load) => ({ ...actor, isDead: () => false, fetchHp: () => 100, fetchMp: () => 100,
+    fetchMaxLoad: () => 1000, skillset: { fetchSkills: () => [], fetchSkill: () => null },
+    backpack: { fetchItems: () => [], fetchTotalLoad: () => load } });
+const retrying = { stats: { marketSellRetryAfter: now + 60000 } };
+const retryOver = { stats: { marketSellRetryAfter: now - 1 } };
+assert.equal(Floor.forActor(heavy(550), null, now)?.weightPenalty, 1, 'a hot bag at 55 % load is weight penalty 1');
+assert.equal(Floor.forActor(heavy(550), retrying, now), null, 'hot penalty 1 waits during the sale retry');
+assert.equal(Floor.forActor(heavy(550), retryOver, now)?.reason, 'overweight', 'hot penalty 1 unloads after the retry');
+assert.equal(Floor.forActor(heavy(700), retrying, now)?.weightPenalty, 2, 'hot penalty 2 stays the floor during the retry');
 console.log('test_bot_inventory_capacity_cleanup: ok');

@@ -26,10 +26,13 @@ async function run() {
         { nextState: { ...initial, updatedAt: Date.now() }, allowLifecycle: true });
     assert.equal(transition.ok, true);
     assert.equal(transition.revision, 1);
+    // A save over a far row moves its revision (Database MOVE_FAR_REVISION,
+    // the worker's fence); each save publishes the row's own revision.
+    const rowRevision = async () => Number((await Database.execute(['SELECT simulationRevision FROM bot_life_state WHERE characterId=?', [id]]))[0].simulationRevision);
     let saved = await Life.upsertState(initial, 'retained_session_save');
     assert(saved);
     const [row] = await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [id]]);
-    assert.equal(row.simulationRevision, transition.revision, 'ordinary saves preserve durable ownership');
+    assert(row.simulationRevision >= transition.revision, 'a save never moves the durable revision back');
     assert.equal(saved.simulation.revision, row.simulationRevision, 'publication must use the saved native revision');
     assert(Protocol.sameCommandCheckpoint(saved, { ...row, activityStartedAt: row.activityStartedAt || 0,
         nextResolveAt: row.nextResolveAt || 0, lastResolvedAt: row.lastResolvedAt || 0, lastHotAt: row.lastHotAt || 0 }));
@@ -40,12 +43,12 @@ async function run() {
     { get: (target, key) => key in target ? target[key]
         : typeof key === 'string' && key.startsWith('fetch') ? () => 0 : undefined });
     const session = { actor, accountId: 'bot_save_ownership', coldLifeState: initial };
-    assert.equal((await Life.markHot(session, 'retained_hot')).simulation.revision, transition.revision);
+    assert.equal((await Life.markHot(session, 'retained_hot')).simulation.revision, await rowRevision());
     saved = await Life.markCold(session, 'retained_cooldown');
     assert.equal(saved.phase, 'cold');
-    assert.equal(saved.simulation.revision, transition.revision, 'hot/cold hand-back keeps the durable revision');
+    assert.equal(saved.simulation.revision, await rowRevision(), 'hot/cold hand-back publishes the row revision');
     saved = await Life.upsertState({ ...saved, simulation: undefined }, 'legacy_view_save');
-    assert.equal(saved.simulation.revision, transition.revision, 'a legacy view without ownership cannot publish revision zero');
+    assert.equal(saved.simulation.revision, await rowRevision(), 'a view without a revision cannot publish revision zero');
     const beforeWrite = Checkpoint.create(id, { workerAdmission: { characterId: id, commandId: 'after-retained-save',
         commandCheckpoint: Protocol.commandCheckpoint(saved), check: () => null } });
     await Database.updateCharacterVitals(id, 90, 100, 80, 100, { beforeWrite });

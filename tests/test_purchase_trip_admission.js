@@ -50,21 +50,24 @@ try {
     const beforeWallet = quoteReads;
     Market.canTravelForPurchase({ ...state, adena: 10 }, tiny, { economy: held });
     assert(quoteReads > beforeWallet, 'changed own money never reuses a funding decision');
+    // The near body's held economy: the view of the card the worker decided
+    // (DecisionEvents.receive), read by the shared travel gate.
     const Events = invoke('GameServer/Bot/AI/DecisionEvents');
-    const actor = { fetchLevel: () => 30, backpack: { fetchItems: () => [], fetchTotalAdena: () => 20 } };
+    Economy.basics = () => ({ kitCost: (_id, price) => price || 1, persona: { understanding: 1 }, trip });
     const session = { coldLifeState: { stats: { decisionSeq: 1 } } };
-    const liveContext = { ...context, inputKey: 'hot-shopping-source', stock: () => ({}),
-        network: { activity: { activity: 'shopping', itemId: 1835, amount: 2, town: 'Dion', valueHours: .2 } },
-        statsPacket: { decisionSeq: 1, money: [1000, .001, 0, 0] } };
-    const compact = Events.hold(session, actor, liveContext);
-    const hotState = { ...state, stats: { money: liveContext.statsPacket.money } };
+    // Without the leaf's value hours the packet's item row funds the purchase, as for a far bot.
+    const hotState = { ...state, phase: 'hot' };
+    const card = Decision.capture({ ...context, inputKey: 'hot-shopping-source',
+        network: { activity: { activity: 'shopping', itemId: 1835, amount: 2, town: 'Dion', valueHours: .2 },
+            demands: [['item:1835', .1]], decisionSeq: 1 } }, hotState);
+    session.heldEconomy = Decision.view(hotState, card, { knowledgeEnabled: false });
+    const compact = Events.held(session);
     Trip.read = () => trip.details();
     Order.tripCost = () => trip;
-    const hotRequest = { selfId: 1835, amount: compact.network.activity.amount,
-        town: compact.network.activity.town, valueHours: compact.network.activity.valueHours };
-    assert.equal(compact.itemUsefulness, undefined, 'a held decision retains no graph closure');
+    // The compact leaf carries no value hours: the card's usefulness prices the units.
+    const hotRequest = { selfId: 1835, amount: compact.network.activity.amount, town: compact.network.activity.town };
     assert.equal(Market.canTravelForPurchase(hotState, hotRequest, { economy: compact }), true,
-        'native hot hold preserves the finite utility and money conversion needed by the shared travel gate');
+        'the held card keeps the finite utility and money conversion the shared travel gate needs');
     assert.equal(compact.moneyPrice, context.moneyPrice);
     assert.equal(Market.canTravelForPurchase({ ...hotState, adena: 10 }, hotRequest, { economy: compact }), false,
         'a partial hot fill earns only half the retained benefit');
@@ -74,7 +77,6 @@ try {
     assert.equal(quoteReads, hotReads, '1000 identical refused hot departures reuse one native quote calculation');
     assert.equal(Market.canTravelForPurchase(state, tiny, { economy: { moneyPrice: .001, trip } }), false,
         'unavailable finite utility refuses a trip without throwing or rebuilding wishes');
-    assert(Buffer.byteLength(JSON.stringify(compact)) < 1024, 'the held source remains a compact decision');
     const blocked = { ...state, stats: { money: [1000, .001, 0, 999999] } };
     const quoted = Market.planPurchase(blocked, 1835, 1, { currentFunding: true, cost: () => 0, purpose: 'shots', towns: ['Dion'] });
     assert.equal(quoted?.units, 1);

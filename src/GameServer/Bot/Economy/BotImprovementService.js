@@ -1,8 +1,12 @@
 'use strict';
 const DiagnosticConfig = require('../Population/PopulationConfig');
 const Policy = require('./BotImprovementPolicy');
+const DecisionEvents = require('../AI/DecisionEvents');
 const pendingCold = new Map(), pendingHot = new WeakMap();
 let improvementDeferred = 0;
+const INPUT_REJECTIONS = new Set(['improvement_source_changed', 'improvement_missing_materials', 'improvement_missing_template',
+    'invalid_bot_enchant', 'invalid_bot_henna', 'invalid_bot_crystal_quest', 'soul_crystal_resonance']);
+const rejectedInput = error => INPUT_REJECTIONS.has(error?.message);
 function chosen(state, context) {
     const leaf = context.network.activity;
     return leaf?.activity === 'improving' ? { ...leaf.improvement } : null;
@@ -33,8 +37,7 @@ function acquisitionTravel(state, leaf, timestamp = Date.now()) {
 // options.decide(): the worker's decision made on exactly this state, or null
 // (L25); without one the wish network is built here.
 async function reviewCold(state, options = {}) {
-    if (!state?.characterId || state.phase !== 'cold' || ['dead','traveling'].includes(state.activity)
-        || state.simulation?.ownerId && state.simulation.ownerId !== 'legacy_main') return Promise.resolve({state,changed:false});
+    if (!state?.characterId || state.phase !== 'cold' || ['dead','traveling'].includes(state.activity)) return Promise.resolve({state,changed:false});
     if (pendingCold.has(state.characterId)) return pendingCold.get(state.characterId);
     const Life = invoke('GameServer/Bot/Population/BotLifeState');
     const { decide, ...writeOptions } = options;
@@ -58,15 +61,25 @@ async function reviewCold(state, options = {}) {
         const current = Life.acceptLifecycleRow(result.coldLifeRow, 'improvement');
         invoke('GameServer/Bot/Economy/EconomyContext').forget(state.characterId);
         return {state:current,changed:true,result};
+    }).catch(async error => {
+        // These native refusals describe the selected input, never a stale
+        // revision, location, MP or uncertain transaction-delivery retry.
+        if (!rejectedInput(error)) throw error;
+        const current = Life.cachedState(state.characterId) || state;
+        if (current.phase !== 'cold') return { state: current, changed: false };
+        const rejected = DecisionEvents.rejectedState(current, state);
+        const saved = rejected === current ? current : await Life.upsertState(rejected, 'improvement_source_rejected') || current;
+        return { state: saved, changed: false, reason: error.message };
     }).finally(() => pendingCold.delete(state.characterId));
     pendingCold.set(state.characterId,work); return work;
 }
-function reviewHot(session, context = null) {
+// The improvement the near body's held decision chose (DecisionEvents.held).
+function reviewHot(session) {
     const actor = session?.actor;
     if (!actor || actor.isDead?.() || !String(session.accountId || '').startsWith('bot_')) return Promise.resolve(null);
     if (pendingHot.has(actor)) return pendingHot.get(actor);
     const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
-    context ||= Economy.forActor(actor,session);
+    const context = DecisionEvents.held(session);
     const improvement = chosen(context.state,context);
     if (!improvement) return Promise.resolve(null);
     const World = invoke('GameServer/World/World');
@@ -74,6 +87,9 @@ function reviewHot(session, context = null) {
     const current = () => session.actor === actor && World.registeredActorById(actor.fetchId()) === record
         && record?.session === session && record.retired !== true && actor.fetchIsOnline?.() !== false && !actor.isDead?.();
     if (!current()) return Promise.resolve(null);
+    const packet = context.statsPacket || context.state?.stats || {};
+    const accepted = { characterId: Number(actor.fetchId()), stats: { decisionSeq: packet.decisionSeq,
+        activityLeaf: packet.activityLeaf, wishFocus: packet.wishFocus, wishSections: packet.wishSections } };
     // Smiths and symbol makers use the actual town interaction, never a
     // remote synthetic NPC grant. Enchant itself has no NPC requirement.
     if (improvement.kind !== 'enchant' && !selfCrystallization(improvement)) {
@@ -111,6 +127,9 @@ function reviewHot(session, context = null) {
         session.dataSendToMe?.(invoke('GameServer/Network/Response').itemsList(backpack.fetchItems()));
         session.dataSendToMe?.(invoke('GameServer/Network/Response').userInfo(actor));
         Economy.forget(actor.fetchId()); return result;
+    }).catch(error => {
+        if (current() && rejectedInput(error)) DecisionEvents.rejectSession(session, accepted);
+        throw error;
     }).finally(() => pendingHot.delete(actor));
     pendingHot.set(actor,work); return work;
 }

@@ -87,10 +87,12 @@ for (let attempt = 0; attempt < 2; attempt++) {
 veteran = JSON.parse(JSON.stringify(veteran));
 assert(!Safety.allowed(veteran, objective, at + 2), 'two deaths must survive party and roster replacement and serialization');
 assert(!veteran.stats.spotRisk && !veteran.stats.spotBackoffs, 'clan defeats must not prohibit a different solo hunt');
-const retryAt = veteran.stats.clanHuntBackoffs[0].until + 1;
+// The ban lives the member's own steps (stats.stepCount).
+const retryAt = at + 10;
+veteran = { ...veteran, stats: { ...veteran.stats, stepCount: veteran.stats.clanHuntBackoffs[0].untilStep } };
 assert(Safety.allowed(veteran, objective, retryAt));
 const successfulRetry = Safety.recordOutcome(veteran, { patch: {}, debug: { fights: 1, wins: 1 } }, objective, retryAt);
-assert(!successfulRetry.patch.stats.clanHuntBackoffs.some(b => b.until > retryAt),
+assert(!successfulRetry.patch.stats.clanHuntBackoffs.some(b => b.untilStep > veteran.stats.stepCount),
     'an expired ban must permit a real retry rather than revive old death pressure forever');
 
 const debtMembers = [1, 2].map(characterId => ({ characterId, level: 55, phase: 'cold',
@@ -140,22 +142,18 @@ async function checkWorkerSafety() {
     const states = members.slice(0, 3).map(m => ({ ...m, activity: 'grouped',
         party: { partyId: 'unsafe', leaderId: 1 },
         timing: { lastResolvedAt: at - 1000, nextResolveAt: at - 1 },
-        simulation: { ownerId: 'legacy_main', revision: 3 },
+        simulation: { revision: 3 },
         stats: { ...m.stats, clanPartyObjective: objective } }));
     const party = { partyId: 'unsafe', leaderId: 1, memberIds: [1, 2, 3], spotId: 'tower',
         stats: { objective, sessionExpiresAt: at + 3600000 } };
     const kernel = new ColdSimulationKernel({ now: () => at,
         resolveSolo: () => { throw new Error('party review must not run a solo fight'); },
         resolveParty: () => { throw new Error('an unsafe clan party must be released before combat'); },
-        emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
-    states.forEach((state, i) => kernel.upsert({ state, context: i === 0
-        ? { isPartyLeader: true, party, partyMembers: states, spot: { id: 'tower' } } : {} }));
+        spotOf: () => ({ id: 'tower' }), emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
+    states.forEach(state => kernel.upsert({ state }));
+    kernel.partyPut(party.partyId, party);
     kernel.tick();
-    const claim = messages.shift();
-    assert.strictEqual(claim.type, 'claim_request');
-    kernel.onClaimAck({ grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,
-        ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,
-        leaseId: `safety-${c.characterId}`, leaseUntil: at + 30000, purpose: c.purpose })) }, claim.msgId);
+    assert.strictEqual(kernel.inFlight.size, 3, 'the party steps at once from the worker\'s copy');
     await kernel.resolveChain;
     const proposals = messages.find(m => m.type === 'proposal_batch').payload.proposals;
     assert.strictEqual(proposals.length, 3);
@@ -218,7 +216,7 @@ async function checkMissingSpotRecovery() {
     }
     assert(Population.canResumeAffordableMarketPlan(buyer, at),
         'the original funded compatible bridge remains eligible for a market review before another fight');
-    const originals = { ensure: Spots.ensure, occupancy: Spots.currentOccupancy, find: Spots.findForState,
+    const originals = { ensure: Spots.ensure, find: Spots.findForState,
         save: Life.upsertState, cachedState: Life.cachedState };
     const state = { ...polearm, characterId: 100, phase: 'cold', activity: 'hunting', inventory: {},
         adena: 0, stats: { classId: 3 }, timing: { nextResolveAt: 1 } };
@@ -228,7 +226,6 @@ async function checkMissingSpotRecovery() {
     const originalReview = Goals.review;
     try {
         Spots.ensure = () => [];
-        Spots.currentOccupancy = () => ({});
         Spots.findForState = () => null;
         Life.upsertState = async (next, reason) => { savedReason = reason; saves += 1; return next; };
         Events.recordMany = async () => [];
@@ -277,7 +274,7 @@ async function checkMissingSpotRecovery() {
         assert.strictEqual(staleTrip.state, current);
         assert.strictEqual(saves, savesBeforeStaleTrip, 'the stale market trip must not write another lifecycle state');
     } finally {
-        Spots.ensure = originals.ensure; Spots.currentOccupancy = originals.occupancy;
+        Spots.ensure = originals.ensure;
         Spots.findForState = originals.find; Life.upsertState = originals.save;
         Life.cachedState = originals.cachedState;
         Events.recordMany = originalEvents;

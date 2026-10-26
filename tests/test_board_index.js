@@ -9,6 +9,28 @@ const record = (id, fields, lines) => ({ id, kind: 'shop', storeType: SELL, owne
     botOwned: true, ...fields, lines: lines.map((line, at) => ({ lineId: id * 100 + at, enchant: 0, count: 1, ...line })) });
 const ids = (lines) => lines.map((line) => `${line.recordId}/${line.lineId}`);
 
+// A list token follows membership, including replacement and index rebuilds.
+{
+    const board = new BoardIndex(), empty = board.itemIdsFingerprint(BUY);
+    board.put(record(1, { storeType: BUY }, [{ selfId: 7, price: 1 }]));
+    const one = board.itemIdsFingerprint(BUY);
+    assert.notStrictEqual(one, empty);
+    assert.strictEqual(board.itemIdsFingerprint(SELL), empty, 'sides have independent lists');
+    board.put(record(2, { storeType: BUY, town: 'Dion' }, [{ selfId: 7, price: 2 }]));
+    assert.strictEqual(board.itemIdsFingerprint(BUY), one, 'another advertisement does not add a list member');
+    board.put(record(1, { storeType: BUY }, [{ selfId: 7, price: 3 }]));
+    board.remove(2);
+    assert.strictEqual(board.itemIdsFingerprint(BUY), one, 'replacement and removal of a duplicate keep membership');
+    board.put(record(1, { storeType: BUY }, [{ selfId: 8, price: 3 }]));
+    assert.notStrictEqual(board.itemIdsFingerprint(BUY), one, 'a replaced last line moves list membership');
+    board.clear();
+    assert.strictEqual(board.itemIdsFingerprint(BUY), empty, 'clear resets the token');
+    board.put(recordOf(rowOf(record(3, { storeType: BUY }, [{ selfId: 7, price: 9 }]))));
+    assert.strictEqual(board.itemIdsFingerprint(BUY), one, 'loading identical membership restores the same token');
+    board.remove(3);
+    assert.strictEqual(board.itemIdsFingerprint(BUY), empty, 'the last ad removes the member');
+}
+
 // Sell lines: cheaper first, a player before a bot, then record and line id.
 index.put(record(3, {}, [{ selfId: 7, price: 50 }]));
 index.put(record(1, {}, [{ selfId: 7, price: 50 }, { selfId: 7, price: 40, enchant: 3 }]));
@@ -46,7 +68,7 @@ const store = { shopId: 12, kind: 'sell_ad', storeType: SELL, ownerId: 5, town: 
     items: [{ afkTradeLineId: 40, selfId: 1864, enchant: 0, count: 3, price: 9, name: 'Stem' },
         { afkTradeLineId: 41, selfId: 1865, enchant: 0, count: 0, price: 9 }] };
 const row = rowOf(store);
-assert.deepStrictEqual(row, [12, 'sell_ad', SELL, 5, 'Oren', 1, [[40, 1864, 0, 3, 9, null, 0]], 4, 0]);
+assert.deepStrictEqual(row, [12, 'sell_ad', SELL, 5, 'Oren', 1, [[40, 1864, 0, 3, 9, null, 0]], 4, 0, 0], 'a sell record holds no escrow');
 assert.deepStrictEqual(recordOf(row), { id: 12, kind: 'sell_ad', storeType: SELL, ownerId: 5, town: 'Oren', botOwned: true,
     revision: 4, custodyPolicy: 0, lines: [{ lineId: 40, selfId: 1864, enchant: 0, count: 3, price: 9, fills: 0 }] });
 assert.strictEqual(recordOf(row.slice(0, 7)).revision, null, 'old worker rows stay readable without a revision fence');
@@ -179,3 +201,41 @@ assert.equal(admittedFill.cost, 4);
 assert.equal(admittedFill.lines[0].line.ownerId, 2, 'fill streams caller admission before selecting an executable quote');
 const admittedTown = Query.cheapestTown(leftContent, 1867, { amount: 1, accept: line => line.recordId !== 81 });
 assert.equal(admittedTown.lines[0].line.recordId, 82, 'town selection passes caller admission into the same fill');
+
+// E303: a cut call left short is sampled one in 64 when its caller opts in and priced again over the whole list;
+// `lost` counts those it fills (developer diagnostics only, the result itself unchanged).
+const Config = require('../src/GameServer/Bot/Population/PopulationConfig');
+const Diagnostics = require('../src/GameServer/Bot/Economy/EconomyDiagnostics');
+const deep = new BoardIndex();
+for (let id = 1; id <= 6; id++) deep.put(record(900 + id, {}, [{ selfId: 77, price: 10 + id }]));
+const diagnostics = Config.developerDiagnostics;
+Config.developerDiagnostics = true;
+try {
+    const counts = () => Diagnostics.metrics().counts;
+    const before = { ...counts() };
+    for (let call = 0; call < 64; call++) assert.equal(Query.cheapestTown(deep, 77, { amount: 6, quoteDepth: 5 }).whole, false);
+    assert.equal(counts()['cap:quotes:sampled'] || 0, before['cap:quotes:sampled'] || 0, 'no sample without the opt-in');
+    for (let call = 0; call < 64; call++) {
+        const capped = Query.cheapestTown(deep, 77, { amount: 6, quoteDepth: 5, sampleWhole: true });
+        assert.equal(capped.units, 5, 'the cap still prices only the first five asks');
+        assert.equal(capped.whole, false);
+    }
+    const delta = key => (counts()[key] || 0) - (before[key] || 0);
+    assert.equal(delta('cap:quotes:short'), 128);
+    assert.equal(delta('cap:quotes:sampled'), 1, 'one opted-in short call in 64 is sampled');
+    assert.equal(delta('cap:quotes:lost'), 1, 'the whole list fills the sampled call');
+    // A craft purchase table (one board read for many amounts) counts the cap per priced amount, not per build.
+    const checks = () => (counts()['cap:quotes:check'] || 0);
+    const checksBefore = checks();
+    const table = Query.townTable(deep, 77, { quoteDepth: 5 });
+    assert.equal(checks() - checksBefore, 0, 'building a table counts no check');
+    for (const amount of [1, 5, 6]) Query.cheapestIn(table, amount);
+    assert.equal(checks() - checksBefore, 3, 'one check per priced amount');
+    assert.equal(Query.cheapestTown(deep, 77, { amount: 6 }).whole, true);
+    // With diagnostics off an opted-in call never pays for the whole-list rerun.
+    Config.developerDiagnostics = false;
+    let accepted = 0;
+    for (let call = 0; call < 128; call++) Query.cheapestTown(deep, 77, { amount: 6, quoteDepth: 5, sampleWhole: true, accept: () => ++accepted > 0 });
+    assert.equal(accepted, 128 * 5, 'no rerun over the whole list while diagnostics are off');
+} finally { Config.developerDiagnostics = diagnostics; }
+console.log('PASS test_board_index');

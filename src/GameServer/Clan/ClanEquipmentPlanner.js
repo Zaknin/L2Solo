@@ -83,19 +83,20 @@ function calculateRoute(member, spots = [], warehouseRows = [], options = {}) {
     const marketBudget = clanBudget(state, options);
     const plannerOptions = {
         spots,
+        ...(options.strategicTarget ? { wishTargetId: Number(options.strategicTarget.itemId),
+            wishSlot: Number(options.strategicTarget.slot) } : {}),
         clanCrafting: true,
         craftRecipes: options.craftRecipes,
         craftProviders: options.craftProviders,
         ...(options.recipeId ? { recipeId: options.recipeId } : {}),
         allowedRecipeIds: options.allowedRecipeIds ? new Set(options.allowedRecipeIds) : undefined,
         maxExpectedKills: number(options.maxExpectedKills, Config.equipmentMaxExpectedKills),
+        // The beneficiary must pass the same ordinary-source level limit as
+        // the native clan party assignment. Raids have their own full proof.
+        maxSourceLevel: number(member.level) + Config.operationMaxTargetLevelGap,
         maxMarketPrice: marketBudget,
         spoilCapable: options.spoilCapable === true,
         allowRaidSources: options.allowRaidSources === true,
-        ...(options.occupancy ? { occupancy: options.occupancy } : {}),
-        ...(options.capacityUnits ? { capacityUnits: options.capacityUnits } : {}),
-        ...(options.reservationKey ? { reservationKey: options.reservationKey } : {}),
-        ...(options.maxReservationGroups ? { maxReservationGroups: options.maxReservationGroups } : {}),
         ...(options.excludedTargetIds ? { excludedTargetIds: options.excludedTargetIds } : {})
     };
     try {
@@ -242,12 +243,19 @@ function planForMember(member, spots = [], warehouseRows = [], options = {}) {
     // Recalculate craft shortages against the pooled inventory before routing.
     const previous = member.stats?.equipmentPlan;
     const state = { ...member, inventory: pooled, stats: { ...(member.stats || {}) } };
-    if (previous?.strategy === 'craft') delete state.stats.equipmentPlan;
+    const target = options.strategicTarget;
+    const matchesTarget = !target || Number(previous?.target?.selfId) === Number(target.itemId)
+        && Number(previous?.target?.slot) === Number(target.slot);
+    if (previous?.strategy === 'craft' || !matchesTarget) delete state.stats.equipmentPlan;
     const retainedRecipe = previous?.strategy === 'craft' && previous.status !== 'blocked' && !options.ignoreExistingPlan
+        && matchesTarget
         && GearAcquisitionPlanner.acquisitionTargetAllowed(state, previous)
         && !(options.excludedTargetIds || []).map(Number).includes(Number(previous.target?.selfId))
         ? Number(previous.recipeId) : null;
     const plan = calculate(state, spots, [], { ...options, recipeId: retainedRecipe });
+    if (target && (Number(plan?.target?.selfId) !== Number(target.itemId)
+        || Number(plan?.target?.slot) !== Number(target.slot))) return {
+        status: 'blocked', reason: 'clan_target_unavailable', strategy: 'none', target: null };
     if (plan?.strategy !== 'craft') return plan;
     const providers = {};
     const componentRecipes = {};

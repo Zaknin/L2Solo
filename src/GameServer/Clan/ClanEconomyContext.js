@@ -5,6 +5,7 @@ const { WishNetwork, fundable: fundableWish } = require('../Bot/Economy/WishNetw
 const HallPolicy = require('../ClanHall/Policy');
 const Rules = require('./ClanRules');
 const Contributions = invoke('GameServer/Clan/ClanContributionPolicy');
+const WishProviders = require('../Bot/Economy/WishProviders');
 const engine = new WishNetwork();
 const positive = value => Math.max(0, Number(value) || 0);
 const trait = (persona, name) => Math.max(0, Math.min(1, Number(persona?.traits?.[name] ?? 0.5)));
@@ -19,6 +20,8 @@ function treasury(rows = []) {
 function build(clan, { warehouse = [], memberContexts = [], equipment = [], halls = [], proofOffer = null } = {}) {
     halls = halls.map(hall => ({ ...HallPolicy.definition(hall.id), ...hall }));
     const members = clan.members || [];
+    const Strategy = require('./ClanStrategyPolicy');
+    const strategy = Strategy.active(clan);
     const leaderIndex = members.findIndex(member => Number(member.characterId ?? member.id) === Number(clan.leaderId ?? clan.state?.leaderId));
     const leader = memberContexts[Math.max(0, leaderIndex)];
     const persona = leader?.persona || members[Math.max(0, leaderIndex)]?.persona || {};
@@ -93,13 +96,17 @@ function build(clan, { warehouse = [], memberContexts = [], equipment = [], hall
     // promises to buy several residences. The native bid still checks funds.
     const hallNodes = nodes.filter(node => node.object.kind === 'hall').sort((a, b) => b.valueHours / Math.max(1, b.paths[0].price)
         - a.valueHours / Math.max(1, a.paths[0].price) || a.object.hallId - b.object.hallId);
-    const chosenHall = hallNodes[0];
+    const chosenHall = strategy?.objective === 'clan_hall'
+        ? hallNodes.find(node => Number(node.object.hallId) === Number(strategy.target.hallId)) : hallNodes[0];
     const selected = nodes.filter(node => node.object.kind !== 'hall').sort((a, b) => b.valueHours / Math.max(1, b.paths[0].price)
         - a.valueHours / Math.max(1, a.paths[0].price) || a.key.localeCompare(b.key)).slice(0, chosenHall ? 11 : 12);
     if (chosenHall) selected.push(chosenHall);
-    const inputKey = JSON.stringify([wallet, reserve, level, persona, selected,
+    const eligible = selected.filter(node => Strategy.spendingAllowed(clan, node.object.kind)
+        && (!strategy || strategy.objective !== 'clan_hall' || node.object.kind !== 'hall'
+            || Number(node.object.hallId) === Number(strategy.target.hallId)));
+    const inputKey = JSON.stringify([wallet, reserve, level, persona, eligible, strategy?.objective, strategy?.target,
         memberContexts.map(context => context.inputKey), clan.state?.goal?.economy?.focus]);
-    const network = engine.build({ actorKey: `clan:${clan.id}`, inputKey, nodes: selected, roots: selected.map(node => node.key),
+    const network = engine.build({ actorKey: `clan:${clan.id}`, inputKey, nodes: eligible, roots: eligible.map(node => node.key),
         wallet, survivalReserve: reserve, persona, hourAdena: income,
         playedHours: mean(members.map(member => member.stats?.playedHours)),
         previous: clan.state?.goal?.economy || { focus: clan.state?.wishFocus, dormant: clan.state?.dormantWishes },
@@ -127,9 +134,9 @@ function build(clan, { warehouse = [], memberContexts = [], equipment = [], hall
         return Math.max(0, Math.floor(Math.min(purse, worth)));
     }
     return { actorKey: `clan:${clan.id}`, inputKey, wallet, reserve, incomePerHour: income, network,
-        focusObject: selected.find(node => node.key === network.focus?.[0])?.object || null,
+        focusObject: eligible.find(node => node.key === network.focus?.[0])?.object || null,
         moneyPrice: network.moneyPrice, hourAdena: network.hourAdena, persona, budgetFor, hallBid,
-        hall: chosenHall ? halls.find(hall => Number(hall.id) === chosenHall.object.hallId) : null,
+        hall: chosenHall && Strategy.spendingAllowed(clan, 'hall') ? halls.find(hall => Number(hall.id) === chosenHall.object.hallId) : null,
         statsPacket: { wishFocus: network.focus, dormantWishes: network.dormant } };
 }
 
@@ -150,7 +157,7 @@ function forClan(clan, inputs = {}) {
             if (Number(id) === Number(numbers?.plan?.itemId)) return positive(numbers.plan.valueHours);
             const item = require('../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, id);
             if (!item?.etc?.slot) return 0;
-            const gain = require('../Bot/Economy/WishProviders').gearGain(member, item, basics().timestamp);
+            const gain = WishProviders.gearGain(member, item, basics().timestamp);
             return Math.max(0, (gain.attack + gain.defence * basics().deathHours) * clanHorizon);
         };
         return { persona: member.persona || basics().persona, clanHorizon,

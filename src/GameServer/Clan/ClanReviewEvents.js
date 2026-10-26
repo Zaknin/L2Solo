@@ -1,5 +1,7 @@
 'use strict';
 
+const ClanRules = require('./ClanRules');
+
 // Addressed planning inputs, never clan/member snapshots. Native rows stay in
 // the lifecycle and warehouse; this queue only remembers which clan to visit.
 const dirty = new Map();
@@ -84,7 +86,7 @@ function track(clan) {
     const leaderId = Number(clan.leaderId);
     if (cashLevelGoal(clan) && Number.isSafeInteger(leaderId) && leaderId > 0) {
         clanLeaders.set(id, leaderId);
-        leaders.set(leaderId, { clanId: id, requiredSp: require('./ClanRules').LEVEL_REQUIREMENTS[Number(clan.level)].sp });
+        leaders.set(leaderId, { clanId: id, requiredSp: ClanRules.LEVEL_REQUIREMENTS[Number(clan.level)].sp });
     }
     const previous = clanItems.get(id) || new Set();
     const wanted = new Set();
@@ -103,7 +105,7 @@ function track(clan) {
         }
         for (const item of plan?.materials || []) if (Number(item.selfId) > 0) wanted.add(Number(item.selfId));
     }
-    if (Number(clan.level) === 2) wanted.add(require('./ClanRules').LEVEL_REQUIREMENTS[2].itemId);
+    if (Number(clan.level) === 2) wanted.add(ClanRules.LEVEL_REQUIREMENTS[2].itemId);
     for (const itemId of previous) {
         if (wanted.has(itemId)) continue;
         const group = items.get(itemId); group?.delete(id); if (!group?.size) items.delete(itemId);

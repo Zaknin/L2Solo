@@ -95,7 +95,10 @@ function startAggroTicker(world = invoke('GameServer/World/World'), {
 } = {}) {
     if (!world || world.npcAggroTicker) return world?.npcAggroTicker;
 
-    const ticker = setTicker(() => tickLiveActors(world), 1000);
+    const ticker = setTicker(() => {
+        tickLiveActors(world);
+        invoke('GameServer/Npc/NpcWander').tick(world);
+    }, 1000);
     ticker?.unref?.();
     world.npcAggroTicker = ticker;
     return ticker;

@@ -139,7 +139,8 @@ Party selection excludes pending waits. CAS validation rejects duplicate deliver
 even after restart, and a stale participant aborts both writes.
 
 An avoid decision uses the ordinary suitable-spot selector and capacity check,
-excluding the current spot for ten minutes. A successful action starts normal
+excluding the current spot for ten steps of each holder (a member's far steps,
+the party's rounds). A successful action starts normal
 travel, with its existing arrival time and zero farming rewards during transit.
 All departing party members and the party's destination/schedule commit together;
 the other unit keeps hunting. A missing destination returns `no_retreat_route`,

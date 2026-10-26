@@ -89,7 +89,7 @@ function basicAction(session, actor, data) {
         break;
 
     case 0x28: // Recommend without selection
-        break;
+        return invoke('GameServer/Recommendations/Runtime').recommend(session, Number(actor.fetchDestId()));
 
     case 0x25: // Dwarven Manufacture
         if (!ManufactureShop.open(session, 'dwarven')) session.dataSendToMe(ServerResponse.actionFailed());

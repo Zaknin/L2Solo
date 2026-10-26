@@ -49,13 +49,10 @@ const flush = async () => { for (let n = 0; n < 30; n++) await new Promise(resol
             return accepted.meeting.id;
         };
         const commitArrival = async dead => {
-            const prior = Life.cachedState(ids[0]);
-            const token = await Owner.claim(prior, { allowLifecycle: true });
-            assert.equal(token.ok, true);
             const owned = Life.cachedState(ids[0]);
             const next = { ...owned, activity: dead ? 'dead' : 'shopping', loc: point,
                 vitals: { ...owned.vitals, hp: dead ? 0 : 100 }, stats: { ...owned.stats, travel: null } };
-            const results = await Owner.commitAndReleaseBatch([{ token, nextState: next, options: { allowLifecycle: true } }]);
+            const results = await Owner.commitBatch([{ revision: owned.simulation.revision, nextState: next, options: { allowLifecycle: true } }]);
             assert.equal(results[0].ok, true);
             await flush();
         };

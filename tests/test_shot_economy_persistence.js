@@ -1,11 +1,12 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('fs');
 const path = require('path');
 const isolated = require('./helpers/isolatedSocialDatabase')('shot_economy_persistence', path.resolve(__dirname, '..'));
 require('./helpers/databaseIsolation');
 require('../src/Global');
 isolated.assertConfigured(options.default);
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 const DB = invoke('Database');
 const Cache = invoke('GameServer/DataCache');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
@@ -72,10 +73,10 @@ async function run() {
     const empty = await bot({ classId: 0, shots: 0, recipe: false, money: 100000 });
     const fallback = await nativeReview(empty);
     // Task 4 B3: review plans no shot purchase on main; the card of the
-    // core's root stock:shots buys. Review keeps the crafters' demand index.
+    // core's root stock:shots buys. The crafters' demand row is the far
+    // step's output (test_cold_shot_economy).
     assert.strictEqual(fallback.state.adena, empty.adena, 'review buys no shots on main');
     assert(!(fallback.state.inventory[1463]?.amount > 0));
-    assert(fallback.state.stats.shotDemand?.amount > 0, 'the missing stack stays visible to crafters');
     assert.strictEqual((await balances(empty.characterId)).life.adena, fallback.state.adena);
     // A committed purchase makes the pre-review state stale.
     await DB.purchaseNpcInventoryItem(empty.characterId, {

@@ -1,8 +1,9 @@
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('node:fs');
 require('./helpers/databaseIsolation');
 const isolated = require('./helpers/isolatedSocialDatabase')('group-f-market-ads');
-process.env.L2NODE_PROGRESSION_RATE = 'x1';
+useRate('x1');
 require('../src/Global');
 isolated.assertConfigured(options.default);
 
@@ -37,14 +38,14 @@ async function run() {
             && !starterIds.has(Number(row.selfId)));
         assert(item);
         for (const rate of ['x1', 'x10', 'x50']) {
-            process.env.L2NODE_PROGRESSION_RATE = rate;
+            useRate(rate);
             assert.equal(ListingPolicy.classify({ stats: {} }, { selfId: Number(item.selfId),
                 kind: item.template.kind, rank: item.etc?.rank, count: 1,
                 basePrice: item.template.price, enchant: 0 }).action, 'market', rate);
         }
-        process.env.L2NODE_PROGRESSION_RATE = 'x1';
+        useRate('x1');
     });
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     await check('new town ad coordinates belong to the named town', () => {
         for (const name of ["Hunter's Village", 'Aden', 'Rune', 'Goddard', 'Floran Village']) {
             const town = Object.values(TownRespawn.towns).find(row => row.name === name);

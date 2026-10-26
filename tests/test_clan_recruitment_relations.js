@@ -32,10 +32,11 @@ async function main() {
     isolated.assertConfigured(options.default);
     Database.init();
     try {
-        // The candidate remembers a friend from shared hunts.
+        // The candidate remembers a friend from shared hunts; one clock read, so the reason is never newer than its row.
+        const now = Date.now();
         Memory.accept({ version: 1, ownerId: CANDIDATE, revision: 1, replayFloor: 0, recent: [], relations: [{
-            kind: 'character', targetId: FRIEND, at: Date.now(), order: 1,
-            affinity: 40, trust: 30, hostility: 0, fear: 0, familiarity: 8, reasons: [{ type: 'hunted_together', at: Date.now() }]
+            kind: 'character', targetId: FRIEND, at: now, order: 1,
+            affinity: 40, trust: 30, hostility: 0, fear: 0, familiarity: 8, reasons: [{ type: 'hunted_together', at: now }]
         }] });
         const [candidate] = await Service.candidateProjection(10);
         assert.strictEqual(candidate.characterId, CANDIDATE);

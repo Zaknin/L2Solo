@@ -3,6 +3,7 @@
 // The shared worker wish selects one finite batch. Hot execution only checks
 // that selected recipe against live stock, then calls the player's native
 // self-craft owner; it never buys inputs or grants a sale/profit here.
+const DecisionEvents = require('../AI/DecisionEvents');
 const pending = new WeakMap();
 function canStart(session, leaf) {
     const actor = session?.actor;
@@ -49,15 +50,15 @@ function review(session, context) {
             // free stock through the one quantity reader (remainingQuantity).
             return opportunity && opportunity.basket.purchases.length === 0 ? opportunity : null;
         };
-        const retirePreparation = () => {
-            require('../AI/DecisionEvents').prepared(session);
-            Economy.forget(Number(actor.fetchId()));
-        };
+        const packet = context.statsPacket || DecisionEvents.statsFor(session);
+        const accepted = { characterId: Number(actor.fetchId()), stats: { decisionSeq: packet.decisionSeq, activityLeaf: packet.activityLeaf,
+            wishFocus: packet.wishFocus, wishSections: packet.wishSections } };
+        const retirePreparation = () => Economy.forget(Number(actor.fetchId()));
         let state = liveState();
         if (!permitted(state)) return { attempted: false };
         if (!ready(state)) {
-            // A withdrawn bid or changed input invalidates this held leaf.
-            // Recomputing preserves its native decision seed, not a new roll.
+            // A withdrawn bid or changed input rejects this accepted work.
+            DecisionEvents.rejectSession(session, accepted);
             retirePreparation();
             return { attempted: false };
         }
@@ -68,8 +69,9 @@ function review(session, context) {
                 await invoke('GameServer/Bot/Economy/BotWarehouseService').learnActorRecipes(actor, state, session,
                     { recipeIds: [Number(recipe.recipeId)] });
                 state = liveState();
-                if (!permitted(state) || !ready(state)
-                    || !book().some(row => Number(row.recipeId ?? row) === Number(recipe.recipeId))) return { attempted, crafted: false };
+                if (!permitted(state)) return { attempted, crafted: false };
+                if (!ready(state)) { DecisionEvents.rejectSession(session, accepted); return { attempted, crafted: false }; }
+                if (!book().some(row => Number(row.recipeId ?? row) === Number(recipe.recipeId))) return { attempted, crafted: false };
             }
             attempted = true;
             const crafted = await invoke('GameServer/Crafting/RecipeCrafting').craftSelf(session, Number(recipe.recipeId));

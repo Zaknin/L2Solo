@@ -19,7 +19,7 @@ function actor(id, x = 0, kind = null) {
         fetchHp() { return this.hp; }, fetchMaxHp: () => 100, fetchMp: () => 100, fetchMaxMp: () => 100,
         fetchLevel: () => 20, fetchIsOnline: () => true, isDead() { return this.hp <= 0; },
         state: { seated: false, fetchSeated() { return this.seated; }, setSeated(v) { this.seated = v; } },
-        automation: { replenishVitals() {} }, select() {}, moveTo(coords) { this.moved = true; this.move = coords; } };
+        automation: { replenishVitals() {}, abortAll() {} }, select() {}, moveTo(coords) { this.moved = true; this.move = coords; } };
 }
 try {
     replace(Geo, 'hasLineOfSight', () => true);

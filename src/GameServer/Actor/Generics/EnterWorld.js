@@ -1,6 +1,7 @@
 const DataCache   = invoke('GameServer/DataCache');
 const ConsoleText = invoke('GameServer/ConsoleText');
 const CharacterStatus = invoke('GameServer/Actor/CharacterStatus');
+const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const ServerResponse = invoke('GameServer/Network/Response');
 
 function refreshLoadedSkillState(session, actor, Generics, response = ServerResponse) {
@@ -21,6 +22,7 @@ function refreshLoadedSkillState(session, actor, Generics, response = ServerResp
 async function enterWorld(session, actor) {
     const Generics = invoke(path.actor);
     await invoke('GameServer/Progression/DeathExperience').load(actor);
+    await invoke('GameServer/Recommendations/Runtime').refresh(actor);
 
     // Set character as online
     actor.setIsOnline(true);
@@ -32,7 +34,7 @@ async function enterWorld(session, actor) {
     // buff affects the cap used when the persisted HP is restored.
     const vitals = CharacterStatus.savedVitals(actor);
     if (Number.isFinite(session.coldLifeState?.stats?.coldCombat?.cp)) {
-        vitals.cp = invoke('GameServer/Bot/Population/ColdCombatProfile').profileFor(session.coldLifeState).cp;
+        vitals.cp = ColdCombatProfile.currentCp(session.coldLifeState, ColdCombatProfile.profileFor(session.coldLifeState), Date.now());
     }
     const coldEffects = session.coldLifeState?.stats?.coldCombat?.effects;
     // A cold snapshot is authoritative even when empty: falling back then

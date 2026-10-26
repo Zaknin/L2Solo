@@ -12,7 +12,7 @@ const Policy = invoke('GameServer/Bot/Economy/BuffServicePolicy');
 const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
 const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
-const { ColdCommitQueue } = require('../src/GameServer/Bot/Population/ColdCommitQueue');
+const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const timestamp = 1800000000000;
 const ids = [719400, 719401, 719402, 719403];
 const state = (id, classId, revision) => ({ characterId: id, name: `Buff${id}`, level: 55,
@@ -21,7 +21,7 @@ const state = (id, classId, revision) => ({ characterId: id, name: `Buff${id}`, 
     stats: { classId, money: [6000, 0, 0, 0], classProgressionLevel: 55, classProgressionClassId: classId,
         coldCombat: { skills: Profile.skillRecordsFromTree(classId, 55), effects: [] } },
     inventory: { 57: { selfId: 57, amount: 20000 } }, vitals: { hp: 100, maxHp: 100, mp: 2000, maxMp: 2000 },
-    simulation: { ownerId: 'legacy_main', revision, leaseId: null, leaseUntil: 0 } });
+    simulation: { revision } });
 async function run() {
     const world = await createWorld(ids.map(id => ({ id, level: 55 })), 'cold-buff-offer');
     const mark = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').markDirty;
@@ -58,15 +58,12 @@ async function run() {
         for (const current of [provider, first, buyer, last]) transport.upsert({ state: { ...current,
             timing: { lastResolvedAt: timestamp - 45000, nextResolveAt: current === provider ? timestamp - 1 : timestamp + 60000 } } });
         transport.tick();
-        const claim = sent.find(row => row.type === 'claim_request');
-        assert.ok(claim);
-        transport.onClaimAck({ grants: [{ ok: true, characterId: provider.characterId, ownerId: 'cold_simulation_owner',
-            revision: 42, leaseId: 'buff-project-lease', leaseUntil: timestamp + 30000 }] }, claim.msgId);
+        assert.deepEqual([...transport.inFlight.keys()], [provider.characterId], 'the provider steps from the worker\'s copy');
         await transport.resolveChain;
         transport.flush(null, true);
         const projectedPacket = sent.find(row => row.type === 'proposal_batch')?.payload.proposals[0].buffOffer;
         assert.ok(projectedPacket, 'the provider resolve carries one actual proposal offer');
-        assert.equal(projectedPacket.providerRevision, 42);
+        assert.equal(projectedPacket.providerRevision, 41, 'the offer names the revision the step started from');
         assert.equal(projectedPacket.recipientRevision, 17);
         assert.equal(projectedPacket.recipientId, buyer.characterId);
         assert.ok(Buffer.byteLength(JSON.stringify(projectedPacket)) <= 512);
@@ -96,31 +93,34 @@ async function run() {
         const originalApply = Cold.applyOffer;
         stub(Cold, 'applyOffer', (offer, options) => originalApply(offer, { ...options, timestamp,
             beforeWrite: () => { options.beforeWrite(); guarded++; } }));
-        const entry = { nextState: Life.cachedState(provider.characterId), proposal: { buffOffer: packet, result: { events: [] } } };
-        await coordinator.afterCommit(entry);
+        // The provider's review command after its commit, as the worker sends it.
+        const answers = [];
+        coordinator.worker = { postMessage: message => message.type === 'command_ack' && answers.push(...message.payload.results) };
+        coordinator.workerEpoch = 'buff:test';
+        const review = async buffOffer => {
+            coordinator.handleCommandRequest({ msgId: `buff:${answers.length}`, payload: { requests: [{
+                characterId: provider.characterId, kind: 'review', commandId: `review:${provider.characterId}:${answers.length}`,
+                commandCheckpoint: Protocol.commandCheckpoint(Life.cachedState(provider.characterId)), buffOffer }] } });
+            await coordinator.commandTail;
+            return answers.at(-1);
+        };
+        // Life.init's startup repair already saved (and moved) the fixture rows.
+        const buyerBefore = Life.cachedState(buyer.characterId).simulation.revision;
+        assert.equal((await review(packet)).ok, true);
         assert.equal(guarded, 1);
         assert.equal(Cold.summary().sold, 1);
         const stored = (await Database.execute(['SELECT statsJson,simulationRevision FROM bot_life_state WHERE characterId=?', [buyer.characterId]]))[0];
         assert.deepEqual(JSON.parse(stored.statsJson).coldCombat.effects, native.effects);
-        assert.equal(stored.simulationRevision, 18);
+        assert.equal(stored.simulationRevision, buyerBefore + 1, 'the purchase moves the buyer once');
         const stale = { ...packet, providerRevision: Life.cachedState(provider.characterId).simulation.revision,
-            recipientRevision: 16 };
-        const acks = [];
-        const queue = new ColdCommitQueue({ prepare: async proposal => proposal.baseState,
-            commit: async entries => entries.map(row => ({ ok: true, characterId: row.nextState.characterId })),
-            afterCommit: row => coordinator.afterCommit(row), onResults: rows => acks.push(...rows) });
-        queue.enqueue({ proposalId: 'buff-stale-ack', characterId: provider.characterId, priority: 'P1', enqueuedAt: Date.now(),
-            token: { characterId: provider.characterId, ownerId: 'legacy_main', revision: 43, leaseId: 'buff-lease', leaseUntil: Date.now() + 10000 },
-            baseState: Life.cachedState(provider.characterId), result: { patch: {}, materialize: {}, events: [] }, buffOffer: stale });
-        await queue.flushCharacter(provider.characterId);
-        assert.equal(acks[0].ok, true, 'a stale offer cannot reject the provider commit ack');
+            recipientRevision: Number(stored.simulationRevision) - 2 };
+        assert.equal((await review(stale)).ok, true, 'a stale offer does not refuse the provider review');
         assert.equal(Cold.summary().dropped, 1, 'recipient two revisions ahead drops once');
         assert.equal(Cold.summary().sold, 1);
         coordinator.stopping = true;
-        await coordinator.afterCommit({ ...entry, proposal: { ...entry.proposal, buffOffer: { ...packet,
-            providerRevision: Life.cachedState(provider.characterId).simulation.revision, recipientRevision: 18 } } });
+        assert.equal((await review({ ...packet, providerRevision: Life.cachedState(provider.characterId).simulation.revision,
+            recipientRevision: Number(stored.simulationRevision) })).reason, 'coordinator_stopping');
         assert.equal(guarded, 1, 'a retired source cannot reach the buff writer');
-        assert.equal(coordinator.counters.afterCommitStepErrors.buff, 1);
         const sellerNow = Life.cachedState(provider.characterId), buyerNow = Life.cachedState(buyer.characterId);
         const currentPacket = { ...packet, providerRevision: sellerNow.simulation.revision,
             recipientRevision: buyerNow.simulation.revision };

@@ -35,7 +35,7 @@ const dwarf = spot('dwarf-keltir', { locX: 109648, locY: -174646 }, [[BEARDED_KE
 const darkElf = spot('dark-elf-keltir', { locX: 29715, locY: 7844 }, [[BEARDED_KELTIR, 16, 1], [LONGTAIL_KELTIR, 2, 2]]);
 const orcWolves = spot('orc-wolves', { locX: -49570, locY: -115635 }, [[BEARDED_KELTIR, 6, 1], [KASHA_WOLF, 10, 4]]);
 const orcKeltir = spot('orc-keltir', { locX: -52000, locY: -112000 }, [[BEARDED_KELTIR, 12, 1], [LONGTAIL_KELTIR, 2, 2]]);
-const options = { matchupProfiles: [mystic], occupancy: {}, timestamp: at };
+const options = { matchupProfiles: [mystic], timestamp: at };
 const target = Routes.targetLevelForState(state, options);
 
 const original = Spots.cache;
@@ -61,11 +61,7 @@ try {
     Spots.cache = [dwarf, darkElf, orcWolves, orcKeltir];
     assert(Routes.isSpotAllowedForState(orcKeltir, state, options), 'fixture: the home keltir field is allowed');
     assert.strictEqual(Spots.findForState(state, options)?.id, 'orc-keltir',
-        'an allowed home field with room still pulls the bot home (the author\'s locality rule)');
-    const full = { 'orc-keltir': { count: 99, reservedCount: 99, capacity: 9, retained: new Set(), reservedKeys: new Set(),
-        reservationKeys: new Set(), retainedReservationKeys: new Set() } };
-    assert.strictEqual(Spots.findForState(state, { ...options, occupancy: full })?.id, 'dwarf-keltir',
-        'a full home field leaves the bot on its current field');
+        'an allowed home field still pulls the bot home (the author\'s locality rule)');
 } finally { Spots.cache = original; }
 
 console.log('locality stay tests passed');

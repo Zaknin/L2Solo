@@ -1,5 +1,6 @@
 const Identity = invoke('GameServer/Bot/AI/BotServiceIdentity');
 const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
+const PartyAwareness = invoke('GameServer/Bot/AI/PartyAwareness');
 const { randomUUID } = require('crypto');
 const TRUSTED_TRUST = 8;
 const RECENT_ABANDON_MS = 5 * 60 * 1000;
@@ -18,7 +19,7 @@ function relationship(record) {
 function recentlyAbandoned(record, at) { return record?.recentlyAbandonedAt > 0 && at - record.recentlyAbandonedAt < RECENT_ABANDON_MS; }
 function snapshot(player, bot) {
     const relation = Memory.views.get(actorId(bot))?.relation('character', actorId(player), Date.now());
-    const counts = relation?.social || {};
+    const counts = Memory.socialCounts(actorId(bot), actorId(player));
     return { playerId: actorId(player), botId: actorId(bot), playerName: actorName(player), botName: actorName(bot),
         trust: relation?.trust || 0, familiarity: relation?.familiarity || 0, groupRuns: counts.party_formed || 0, inviteAttempts: counts.invite_attempt || 0,
         wipesTogether: counts.party_wiped || 0, helpedInCombat: counts.helped_in_combat || 0,
@@ -78,20 +79,13 @@ const BotSocialMemory = {
         const npcId = npc.fetchId();
         if (!playerId || !npcId) return [];
 
-        let botSessions = [];
-        try {
-            const BotManager = invoke('GameServer/Bot/BotManager');
-            botSessions = BotManager.sessions;
-        } catch (err) {
-            utils.infoWarn('BotSocial', 'combat social lookup failed: %s', err.message);
-            return [];
-        }
-
         if (combatHelpSeen.size > 5000) {
             combatHelpSeen.clear();
         }
 
-        return botSessions
+        // The player's party (PartyAwareness: the who-where map's party group,
+        // online actors), not every hot bot session on each hit.
+        return PartyAwareness.partySessions(playerSession)
             .filter((botSession) => (
                 botSession.actor &&
                 botSession.followPlayerSession === playerSession &&

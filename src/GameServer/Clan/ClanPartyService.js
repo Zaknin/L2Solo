@@ -316,7 +316,7 @@ async function startOperation(clan, goal, roster = operationRoster(clan, goal)) 
 
 async function resolveActiveOperation(clan, goal, operation, options = {}) {
     const memberIds = parseIds(operation.memberIdsJson);
-    const operationStates = await LifeState.statesByIds(memberIds, { ownerId: 'legacy_main' });
+    const operationStates = await LifeState.statesByIds(memberIds);
     const hydratedLevels = operationStates.map((state) => number(state.level)).filter((level) => level > 0);
     const hydratedAverage = hydratedLevels.length
         ? hydratedLevels.reduce((sum, level) => sum + level, 0) / hydratedLevels.length
@@ -382,7 +382,7 @@ async function resolveActiveOperation(clan, goal, operation, options = {}) {
             goalKey: demandKey,
             status: 'fulfilled'
         });
-        await Database.syncClanMarketDemandSignal({
+        await LifeState.syncClanMarketDemandSignal({
             clanId: clan.id,
             itemId: Config.bloodMarkItemId,
             amount: 1,

@@ -1,5 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -7,14 +8,13 @@ const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gear-threat-'));
 delete process.env.L2NODE_SHARED_CONFIG_FILE;
 process.env.L2NODE_CONFIG_FILE = path.join(directory, 'default.ini');
 fs.writeFileSync(process.env.L2NODE_CONFIG_FILE, `[Database]\npath=${directory}/world.sqlite\nhistoryPath=${directory}/history.sqlite\n`);
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 require('../src/Global');
 const Data = invoke('GameServer/DataCache');
 Data.init();
 const Skills = invoke('GameServer/Npc/NpcSkills');
 const Threat = invoke('GameServer/Bot/Economy/GearThreat');
 const Providers = invoke('GameServer/Bot/Economy/WishProviders');
-const Profile = invoke('GameServer/Bot/Population/ColdCombatProfile');
 const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 let failures = 0;
 function check(name, fn) {
@@ -73,27 +73,17 @@ check('preparation reuses unchanged sources and notices in-place hostile changes
     bot.stats.relations[0].hostility = 0;
     bot.stats.targetCombat.lastDefeatedNpcIds = [264]; bot.spotId = 'magic';
     assert.equal(Threat.prepare(bot, deps, first).mask, 3);
-    assert.notEqual(Economy.inputKey(state(), deps), Economy.inputKey(state([264], 'magic'), deps));
+    assert.notEqual(Threat.maskFor(state(), deps), Threat.maskFor(state([264], 'magic'), deps));
 });
-check('same native build caches distinct physical/magic gains in both orders', () => {
+check('physical and magic threats give distinct necklace gains', () => {
     const necklace = Data.items.find(item => Number(item.selfId) === 118);
     assert.ok(necklace);
-    for (const masks of [[1, 3], [3, 1]]) {
-        const bot = state(); bot.characterId += masks[0];
-        const build = Profile.buildGainsFor(bot, 1000);
-        const values = new Map(masks.map(mask => [mask, Providers.gearGain(bot, necklace, 1000, build, mask)]));
-        assert.equal(values.get(1).defence, 0);
-        assert.ok(values.get(3).defence > 0);
-        const original = Profile.powerFor;
-        let evaluations = 0;
-        Profile.powerFor = (...args) => { evaluations++; return original(...args); };
-        try {
-            for (const mask of masks) assert.deepEqual(Providers.gearGain(bot, necklace, 1000, build, mask), values.get(mask));
-        assert.deepEqual(Providers.gearGain(bot, necklace, 1000, build), values.get(3));
-            assert.equal(evaluations, 0, 'both threat variants hit the bounded native cache');
-        } finally { Profile.powerFor = original; }
-        assert.equal(values.get(1).attack, values.get(3).attack);
-    }
+    const bot = state();
+    const values = new Map([1, 3].map(mask => [mask, Providers.gearGain(bot, necklace, 1000, mask)]));
+    assert.equal(values.get(1).defence, 0);
+    assert.ok(values.get(3).defence > 0);
+    assert.deepEqual(Providers.gearGain(bot, necklace, 1000), values.get(3), 'the default threat is both');
+    assert.equal(values.get(1).attack, values.get(3).attack);
 });
 check('saved level-19 build: survival shots, then armour gaps; empty jewel slots take owned jewellery', () => {
     // Recorded build, not a reconstruction of its historical purchase order.

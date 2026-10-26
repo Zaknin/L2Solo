@@ -21,36 +21,18 @@ function normalizePreset(value) {
     return Object.prototype.hasOwnProperty.call(PRESETS, key) ? key : 'x1';
 }
 
-function selectedPreset() {
-    return normalizePreset(process.env.L2NODE_PROGRESSION_RATE || options.default.General?.progressionPreset);
-}
-
-// The profile is a pure function of the rate variable and the [General] rate
-// keys, both changeable at runtime (the clan planning worker, tests). Keep the
-// last answer while those raw inputs are equal; it is frozen because every
-// caller shares it.
-const PROFILE_KEYS = ['progressionPreset', 'expRate', 'spRate', 'adenaRate', 'dropChanceRate', 'spoilRate',
-    'questRewardRate', 'questAdenaRate', 'questExpRate', 'questSpRate'];
-let lastProfile = null, lastEnv, lastGeneral = null;
-const NO_GENERAL = Object.freeze({});
-const lastValues = new Array(PROFILE_KEYS.length);
+// Rates are a restart input: the profile is built once per process from the
+// rate variable and the [General] rate keys, frozen because every caller shares
+// it. Whoever changes those inputs at runtime (the clan planning worker on a new
+// context, the generator scripts, tests) calls reset() after the change.
+let held = null;
 
 function profile() {
-    const env = process.env.L2NODE_PROGRESSION_RATE;
-    const general = options.default.General || NO_GENERAL;
-    if (lastProfile && env === lastEnv && general === lastGeneral && sameProfileValues(general)) return lastProfile;
-    lastProfile = Object.freeze(buildProfile(env, general));
-    lastEnv = env;
-    lastGeneral = general;
-    for (let index = 0; index < PROFILE_KEYS.length; index++) lastValues[index] = general[PROFILE_KEYS[index]];
-    return lastProfile;
+    return held ||= Object.freeze(buildProfile(process.env.L2NODE_PROGRESSION_RATE, options.default.General || {}));
 }
 
-function sameProfileValues(general) {
-    for (let index = 0; index < PROFILE_KEYS.length; index++) {
-        if (general[PROFILE_KEYS[index]] !== lastValues[index]) return false;
-    }
-    return true;
+function reset() {
+    held = null;
 }
 
 function buildProfile(env, general) {
@@ -190,6 +172,13 @@ function deepBlueActive(npcLevel, killerLevel) {
     return deepBlueLevelGap(npcLevel, attackerLevel(killerLevel)) >= DEEP_BLUE_LEVEL_GAP;
 }
 
+// The single-killer penaltyPercent of deepBlueRule (0 when no penalty applies),
+// without building the rule (L129).
+function deepBluePenaltyPercent(npcLevel, killerLevel) {
+    const levelGap = deepBlueLevelGap(npcLevel, attackerLevel(killerLevel));
+    return levelGap < DEEP_BLUE_LEVEL_GAP ? 0 : (levelGap - (DEEP_BLUE_LEVEL_GAP - 1)) * DEEP_BLUE_PENALTY_PER_LEVEL;
+}
+
 function deepBlueRule({ npcLevel, killerLevel, attackerLevels = [] } = {}) {
     const levels = [killerLevel, ...attackerLevels]
         .map(attackerLevel)
@@ -241,11 +230,33 @@ function scaleAmount(amount, amountMultiplier, rng = Math.random) {
     return Math.max(1, whole + (rng() < fraction ? 1 : 0));
 }
 
+// C4 spoil: each item of a landed spoil group rolls on its own chance, so one
+// sweep can give several items of a group; the datapack has groups whose
+// item chances add up past 100, which one 0-100 line cannot roll.
+// The chance (0..1) that a landed group gives this item.
+function spoilItemChance(item) {
+    return Math.max(0, Math.min(1, (Number(item?.chance) || 0) / 100));
+}
+
+// The items a landed spoil group gives: [{ item, amount }], the one spoil roll
+// of the hot sweep (SpoilSweep) and the cold fight (BackgroundDropResolver).
+function rollSpoilGroup(group, amountMultiplier, rng = Math.random) {
+    const landed = [];
+    for (const item of group?.items || []) {
+        if (!(rng() < spoilItemChance(item))) continue;
+        const min = Math.max(1, Math.floor(Number(item.min) || 1));
+        const max = Math.max(min, Math.floor(Number(item.max) || min));
+        const baseAmount = min === max ? min : Math.floor(rng() * (max - min + 1)) + min;
+        landed.push({ item, amount: scaleAmount(baseAmount, amountMultiplier, rng) });
+    }
+    return landed;
+}
+
 module.exports = {
     PRESETS,
     normalizePreset,
-    selectedPreset,
     profile,
+    reset,
     groupRate,
     rollGroup,
     dropItemBaseChance,
@@ -257,6 +268,9 @@ module.exports = {
     rollDropAmount,
     deepBlueRule,
     deepBlueActive,
+    deepBluePenaltyPercent,
     rewardGroupRoll,
-    scaleAmount
+    scaleAmount,
+    spoilItemChance,
+    rollSpoilGroup
 };

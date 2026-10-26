@@ -2,22 +2,22 @@ const assert = require('assert');
 const { Worker } = require('worker_threads');
 
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 
 const DataCache = invoke('GameServer/DataCache');
-const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
-const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const BotGear = invoke('GameServer/Bot/AI/BotGear');
 const Selection = invoke('GameServer/Bot/AI/GearPlanSelection');
 const nativeGearEconomy = require('./fixtures/native_gear_economy');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const ColdNpcPlanningCatalog = require('../src/GameServer/Bot/Population/ColdNpcPlanningCatalog');
-const { ColdSimulationCoordinator, npcPlanningCatalogRows } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
+const { npcPlanningCatalogRows } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
+const { rowOf, escrowOf, BUY, SELL } = require('../src/GameServer/AfkTrade/BoardIndex');
 
 DataCache.init();
 
 // A solo cold bot is planned in the worker, which cannot see AFK shops. Its
-// own buy-order escrow must travel in the resolve context: without it the
+// own buy-order escrow must reach the worker (the board table): without it the
 // worker plan sees only the wallet once the bid is posted, drops the target
 // and the order is withdrawn (T2).
 const catalogRows = npcPlanningCatalogRows();
@@ -88,25 +88,17 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
         `without own escrow the purchase must earn money: ${nativeGearEconomy.describe(unfunded)}; quote=${price}; wallet=${afterPosting}`);
     assert(!fundedIds(unfunded.statsPacket.money).includes(posting.target.selfId), 'unfunded target has no spending ratio');
 
-    const originalProjection = AfkTrade.ownerRecords;
-    const originalCachedState = LifeState.cachedState;
-    try {
-        AfkTrade.ownerRecords = (id) => Number(id) === 7
-            ? [{ kind: 'buy_ad', storeType: AfkTrade.BUY, escrowAdena: price, lines: [] }] : [];
-        LifeState.cachedState = () => null;
-        const coordinator = new ColdSimulationCoordinator();
-        const index = { spots: new Map(), parties: new Map(), occupancy: {} };
-        assert.strictEqual(coordinator.contextFor(soloBase(7, afterPosting), index).buyOrderEscrow, price,
-            'the resolve context carries the bot\'s own buy-order escrow');
-        assert.strictEqual(coordinator.contextFor(soloBase(8, afterPosting), index).buyOrderEscrow, 0);
-    } finally {
-        AfkTrade.ownerRecords = originalProjection;
-        LifeState.cachedState = originalCachedState;
-    }
+    // The escrow reaches the worker on the board table's rows: a buy
+    // record's row carries the adena it holds, a sell record's none.
+    const wtb = (id, ownerId, selfId, quote) => [id, rowOf({ id, kind: 'buy_ad', storeType: BUY, ownerId,
+        town: 'Giran', botOwned: true, lines: [{ id: id * 10, selfId, count: 1, price: quote }], escrowAdena: quote })];
+    assert.strictEqual(escrowOf(wtb(901, 7, posting.target.selfId, price)[1]), price);
+    assert.strictEqual(escrowOf(rowOf({ id: 903, storeType: SELL, ownerId: 7, escrowAdena: price,
+        lines: [{ id: 1, selfId: 57, count: 1, price: 1 }] })), 0, 'a sell record holds no escrow');
 
     const epoch = 'escrow-test';
     const worker = new Worker(require.resolve('../src/GameServer/Bot/Population/ColdSimulationWorker'), {
-        workerData: { workerEpoch: epoch }
+        workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: epoch }
     });
     const received = [];
     let workerError;
@@ -141,9 +133,12 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
         // and its order's escrow is part of that budget.
         const spot = { id: 'escrow-field', name: 'Escrow field', center: point, avgLevel: 30, minLevel: 28, maxLevel: 32,
             density: 3, npcSelfIds: [], mob: { hp: 1, damage: 1 }, rewards: { exp: 100, sp: 10, adenaMin: 1, adenaMax: 1 } };
+        // The worker finds the party's spot in its spot catalog.
+        send('catalog_page', { catalog: 'spots', rows: [spot], done: true });
         const robe = 391; // Puma Skin Shirt: D-grade light armour, wrong for this build
         const bridgeWallet = 150000;
-        const partyRows = (partyId, leaderId, wallet, escrow) => {
+        const parties = [];
+        const partyRows = (partyId, leaderId, wallet) => {
             const party = { partyId, leaderId, memberIds: [leaderId, leaderId + 1], status: 'active', spotId: spot.id,
                 nextResolveAt: now - 1, cohesion: 1, stats: { fightsResolved: 10, sessionExpiresAt: now + 3600000 } };
             const member = (characterId, adena, body) => ({ ...base(characterId, adena), activity: 'grouped',
@@ -153,27 +148,30 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
                     [body]: { selfId: body, amount: 1, equippedCount: 1, equipped: 1 }
                 } });
             const members = [member(leaderId, wallet, robe), member(leaderId + 1, bridgeWallet, 58)];
-            return members.map((state, index) => ({ state, context: {
-                buyOrderEscrow: index ? 0 : escrow,
-                ...(index ? {} : { isPartyLeader: true, party, partyMembers: members, spot, route: null })
-            } }));
+            parties.push(party);
+            return members.map(state => ({ state }));
         };
-        const bridge = GearAcquisitionPlanner.npcEquipmentBridgePlan(partyRows('p', 20, bridgeWallet, 0)[0].state, plannerOptions);
+        const bridge = GearAcquisitionPlanner.npcEquipmentBridgePlan(partyRows('p', 20, bridgeWallet)[0].state, plannerOptions);
+        parties.length = 0;
         assert(bridge?.equipmentBridge, 'the fixture member must need a class armour bridge');
         const bridgePrice = Number(bridge.market.price);
         const unfundedWallet = Number(bridge.market.reserve) + 1000;
         assert(unfundedWallet < bridgePrice + Number(bridge.market.reserve),
             'the fixture bridge must need the escrow once the bid is posted');
-        send('snapshot_page', { done: true, rows: [
-            { state: { ...soloBase(7, afterPosting), timing }, context: { buyOrderEscrow: price } },
-            { state: { ...soloBase(8, afterPosting), timing }, context: {} },
-            ...partyRows('escrow-party', 20, unfundedWallet, bridgePrice),
-            ...partyRows('wallet-party', 30, unfundedWallet, 0)
-        ] });
-        const claim = await until((m) => m.type === 'claim_request');
-        send('claim_ack', { grants: claim.payload.candidates.map((c) => ({ ok: true, characterId: c.characterId,
-            ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,
-            leaseId: `worker-escrow-${c.characterId}`, leaseUntil: Date.now() + 30000, purpose: c.purpose })) }, claim.msgId);
+        const rows = [
+            { state: { ...soloBase(7, afterPosting), timing } },
+            { state: { ...soloBase(8, afterPosting), timing } },
+            ...partyRows('escrow-party', 20, unfundedWallet),
+            ...partyRows('wallet-party', 30, unfundedWallet)
+        ];
+        // Bot 7's order for its target and member 20's for its bridge hold
+        // the escrow; the parties come from main's parties table.
+        send('table_page', { tables: [
+            { name: 'board', from: null, to: 0, full: true, removed: [], last: true,
+                rows: [wtb(901, 7, posting.target.selfId, price), wtb(902, 20, bridge.target.selfId, bridgePrice)] },
+            { name: 'parties', from: null, to: 0, full: true, removed: [], last: true,
+                rows: parties.map(party => [party.partyId, party]) }] });
+        send('snapshot_page', { done: true, rows });
         const proposals = new Map();
         const deadline = Date.now() + 15000;
         while ([7, 8, 20, 30].some((id) => !proposals.has(id))) {
@@ -186,14 +184,14 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
             }
             await new Promise((resolve) => setTimeout(resolve, 25));
         }
-        const plans = new Map([7, 8].map((id) => [id, proposals.get(id).baseState?.stats?.equipmentPlan || null]));
         assert(!received.some((m) => m.type === 'fault'), JSON.stringify(received.filter((m) => m.type === 'fault')));
-        assert.strictEqual(plans.get(7)?.target?.selfId, posting.target.selfId,
-            'the worker keeps the target funded by the bot\'s own buy-order escrow');
         const compact = require('../src/GameServer/Bot/Population/ColdEconomyDecision').compact;
         const fundedDecision = compact(proposals.get(7).economyDecision), unfundedDecision = compact(proposals.get(8).economyDecision);
         assert(fundedDecision.activity, 'worker supplies its new native wish after the fight');
-        assert(fundedIds(proposals.get(7).nextState.stats.money).includes(posting.target.selfId));
+        assert.strictEqual(proposals.get(7).nextState.stats.wishFocus?.[0], `power:${posting.target.selfId}:${posting.target.slot}`,
+            'the worker keeps the target funded by the bot\'s own buy-order escrow as its focused wish');
+        assert(fundedIds(proposals.get(7).nextState.stats.money).includes(posting.target.selfId),
+            'the target carries a funded spending ratio');
         assert(Funding.spendable(proposals.get(7).nextState, price, { itemId: posting.target.selfId }) >= price,
             'current native funded ratio plus own escrow can pay the actual NPC offer');
         assert(Funding.spendable(proposals.get(8).nextState, 0, { itemId: posting.target.selfId }) < price,

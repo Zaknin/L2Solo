@@ -124,7 +124,7 @@ function showDefaultTalk(session, npc, options = {}) {
             '<a action="bypass -h warehouse withdraw">Withdraw item</a>',
             ...clanLinks,
             ...(secondProfession
-                ? ['<br><a action="bypass -h second-profession">Second profession trials</a><br>'] : []),
+                ? ['<br><a action="bypass -h second-profession">Second profession transfer (3 marks)</a><br>'] : []),
             ...(options.questLink ? [`<a action="bypass -h html ${npc.fetchSelfId()}-quest">Quest</a><br>`] : []),
             '</center></body></html>'
         ].join('')));
@@ -140,7 +140,7 @@ function showDefaultTalk(session, npc, options = {}) {
             : utils.parseRawFile(path + 'noquest.html');
     if (options.questLink) html = withQuestLink(html, npc.fetchSelfId());
     if (secondProfession) {
-        html = html.replace(/<\/body>/i, '<br><a action="bypass -h second-profession">Second profession trials</a><br></body>');
+        html = html.replace(/<\/body>/i, '<br><a action="bypass -h second-profession">Second profession transfer (3 marks)</a><br></body>');
     }
     html = html.replace(/<\/body>/i, weaponServices.links(npc.fetchSelfId()) + '</body>');
     if (invoke('GameServer/Pets/PetExchangeData').managers.has(npc.fetchSelfId())) {
@@ -155,6 +155,8 @@ function showDefaultTalk(session, npc, options = {}) {
 }
 
 function withQuestLink(html, npcId) {
+    // Preserve the label and placement of an NPC's authored quest entry.
+    if (html.includes(`action="bypass -h html ${npcId}-quest"`)) return html;
     const questAction = `<a action="bypass -h html ${npcId}-quest">Quest</a>`;
     const questLink = /<a action="bypass -h html (?:noquest|\d+-quest)">Quest<\/a>/i;
     if (questLink.test(html)) return html.replace(questLink, questAction);

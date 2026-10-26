@@ -25,6 +25,10 @@ const stateFor = (inventory, effects = []) => ({
 });
 const setEffects = state => Profile.profileFor(state, TS).effects.filter(e => e.category === Sets.CATEGORY);
 const effectRows = effects => effects.map(e => [e.id, e.stats]).sort((a, b) => a[0] - b[0]);
+const POWER = ['pAtk', 'mAtk', 'atkSpd', 'castSpd', 'pDef', 'mDef', 'maxHp'];
+const pick = profile => POWER.map(field => profile[field]);
+// The power numbers of a state built on its own (another kit under the same id).
+const power = state => pick(Profile.profileFor(state, TS, { store: false }));
 
 // Real catalog parts: cold-only profiles must derive all native set stats,
 // including base-stat changes, resistance descriptors and shield additions.
@@ -34,8 +38,7 @@ for (const set of Sets.ARMOR_SETS) {
     const expected = [[set.skillId, Sets.resolveSkill(set.skillId).stats]];
     assert.deepEqual(effectRows(setEffects(stateFor(bag))), expected, set.name);
     assert.deepEqual(effectRows(nativeEffects(bag)), expected, `native ${set.name}`);
-    assert.deepEqual(Profile.powerFor(stateFor(bag), TS),
-        Profile.powerFor(stateFor(bag, nativeEffects(bag)), TS), `no double bonus: ${set.name}`);
+    assert.deepEqual(power(stateFor(bag)), power(stateFor(bag, nativeEffects(bag))), `no double bonus: ${set.name}`);
     for (const missing of ids) {
         const partial = { ...bag, [missing]: { ...bag[missing], equipped: false, equippedCount: 0, equippedSlots: [] } };
         assert.equal(setEffects(stateFor(partial, nativeEffects(bag))).length, 0,
@@ -65,8 +68,8 @@ assert.equal(before.castSpd, 468);
 assert.equal(before.pDef, 573.9);
 assert.equal(after.castSpd, 369, 'one Major Arcana glove must lose Dark Crystal casting bonus and WIT');
 assert.equal(after.pDef, 547.9, 'one Major Arcana glove must lose Dark Crystal defence bonus');
-assert.deepEqual(Profile.powerFor(changed, TS), Profile.powerFor(stateFor(changedBag, nativeEffects(changedBag)), TS));
-assert.deepEqual(Profile.powerFor(stateFor(dcBag), TS), Profile.powerFor(complete, TS));
+assert.deepEqual(power(changed), power(stateFor(changedBag, nativeEffects(changedBag))));
+assert.deepEqual(power(stateFor(dcBag)), power(complete));
 
 const devotionBag = bagFor([1101, 1104, 44]);
 const devotion = stateFor(devotionBag, nativeEffects(devotionBag));
@@ -76,14 +79,10 @@ const helmetBag = { ...devotionBag, 44: { ...devotionBag[44], equipped: false, e
 assert.equal(Profile.profileFor(devotion, TS).castSpd, 404);
 assert.equal(Profile.profileFor({ ...devotion, inventory: helmetBag }, TS).castSpd, 352);
 
-const packed = Profile.buildGainsFor(complete, TS);
-assert.strictEqual(Profile.buildGainsFor(stateFor(dcBag), TS), packed,
-    'captured derived effects do not split equivalent builds');
-const swapped = Profile.buildGainsFor(changed, TS);
-assert.notStrictEqual(swapped, packed, 'worn-part change invalidates the cached build');
-assert.deepEqual(Profile.powerNumbers(swapped), Profile.powerFor(changed, TS));
-assert.strictEqual(Profile.buildGainsFor(stateFor(changedBag), TS), swapped,
-    'stale saved set descriptors do not split a broken build');
+// Valuing the glove swap as a candidate breaks the set as wearing it does.
+const swap = Profile.candidateProfiles(complete, TS, { store: false }).after({
+    free: slot => slot === Number(item(5767).etc.slot), wear: { selfId: 6384, slot: Number(item(6384).etc.slot) } });
+assert.deepEqual(pick(swap), pick(after), 'a candidate that breaks a set loses its bonus');
 Profile.forgetBuild(complete.characterId);
 
 assert.equal(setEffects(stateFor({}, stale)).length, 0, 'explicitly empty inventory clears captured set bonuses');
@@ -93,7 +92,7 @@ const zeroBag = { ...dcBag, 5767: { ...dcBag[5767], amount: 0 } };
 assert.equal(setEffects(stateFor(zeroBag, stale)).length, 0, 'zero-count part cannot complete a set');
 const buff = { id: 999000, key: 'test-buff', category: 'buff', stats: { pAtkMul: 1.2 } };
 const buffed = stateFor(changedBag, [...stale, buff]);
-assert(Profile.profileFor(buffed, TS).effects.includes(buff), 'rebuilding sets preserves unrelated buffs');
+assert(Profile.fightProfile(buffed, TS).effects.includes(buff), 'rebuilding sets preserves unrelated buffs');
 assert.equal(setEffects(stateFor(dcBag, [...stale, ...stale])).length, 1, 'captured duplicates cannot double a bonus');
 
 console.log('Cold armor set effects: all 45 sets, shield bonuses, swaps, legacy state and cache checks passed');

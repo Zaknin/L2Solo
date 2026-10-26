@@ -22,6 +22,9 @@ function body() {
     let end = 5; while (p.readUInt16LE(end)) end += 2;
     return p.subarray(5, end).toString('utf16le');
 }
+function candidateRows() {
+    return body().split('\n').slice(2).map((row) => row.split('\t'));
+}
 const command = (value) => Native(session, ['native-finder', ...value.split(' ')]);
 (async () => {
     try {
@@ -38,12 +41,31 @@ const command = (value) => Native(session, ['native-finder', ...value.split(' ')
         command('open 1');
         assert(body().startsWith(Protocol.PREFIX));
         assert(body().includes('state\t\t50-59\tall\t0\t3\t23\t1\t8\t'));
-        assert.strictEqual(evaluations, 8, 'only visible candidates evaluate availability');
+        assert.strictEqual(evaluations, 23, 'classify the filtered catalog once without loading social memories');
+        assert.deepStrictEqual(candidateRows().map((row) => row[1]), [
+            'Candidate00', 'Candidate10', 'Candidate20', 'Candidate01',
+            'Candidate11', 'Candidate21', 'Candidate12', 'Candidate22'
+        ], 'available candidates sort by ascending level, then name');
         assert.strictEqual(body().split('\n').length, 10);
         if (process.argv[2]) require('fs').writeFileSync(process.argv[2], Buffer.from(body(), 'utf16le'));
+        command('page 2');
+        assert.deepStrictEqual(candidateRows().map((row) => row[1]), [
+            'Candidate17', 'Candidate08', 'Candidate18', 'Candidate09',
+            'Candidate19', 'Candidate02', 'Candidate03'
+        ], 'low-level unavailable candidates follow all available candidates across pages');
+        assert.deepStrictEqual(candidateRows().map((row) => row[6]), ['1', '1', '1', '1', '1', '0', '0']);
+        command('page 0');
+        entries[0].state.available = false;
+        command('refresh');
+        assert.strictEqual(candidateRows()[0][1], 'Candidate10', 'refresh must move newly unavailable candidates out of the first page');
+        assert.ok(!session.nativeFinderVisible.includes('Candidate00'));
+        entries[0].state.available = true;
+        const beforeFilter = evaluations;
         command('filter - all healer');
+        assert.strictEqual(evaluations - beforeFilter, 11, 'availability checks apply only to candidates matching the filters');
         assert(body().includes('state\t\tall\thealer\t0\t2\t11\t0\t8\t'));
         assert(body().split('\n').slice(2).every((row) => row.includes('\t16\tBishop\thealer\t')));
+        assert.ok(!session.nativeFinderVisible.includes('Candidate03'), 'filtered results also rank available candidates before unavailable ones');
         command('page 999999');
         assert(body().includes('state\t\tall\thealer\t1\t2\t11\t0\t3\t'));
         command('filter Candidate03 50-59 healer');
@@ -81,5 +103,5 @@ const command = (value) => Native(session, ['native-finder', ...value.split(' ')
         command('open 0'); assert(body().includes('<title>Bot Party</title>'));
         assert.strictEqual(session.nativeFinderVersion, 0);
     } finally { restores.reverse().forEach((fn) => fn()); }
-    console.log('Native finder: HTML compatibility, combined filters, paging, bounded availability work, async invites and close lifecycle passed');
+    console.log('Native finder: HTML compatibility, combined filters, availability ranking across pages, refresh, async invites and close lifecycle passed');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

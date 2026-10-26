@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate, useGeneral } = require('./helpers/progressionRate');
 
 require('./helpers/databaseIsolation');
 const isolated = require('./helpers/isolatedSocialDatabase')('rule-c4-shop-stock');
@@ -108,10 +109,10 @@ for (const name of accessibleStalls) {
 // 21 (Pano), 63 (Harmony), and 65 (Hally) only sell Gemstone D.
 const originalPreset = options.default.General.progressionPreset;
 const originalRateEnv = process.env.L2NODE_PROGRESSION_RATE;
-delete process.env.L2NODE_PROGRESSION_RATE;
+useRate(undefined);
 try {
     for (const [preset, multiplier] of [['x1', 1], ['x10', 2]]) {
-        options.default.General.progressionPreset = preset;
+        useGeneral({ progressionPreset: preset });
         const gemstonePackets = [];
         const gemstoneSession = {
             activeNpcTalk: { selfId: 7081 },
@@ -141,9 +142,8 @@ try {
         assert.deepStrictEqual(gemstoneIds, [2130], `C4 merchant ${npcId} must only stock Gemstone D`);
     }
 } finally {
-    options.default.General.progressionPreset = originalPreset;
-    if (originalRateEnv === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = originalRateEnv;
+    useGeneral({ progressionPreset: originalPreset });
+    useRate(originalRateEnv);
 }
 
 require('node:fs').rmSync(isolated.directory, { recursive: true, force: true });

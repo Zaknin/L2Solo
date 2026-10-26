@@ -16,14 +16,12 @@ const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const PartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
-const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const { ColdSimulationKernel, lifecycleKind } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 
 DataCache.init();
 Database.init();
 
 const originalMarkDirty = Coordinator.markDirty;
-const originalClaimBatch = Owner.claimBatch;
 
 function settleSnapshot() {
     return new Promise((resolve) => setImmediate(resolve));
@@ -100,11 +98,11 @@ function settleSnapshot() {
     )), 'party detachment must publish a critical worker snapshot');
 
     const kernel = new ColdSimulationKernel({ now: () => Date.now(), resolveSolo: () => ({}) });
-    kernel.upsert({ state: assigned, context: {} });
-    assert.strictEqual(lifecycleKind(assigned, {}), 'party_member');
+    kernel.upsert({ state: assigned });
+    assert.strictEqual(lifecycleKind(assigned), 'party_member');
     assert.strictEqual(kernel.snapshot().heap, 0, 'attached party member must not own a solo schedule');
-    kernel.upsert({ state: detached, context: {} });
-    assert.strictEqual(lifecycleKind(detached, {}), 'resolver');
+    kernel.upsert({ state: detached });
+    assert.strictEqual(lifecycleKind(detached), 'resolver');
     assert.strictEqual(kernel.snapshot().heap, 1, 'detachment snapshot must recreate the solo schedule without a restart');
 
     notifications.length = 0;
@@ -128,54 +126,20 @@ function settleSnapshot() {
     assert.strictEqual(travelDetached.activity, 'hunting');
     assert.strictEqual(travelDetached.stats.travel, null, 'detaching party travel must clear its grouped destination');
 
-    let claimedCandidates = null;
-    Owner.claimBatch = async (candidates) => {
-        claimedCandidates = candidates;
-        return { grants: [], rejected: [] };
-    };
-    const claimCoordinator = new ColdSimulationCoordinator();
-    let response = null;
-    claimCoordinator.postCollections = (type, payload) => { response = { type, payload }; };
-    await claimCoordinator.handleClaimRequest({
-        msgId: 'stale-party-claim',
-        payload: {
-            candidates: [{
-                characterId: Number(character.id),
-                expectedRevision: Number(travelDetached.simulation?.revision || 0),
-                purpose: {
-                    kind: 'party',
-                    partyId: 'handoff-party',
-                    leaderId: Number(character.id),
-                    memberIds: [Number(character.id)]
-                }
-            }]
-        }
-    });
-    assert.deepStrictEqual(claimedCandidates, [], 'stale party catalog entry must be rejected before acquiring a lease');
-    assert.strictEqual(response?.type, 'claim_ack');
-    assert.strictEqual(response?.payload?.rejected?.[0]?.reason, 'party_membership_changed');
-    assert.strictEqual(response?.payload?.rejected?.[0]?.state?.party?.partyId, null,
-        'stale rejection must return the current detached state to the worker');
-
     const raceAssigned = await LifeState.assignParty(
         travelDetached,
         'handoff-party',
         'dps',
         Number(character.id)
     );
-    const activeClaim = await Owner.claim(raceAssigned, {
-        allowParty: true,
-        allowLifecycle: true,
-        timestamp: Date.now()
-    });
-    assert.strictEqual(activeClaim.ok, true,
-        `race fixture must hold an active worker lease: ${JSON.stringify(activeClaim)}`);
-    const claimedPartyState = LifeState.cachedState(character.id);
+    // A worker step begins from the assigned copy.
+    const stepRevision = Number(raceAssigned.simulation.revision);
+    const steppedPartyState = LifeState.cachedState(character.id);
     const marketBreakState = {
-        ...claimedPartyState,
+        ...steppedPartyState,
         activity: 'traveling',
         stats: {
-            ...(claimedPartyState.stats || {}),
+            ...(steppedPartyState.stats || {}),
             travel: {
                 reason: 'market_sale_inventory',
                 arrivalActivity: 'shopping',
@@ -190,27 +154,25 @@ function settleSnapshot() {
         { ownerHandoff: true }
     );
     await settleSnapshot();
-    assert(raceDetached, 'party market break must atomically invalidate an active worker lease');
+    assert(raceDetached, 'party market break must commit while a worker step is in flight');
     assert.strictEqual(raceDetached.party.partyId, null);
     assert.strictEqual(raceDetached.activity, 'traveling');
     assert.strictEqual(raceDetached.stats.travel.reason, 'market_sale_inventory');
-    assert.strictEqual(raceDetached.simulation.ownerId, 'legacy_main');
-    assert(Number(raceDetached.simulation.revision) > Number(activeClaim.revision),
-        'the atomic main transition must advance the revision past the active worker token');
-    const staleCommit = await Owner.commit(activeClaim, claimedPartyState, {
-        allowParty: true,
-        allowLifecycle: true,
-        timestamp: Date.now()
-    });
-    assert.strictEqual(staleCommit.ok, false, 'the invalidated worker token must not overwrite party departure');
+    assert(Number(raceDetached.simulation.revision) > stepRevision,
+        'the atomic main transition must advance the revision past the step base');
+    const [staleCommit] = await Owner.commitBatch([{
+        revision: stepRevision,
+        nextState: steppedPartyState,
+        options: { allowParty: true, allowLifecycle: true }
+    }]);
+    assert.strictEqual(staleCommit.ok, false, 'the stale worker step must not overwrite party departure');
 
-    console.log('Cold party membership snapshot handoff and stale-claim fencing checks passed');
+    console.log('Cold party membership snapshot handoff and stale-step fencing checks passed');
 })().catch((error) => {
     console.error(error);
     process.exitCode = 1;
 }).finally(async () => {
     Coordinator.markDirty = originalMarkDirty;
-    Owner.claimBatch = originalClaimBatch;
     await Database.close().catch(() => null);
     fs.rmSync(databasePath, { force: true });
     fs.rmSync(`${databasePath}-wal`, { force: true });

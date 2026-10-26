@@ -1,81 +1,20 @@
 const Runtime = require('./Runtime');
 const Services = require('./Services');
 const Effects = invoke('GameServer/Effects/EffectStore');
-const VisitPolicy = require('./VisitPolicy');
+const VisitNeed = require('./VisitNeed');
+const { actorFor, eligible } = VisitNeed;
 const VISIT_MS = 180000;
 function hallFor(state) {
     // Membership projection is refreshed on joins/kicks; a saved stats.clanId is not authority.
     const id = invoke('GameServer/Clan/ClanSocialRuntime').view.memberships.get(Number(state.characterId));
     return Runtime.owned(id);
 }
-function actorFor(state, hall) {
-    const loc = state.loc || {};
-    const items = Object.values(state.inventory || {})
-        .filter((item) => item.equipped && Number(item.amount) > 0)
-        .flatMap((item) => {
-            const template = invoke('GameServer/Item/ItemTemplateIndex').find(
-                invoke('GameServer/DataCache').items,
-                item.selfId
-            );
-            const slots = item.equippedSlots?.length ? item.equippedSlots : [item.slot || template?.etc?.slot];
-            return slots.map((slot) => ({
-                fetchEquipped: () => true,
-                fetchSlot: () => Number(slot),
-                fetchKind: () => template?.template?.kind || '',
-                fetchName: () => template?.template?.name || '',
-                fetchPAtk: () => template?.stats?.pAtk || 0,
-                fetchMAtk: () => template?.stats?.mAtk || 0
-            }));
-        });
-    const weapon = items.find((item) => item.fetchKind().startsWith('Weapon.')) || null;
-    const actor = {
-        classId: state.stats?.classId ?? state.classId,
-        backpack: {
-            fetchItems: () => items,
-            fetchEquippedWeapon: () => weapon,
-            fetchTotalWeaponKind: () => weapon?.fetchKind() || ''
-        },
-        stats: state.stats,
-        fetchId: () => state.characterId,
-        fetchClanId: () => hall?.ownerId || 0,
-        fetchClassId: () => state.stats?.classId ?? state.classId,
-        fetchLevel: () => state.level,
-        fetchLocX: () => loc.locX,
-        fetchLocY: () => loc.locY,
-        fetchLocZ: () => loc.locZ,
-        fetchHp: () => state.vitals?.hp || 0,
-        fetchMaxHp: () => state.vitals?.maxHp || 1,
-        fetchMp: () => state.vitals?.mp || 0,
-        fetchMaxMp: () => state.vitals?.maxMp || 1,
-        isDead: () => state.activity === 'dead' || Number(state.vitals?.hp) <= 0,
-        effects: Object.fromEntries((state.stats?.coldCombat?.effects || []).map((e) => [e.key, { ...e }]))
-    };
-    return actor;
-}
-// The same rule as the hot visit and the hot restart (VisitPolicy): a cold
-// bot is never at the manager, so a party member restarts in town.
-function eligible(state) {
-    return state?.phase === 'cold' && VisitPolicy.mayUse(VisitPolicy.fromState(state));
-}
+// Main thread: the hall from the membership projection, the manager from World
+// (asked only past the cheap gates: a missing manager costs a spawn scan).
 function needed(state, timestamp = Date.now()) {
     if (!eligible(state)) return false;
-    if (state.stats?.clanHallVisit) return true;
-    const hall = hallFor(state);
-    if (!hall) return false;
-    if (state.activity === 'dead' || Number(state.vitals?.hp) <= 0) return true;
-    if (
-        !['hunting', 'resting'].includes(state.activity) ||
-        Number(state.stats?.clanHallRetryAt || 0) > timestamp ||
-        state.stats?.pveEncounter
-    )
-        return false;
-    const actor = actorFor(state, hall);
-    return (
-        Services.available(hall, timestamp) &&
-        !!Services.manager(hall) &&
-        (Services.missing(actor, hall, timestamp).length > 0 ||
-            (require('./BotVisit').local(actor, hall) && Services.recovery(actor, hall)))
-    );
+    const hall = state.stats?.clanHallVisit ? null : hallFor(state);
+    return VisitNeed.needed(state, hall, () => !!Services.manager(hall), timestamp);
 }
 function result(state, patch, timestamp, nextAt, reason) {
     return {
@@ -156,7 +95,7 @@ async function resolve(state, timestamp = Date.now(), options = {}) {
     } else {
         const actor = actorFor(state, hall);
         const currentVisit = visit || { hallId: hall.id, startedAt: timestamp, expiresAt: timestamp + VISIT_MS };
-        if (!require('./BotVisit').local(actor, hall)) {
+        if (!VisitNeed.local(actor, hall)) {
             next = Services.missing(actor, hall, timestamp).length
                 ? result(state, {
                     activity: 'clan_hall',
@@ -227,7 +166,7 @@ async function resolve(state, timestamp = Date.now(), options = {}) {
                     }
                 }
             };
-            if (!inside || !Services.recovery(actorFor(serviced, hall), hall)) {
+            if (!inside || !Services.recovery(actorFor(serviced, hall), hall, timestamp)) {
                 next = finish(serviced, timestamp, 'clan_hall_services_complete');
                 next.patch.vitals = serviced.vitals;
                 const departure = require('./Departure').plan(serviced, hall, timestamp);

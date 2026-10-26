@@ -5,6 +5,7 @@ const Skillset       = invoke('GameServer/Actor/Skillset');
 const Backpack       = invoke('GameServer/Actor/Backpack');
 const Automation     = invoke('GameServer/Automation');
 const EffectStats    = invoke('GameServer/Effects/EffectStats');
+const ClanReviewEvents = require('../Clan/ClanReviewEvents');
 
 class Actor extends ActorModel {
     constructor(session, data) {
@@ -15,8 +16,11 @@ class Actor extends ActorModel {
         this.skillset   = new Skillset();
         this.backpack   = new Backpack(data);
         this.backpack.onInventoryChange = selfId => {
-            const Events = require('../Clan/ClanReviewEvents'), clanId = this.fetchClanId();
-            if (Events.tracks(clanId, selfId)) Events.changed(clanId, 'member_item');
+            const clanId = this.fetchClanId();
+            if (ClanReviewEvents.tracks(clanId, selfId)) ClanReviewEvents.changed(clanId, 'member_item');
+            // An item kind entered or left the bag; stack counts never post.
+            // lazy: cycle BotLifeState loads Actor at its top.
+            invoke('GameServer/Bot/Population/BotLifeState').notifyNearFacts(this.session, 'bag');
         };
         this.attack     = new Attack();
         this.automation = new Automation();
@@ -31,6 +35,7 @@ class Actor extends ActorModel {
     }
 
     destructor() {
+        require('./CombatStance').clear(this);
         invoke('GameServer/Skills/ChargeLifecycle').dispose(this);
         // A player-owned summon retains follow/feed/lifetime timers. Dispose it
         // while the owner and session are still valid; otherwise a timer can
@@ -85,7 +90,7 @@ class Actor extends ActorModel {
     }
 
     basicAction(data) {
-        invoke(path.actor).basicAction(
+        return invoke(path.actor).basicAction(
             this.session, this, data
         );
     }

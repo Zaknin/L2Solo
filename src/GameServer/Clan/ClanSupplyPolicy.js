@@ -1,9 +1,27 @@
 'use strict';
 const { isMainThread } = require('node:worker_threads');
+const { createHash } = require('node:crypto');
+let ClanCraftingPolicyModule = null;
+// lazy: order ClanCraftingPolicy reads the item catalogs at load; tests load this file before them. Resolved once.
+const craftingPolicy = () => ClanCraftingPolicyModule ??= require('./ClanCraftingPolicy');
+const ClanHallPolicy = require('../ClanHall/Policy');
+const CONTENT_IDENTITY = Symbol('clan_supply_content_identity');
+const NO_CLAN_IDENTITY = createHash('sha256').update('[0,[]]').digest('hex');
 const records = new Map();
 const stocks = new Map();
 let source = id => records.get(id);
 let revision = 0;
+let initialized = false, sourceReady = () => initialized;
+function prepareRow(row) {
+    const valid = Array.isArray(row) && row.length === 4 && Number.isSafeInteger(row[0]) && row[0] > 0
+        && Number.isSafeInteger(row[1]) && row[1] >= 0 && Array.isArray(row[2]) && row[2].length <= 128
+        && row[2].every(value => Array.isArray(value) && value.length === 2
+            && Number.isSafeInteger(value[0]) && value[0] > 0 && Number.isSafeInteger(value[1]) && value[1] > 0);
+    if (!valid) { if (row && typeof row === 'object') delete row[CONTENT_IDENTITY]; return row; }
+    if (!Object.hasOwn(row, CONTENT_IDENTITY)) Object.defineProperty(row, CONTENT_IDENTITY,
+        { configurable: true, value: createHash('sha256').update(JSON.stringify([row[1], row[2]])).digest('hex') });
+    return row;
+}
 const positive = value => Math.max(0, Math.floor(Number(value) || 0));
 const active = goal => goal && !['completed', 'cancelled', 'failed', 'abandoned'].includes(goal.status)
     && !(positive(goal.required) && Number(goal.progress) >= Number(goal.required));
@@ -19,8 +37,7 @@ function requirements(clan, warehouse = null) {
         if (goal.policy?.strategy === 'craft' && goal.plan?.craft?.materials?.length) materials = goal.plan.craft.materials
             .map(row => [Number(row.selfId), positive(row.required ?? row.amount)]);
         else if (plan?.strategy === 'craft' && plan.clanGoal?.goalKey === goal.goalKey) {
-            const Crafting = require('./ClanCraftingPolicy');
-            materials = [...Crafting.requirements(Crafting.resolveRecipe(plan.recipeId), beneficiary.inventory,
+            materials = [...craftingPolicy().requirements(craftingPolicy().resolveRecipe(plan.recipeId), beneficiary.inventory,
                 null, 1, plan.craftProviders, plan.componentRecipes)].map(([id, amount]) =>
                 [id, Math.max(0, amount - positive(beneficiary.inventory?.[id]?.amount))]);
         } else if (goal.policy?.strategy !== 'craft' && (goal.type === 'item' || goal.type === 'equipment')) {
@@ -29,7 +46,7 @@ function requirements(clan, warehouse = null) {
             const unit = invoke('GameServer/Items/NpcSellRules').npcBuyPrice(item?.template?.price);
             let amount = Math.max(0, positive(goal.required || 1) - positive(goal.progress));
             if (warehouse) {
-                const budget = require('../ClanHall/Policy').freeAdena(warehouse, clan,
+                const budget = ClanHallPolicy.freeAdena(warehouse, clan,
                     clan.state?.mode || 'autonomous', goal === clan.state?.goal ? null : clan.state?.goal);
                 amount = Math.min(amount, unit > 0 ? Math.floor(budget / unit) : 0);
             }
@@ -51,7 +68,9 @@ function publish(clan, warehouse) {
     const previous = records.get(row[0]);
     if (JSON.stringify(previous?.slice(0, 3)) === JSON.stringify(row)) return;
     row.push(++revision);
+    prepareRow(row);
     records.set(row[0], row);
+    // lazy: worker only the main clan projection publishes readiness.
     require('../Bot/Population/ColdTableChannel').shared.changed('clan_supplies', row);
 }
 function reservedAmounts(state = {}) {
@@ -69,9 +88,26 @@ async function init() {
     const rows = await invoke('Database').execute(['SELECT id, level FROM clans', []], 'clan-supplies:levels');
     for (const row of rows) publish({ ...row, state: {} });
 }
+// lazy: worker only the main clan projection publishes readiness.
 if (isMainThread) require('../Bot/Population/ColdTableChannel').shared.register('clan_supplies', {
-    key: row => row[0], allRows: () => records.values(), eventDriven: true
+    key: row => row[0], allRows: () => records.values(), eventDriven: true, ready: () => initialized
 });
-module.exports = { requirements, publish, reservedAmounts, hasWarehouse, init,
+module.exports = { requirements, publish, reservedAmounts, hasWarehouse, init, prepareRow,
+    ready() { return sourceReady() === true; },
+    projectionReady() {
+        if (!isMainThread || initialized) return;
+        initialized = true;
+        // lazy: worker only the main clan projection publishes readiness.
+        require('../Bot/Population/ColdTableChannel').shared.flush();
+    },
+    contentIdentity(state = {}) {
+        const id = Number(state.clanId ?? state.stats?.clanId);
+        if (!(id > 0)) return NO_CLAN_IDENTITY;
+        if (sourceReady() !== true) return null;
+        return source(id)?.[CONTENT_IDENTITY] ?? null;
+    },
     version(state = {}) { return Number(source(Number(state.clanId ?? state.stats?.clanId))?.[3] || 0); },
-    useRowSource(reader) { source = reader || (id => records.get(id)); } };
+    useRowSource(reader, isReady) {
+        source = reader || (id => records.get(id));
+        sourceReady = reader ? (isReady || (() => false)) : () => initialized;
+    } };

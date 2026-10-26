@@ -19,7 +19,7 @@ const stock = Object.fromEntries(recipe.materials.map(row => [row.selfId, { self
 stock[recipe.recipeItemId] = { selfId: recipe.recipeItemId, amount: 1 };
 function member(characterId, classId, skills = [], inventory = {}) {
     return { characterId, classId, level: 50, clanId: 0, phase: 'cold', activity: 'hunting', spotId: 'ordinary:economic-fixture', partyId: null,
-        simulationOwner: 'legacy_main', simulationRevision: 0, accountName: 'bot_pop_economic', inventory,
+        simulationRevision: 0, accountName: 'bot_pop_economic', inventory,
         loc: { locX: 83400, locY: 148600, locZ: -3400 }, stats: { generatedCold: true, classId,
             coldCombat: { version: Combat.PROFILE_VERSION, classId, skillSource: 'database', skills: Combat.skillSnapshotsFromRecords(skills) } } };
 }
@@ -76,7 +76,7 @@ function pureCases() {
     assert.equal(Crafting.recipeForProvider(recipe, { known: true }), recipe);
     const used = Demand.recipeIds({ recipeId: recipe.recipeId, componentRecipes: { 1890: 30, 1888: 31 } }, owns[0]);
     assert.deepEqual(used, [recipe.recipeId], 'owned intermediates need no extra component crafter');
-    const nativeOptions = { ...options, excludedTargetIds: excluded, occupancy: {}, capacityUnits: 3, clanShare: 0 };
+    const nativeOptions = { ...options, excludedTargetIds: excluded, clanShare: 0 };
     const clan = { id: 1, level: 0, members: owns, physicalMemberCount: 3, state: { mode: 'autonomous' } };
     const job = { clan, prospects: [external], prepared: { teams: {} } };
     const discovered = Demand.economicPlan(Planner.planForMember, job, owns[0], [], [], { ...nativeOptions, economicMode: 'discovery' });
@@ -154,7 +154,10 @@ async function criticCases() {
         npcEntries: [{ selfId: reward.selfId, count: 10 }], center: owns[0].loc };
     const Profiles = invoke('GameServer/Bot/Population/SpotProfiles'), oldProfiles = Profiles.ensure(), oldPublished = Shops.publishedStationRecipes;
     Profiles.cache = [...oldProfiles, spot];
-    Shops.publishedStationRecipes = () => ({ recipes: [component], ids: new Set([component.recipeId]), stationByRecipeId: new Map() });
+    // One object until the fixture changes, as the owner publishes it
+    // (ClanPlanningCoordinator.context compares the recipes by identity).
+    const published = { recipes: Object.freeze([component]), ids: new Set([component.recipeId]), stationByRecipeId: new Map() };
+    Shops.publishedStationRecipes = () => published;
     try {
         learningReaderCases();
         const created = await DB.createAutonomousClan({ name: 'PartialEconomic', leaderId: base, memberIds: owns.map(row => row.characterId),
@@ -245,7 +248,7 @@ async function sourceCases(clan) {
     assert(team && Demand.economicSourceCurrent(team.source));
     const old = reward.spoils; reward.spoils = [];
     assert(!Demand.economicSourceCurrent(team.source), 'changed useful yield invalidates exact canonical source'); reward.spoils = old;
-    const blocked = { ...spoiler, stats: { ...spoiler.stats, clanHuntBackoffs: [{ spotId: spot.id, until: Date.now() + 60000 }] } };
+    const blocked = { ...spoiler, stats: { ...spoiler.stats, clanHuntBackoffs: [{ spotId: spot.id, untilStep: 60 }] } };
     assert(!Demand.economicCapable(blocked, requirement), 'native source safety applies to prospective helper');
     Events.watchRecruitment(clan.id, { classIds: [55], minLevel: 1, maxLevel: 100, requirements: [requirement] }); await Events.drain();
     const Policy = require('../src/GameServer/Bot/Population/ClanEquipmentPartyPolicy');
@@ -305,8 +308,11 @@ async function selectedSpoil() {
         assert(planned.selection.plan.economicTeam?.requirements.some(row => row.kind === 'spoil' && row.itemId === item.selfId));
         const team = planned.selection.plan.economicTeam;
         assert.deepEqual(team.prospectiveIds, [base + 200]);
-        const beforeLevel = npc.template.level; npc.template.level++;
-        assert(!Demand.economicSourceCurrent(team.source), 'canonical source level race invalidates selected spoil proof'); npc.template.level = beforeLevel;
+        // Datapack rows are frozen: race the level on a swapped-in copy, then put the row back.
+        const npcAt = Data.npcs.indexOf(npc);
+        Data.npcs[npcAt] = { ...npc, template: { ...npc.template, level: npc.template.level + 1 } }; Index.invalidate(Data.npcs);
+        assert(!Demand.economicSourceCurrent(team.source), 'canonical source level race invalidates selected spoil proof');
+        Data.npcs[npcAt] = npc; Index.invalidate(Data.npcs);
         const waiting = await Equipment.resolveClan(clan, clan.state.productionGoal, { planning: planned, ownerSection: 'productionGoal' });
         assert(waiting.ok && waiting.joined.accepted === base + 200, JSON.stringify({ code: waiting.code, joined: waiting.joined }));
         clan = await projection();
@@ -331,7 +337,10 @@ async function selectedSpoil() {
 
 async function main() {
     DB.init(); await Life.init(); await invoke('GameServer/Bot/Population/BackgroundPartyState').init();
-    Shops.publishedStationRecipes = () => ({ recipes: [], ids: new Set(), stationByRecipeId: new Map() });
+    // One object for the whole run, as the owner publishes it until its
+    // catalogue changes (ClanPlanningCoordinator.context compares by identity).
+    const published = { recipes: Object.freeze([]), ids: new Set(), stationByRecipeId: new Map() };
+    Shops.publishedStationRecipes = () => published;
     // Main-thread options and the worker context must see the same fixture
     // public services, including the component service used by criticCases.
     Shops.publishedRecipeIndex = () => new Map(Shops.publishedStationRecipes().recipes.map(row => [Number(row.recipeId), row]));

@@ -10,9 +10,10 @@ const DataCache = invoke('GameServer/DataCache');
 const Death = invoke('GameServer/Progression/DeathExperience');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Resolver = invoke('GameServer/Bot/Population/BackgroundResolver');
 const Pvp = require('../src/GameServer/Bot/Population/ColdPvpResolver');
-const { seeded } = require('../src/GameServer/Bot/Population/ColdCompetitionMonitor');
+const { seeded } = require('../src/GameServer/Bot/AI/TendencyRoll');
 
 // A bot killed in a cold PvP fight pays the C4 death penalty through the same
 // function as an ordinary cold death, once, with a durable restore record.
@@ -99,12 +100,10 @@ async function main() {
 
     // 5. The cold commit writes exp, level and the durable death record that a
     // resurrection restores, the same row an ordinary cold death writes.
-    const claimed = await Owner.claimBatch([killer, victim], { timestamp: at, allowParty: true, allowLifecycle: true });
-    assert.strictEqual(claimed.grants.length, 2);
-    const commit = await Owner.commitAndReleaseBatch([killer, victim].map(state => ({
-        token: claimed.grants.find(g => g.characterId === state.characterId),
+    const commit = await Owner.commitBatch([killer, victim].map(state => ({
+        revision: state.simulation.revision,
         nextState: result.updates.get(state.characterId), options: { allowParty: true, allowLifecycle: true },
-        proposal: { baseState: state, durable: { pvpKills: result.fighters.find(f => f.id === state.characterId).kills } }
+        proposal: { ...InventorySummary.bagChange(state.inventory, result.updates.get(state.characterId).inventory), durable: { pvpKills: result.fighters.find(f => f.id === state.characterId).kills } }
     })), { timestamp: at + 10, journalReason: 'pvp' });
     assert(commit.every(r => r.ok), JSON.stringify(commit));
     const [character] = await Database.execute(['SELECT level, exp FROM characters WHERE id = ?', [VICTIM]]);

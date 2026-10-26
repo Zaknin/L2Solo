@@ -67,6 +67,8 @@ function creature(overrides = {}) {
             fetchTotalWeaponPAtkRnd: () => 0
         },
         state: {
+            fetchCombats() { return !!this.combats; },
+            setCombats(value) { this.combats = value; },
             fetchDead: () => overrides.dead ?? false,
             setHits() {},
             setCasts() {}

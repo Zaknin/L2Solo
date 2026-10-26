@@ -18,10 +18,12 @@ async function main() {
     const originalNow = Date.now;
     const originalLag = Metrics.currentEventLoopLag;
     const originalStats = Database.stats;
+    const originalPending = Database.pending;
     let now = 1000;
     Date.now = () => now;
     Metrics.currentEventLoopLag = () => 0;
     Database.stats = () => ({ pending: 0 });
+    Database.pending = () => 0;
     Object.assign(Config, settings);
 
     function create(availableMs, atomic = false) {
@@ -42,7 +44,7 @@ async function main() {
         queue.afterCommit = async () => {};
         queue.onResults = () => {};
         for (let id = 1; id <= (atomic ? 2 : 4); id++) queue.enqueue({
-            characterId: id, token: { leaseId: `lease-${id}`, revision: 1 },
+            characterId: id, revision: 1,
             priority: atomic ? 'P1' : 'P2',
             ...(atomic ? { atomicGroup: { id: 'party', memberIds: [1, 2] } } : {})
         });
@@ -78,12 +80,14 @@ async function main() {
         now += 100;
         pressured.coordinator.desiredWorkerPressure = () => ({ player: true, lagMs: 0 });
         Database.stats = () => ({ pending: 1 });
+        Database.pending = () => 1;
         assert.strictEqual(await pressured.queue.flushDue(), false, 'database queue protection still rejects early work');
         assert.strictEqual(Governor.snapshot().jobs.cold_commit_early.reasons.database_queue, 1);
     } finally {
         Date.now = originalNow;
         Metrics.currentEventLoopLag = originalLag;
         Database.stats = originalStats;
+        Database.pending = originalPending;
         Object.assign(Config, saved);
         Governor.reset();
     }

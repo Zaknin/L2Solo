@@ -8,6 +8,7 @@ fixture.assertConfigured(options.default);
 const Database = invoke('Database');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
+const InventorySummary = invoke('GameServer/Bot/Population/InventorySummary');
 const Warehouse = invoke('GameServer/Bot/Economy/BotWarehouseService');
 const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const STEM = 1864;
@@ -51,13 +52,10 @@ async function run() {
         // On the unfixed code the cache and saved summary still have 20.
         // The next real worker commit can therefore restore that physical bag.
         if (process.argv.includes('--reproduce')) {
-            const claim = await Owner.claim(first.state, { allowLifecycle: true, leaseMs: 30000 });
-            assert(claim.ok);
-            const [commit] = await Owner.commitAndReleaseBatch([{ token: claim,
-                nextState: { ...first.state, inventory: { ...first.state.inventory,
-                    [STEM]: { ...first.state.inventory[STEM], amount: 21 } },
-                    simulation: { ...first.state.simulation, ownerId: Owner.OWNER_ID, revision: claim.revision } },
-                proposal: { baseState: { inventory: first.state.inventory } }
+            const looted = { ...first.state.inventory, [STEM]: { ...first.state.inventory[STEM], amount: 21 } };
+            const [commit] = await Owner.commitBatch([{ revision: first.state.simulation.revision,
+                nextState: { ...first.state, inventory: looted },
+                proposal: InventorySummary.bagChange(first.state.inventory, looted)
             }]);
             assert(commit.ok);
             const actual = await facts(first.id);
@@ -70,15 +68,17 @@ async function run() {
         const after = await facts(first.id);
         assert.equal(after.saved, 0); assert.equal(after.bag, 0); assert.equal(after.stored, 20);
         assert.equal(JSON.parse(after.row.statsJson).fixtureNote, 'keep');
-        assert.equal((await Owner.claim(first.state, { allowLifecycle: true })).reason, 'stale_revision');
+        const stale = { ...first.state.inventory, [STEM]: { selfId: STEM, name: 'Stem', amount: 21 } };
+        const [behind] = await Owner.commitBatch([{ revision: first.state.simulation.revision,
+            nextState: { ...first.state, inventory: stale },
+            proposal: InventorySummary.bagChange(first.state.inventory, stale) }]);
+        assert.equal(behind.reason, 'stale_revision', 'a step from before the deposit is refused');
         const fresh = Life.acceptInventoryProjection(moved.coldLifeRow);
         assert(fresh); assert.equal(Number(fresh.inventory[STEM]?.amount || 0), 0);
-        const claim = await Owner.claim(fresh, { allowLifecycle: true, leaseMs: 30000 });
-        assert(claim.ok);
-        const [commit] = await Owner.commitAndReleaseBatch([{ token: claim,
-            nextState: { ...fresh, inventory: { ...fresh.inventory, [STEM]: { selfId: STEM, name: 'Stem', amount: 1 } },
-                simulation: { ...fresh.simulation, ownerId: Owner.OWNER_ID, revision: claim.revision } },
-            proposal: { baseState: { inventory: fresh.inventory } }
+        const loot = { ...fresh.inventory, [STEM]: { selfId: STEM, name: 'Stem', amount: 1 } };
+        const [commit] = await Owner.commitBatch([{ revision: fresh.simulation.revision,
+            nextState: { ...fresh, inventory: loot },
+            proposal: InventorySummary.bagChange(fresh.inventory, loot)
         }]);
         assert(commit.ok);
         assert.equal((await facts(first.id)).bag, 1, 'fresh cold commit adds only the new loot');
@@ -90,12 +90,11 @@ async function run() {
         let unchanged = await facts(rollback.id);
         assert.deepEqual([unchanged.bag, unchanged.stored, unchanged.saved], [20, 0, 20]);
         await Database.execute(['DROP TRIGGER deposit_projection_fault']);
-        const lease = await Owner.claim(rollback.state, { allowLifecycle: true, leaseMs: 30000 });
-        assert(lease.ok);
+        // A main write moved the row after the caller read its copy.
+        await Database.updateGeneratedBotName(rollback.id, `Moved${rollback.id}`, 3);
         await assert.rejects(transfer(rollback.id, rollback.items[0], { coldState: rollback.state }), /economy_state_changed/);
         unchanged = await facts(rollback.id);
         assert.deepEqual([unchanged.bag, unchanged.stored, unchanged.saved], [20, 0, 20]);
-        await Owner.releaseBatch([lease]);
 
         Disposition.warehouseCandidates = state => Object.values(state.inventory).filter(item => item.selfId === STEM && item.amount > 0);
         const multiple = await seed([3, 4]);
@@ -113,14 +112,14 @@ async function run() {
             const result = await transfer(...args);
             if (++calls === 1) {
                 const current = Life.acceptInventoryProjection(result.coldLifeRow);
-                assert((await Owner.claim(current, { allowLifecycle: true, leaseMs: 30000 })).ok);
+                assert(await Life.upsertState({ ...current, stats: { ...current.stats, note: 'newer row' } }, 'newer_row_after_first_deposit'));
             }
             return result;
         };
         const partial = await Warehouse.depositCold(handoff.state);
         assert(partial.aborted); assert.equal(calls, 1);
         assert.equal(partial.count, 3);
-        assert.equal(partial.state.simulation.ownerId, Owner.OWNER_ID);
+        assert.equal(partial.state.stats.note, 'newer row', 'a returned older row cannot replace the newer one');
         const partialFacts = await facts(handoff.id);
         assert.deepEqual([partialFacts.bag, partialFacts.stored, partialFacts.saved], [4, 3, 4]);
 
@@ -165,7 +164,7 @@ async function run() {
         await Database.close(); Database.init(); assert(Database.isReady());
         const reopened = await facts(multiple.id);
         assert.deepEqual([reopened.bag, reopened.stored, reopened.saved], [0, 7, 0]);
-        console.log('PASS E222 no resurrection, atomic rollback, stale revision/lease refusal, multiple rows, partial owner handoff and reopen');
+        console.log('PASS E222 no resurrection, atomic rollback, stale revision refusal, multiple rows, partial newer row and reopen');
     } finally {
         Disposition.warehouseCandidates = candidates; Database.transferInventoryToWarehouse = transfer;
         await Database.close();

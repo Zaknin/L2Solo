@@ -8,7 +8,7 @@ function actionUse(session, buffer) {
         .readD()  // Ctrl
         .readC(); // Shift
 
-    consume(session, {
+    return consume(session, {
         actionId: packet.data[0],
             ctrl: packet.data[1],
            shift: packet.data[2],
@@ -16,7 +16,7 @@ function actionUse(session, buffer) {
 }
 
 function consume(session, data) {
-    session.actor.basicAction(data);
+    return session.actor.basicAction(data);
 }
 
 module.exports = actionUse;

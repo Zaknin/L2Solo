@@ -36,7 +36,7 @@ function recordReason(code) {
 async function stateFor(characterId) {
     const cached = LifeState.cachedState(characterId);
     if (cached) return cached;
-    const states = await LifeState.statesByIds([characterId], { ownerId: 'legacy_main', unassigned: true });
+    const states = await LifeState.statesByIds([characterId], { unassigned: true });
     return states[0] || null;
 }
 
@@ -83,7 +83,7 @@ async function resolveClan(clan) {
     let buyer = null;
     for (const candidate of candidates) {
         const state = await stateFor(candidate.characterId);
-        if (!state || state.phase !== 'cold' || String(state.partyId || '') !== '') continue;
+        if (!state || state.phase !== 'cold' || String(state.party?.partyId || '') !== '') continue;
         const nextOffer = playerControlled ? ClanOrderService.memberOffer(state, itemId, Math.min(maxUnitPrice, remainingBudget))
             : MarketOpportunity.bestOffer(itemId, { buyerCharacterId: state.characterId,
                 budget: Math.min(Number(goal.plan.maxPrice) || Infinity, PurchaseFunding.spendable(state, 0, { free: true }) + clanBudget) });
@@ -180,7 +180,7 @@ async function deposit(clan, goal, itemId, buyer, purchase, offer, { playerContr
         goalKey: demandKey,
         status: playerControlled && number(goal.progress) + 1 < number(goal.required) ? 'open' : 'fulfilled'
     });
-    await Database.syncClanMarketDemandSignal({
+    await LifeState.syncClanMarketDemandSignal({
         clanId: clan.id,
         itemId,
         amount: remaining,

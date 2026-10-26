@@ -1,5 +1,6 @@
 const assert = require('assert');
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 invoke('GameServer/DataCache').init();
 const Resolver = invoke('GameServer/Bot/Population/BackgroundPartyResolver');
 const { ColdSimulationKernel, finishPartyRouteTravelState } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
@@ -12,7 +13,7 @@ const spot = { id: '24_20:antharas_lair', name: 'Assembly test', center: point,
 const party = { partyId: 'assembly-party', leaderId: 1, memberIds: [1, 2], status: 'active',
     spotId: spot.id, nextResolveAt: at, cohesion: 1,
     stats: { fightsResolved: 10, sessionExpiresAt: at + 3600000 } };
-const members = [1, 2].map(characterId => ({ characterId, name: `Hunter${characterId}`, level: 40,
+const members = [1, 2].map(characterId => ({ characterId, name: `Hunter${characterId}`, level: 40, exp: 1000,
     phase: 'cold', activity: 'grouped', spotId: spot.id, loc: { ...point },
     party: { partyId: party.partyId, leaderId: 1, role: 'dps' },
     vitals: { hp: 2000, maxHp: 2000, mp: 1000, maxMp: 1000 },
@@ -87,20 +88,17 @@ async function main() {
         resolveSolo: () => { throw Error('party must not become solo combat'); },
         resolveParty: options => Resolver.resolve(options),
         emit: (type, payload) => messages.push({ type, payload }),
-        projectResolve: (state, result) => ({ ...state, ...result.patch }) });
-    const requestId = 'assembly-claim';
-    const held = new Map(scattered.map(s => [s.characterId, { characterId: s.characterId,
-        ownerId: 'cold_simulation_owner', leaseId: `assembly-${s.characterId}`, revision: 1, leaseUntil: at + 30000 }]));
+        // The round's exp lands on the projected state, as the worker's projection does.
+        projectResolve: (state, result) => ({ ...state, ...result.patch, exp: state.exp + Number(result.materialize?.exp || 0) }) });
     for (const state of scattered) {
-        kernel.upsert({ state, context: {} });
-        kernel.inFlight.set(state.characterId, { state, grant: held.get(state.characterId),
-            partyId: party.partyId, claimRequestId: requestId });
+        kernel.upsert({ state });
+        kernel.inFlight.set(state.characterId, { state, startedAt: at, partyId: party.partyId });
     }
-    kernel.partyRuns.set(party.partyId, { party, members: scattered, spot, route: null, requestId, grants: held });
-    await kernel.resolvePartyGrant(party.partyId);
+    kernel.partyRuns.set(party.partyId, { party, members: scattered, spot, startedAt: at });
+    await kernel.resolvePartyStep(party.partyId);
     const batch = messages.find(m => m.type === 'proposal_batch');
     assert(batch, JSON.stringify(messages));
-    assert(batch.payload.proposals.every(p => p.result.materialize.exp === 0));
+    assert(batch.payload.proposals.every(p => p.nextState.exp === scattered.find(s => s.characterId === p.characterId).exp));
     assert.deepStrictEqual(batch.payload.proposals.map(p => p.nextState.loc), scattered.map(s => s.loc));
     assert.strictEqual(batch.payload.proposals.find(p => p.partyResolution).partyResolution.party.nextResolveAt, at + 30000);
 
@@ -114,42 +112,12 @@ async function main() {
     assert.strictEqual(hunt.partyPatch.stats.partySpotRisk.partyId, party.partyId);
     assert(hunt.debug.wins > 0 && hunt.memberResults.some(e => e.result.materialize.exp > 0), 'arrived party resumes ordinary combat');
 
-    const Population = invoke('GameServer/Bot/Population/PopulationService');
-    const Life = invoke('GameServer/Bot/Population/BotLifeState');
-    const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
-    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
-    const Spots = invoke('GameServer/Bot/AI/SpotService');
-    const restore = [];
-    const patch = (object, key, value) => {
-        const original = object[key]; restore.push(() => { object[key] = original; }); object[key] = value;
-    };
-    try {
-        const saved = [];
-        const occupancy = { [spot.id]: { count: 2, reservedCount: 2, capacity: 3,
-            reservedKeys: new Set(['1', '9']), retained: new Set(['1', '9']) } };
-        patch(Life, 'statesForParty', async () => scattered);
-        patch(Life, 'upsertState', async state => { saved.push(state); return state; });
-        patch(Parties, 'createOrUpdate', async next => next);
-        patch(Profiles, 'findById', () => spot);
-        patch(Profiles, 'ensure', () => [spot]);
-        patch(Profiles, 'currentOccupancy', () => occupancy);
-        patch(Spots, 'findCurrentSpot', () => spot);
-        patch(Spots, 'arrivalPointForState', () => point);
-        const legacy = await Population.resolveBackgroundParty({ ...party,
-            stats: { ...party.stats, objective: { spotId: spot.id } } });
-        assert.strictEqual(legacy.debug.activity, 'party_travel', 'legacy resolver also gathers distant followers when leader is already there');
-        assert.strictEqual(saved.length, 2);
-        assert.deepStrictEqual(saved[1].loc, scattered[1].loc);
-        assert(saved.every(s => s.stats.travel.reason === 'party_spot_replan'));
-        assert.strictEqual(occupancy[spot.id].reservedCount, 3);
-    } finally { restore.reverse().forEach(fn => fn()); }
-
     // Exercise the actual isolated worker: its static area catalog must reject
     // a surface teammate with the same X/Y sector and saved dungeon spot id.
     const { Worker } = require('worker_threads');
     const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
     const worker = new Worker(require.resolve('../src/GameServer/Bot/Population/ColdSimulationWorker'), {
-        workerData: { workerEpoch: 'assembly-test' }
+        workerData: { workerEpoch: 'assembly-test', sharedGeodata: Geodata.sharedDescriptor() }
     });
     const received = [];
     let workerError;
@@ -167,6 +135,8 @@ async function main() {
     };
     try {
         await until(m => m.type === 'ready' && m.payload.phase === 'loaded');
+        // The worker finds the party's spot in its spot catalog.
+        send('catalog_page', { catalog: 'spots', rows: [spot], done: true });
         send('init', { config: { loopIntervalMs: 10 } });
         await until(m => m.type === 'ready' && m.payload.phase === 'running');
         const now = Date.now();
@@ -175,15 +145,12 @@ async function main() {
         const workerMembers = members.map((s, index) => ({ ...s,
             loc: { ...point, locZ: index ? 160 : point.locZ },
             timing: { lastResolvedAt: now - 45000, nextResolveAt: now - 1 } }));
-        send('snapshot_page', { done: true, rows: workerMembers.map(state => ({ state,
-            context: state.characterId === 1 ? { isPartyLeader: true, party: workerParty,
-                partyMembers: workerMembers, spot, route: null } : {} })) });
-        const claim = await until(m => m.type === 'claim_request');
-        send('claim_ack', { grants: claim.payload.candidates.map(c => ({ ok: true, characterId: c.characterId,
-            ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,
-            leaseId: `worker-assembly-${c.characterId}`, leaseUntil: Date.now() + 30000, purpose: c.purpose })) }, claim.msgId);
+        // The party row comes from main's parties table, the members from their snapshot rows.
+        send('table_page', { tables: [{ name: 'parties', from: null, to: 0, full: true,
+            rows: [[workerParty.partyId, workerParty]], removed: [], last: true }] });
+        send('snapshot_page', { done: true, rows: workerMembers.map(state => ({ state })) });
         const proposal = await until(m => m.type === 'proposal_batch');
-        assert(proposal.payload.proposals.every(p => p.result.materialize.exp === 0));
+        assert(proposal.payload.proposals.every(p => p.nextState.exp === workerMembers.find(s => s.characterId === p.characterId).exp));
         assert(proposal.payload.proposals.every(p => !p.result.memoryEvents?.length));
         assert(!received.some(m => m.type === 'fault'), JSON.stringify(received));
     } finally { await worker.terminate(); }

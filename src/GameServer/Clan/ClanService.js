@@ -8,8 +8,14 @@ const CREATE_COOLDOWN_MS = 10 * DAY_MS;
 const SMALL_CREST_KIND = 'pledge';
 const SMALL_CREST_MAX_BYTES = 256;
 
+// memberClans (member id -> clan id) and membershipRevision are kept by the
+// membership writers below (replaceMember, removeMemberFromCache, reload,
+// create, dissolve): a member's clan is a Map read, and a reader that copies
+// the memberships (ClanSocialRuntime) rebuilds only when the revision moved.
 const state = {
-    clans: new Map()
+    clans: new Map(),
+    memberClans: new Map(),
+    membershipRevision: 0
 };
 
 function nowMs() {
@@ -121,14 +127,39 @@ function liveMember(member) {
 }
 
 function replaceMember(clan, member) {
+    const before = clan.members.length;
     clan.members = clan.members.filter((entry) => Number(entry.id) !== Number(member.id));
     clan.members.push(normalizeMember(member));
+    if (clan.members.length === before) return;
+    state.memberClans.set(number(member.id), number(clan.id));
+    state.membershipRevision++;
 }
 
 function removeMemberFromCache(clanId, actorId) {
     const clan = state.clans.get(number(clanId));
     if (!clan) return;
+    const before = clan.members.length;
     clan.members = clan.members.filter((entry) => Number(entry.id) !== Number(actorId));
+    if (clan.members.length === before) return;
+    if (state.memberClans.get(number(actorId)) === number(clan.id)) state.memberClans.delete(number(actorId));
+    state.membershipRevision++;
+}
+
+// A whole clan enters or leaves the cache (reload, create, dissolve).
+function setClan(clan) {
+    state.clans.set(clan.id, clan);
+    for (const member of clan.members) state.memberClans.set(number(member.id), clan.id);
+    state.membershipRevision++;
+}
+
+function deleteClan(clanId) {
+    const clan = state.clans.get(clanId);
+    if (!clan) return;
+    state.clans.delete(clanId);
+    for (const member of clan.members) {
+        if (state.memberClans.get(number(member.id)) === clanId) state.memberClans.delete(number(member.id));
+    }
+    state.membershipRevision++;
 }
 
 function setActorClan(actor, clanId, privileges) {
@@ -145,6 +176,12 @@ function clearActorClan(actor) {
 
 function ensureSchema() {
     return Database.execute(['SELECT 1', []], 'schema:clans');
+}
+
+// The social runtime reads the rosters from this service: the push back is the one lazy link.
+function syncSocialMemberships() {
+    // lazy: cycle ClanSocialRuntime loads ClanService at its top to read the rosters.
+    invoke('GameServer/Clan/ClanSocialRuntime').syncMemberships();
 }
 
 const ClanService = {
@@ -172,15 +209,23 @@ const ClanService = {
 
     reload() {
         state.clans.clear();
+        state.memberClans.clear();
+        state.membershipRevision++;
         return Promise.all([
             Database.fetchClans(),
             Database.fetchClanCharacters()
         ]).then(([clans, members]) => {
+            // One pass groups the members by clan (in their row order), not one filter per clan.
+            const byClan = new Map();
+            for (const member of members) {
+                const id = number(member.clanId);
+                if (!byClan.has(id)) byClan.set(id, []);
+                byClan.get(id).push(member);
+            }
             clans.forEach((row) => {
-                const clanMembers = members.filter((member) => number(member.clanId) === number(row.id));
-                state.clans.set(number(row.id), normalizeClan(row, clanMembers));
+                setClan(normalizeClan(row, byClan.get(number(row.id)) || []));
             });
-            invoke('GameServer/Clan/ClanSocialRuntime').syncMemberships();
+            syncSocialMemberships();
             return Array.from(state.clans.values());
         });
     },
@@ -191,6 +236,16 @@ const ClanService = {
 
     findById(id) {
         return state.clans.get(number(id)) || null;
+    },
+
+    // The clan whose cached roster holds this member (the index the membership writers keep).
+    clanOfMember(memberId) {
+        return state.clans.get(state.memberClans.get(number(memberId))) || null;
+    },
+
+    // Moves on every cached membership change (a member or a whole clan in or out).
+    membershipRevision() {
+        return state.membershipRevision;
     },
 
     findByName(name) {
@@ -233,7 +288,8 @@ const ClanService = {
                     level: 0,
                     leaderId: actor.fetchId()
                 }, [actorMember(actor)]);
-                state.clans.set(clanId, clan);
+                setClan(clan);
+                syncSocialMemberships();
                 setActorClan(actor, clanId, ClanRules.CP_ALL);
                 actor.setClanJoinExpiryTime?.(0);
                 actor.setClanCreateExpiryTime?.(0);
@@ -259,7 +315,7 @@ const ClanService = {
             setActorClan(actor, clan.id, privileges);
             actor.setClanJoinExpiryTime?.(0);
             replaceMember(clan, actorMember(actor));
-            invoke('GameServer/Clan/ClanSocialRuntime').syncMemberships();
+            syncSocialMemberships();
             return Database.syncPlayerManagedClan(clan.id).catch((error) => {
                 utils.infoWarn('Clan', 'player-managed sync failed after member join: %s', error.message);
                 return { ok: false, code: 'automation_sync_failed' };
@@ -290,7 +346,7 @@ const ClanService = {
             session.actor.setClanJoinExpiryTime?.(result.banUntil);
         }
         removeMemberFromCache(result.clanId, result.characterId);
-        invoke('GameServer/Clan/ClanSocialRuntime').syncMemberships();
+        syncSocialMemberships();
         const Response = invoke('GameServer/Network/Response');
         if (session?.actor && session.actor.backpack) {
             session.dataSendToMe(Response.userInfo(session.actor));
@@ -317,7 +373,7 @@ const ClanService = {
             return Database.removeCharacterFromClan(member.id).then(() => {
                 if (options.actor) clearActorClan(options.actor);
                 removeMemberFromCache(clan.id, member.id);
-                invoke('GameServer/Clan/ClanSocialRuntime').syncMemberships();
+                syncSocialMemberships();
                 return Database.syncPlayerManagedClan(clan.id).catch((error) => {
                     utils.infoWarn('Clan', 'player-managed sync failed after member removal: %s', error.message);
                     return { ok: false, code: 'automation_sync_failed' };
@@ -395,7 +451,8 @@ const ClanService = {
             const sessions = clanOnlineSessions(clan);
             remembered.forEach(clearActorClan);
             sessions.forEach((memberSession) => clearActorClan(memberSession.actor));
-            state.clans.delete(number(clan.id));
+            deleteClan(number(clan.id));
+            syncSocialMemberships();
             return { ok: true, clan, sessions, memberIds: result.memberIds || [] };
         });
     },
@@ -503,8 +560,7 @@ const ClanService = {
     syncColdMember(bot) {
         if (!bot || onlineSessionByActorId(bot.characterId)?.actor?.fetchIsOnline?.()) return;
         if (bot.stats?.clanId !== undefined && Number(bot.stats.clanId) === 0) return;
-        const clan = state.clans.get(Number(bot.stats?.clanId))
-            || [...state.clans.values()].find(c => c.members.some(m => m.id === Number(bot.characterId)));
+        const clan = state.clans.get(Number(bot.stats?.clanId)) || this.clanOfMember(bot.characterId);
         const member = clan?.members.find(m => m.id === Number(bot.characterId));
         if (!member) return;
         const level = Number(bot.level ?? member.level);
@@ -522,7 +578,7 @@ const ClanService = {
         recipients.forEach(s => s.dataSendToMe(packet));
     },
     renameMember(characterId, name) {
-        const clan = [...state.clans.values()].find(c => c.members.some(m => m.id === Number(characterId)));
+        const clan = this.clanOfMember(characterId);
         const member = clan?.members.find(m => m.id === Number(characterId));
         if (!member || !name || member.name === name) return;
         member.name = name;

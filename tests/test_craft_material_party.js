@@ -17,7 +17,7 @@ const plan = { status: 'active', strategy: 'craft', recipeId: 424, target: { sel
 const state = { characterId: 990201, level: 65, classId: 8, phase: 'cold', activity: 'hunting', spotId: 'solo',
     party: { partyId: null, role: 'dps' }, clanId: 1, adena: 1000000,
     stats: { classId: 8, role: 'dps', equipmentPlan: plan, wishFocus: ['power:5726:12', 0, 1] },
-    inventory: {}, simulation: { ownerId: 'legacy_main', revision: 1 }, updatedAt: timestamp };
+    inventory: {}, simulation: { revision: 1 }, updatedAt: timestamp };
 const spots = Array.from({ length: 40 }, (_, i) => ({ id: `camp:${i}`, raidBoss: false }));
 const entries = spots.map((spot, i) => ({ spot, kind: 'drop', npcLevel: 60, reward: { selfId: 626 },
     sourceCount: 40 - i, totalCount: 40 }));
@@ -72,14 +72,20 @@ try {
     // the next cold review instead of permanently losing later sources.
     index = new Map([[4097, entries.map((entry, i) => i < Material.MAX_SOURCE_CHECKS
         ? { ...entry, npcLevel: 1 } : entry)]]);
-    const boundedEconomy = { ...economy, plan: {} }, inspectedBefore = inspected, routesBefore = routeChecks;
-    assert.equal(Material.request(state, plan, { spots, economy: boundedEconomy, timestamp }), null);
-    assert.equal(Material.request(state, plan, { spots, economy: boundedEconomy, timestamp: timestamp + 1 }), null);
+    // memo: the bot's record in the background thread, which keeps the negative.
+    const memo = {}, inspectedBefore = inspected, routesBefore = routeChecks;
+    assert.equal(Material.request(state, plan, { spots, economy, memo, timestamp }), null);
+    assert.equal(Material.request(state, plan, { spots, economy: { ...economy }, memo, timestamp: timestamp + 1 }), null);
     assert.equal(inspected, inspectedBefore);
-    assert.equal(routeChecks, routesBefore, 'a cached negative repeats no safety checks');
-    assert(Material.request(state, plan, { spots, economy: boundedEconomy, timestamp: timestamp + Material.REVIEW_MS }));
+    assert.equal(routeChecks, routesBefore, 'a cached negative repeats no safety checks, whatever economy object is passed');
+    // A raised section (the decision sequence moved) re-checks before the review time.
+    const raised = { ...state, stats: { ...state.stats, decisionSeq: Number(state.stats?.decisionSeq || 0) + 1 } };
+    assert(Material.request(raised, plan, { spots, economy, memo, timestamp: timestamp + 2 }),
+        'a moved decision re-checks the camps');
     assert.equal(inspected - inspectedBefore, entries.length - Material.MAX_SOURCE_CHECKS,
         'a later review reaches valid sources after the rejected first bounded page');
+    assert(Material.request(state, plan, { spots, economy, memo, timestamp: timestamp + Material.REVIEW_MS }),
+        'the negative ends at its review time');
     const equippedB = {};
     const role = Planner.roleFor(state);
     for (const entry of invoke('GameServer/Bot/AI/BotGear').planFor({ classId: state.classId, level: 40 }).items) {

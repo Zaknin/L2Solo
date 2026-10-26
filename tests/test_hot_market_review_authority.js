@@ -66,8 +66,7 @@ async function run() {
     };
     assert(cacheOnly(), 'prototype actual cache/current actor hot guard initially accepts');
 
-    const hotAuthority = { ownerId: expected.ownerId, revision: Number(expected.revision || 0),
-        leaseId: expected.leaseId || null };
+    const hotAuthority = { revision: Number(expected.revision || 0) };
     const proposal = (cursor) => {
         const current = AfkTrade.ownerRecords(id).find(record => Number(record.id) === Number(shop.id));
         const line = current.lines[0];
@@ -77,11 +76,8 @@ async function run() {
     };
     assert.deepStrictEqual(await BotMarket.applyReview(id, proposal(1), { hotAuthority, canCommitReview: cacheOnly }),
         { changed: 0, updated: 1 }, 'same native hot authority accepts a metadata-only observation');
-    for (const wrong of [{ ...hotAuthority, ownerId: 'foreign-owner' },
-        { ...hotAuthority, revision: hotAuthority.revision + 1 }, { ...hotAuthority, leaseId: 'foreign-lease' }]) {
-        await assert.rejects(BotMarket.applyReview(id, proposal(2), { hotAuthority: wrong, canCommitReview: cacheOnly }),
-            /stale_market_review/, 'a mismatched durable hot tuple refuses before writing');
-    }
+    await assert.rejects(BotMarket.applyReview(id, proposal(2), { hotAuthority: { revision: hotAuthority.revision + 1 },
+        canCommitReview: cacheOnly }), /stale_market_review/, 'a moved durable hot revision refuses before writing');
     const before = (await Database.execute(['SELECT * FROM afk_trade_lines WHERE shopId = ?', [shop.id]]));
 
     let flushEntered;
@@ -113,7 +109,7 @@ async function run() {
     // completes before the subsequent awaited location/experience/vitals/cache.
     transition = LifeState.upsertState({ ...LifeState.snapshot(id), phase: 'cold' }, 'hot_durable_handoff', { releaseHot: true });
     await locationReady;
-    const durable = (await Database.execute(['SELECT phase, simulationOwner, simulationRevision, simulationLeaseId FROM bot_life_state WHERE characterId = ?', [id]]))[0];
+    const durable = (await Database.execute(['SELECT phase, simulationRevision FROM bot_life_state WHERE characterId = ?', [id]]))[0];
     assert.equal(durable.phase, 'cold');
     assert.equal(LifeState.cachedState(id).phase, 'hot', 'real producer cache publication remains behind awaited location');
     assert(cacheOnly(), 'cache-only prototype guard still permits the retired durable authority');

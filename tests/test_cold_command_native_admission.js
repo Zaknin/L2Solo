@@ -42,7 +42,7 @@ async function seed() {
 async function heldNative(mode) {
     const id = await seed(), state = clone(Life.snapshot(id)), time = Date.now();
     const request = { characterId: id, kind: 'lifecycle', commandId: `admission:${serial}`,
-        commandCheckpoint: Protocol.commandCheckpoint(state), state, context: {},
+        commandCheckpoint: Protocol.commandCheckpoint(state), state,
         precomputedResult: { patch: { activity: 'resting', vitals: { ...state.vitals, hp: 90 },
             stats: { restUntil: time + 60000 } }, events: [], materialize: { exp: 0, sp: 0, adena: 0, items: [] },
             nextResolveAt: time + 60000 } };
@@ -62,7 +62,6 @@ async function heldNative(mode) {
     coordinator.population = { executeWorkerLifecycleCommand(...args) {
         calls.push(args[0]); return Population.executeWorkerLifecycleCommand(...args);
     } };
-    coordinator.contextIndex = () => ({}); coordinator.contextFor = () => ({});
     let stop;
     try {
         await coordinator.onMessage(Protocol.envelope('command_request', originalEpoch,

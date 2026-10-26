@@ -8,12 +8,12 @@ fixture.assertConfigured(options.default);
 const DB = invoke('Database'), Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
 const Market = invoke('GameServer/Bot/Economy/BotAfkMarketService');
+const BuyShop = invoke('GameServer/Bot/Economy/BotBuyShopService');
 const Places = invoke('GameServer/Bot/Economy/ShopPlaces');
 const Native = require('./helpers/nativeMarketFixture');
 const Plan = require('../src/GameServer/Bot/Population/ColdEconomyPlan');
 const Decision = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
 const Ready = require('../src/GameServer/Bot/Economy/ReadyTradeChoice');
-const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const POINT = { locX: 83000, locY: 148000, locZ: -3400 };
 const REQUESTS = [79, 1864, 1865, 1866, 1867, 1868, 1869, 1870].map((id, at) => [id, at ? 2 : 1, (at + 1) * 100]);
 const cost = rows => rows.reduce((sum, row) => sum + row[1] * row[2], 0);
@@ -35,9 +35,7 @@ async function bot(id, town = 'Giran', loc = POINT) {
 async function autonomousSale() {
     await bot(9110);
     await apply(9110, [[79, 1, 100], [1864, 5, 100000]]);
-    const buyer = await Life.upsertState({ ...Life.snapshot(9110), activity: 'hunting' }, 'buy_shop_hunt');
-    const claim = await Owner.claim(buyer, { timestamp: Date.now(), leaseMs: 30000 });
-    assert.equal(claim.ok, true);
+    await Life.upsertState({ ...Life.snapshot(9110), activity: 'hunting' }, 'buy_shop_hunt');
     await bot(9111);
     await DB.setItem(9111, { selfId: 1864, name: 'Stem', amount: 12, slot: 0 });
     const refreshed = await Life.refreshInventory(Life.snapshot(9111));
@@ -62,21 +60,8 @@ async function autonomousSale() {
     assert.equal(shop(9110).escrowAdena, 100, 'only the unfilled weapon request remains reserved');
     assert.equal(await wallet(9110) + await wallet(9111) + Market.buyOrderEscrow(9110), cashBefore,
         'a native sale transfers Adena without creating or deleting money');
-    const queued = await DB.execute(['SELECT SUM(amount) amount FROM board_settlements WHERE ownerId=? AND selfId=?', [9110, 1864]]);
-    assert.equal(queued[0].amount, 5, 'a leased buyer receives a durable item settlement');
-    assert.equal(Native.amount(await DB.fetchItems(9110), 1864), 0, 'the sale cannot overwrite the worker-owned bag');
-    const inventory = structuredClone(buyer.inventory);
-    inventory[57].amount += 30;
-    inventory[1864] = { selfId: 1864, name: 'Stem', amount: 2 };
-    const next = { ...buyer, adena: buyer.adena + 30, inventory,
-        simulation: { ...buyer.simulation, ownerId: Owner.OWNER_ID, revision: claim.revision } };
-    const [committed] = await Owner.commitAndReleaseBatch([{ token: claim, nextState: next,
-        proposal: { baseState: { inventory: buyer.inventory } } }], { timestamp: Date.now() });
-    assert.equal(committed.ok, true);
-    assert.equal(committed.settled, true);
-    assert.equal(Native.amount(await DB.fetchItems(9110), 1864), 7, 'the worker preserves both five purchased items and two new drops');
-    assert.equal(Life.snapshot(9110).inventory[1864].amount, 7);
-    assert.equal((await DB.execute(['SELECT COUNT(*) n FROM board_settlements WHERE ownerId=?', [9110]]))[0].n, 0);
+    await Afk.settleOwners([9110]);
+    assert.equal(Native.amount(await DB.fetchItems(9110), 1864), 5, 'the buyer receives the five purchased items');
     await Market.executePlan(Life.snapshot(9111), plan, { reviewGoal: false });
     assert.equal(await wallet(9111), 1500000, 'an old quote cannot pay the seller twice');
     await DB.flushJournals(); await DB.flushHistory();
@@ -86,7 +71,7 @@ async function autonomousSale() {
     const flows = await DB.readHistory([`SELECT selfId,SUM(delta) delta FROM economy_flow_hour
         WHERE operation='afk-trade:sell-to-shop' GROUP BY selfId`, []]);
     assert(flows.every(row => row.delta === 0), 'the transfer journal conserves purchased goods and Adena');
-    console.log('PASS autonomous buy-shop sale: native decision, escrow, seller receipt, worker settlement, replay and conservation');
+    console.log('PASS autonomous buy-shop sale: native decision, escrow, seller receipt, buyer settlement, replay and conservation');
 }
 
 async function run() {
@@ -189,6 +174,41 @@ async function run() {
     await Market.executePlan(Life.snapshot(9105), { buyAds: alternatives, buyShop: Afk.BUY }, { reviewGoal: false });
     assert.equal(shop(9105).lines.length, 1, 'alternatives for one root cannot reserve both product and materials');
     assert.equal(records(9105).filter(row => row.kind === 'buy_ad').length, 2);
+
+    // A kept purchase shop's escrow stays locked: it cannot back a new meeting bid.
+    await bot(9106);
+    await apply(9106, REQUESTS.slice(0, 3));
+    const kept = shop(9106);
+    assert.equal(records(9106).length, 1);
+    const cash = (await DB.fetchItems(9106)).find(item => Number(item.selfId) === 57);
+    await DB.updateItemAmount(9106, cash.id, 1000);
+    const keptLines = kept.lines.map(line => ({ selfId: line.selfId, enchant: line.enchant, count: line.count,
+        price: line.price, name: line.name }));
+    await assert.rejects(DB.replaceBoardRecords(9106, 'buy_ad', [{ storeType: Afk.BUY, title: 'WTB', town: 'Giran', ...POINT,
+        lines: [{ selfId: 1867, count: 1, price: 1500, name: 'Item 1867' }] }], { expected: {}, buyShop: {
+        expected: { id: kept.id, revision: kept.revision },
+        config: { storeType: Afk.BUY, title: kept.title, town: kept.town, locX: kept.locX, locY: kept.locY, locZ: kept.locZ, lines: keptLines }
+    } }), /not_enough_adena/, 'the free wallet (1000) cannot back a 1500 bid while 1100 stays in the kept shop');
+    assert.equal(shop(9106).id, kept.id);
+    assert.equal(shop(9106).escrowAdena, kept.escrowAdena);
+    assert.equal(records(9106).length, 1);
+
+    // An unchanged order keeps its records as they stand: a cheaper quote
+    // within the prepared cap keeps the held bids, no record is rewritten.
+    await bot(9107);
+    await apply(9107);
+    const standing = shop(9107);
+    const standingAds = records(9107).filter(row => row.kind === 'buy_ad').map(row => [row.id, row.revision]);
+    const quoted = REQUESTS.map(([selfId, count, price]) => ({ selfId, count, price: price - 50, purchaseCap: price,
+        enchant: 0, name: `Item ${selfId}` }));
+    const published = await BuyShop.publish(Life.snapshot(9107), quoted, 'Giran', { priority: Afk.BUY, appearance: async () => ({}) });
+    assert.equal(published.changed, false);
+    assert.equal(published.shop?.id, standing.id);
+    assert.equal(shop(9107).id, standing.id, 'the standing purchase shop is kept');
+    assert.equal(shop(9107).revision, standing.revision);
+    assert.deepEqual(shop(9107).lines.map(line => line.price), standing.lines.map(line => line.price), 'held bids keep their price');
+    assert.deepEqual(records(9107).filter(row => row.kind === 'buy_ad').map(row => [row.id, row.revision]), standingAds);
+    assert.equal(await wallet(9107) + Market.buyOrderEscrow(9107), 1000000);
 
     const batch = Plan.buyBatch(REQUESTS.map(([selfId, count, price]) => ({ selfId, count, price })));
     assert.equal(batch.buyAds.length, 8, 'worker transport carries the shop and meeting slots');

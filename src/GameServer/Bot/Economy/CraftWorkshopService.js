@@ -1,12 +1,22 @@
 'use strict';
 const Profit = require('./CraftProfitPolicy');
 const Commit = require('./EconomyCommit');
+const Diagnostics = require('./EconomyDiagnostics');
+const ShotCraftPolicy = require('./ShotCraftPolicy');
+const { isMainThread } = require('node:worker_threads');
+const TableChannel = require('../Population/ColdTableChannel').shared;
 const recipes = () => invoke('GameServer/Items/C4RecipeItems');
 const life = () => invoke('GameServer/Bot/Population/BotLifeState');
 const byRecipe = new Map();
 const owners = new Map();
 const publicDigests = new Map(), publicScopeDigests = new Map();
 const publicCandidates = new (require('./PublicWorkshopIndex').PublicWorkshopIndex)();
+// A live player's manufacture rows stay apart from the bot rows above: the
+// bot digests are what the worker mirrors (publicRows), and a meeting proof
+// compares them with its token. Player rows refresh when the store opens
+// (registerPlayer) and on the hot reads that use them (lookup,
+// publicForRecipe); no single close event exists (quit, stop, death and
+// logout reset the store type apart).
 const playerCandidates = new (require('./PublicWorkshopIndex').PublicWorkshopIndex)();
 const playerShops = new Map();
 function registerPlayer(session) {
@@ -17,17 +27,19 @@ function registerPlayer(session) {
     refreshPlayers();
 }
 function refreshPlayers() {
+    // lazy: worker the worker loads this module; player workshops (World, ManufactureShop) are main-thread only
     const World = invoke('GameServer/World/World');
-    const Manufacture = invoke('GameServer/Crafting/ManufactureShop');
+    const Manufacture = invoke('GameServer/Crafting/ManufactureShop'); // lazy: worker main-thread only, as World above
     for (const [id, owned] of playerShops) {
         const { session, actor } = owned;
         const rows = [];
         if (session.actor === actor && (World.user?.sessions || []).includes(session)
             && actor.fetchIsOnline?.() !== false && !actor.isDead?.()
             && Number(actor.fetchPrivateStoreType?.()) === Manufacture.MANUFACTURE) {
+            // lazy: worker main-thread player workshops only (see refreshPlayers)
             const town = invoke('GameServer/Bot/AI/TownTransitPolicy').townAt(actor);
             if (!town) {
-                for (const row of owned.rows) { togglePublicDigest(row, -1); playerCandidates.remove(`p:${id}:${row[1]}`); }
+                for (const row of owned.rows) playerCandidates.remove(`p:${id}:${row[1]}`);
                 owned.rows = [];
                 continue;
             }
@@ -40,8 +52,8 @@ function refreshPlayers() {
             }
         }
         if (JSON.stringify(rows) === JSON.stringify(owned.rows)) continue;
-        for (const row of owned.rows) { togglePublicDigest(row, -1); playerCandidates.remove(`p:${id}:${row[1]}`); }
-        for (const row of rows) { togglePublicDigest(row); playerCandidates.put(`p:${id}:${row[1]}`, { ...candidateRow(row), playerWorkshop: true }); }
+        for (const row of owned.rows) playerCandidates.remove(`p:${id}:${row[1]}`);
+        for (const row of rows) playerCandidates.put(`p:${id}:${row[1]}`, { ...candidateRow(row), playerWorkshop: true });
         owned.rows = rows;
         if (session.actor !== actor || !(World.user?.sessions || []).includes(session)) playerShops.delete(id);
     }
@@ -70,12 +82,10 @@ function togglePublicDigest(row, direction = 1) {
     }
 }
 function publicRecipeDigest(productId) {
-    refreshPlayers();
     const value = publicDigests.get(Number(productId));
     return value ? `${value.xor}:${value.sum}:${value.count}` : '0:0:0';
 }
 function publicScopeDigest(scope) {
-    refreshPlayers();
     const value = publicScopeDigests.get(scope);
     return value ? `${value.xor}:${value.sum}:${value.count}` : '0:0:0';
 }
@@ -103,13 +113,23 @@ function watchedInputs() {
 let unsubscribe = null;
 let unsubscribeOwnership = null;
 
+// The state object each owner was last indexed from. Life states are replaced,
+// not mutated, so the same object registered again (the change and the market
+// review listeners both fire for one commit) rebuilds the same rows.
+const registeredStates = new Map();
+
 function remove(id, { recipes: dropRecipes = true, publish = true } = {}) {
+    registeredStates.delete(Number(id));
+    // A bot with a 'recipes' row: a cold crafter, or one whose recipes are loaded.
+    const recipeRowShown = dropRecipes && (crafters.has(Number(id)) || knownRecipes.has(Number(id)));
     const removedRecipes = owners.get(Number(id)) || [];
     for (const row of publicRecipeRows(id)) { togglePublicDigest(row, -1); publicCandidates.remove(`w:${Number(id)}:${row[1]}`); }
     if (publish) for (const recipeId of removedRecipes) invoke('GameServer/Bot/Population/ColdTableChannel').shared
         .changed('board', { key: `w:${Number(id)}:${recipeId}`, removed: true });
     invoke('GameServer/Bot/Economy/ShotMarketIndex').native().remove(id);
     if (dropRecipes) recipesChanged(id);
+    // Not under publish: the board rows publishRows rewrites do not include it.
+    if (recipeRowShown) TableChannel.changed('recipes', { key: Number(id), removed: true });
     for (const recipeId of owners.get(Number(id)) || []) {
         const records = byRecipe.get(recipeId);
         records?.delete(Number(id));
@@ -126,6 +146,16 @@ function remove(id, { recipes: dropRecipes = true, publish = true } = {}) {
 }
 function register(state) {
     const id = Number(state?.characterId);
+    if (state && state.phase === 'cold' && registeredStates.get(id) === state) {
+        if (!crafters.has(id)) recipesChanged(id);
+        if (Diagnostics.active()) Diagnostics.count('workshop_register', 'skipped', 'same_state');
+        return;
+    }
+    if (Diagnostics.active()) Diagnostics.count('workshop_register', 'rebuilt');
+    indexState(id, state);
+    if (state?.phase === 'cold') registeredStates.set(id, state);
+}
+function indexState(id, state) {
     const previousRows = publicRecipeRows(id);
     remove(id, { recipes: state?.phase !== 'cold', publish: false });
     const publishRows = () => {
@@ -139,7 +169,11 @@ function register(state) {
     };
     if (!state || state.phase !== 'cold') { publishRows(); return; }
     invoke('GameServer/Bot/Economy/ShotMarketIndex').native().update(state);
-    const items = new Set([...watchedInputs()].filter(itemId => Number(state.inventory?.[itemId]?.amount || 0) > 0));
+    const watched = watchedInputs(), items = new Set();
+    for (const key in state.inventory || {}) {
+        const itemId = Number(key);
+        if (watched.has(itemId) && Number(state.inventory[key]?.amount || 0) > 0) items.add(itemId);
+    }
     if (state.stats?.shotDemand?.itemId) items.add(Number(state.stats.shotDemand.itemId));
     if (state.stats?.shotRecipeDemand?.itemId) items.add(Number(state.stats.shotRecipeDemand.itemId));
     for (const itemId of items) {
@@ -150,7 +184,7 @@ function register(state) {
     if (invoke('GameServer/Bot/Economy/CraftShopService').isServiceCrafter(state)) crafters.set(id, state);
     else recipesChanged(id);
     const shop = state?.stats?.workshop;
-    if (!shop || state.phase !== 'cold' || state.simulation?.ownerId !== 'legacy_main' || Number(state.vitals?.hp) <= 0
+    if (!shop || state.phase !== 'cold' || Number(state.vitals?.hp) <= 0
         || state.partyId || state.party?.partyId || ['dead', 'traveling'].includes(state.activity)) { publishRows(); return; }
     const ids = [];
     for (const entry of shop.entries || []) {
@@ -235,11 +269,13 @@ async function craft(ownerId, recipeId, customerId, { expectedPrice = null, expe
         const player = playerLookup(ownerId, recipeId, customer);
         if (player) {
             liveOrder = true;
+            // lazy: worker a player workshop order runs on main; the worker loads this module
             const session = (invoke('GameServer/World/World').user?.sessions || [])
                 .find(entry => Number(entry.actor?.fetchId?.()) === Number(customerId));
             if (!session || !customer || expectedPrice !== null && Number(expectedPrice) !== player.price)
                 throw Error('workshop price changed');
             admitted = await Commit.admit(customer, Commit.KINDS.craft);
+            // lazy: worker a player workshop order runs on main; the worker loads this module
             const result = await invoke('GameServer/Crafting/ManufactureShop').craft(session, Number(ownerId), Number(recipeId), random,
                 { botOrder: true, batches, expectedPrice: player.price, funding, economyCommand: admitted.command });
             if (!result || !result.committed) throw Error('player_workshop_unavailable');
@@ -295,6 +331,7 @@ async function knownFor(id) {
     if (!known) {
         known = (await invoke('Database').fetchCharacterRecipes(id)).map(row => Number(row.recipeId));
         knownRecipes.set(id, known);
+        TableChannel.changed('recipes', () => recipeRow(id));
     }
     return known;
 }
@@ -305,6 +342,21 @@ function bookFor(id) {
     if (!encodedRecipes.has(id)) encodedRecipes.set(id, invoke('GameServer/Bot/Economy/RecipeBookCodec').pack(knownRecipes.get(id)));
     return encodedRecipes.get(id);
 }
+// A bot's recipe knowledge for planning: the packed book and its packed shot
+// recipes; empty until knownFor has loaded the bot's recipes.
+function knowledgeFor(id) {
+    return { knownShotRecipes: ShotCraftPolicy.packKnown(cachedRecipes(id)), recipeBook: bookFor(id) };
+}
+const recipeRow = id => ({ characterId: Number(id), ...knowledgeFor(id) });
+// The 'recipes' table: one row per bot whose recipes main has loaded; the cold
+// worker plans a far service crafter from it. A cache drop (recipesChanged)
+// keeps the row until the next load replaces it, so the worker plans on the
+// last known book meanwhile, not on none. Every learning reaches that load:
+// a cold one sends the bot's snapshot (ColdSimulationCoordinator.ensureCraftRecipes),
+// a hot one its return to cold (acceptColdState); a bot that leaves (remove)
+// takes its row away.
+if (isMainThread) TableChannel.register('recipes', { key: row => row.characterId,
+    allRows: () => [...knownRecipes.keys()].map(recipeRow) });
 async function review(state) {
     init();
     const rules = invoke('GameServer/Bot/Economy/CraftShopService');
@@ -396,9 +448,10 @@ function buildPublicRecipeRows(ownerId) {
     return result;
 }
 function* publicForRecipe(recipeId, customer = {}) {
-    refreshPlayers();
     yield* publicCandidates.candidates(recipeId, customer.characterId);
-    if (customer.phase === 'hot') yield* playerCandidates.candidates(recipeId, customer.characterId);
+    if (customer.phase !== 'hot') return;
+    refreshPlayers();
+    yield* playerCandidates.candidates(recipeId, customer.characterId);
 }
 function* publicRows() {
     for (const id of owners.keys()) for (const row of publicRecipeRows(id)) yield [`w:${id}:${row[1]}`, ...row];
@@ -439,4 +492,4 @@ async function publishDemand(state, recipe, productPrice, context) {
     }
     return state;
 }
-module.exports = { init, register, registerPlayer, remove, recipesChanged, knownFor, cachedRecipes, bookFor, review, find, publicForRecipe, publicRecipeRows, publicRows, publicRecipeDigest, publicScopeDigest, itemFingerprint: publicRecipeDigest, quote, discount, boardRecords, lookup, craft, inputSources, inputStateFor, crafterCandidates, publishDemand };
+module.exports = { init, register, registerPlayer, remove, recipesChanged, knownFor, cachedRecipes, bookFor, knowledgeFor, review, find, publicForRecipe, publicRecipeRows, publicRows, publicRecipeDigest, publicScopeDigest, itemFingerprint: publicRecipeDigest, quote, discount, boardRecords, lookup, craft, inputSources, inputStateFor, crafterCandidates, publishDemand };

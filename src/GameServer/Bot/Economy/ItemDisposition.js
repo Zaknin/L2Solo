@@ -147,6 +147,10 @@ function isMarketRecipeItem(item) {
 
 const CRYSTALS = new Set(Object.values(CRYSTAL_IDS));
 
+function isGradeCrystal(item) {
+    return CRYSTALS.has(Number(item?.selfId));
+}
+
 // Consumables a bot sells to the NPC beyond what its class keeps: arrows (a
 // bot's bow spends none, Actor/BowResources), scrolls other than enchant
 // scrolls (the Scrolls of Escape a bot reads for town trips are reserved up to
@@ -351,6 +355,54 @@ function reservedCombinationAmounts(state, plan = equipmentInputPlan(state)) {
     }, {});
 }
 
+// A paused personal kit owns what was collected when it yielded the activity.
+// Its missing inputs cannot claim later purchases made for another funded kit.
+function capDeferredInputs(plan, amounts) {
+    if (plan?.status !== 'deferred' || plan.reason !== 'wish_focus' || !plan.heldInputs) return amounts;
+    return Object.fromEntries(Object.entries(amounts).map(([id, amount]) =>
+        [id, Math.min(amount, Math.max(0, Number(plan.heldInputs[id]) || 0))]).filter(([, amount]) => amount > 0));
+}
+
+function equipmentMaterialAmounts(state, original = state?.stats?.equipmentPlan, options = {}) {
+    const plan = equipmentInputPlan(state, original);
+    const craft = options.craft === false ? {} : reservedCraftAmounts(state, plan);
+    const combine = reservedCombinationAmounts(state, plan);
+    const amounts = { ...craft };
+    for (const [id, amount] of Object.entries(combine)) amounts[id] = Math.max(Number(amounts[id] || 0), amount);
+    const rows = [
+        ...(plan?.strategy === 'luxury_exchange' && plan.status === 'active' ? plan.materials || [] : []),
+        ...(plan?.status === 'active' ? plan.crystalPreparation?.materials || [] : [])
+    ];
+    for (const row of rows) amounts[row.selfId] = Math.max(Number(amounts[row.selfId] || 0), Number(row.amount));
+    return capDeferredInputs(original, amounts);
+}
+
+function collectedEquipmentInputs(state, plan = state?.stats?.equipmentPlan) {
+    return Object.fromEntries(Object.entries(equipmentMaterialAmounts(state, plan)).map(([id, amount]) =>
+        [id, Math.min(amount, Math.max(0, Number(state.inventory?.[id]?.amount) || 0))])
+        .filter(([, amount]) => amount > 0));
+}
+
+// A selected finite production kit survives the ingredient trips. Selling
+// and storage retain it; the production executor still reads its own inputs.
+function productionInputAmounts(state, timestamp = Date.now()) {
+    const shot = state?.stats?.shotCraft?.preparing;
+    const wealth = state?.stats?.wealthCraft?.outcome === 'buying' ? state.stats.wealthCraft : null;
+    const setup = shot && Number(shot.at) + 30 * 60 * 1000 > timestamp ? shot : wealth;
+    const recipe = C4RecipeItems.resolveByRecipeId(Number(setup?.recipeId));
+    const batches = Number(setup?.batches);
+    if (!recipe || !(Number(setup.at) + 30 * 60 * 1000 > timestamp)
+        || !Number.isSafeInteger(batches) || batches < 1 || batches > 64) return {};
+    return Object.fromEntries(recipe.materials.map(row => [row.selfId, Number(row.amount) * batches]));
+}
+
+function saleReservations(state, reserved = reservedEquipmentAmounts(state), timestamp = Date.now()) {
+    const result = { ...reserved };
+    for (const [id, amount] of Object.entries(productionInputAmounts(state, timestamp)))
+        result[id] = Number(result[id] || 0) + amount;
+    return result;
+}
+
 // A lower-grade bridge can replace the executable goal while its later kit
 // still owns collected inputs. Only one retained personal goal is permitted.
 function retainedEquipmentAmounts(state) {
@@ -359,11 +411,7 @@ function retainedEquipmentAmounts(state) {
     if (!retained || owner.reason === 'cancelled') return {};
     const plan = equipmentInputPlan(state, retained);
     if (plan?.strategy === 'none' || plan?.status !== 'active') return {};
-    const craft = reservedCraftAmounts(state, plan), combine = reservedCombinationAmounts(state, plan);
-    const exchange = plan.strategy === 'luxury_exchange' ? Object.fromEntries(
-        (plan.materials || []).map(row => [row.selfId, Number(row.amount)])) : {};
-    return Object.fromEntries([...new Set([...Object.keys(craft), ...Object.keys(combine), ...Object.keys(exchange)])]
-        .map(id => [id, Math.max(Number(craft[id] || 0), Number(combine[id] || 0), Number(exchange[id] || 0))]));
+    return equipmentMaterialAmounts(state, retained);
 }
 
 function reservedUpgradeAmounts(state) {
@@ -408,8 +456,7 @@ function reservedUpgradeAmounts(state) {
 function reservedEquipmentAmounts(state, options = {}) {
     if (!state) return {};
     const exchange = equipmentInputPlan(state);
-    const craft = options.craft === false ? {} : reservedCraftAmounts(state, exchange);
-    const combination = reservedCombinationAmounts(state, exchange);
+    const inputs = equipmentMaterialAmounts(state, state.stats?.equipmentPlan, options);
     const upgrades = reservedUpgradeAmounts(state);
     const unseal = exchange?.unseal;
     if (unseal && Number(exchange.target?.selfId) === Number(unseal.productId)
@@ -420,10 +467,6 @@ function reservedEquipmentAmounts(state, options = {}) {
         upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
     for (const [id, amount] of Object.entries(retainedEquipmentAmounts(state)))
         upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
-    if (exchange?.strategy === 'luxury_exchange' && exchange.status === 'active')
-        for (const row of exchange.materials || []) upgrades[row.selfId] = Math.max(Number(upgrades[row.selfId] || 0), Number(row.amount));
-    if (exchange?.status === 'active') for (const row of exchange.crystalPreparation?.materials || [])
-        upgrades[row.selfId] = Math.max(Number(upgrades[row.selfId] || 0), Number(row.amount));
     for (const [id, amount] of Object.entries(invoke('GameServer/Bot/AI/PersonalGearProgression').preparedAmounts(state)))
         upgrades[id] = Math.max(Number(upgrades[id] || 0), amount);
     for (const book of invoke('GameServer/Skills/SkillBookCatalog').requiredBooks(state)) {
@@ -433,8 +476,8 @@ function reservedEquipmentAmounts(state, options = {}) {
     if (targetId && Number(state?.inventory?.[targetId]?.amount || 0) > 0
         && !state.inventory[targetId].equipped) upgrades[targetId] = 1;
     const clan = options.clan === false ? {} : invoke('GameServer/Clan/ClanSupplyPolicy').reservedAmounts(state);
-    return [...new Set([...Object.keys(craft), ...Object.keys(combination), ...Object.keys(upgrades), ...Object.keys(clan)])].reduce((reserved, selfId) => {
-        reserved[selfId] = Math.max(Number(craft[selfId] || 0), Number(combination[selfId] || 0),
+    return [...new Set([...Object.keys(inputs), ...Object.keys(upgrades), ...Object.keys(clan)])].reduce((reserved, selfId) => {
+        reserved[selfId] = Math.max(Number(inputs[selfId] || 0),
             Number(upgrades[selfId] || 0)) + Number(clan[selfId] || 0);
         return reserved;
     }, {});
@@ -473,7 +516,8 @@ function reservationInputKey(state = {}) {
         ? quantities(plan.combine.requirements) : null;
     return JSON.stringify([Number(plan?.target?.selfId || 0), craftInputs, combine,
         plan?.strategy === 'luxury_exchange' && plan.status === 'active' ? quantities(plan.materials) : null,
-        invoke('GameServer/Clan/ClanSupplyPolicy').version(state), retainedEquipmentAmounts(state), reservedHennaAmounts(state)]);
+        invoke('GameServer/Clan/ClanSupplyPolicy').version(state), retainedEquipmentAmounts(state), reservedHennaAmounts(state),
+        state.stats?.equipmentPlan?.heldInputs ?? null, productionInputAmounts(state)]);
 }
 
 function actorItemValue(item, property, method) {
@@ -481,7 +525,7 @@ function actorItemValue(item, property, method) {
 }
 
 function unreservedActorItems(state, items = []) {
-    const reserved = reservedEquipmentAmounts(state);
+    const reserved = saleReservations(state);
     (items || []).filter((item) => !!actorItemValue(item, 'equipped', 'fetchEquipped')).forEach((item) => {
         const selfId = Number(actorItemValue(item, 'selfId', 'fetchSelfId') || 0);
         reserved[selfId] = Math.max(0, Number(reserved[selfId] || 0) - Number(actorItemValue(item, 'amount', 'fetchAmount') || 0));
@@ -531,7 +575,7 @@ function saleCandidates(state, options = {}) {
     const limit = options.unlimited
         ? Number.MAX_SAFE_INTEGER
         : Math.max(1, Math.min(20, Number(options.limit) || 8));
-    const reserved = { ...(options.preparedReservations || reservedEquipmentAmounts(state)) };
+    const reserved = saleReservations(state, options.preparedReservations || reservedEquipmentAmounts(state), options.now);
     const clan = invoke('GameServer/Clan/ClanSupplyPolicy').reservedAmounts(state);
     for (const [id, amount] of Object.entries(reservedHennaAmounts(state)))
         reserved[id] = Math.max(Number(reserved[id] || 0), amount + Number(clan[id] || 0));
@@ -636,7 +680,7 @@ function npcLiquidationCandidates(state, options = {}) {
         unlimited: true,
         allowPreTradeCleanup: options.allowPreTradeCleanup === true
     }).filter((item) => {
-        if (isClanProgressionItem(item)) return false;
+        if (isClanProgressionItem(item) || isGradeCrystal(item)) return false;
         const gear = String(item.kind || '').startsWith('Weapon.') || String(item.kind || '').startsWith('Armor.');
         const lowGradeGear = gear && gradeIndex(item.rank) < gradeIndex('c');
         return isNpcOnlyItem(item) || lowGradeGear || item.basePrice <= maxUnitPrice;
@@ -671,7 +715,7 @@ function warehouseCandidates(state) {
     // Personal surplus finances equipment. Craft inputs and accepted native
     // obligations are already protected by reservations, not spare storage.
     if (invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state)) return [];
-    const reserved = reservedEquipmentAmounts(state);
+    const reserved = saleReservations(state);
     return Object.values(state?.inventory || {}).flatMap((item) => {
         const equipped = Math.max(0, Number(item.equippedCount ?? (item.equipped ? 1 : 0)) || 0);
         // Reservations include equipped copies, as in unreservedActorItems.
@@ -705,6 +749,7 @@ module.exports = {
     gradeIndex,
     isBelowCGrade,
     isClanProgressionItem,
+    isGradeCrystal,
     isNpcOnlyItem,
     isQuestItem,
     isRecipeItem,
@@ -727,6 +772,11 @@ module.exports = {
     reservedCombinationAmounts,
     reservedCraftAmounts,
     reservedEquipmentAmounts,
+    equipmentMaterialAmounts,
+    collectedEquipmentInputs,
+    productionInputAmounts,
+    saleReservations,
+    capDeferredInputs,
     equipmentInputPlan,
     retainedEquipmentAmounts,
     reservationInputKey,

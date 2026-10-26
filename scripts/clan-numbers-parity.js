@@ -27,7 +27,7 @@ const states = rows.map(row => ({ characterId: row.characterId, name: row.charac
     spotId: row.spotId, updatedAt: row.updatedAt, loc: { locX: row.locX, locY: row.locY, locZ: row.locZ },
     vitals: { hp: row.hp, maxHp: row.maxHp, mp: row.mp, maxMp: row.maxMp },
     timing: { lastResolvedAt: row.lastResolvedAt, nextResolveAt: row.nextResolveAt },
-    simulation: { ownerId: 'legacy_main', revision: row.simulationRevision || 0 },
+    simulation: { revision: row.simulationRevision || 0 },
     party: row.partyId ? { partyId: row.partyId } : null, stats: { ...json(row.statsJson), clanId: membership.get(row.characterId).clanId },
     classId: membership.get(row.characterId).classId, inventory: json(row.inventorySummary), persona: personas.get(row.characterId) }));
 assert.ok(states.length, 'native saved clan members are required');
@@ -41,14 +41,14 @@ invoke('GameServer/Bot/Economy/BotMarketPricing').useNpcOfferSnapshot(catalog);
 Economy.configure({ board: () => board, spots: () => spots, memory: () => null });
 const epoch = 'clan-numbers-parity', timestamp = Date.now();
 const observer = String.raw`
-module.exports.clanOracle = async ids => {
+module.exports.clanOracle = async (ids, workshops) => {
     const result = [];
-    for (const id of ids) {
+    for (const [at, id] of ids.entries()) {
         const entry = kernel.states.get(id), state = entry.state;
         let built, seen;
         const projected = await LifeStateProjector.prepareResolve(state, { patch: {}, materialize: { exp: 0, sp: 0, adena: 0, items: [] },
             debug: {}, events: [], nextResolveAt: workerData.timestamp + 60000 }, { persist: false, timestamp: workerData.timestamp,
-            projectClassProgression: true, economyDeps: { board: boardIndex, spots: planningSpots, memory: null, workshop: entry.context.workshop },
+            projectClassProgression: true, economyDeps: { board: boardIndex, spots: planningSpots, memory: null, workshop: workshops[at] },
             onEconomy: (context, input) => { built = context; seen = structuredClone(input); } });
         result.push({ id, projected, seen, decision: ColdEconomyDecision.capture(built, projected, seen) });
     }
@@ -62,7 +62,7 @@ loaded.filename = workerData.workerPath; loaded.paths = Module._nodeModulePaths(
 loaded._compile(fs.readFileSync(workerData.workerPath, 'utf8') + workerData.observer, workerData.workerPath);
 parentPort.on('message', message => {
     if (!message.clanOracle) return;
-    loaded.exports.clanOracle(message.clanOracle).then(value => parentPort.postMessage({ oracleId: message.msgId, value }))
+    loaded.exports.clanOracle(message.clanOracle, message.workshops).then(value => parentPort.postMessage({ oracleId: message.msgId, value }))
         .catch(error => parentPort.postMessage({ oracleId: message.msgId, error: error.stack }));
 });`;
 (async () => {
@@ -74,7 +74,7 @@ parentPort.on('message', message => {
             if (rejected) throw Error(JSON.stringify(rejected)); if (Date.now() > deadline) throw Error('native clan parity worker timeout');
             await new Promise(resolve => setTimeout(resolve, 10)); } return messages.find(predicate); };
     const send = (type, payload, msgId) => worker.postMessage(Protocol.envelope(type, epoch, payload, msgId));
-    const projected = new Map(), seenInputs = new Map(), contexts = new Map(), differences = [], actualNow = Date.now;
+    const projected = new Map(), seenInputs = new Map(), workshops = new Map(), differences = [], actualNow = Date.now;
     let fallbackMembers = 0, elapsedOld = 0, elapsedNew = 0, valueAndBudgetEqual = 0, normalizedEqual = 0;
     try {
         await wait(message => message.type === 'ready' && message.payload.phase === 'loaded');
@@ -84,13 +84,14 @@ parentPort.on('message', message => {
         await wait(message => message.type === 'ready' && message.payload.phase === 'running'); send('pause', {}, 'pause');
         for (const state of states) {
             const basics = state.stats?.workshop?.entries?.length ? Economy.basics(state, { timestamp }) : null;
-            contexts.set(state.characterId, { workshop: basics ? Economy.craftIncome(state, { hourAdena: basics.hunt.perHour, worth: basics.price, timestamp }) : null });
+            workshops.set(state.characterId, basics ? Economy.craftIncome(state, { hourAdena: basics.hunt.perHour, worth: basics.price, timestamp }) : null);
         }
-        for (let at = 0; at < states.length; at += 4) send('snapshot_page', { rows: states.slice(at, at + 4).map(state => ({ state, context: contexts.get(state.characterId) })), ack: true }, 'state-' + at);
+        for (let at = 0; at < states.length; at += 4) send('snapshot_page', { rows: states.slice(at, at + 4).map(state => ({ state })), ack: true }, 'state-' + at);
         await wait(message => message.type === 'ready' && message.msgId === 'state-' + (Math.floor((states.length - 1) / 4) * 4));
         for (let at = 0; at < states.length; at += 20) {
             const msgId = 'oracle-' + at;
-            worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, msgId), clanOracle: states.slice(at, at + 20).map(state => state.characterId) });
+            const ids = states.slice(at, at + 20).map(state => state.characterId);
+            worker.postMessage({ ...Protocol.envelope('pause', epoch, {}, msgId), clanOracle: ids, workshops: ids.map(id => workshops.get(id)) });
             const response = await wait(message => message.oracleId === msgId); if (response.error) throw Error(response.error);
             for (const row of response.value) {
                 const original = states.find(state => state.characterId === row.id), member = { ...row.projected, persona: original.persona, classId: original.classId };
@@ -116,7 +117,7 @@ parentPort.on('message', message => {
             const inputs = { warehouse: warehouse.filter(row => row.clanId === source.id), halls, equipment, proofOffer: null };
             let started = performance.now();
             const memberContexts = members.map(member => {
-                const full = Economy.forState(seenInputs.get(member.characterId), { persona: member.persona, timestamp, workshop: contexts.get(member.characterId).workshop, caller: 'clan_parity' });
+                const full = Economy.forState(seenInputs.get(member.characterId), { persona: member.persona, timestamp, workshop: workshops.get(member.characterId), caller: 'clan_parity' });
                 const horizon = full.horizonHours ?? Valuation.stageHours(member, full.hunt.expPerHour, full.persona);
                 return { ...full, clanHorizon: horizon, clanItemUsefulness: id => positive(full.itemUsefulness(id)) || fallback(member, id, full, horizon) };
             });

@@ -6,12 +6,9 @@ const { DatabaseSync } = require('node:sqlite');
 
 const rootDir = path.resolve(__dirname, '..');
 const outputDir = path.join(rootDir, 'tmp', 'test-sqlite-bot-life-state-migration');
-const ownerColumns = [
-    'simulationOwner',
-    'simulationRevision',
-    'simulationLeaseId',
-    'simulationLeaseUntil'
-];
+// v10 added the loan columns with the revision; v72 drops them again.
+const loanColumns = ['simulationOwner', 'simulationLeaseId', 'simulationLeaseUntil'];
+const ownerColumns = ['simulationRevision', ...loanColumns];
 const partyProjectionColumns = [
     'partyRequestStatus',
     'partyRequestPriority',
@@ -41,10 +38,11 @@ if (process.argv[2] === '--bootstrap') {
 
     const currentSchema = fs.readFileSync(path.join(rootDir, 'database', 'sql', 'sqlite.sql'), 'utf8');
     const preV10Schema = currentSchema.replace(
-        /updatedAt INTEGER NOT NULL DEFAULT 0,\r?\n\s*simulationOwner TEXT NOT NULL DEFAULT 'legacy_main',\r?\n\s*simulationRevision INTEGER NOT NULL DEFAULT 0,\r?\n\s*simulationLeaseId TEXT,\r?\n\s*simulationLeaseUntil INTEGER NOT NULL DEFAULT 0/,
+        /updatedAt INTEGER NOT NULL DEFAULT 0,\r?\n\s*simulationRevision INTEGER NOT NULL DEFAULT 0/,
         'updatedAt INTEGER NOT NULL DEFAULT 0'
     );
-    assert(!preV10Schema.includes('simulationOwner'), 'test fixture must reproduce the pre-v10 lifecycle schema');
+    assert(!preV10Schema.includes('simulationRevision'), 'test fixture must reproduce the pre-v10 lifecycle schema');
+    assert(!currentSchema.includes('simulationOwner'), 'the current schema has no loan columns');
     // Before v51 an inactive gear plan's next spot set the objective spot.
     const preV51Schema = currentSchema.replace(
         /CASE WHEN json_extract\(statsJson, '\$\.equipmentPlan\.status'\) = 'active'\r?\n\s*THEN (json_extract\(statsJson, '\$\.equipmentPlan\.next\.spotId'\)) END/,
@@ -171,6 +169,12 @@ if (process.argv[2] === '--bootstrap') {
         const migration = db.prepare('INSERT INTO schema_migrations(version, appliedAt) VALUES (?, 0)');
         versions.forEach((version) => migration.run(version));
         if (versions.includes(10)) {
+            // A world of this age has the loan columns v10 added.
+            db.exec(`
+                ALTER TABLE bot_life_state ADD COLUMN simulationOwner TEXT NOT NULL DEFAULT 'legacy_main';
+                ALTER TABLE bot_life_state ADD COLUMN simulationLeaseId TEXT;
+                ALTER TABLE bot_life_state ADD COLUMN simulationLeaseUntil INTEGER NOT NULL DEFAULT 0;
+            `);
             db.exec(`CREATE INDEX IF NOT EXISTS bot_life_state_simulation_owner_lease
                 ON bot_life_state(simulationOwner, simulationLeaseUntil, phase, activity)`);
         }
@@ -254,16 +258,23 @@ if (process.argv[2] === '--bootstrap') {
         ));
     }
 
-    function assertMigrated(databasePath, expectedRows = realisticRows) {
+    function assertMigrated(databasePath, expectedRows = realisticRows, expectedRevisions = expectedRows.map(() => 0)) {
         const db = open(databasePath);
         const columns = db.prepare('PRAGMA table_info(bot_life_state)').all();
-        ownerColumns.forEach((name) => {
-            assert.strictEqual(columns.filter((column) => column.name === name).length, 1, `${name} must exist exactly once`);
-        });
-        const index = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_simulation_owner_lease'").get();
-        assert(index?.sql?.includes('(simulationOwner, simulationLeaseUntil, phase, activity)'), 'owner/lease index must use the intended key order');
+        assert.strictEqual(columns.filter((column) => column.name === 'simulationRevision').length, 1, 'simulationRevision must exist exactly once');
+        loanColumns.forEach((name) => assert(!columns.some((column) => column.name === name), `v72 must drop ${name}`));
+        assert(!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_simulation_owner_lease'").get(),
+            'v72 must drop the owner/lease index');
+        assert.deepStrictEqual(db.prepare(`SELECT name FROM sqlite_master WHERE ${loanColumns.map((name) => `sql LIKE '%${name}%'`).join(' OR ')}`).all(), [],
+            'no index or trigger names a loan column');
         const partyOwnerIndex = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_party_owner_filter'").get();
-        assert(partyOwnerIndex?.sql?.includes('(simulationOwner, phase, partyId, activity, spotId, updatedAt)'), 'party candidate index must cover owner-filtered formation scans');
+        assert(partyOwnerIndex?.sql?.includes('(phase, partyId, activity, spotId, updatedAt)'), 'party candidate index must cover formation scans');
+        ['bot_life_state_warehouse_release', 'bot_life_state_warehouse_demand'].forEach((name) => {
+            const partial = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?").get(name);
+            assert(partial?.sql?.includes("WHERE phase = 'cold'"), `${name} must stay a partial index on far bots`);
+        });
+        ['bot_party_candidate_insert', 'bot_party_candidate_metadata', 'bot_party_candidate_ordinary'].forEach((name) => assert(
+            db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(name), `v72 must create ${name} again`));
         const projectionColumns = db.prepare('PRAGMA table_xinfo(bot_life_state)').all();
         partyProjectionColumns.forEach((name) => {
             assert.strictEqual(projectionColumns.filter((column) => column.name === name).length, 1, `${name} must exist exactly once`);
@@ -277,7 +288,7 @@ if (process.argv[2] === '--bootstrap') {
         const expiryIndex = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_party_request_expiry'").get();
         assert(expiryIndex?.sql?.includes('partyRequestedAt'), 'party request expiry must use the generated request timestamp');
         const expiryPlan = db.prepare(`EXPLAIN QUERY PLAN SELECT characterId FROM bot_life_state
-            WHERE simulationOwner = 'legacy_main' AND phase = 'cold'
+            WHERE phase = 'cold'
             AND partyRequestStatus = 'open' AND partyRequestedAt <= ?
             AND (COALESCE(partyRequestPriority, '') <> 'required' OR partyRequestedAt <= ?)`)
             .all(1812345690000, 1812345685000);
@@ -294,12 +305,10 @@ if (process.argv[2] === '--bootstrap') {
         const marketIndex = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_market_reconcile'").get();
         assert(marketIndex?.sql?.includes('phase, updatedAt, characterId'), 'market rotation must have a keyset-compatible lifecycle index');
         assert.deepStrictEqual(legacyRows(db), expectedRows, 'migration must preserve every pre-v10 bot lifecycle value');
-        const owners = db.prepare(`SELECT simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil
-            FROM bot_life_state ORDER BY characterId`).all();
         assert.deepStrictEqual(
-            owners.map((row) => [row.simulationOwner, Number(row.simulationRevision), row.simulationLeaseId, Number(row.simulationLeaseUntil)]),
-            expectedRows.map(() => ['legacy_main', 0, null, 0]),
-            'all legacy bot rows must receive safe main-owner defaults'
+            db.prepare('SELECT simulationRevision FROM bot_life_state ORDER BY characterId').all().map((row) => Number(row.simulationRevision)),
+            expectedRevisions,
+            'every bot row keeps its revision; a row handed back from a loan moves it once'
         );
         const projected = db.prepare(`SELECT partyRequestStatus, partyRequestPriority, partyRequestedAt, partyObjectiveSpot
             FROM bot_life_state WHERE characterId = 71002`).get();
@@ -432,20 +441,78 @@ if (process.argv[2] === '--bootstrap') {
         'v17 compaction must be one-time and idempotent');
     compactedAgain.close();
 
+    // v70: the generated name and look versions move from the stats into
+    // their own columns; the stats lose them and the unread copy of sex.
+    const versionsPath = path.join(outputDir, 'version-16-generated-versions.sqlite');
+    seed(versionsPath, Array.from({ length: 16 }, (_, index) => index + 1), { schema: currentSchema });
+    const versionsSeed = open(versionsPath);
+    versionsSeed.prepare('UPDATE bot_life_state SET statsJson = ? WHERE characterId = ?').run(
+        JSON.stringify({ role: 'dps', nameGeneratorVersion: 3, appearanceVersion: 2, sex: 1 }), 71001);
+    versionsSeed.close();
+    bootstrap(versionsPath);
+    const versioned = open(versionsPath);
+    const versionRows = () => versioned.prepare(`SELECT characterId, nameGeneratorVersion, appearanceVersion, statsJson
+        FROM bot_life_state WHERE characterId IN (71001, 71002) ORDER BY characterId`).all()
+        .map((row) => [Number(row.characterId), Number(row.nameGeneratorVersion), Number(row.appearanceVersion), JSON.parse(row.statsJson)]);
+    assert.deepStrictEqual(versionRows(), [
+        [71001, 3, 2, { role: 'dps' }],
+        [71002, 0, 0, JSON.parse(realisticRows[1].statsJson)]
+    ], 'v70 copies the versions into their columns and removes them and sex from the stats');
+    versioned.close();
+
     const freshPath = path.join(outputDir, 'fresh.sqlite');
     bootstrap(freshPath);
     const fresh = open(freshPath);
     const freshColumns = fresh.prepare('PRAGMA table_xinfo(bot_life_state)').all().map((column) => column.name);
-    ownerColumns.forEach((name) => assert(freshColumns.includes(name), `fresh bootstrap must include ${name}`));
+    assert(freshColumns.includes('simulationRevision'), 'fresh bootstrap must include simulationRevision');
+    loanColumns.forEach((name) => assert(!freshColumns.includes(name), `fresh bootstrap must not keep ${name}`));
     partyProjectionColumns.forEach((name) => assert(freshColumns.includes(name), `fresh bootstrap must include ${name}`));
-    assert(fresh.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_simulation_owner_lease'").get());
+    assert(!fresh.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_simulation_owner_lease'").get());
     assert(fresh.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_party_candidate_projection'").get());
     assert(fresh.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'bot_life_state_party_request_expiry'").get());
     assert.strictEqual(Number(fresh.prepare('SELECT COUNT(*) count FROM schema_migrations WHERE version = 10').get().count), 1);
     assert.strictEqual(Number(fresh.prepare('SELECT COUNT(*) count FROM schema_migrations WHERE version = 14').get().count), 1);
     assert.strictEqual(Number(fresh.prepare('SELECT COUNT(*) count FROM schema_migrations WHERE version = 15').get().count), 1);
     assert.strictEqual(Number(fresh.prepare('SELECT COUNT(*) count FROM schema_migrations WHERE version = 17').get().count), 1);
+    assert.strictEqual(Number(fresh.prepare('SELECT COUNT(*) count FROM schema_migrations WHERE version = 72').get().count), 1);
     fresh.close();
+
+    // v72 on a world saved while a far bot was on loan: the loan columns,
+    // the owner index and an owner-naming trigger are back as before v72.
+    // The row is handed back (revision + 1) and can join a party again.
+    const loanPath = path.join(outputDir, 'version-71-loan.sqlite');
+    seed(loanPath, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    bootstrap(loanPath);
+    const rewind = open(loanPath);
+    const metadataSql = rewind.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'bot_party_candidate_metadata'").get().sql;
+    rewind.exec(`
+        ALTER TABLE bot_life_state ADD COLUMN simulationOwner TEXT NOT NULL DEFAULT 'legacy_main';
+        ALTER TABLE bot_life_state ADD COLUMN simulationLeaseId TEXT;
+        ALTER TABLE bot_life_state ADD COLUMN simulationLeaseUntil INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX bot_life_state_simulation_owner_lease ON bot_life_state(simulationOwner, simulationLeaseUntil, phase, activity);
+        DROP INDEX bot_life_state_party_owner_filter;
+        CREATE INDEX bot_life_state_party_owner_filter ON bot_life_state(simulationOwner, phase, partyId, activity, spotId, updatedAt);
+        DROP TRIGGER bot_party_candidate_metadata;
+        ${metadataSql.replace('level,phase,', 'level,phase,simulationOwner,')
+        .replaceAll("NEW.phase = 'cold'", "NEW.phase = 'cold' AND NEW.simulationOwner = 'legacy_main'")};
+        DELETE FROM schema_migrations WHERE version = 72;
+    `);
+    const loanStats = JSON.stringify({ ...JSON.parse(realisticRows[0].statsJson), generatedCold: 1 });
+    rewind.prepare('UPDATE bot_life_state SET statsJson = ? WHERE characterId = 71001').run(loanStats);
+    const joinAvailability = (db) => Number(db.prepare('SELECT joinAvailability FROM bot_party_candidate_projection WHERE characterId = 71001').get().joinAvailability);
+    assert.strictEqual(joinAvailability(rewind), 1, 'test fixture: an ordinary far bot at its spot can join');
+    rewind.exec(`UPDATE bot_life_state SET simulationOwner = 'cold_simulation_owner', simulationLeaseId = 'lease-71001',
+        simulationLeaseUntil = 1812345999000 WHERE characterId = 71001`);
+    assert.strictEqual(joinAvailability(rewind), 0, 'test fixture: the bot on loan cannot join');
+    rewind.close();
+    bootstrap(loanPath);
+    const loanRows = realisticRows.map((row, index) => (index === 0 ? { ...row, statsJson: loanStats } : row));
+    assertMigrated(loanPath, loanRows, loanRows.map((row, index) => (index === 0 ? 1 : 0)));
+    const handedBack = open(loanPath);
+    assert.strictEqual(joinAvailability(handedBack), 1, 'the bot handed back from its loan can join a party again');
+    handedBack.prepare("UPDATE bot_life_state SET phase = 'hot' WHERE characterId = 71001").run();
+    assert.strictEqual(joinAvailability(handedBack), 0, 'the re-created trigger still follows the phase');
+    handedBack.close();
 
     const failedPath = path.join(outputDir, 'failed-v10.sqlite');
     seed(failedPath, [1, 2, 3, 4, 5, 6, 7, 8, 9], { collision: true });

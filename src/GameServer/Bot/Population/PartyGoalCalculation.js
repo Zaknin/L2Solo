@@ -6,9 +6,7 @@ function source(state) {
     return { characterId: Number(state.characterId),
         updatedAt: Number(state.updatedAt || 0), phase: state.phase,
         partyId: String(state.party?.partyId || state.partyId || ''),
-        ownerId: String(state.simulation?.ownerId || 'legacy_main'),
-        revision: Number(state.simulation?.revision || 0),
-        leaseId: String(state.simulation?.leaseId || '') };
+        revision: Number(state.simulation?.revision || 0) };
 }
 
 function sources(members) {
@@ -40,9 +38,19 @@ function validMembers(party, members, partial = false) {
 }
 
 async function calculate(party, members, prepare, timestamp, current = () => true, { spots } = {}) {
-    if (party.stats?.recruitmentReview) {
+    if (require('./OpportunisticRaidPolicy').isObjective(party.stats?.objective)) {
         if (!current()) throw new Error('party_goal_expired');
-        return require('./PartyGoalPolicy').recruitment(party, members, { timestamp, spots });
+        const objective = party.stats.objective;
+        const wall = performance.now(), cpu = process.threadCpuUsage?.();
+        const raidAssessment = require('./OpportunisticRaidPolicy').assessment(members,
+            invoke('GameServer/RaidBoss/RaidBossSourceCatalog').findById(objective.spotId), {
+                timestamp, maxFightSeconds: objective.maxFightSeconds, reserve: objective.shotReserve,
+                fundSupplies: objective.fundRaidSupplies === true });
+        const used = cpu && process.threadCpuUsage(cpu);
+        // Charge only synchronous forecast work on this worker thread. Queue
+        // waits and other server threads must not inflate the search budget.
+        raidAssessment.workMs = used ? (used.user + used.system) / 1000 : performance.now() - wall;
+        return { ...require('./PartyGoalPolicy').pending(party, members), raidAssessment };
     }
     // Declared material needs do not require personal or group wish rebuilds.
     if (require('./CraftMaterialParty').isObjective(party.stats?.objective)) {
@@ -60,4 +68,26 @@ async function calculate(party, members, prepare, timestamp, current = () => tru
     return policy.joint(party, members, { context, timestamp, memberContexts: contexts, spots });
 }
 
-module.exports = { sources, sameSource, matches, validMembers, calculate };
+// The recruit check of a pending join: the members with the recruits on one
+// prospective roster, one income and safety forecast each (the author's
+// PartyGoalPolicy.recruitment). The join is the answer only when every
+// required member accepts; null otherwise. Runs where the party steps: the
+// leader's step in the background thread, or main for a party near the player.
+function recruitCheck(party, members, { spots, timestamp }) {
+    // lazy: optional material rules load only for a recruit check (this file loads with the protocol)
+    const Material = require('./CraftMaterialParty');
+    // lazy: optional gear rules (item data) load only for a recruit check
+    const Progression = invoke('GameServer/Bot/AI/PersonalGearProgression');
+    const objective = party.stats?.objective || null;
+    const material = Material.isObjective(objective);
+    const agreement = material ? Material.agreement(members, objective, party.stats.agreement) : party.stats?.agreement;
+    const roster = { ...party, memberIds: members.map(member => Number(member.characterId)),
+        stats: { ...(party.stats || {}), agreement } };
+    // lazy: optional the joint policy loads only for a goal or recruit check
+    const joint = require('./PartyGoalPolicy').recruitment(roster, members, { spots, timestamp });
+    const refused = members.some(member => (material ? Progression.adventurer(member) : Progression.personal(member))
+        && !joint.incomeReviews.find(row => row.characterId === Number(member.characterId))?.accept);
+    return refused ? null : { ...joint, agreement: agreement || null };
+}
+
+module.exports = { sources, sameSource, matches, validMembers, calculate, recruitCheck };

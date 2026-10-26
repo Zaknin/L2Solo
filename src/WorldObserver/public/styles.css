@@ -1383,6 +1383,11 @@ svg.empty-glyph { width: 38px; height: 38px; }
 .clan-goal-brief p, .clan-events p { margin-top: 8px; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .clan-goal-progress { height: 3px; margin-top: 22px; overflow: hidden; border-radius: 999px; background: rgba(237, 240, 232, 0.08); }
 .clan-goal-progress i { display: block; height: 100%; border-radius: inherit; background: var(--gold); box-shadow: 0 0 12px rgba(216, 185, 109, 0.45); transition: width 280ms ease; }
+.clan-strategy { margin: 24px 0; padding: 20px; border: 1px solid var(--line-soft); border-radius: 10px; }
+.clan-strategy > strong { display: block; margin-top: 14px; font-size: 22px; letter-spacing: -0.025em; }
+.clan-strategy p, .clan-strategy summary, .clan-strategy-progress { margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.clan-strategy-progress { display: flex; justify-content: space-between; gap: 16px; }
+.clan-strategy summary { cursor: pointer; }
 .clan-briefing-facts { display: grid; align-content: start; }
 .clan-briefing-facts > div { display: grid; grid-template-columns: minmax(90px, 0.72fr) minmax(90px, 0.62fr) minmax(120px, 1fr); align-items: baseline; gap: 12px; min-width: 0; padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
 .clan-briefing-facts span, .clan-briefing-facts small { overflow: hidden; color: var(--faint); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }

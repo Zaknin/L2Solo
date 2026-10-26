@@ -13,8 +13,8 @@ const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
 const Service = invoke('GameServer/Bot/Economy/ColdWealthCraftService');
+const Sections = invoke('GameServer/Bot/Economy/DecisionSections');
 const Funding = invoke('GameServer/Bot/Economy/PurchaseFunding');
-const Economy = invoke('GameServer/Bot/Economy/EconomyContext');
 const Profit = invoke('GameServer/Bot/Economy/CraftProfitPolicy');
 const Policy = invoke('GameServer/Bot/Economy/WealthCraftPolicy');
 const CraftShop = invoke('GameServer/Bot/Economy/CraftShopService');
@@ -270,6 +270,12 @@ async function run() {
         const step = { recipeId: 25, batches: 1, exit: [991013, 9910130, 90000, 1] };
         const currentBasket = Service.recheck(fundedCrafter, step, [{ recipeId: 25 }]);
         assert(currentBasket, 'a backed native buyer and legal ingredients still pass spending recheck');
+        const mpRefusal = {};
+        const lowMp = { ...fundedCrafter, vitals: { mp: 0 } };
+        assert.strictEqual(Service.recheck(lowMp, step, [{ recipeId: 25 }], mpRefusal), null);
+        assert.strictEqual(mpRefusal.reason, 'mp_changed', 'native current MP failure is distinguished from a source rejection');
+        assert.strictEqual(await Service.rejectAccepted(lowMp, lowMp, mpRefusal), lowMp,
+            'an accepted action waits for MP without invalidating the graph');
         assert.strictEqual(currentBasket.basket.purchases[0].lines[0].line.recordId, 991011,
             'main spending recheck skips the cheaper party personal ingredient supplier');
         assert.strictEqual(Service.recheck(fundedCrafter,
@@ -285,11 +291,24 @@ async function run() {
     const writesBefore = purchases.length;
     const blockedBuyer = await Service.execute(state, forbiddenExit);
     assert.strictEqual(blockedBuyer.reason, 'buyer_changed', 'even a remote personal buyer is rejected before acquiring craft inputs');
-    assert.strictEqual(blockedBuyer.state, state, 'a forbidden exit cannot write a buying state or acquire knowledge');
+    assert.strictEqual(blockedBuyer.state.stats.wishDirty, Sections.sectionBit('sources'));
+    assert.strictEqual(blockedBuyer.state.stats.activityLeaf, 0, 'native buyer rejection retires only the accepted work');
+    assert.deepStrictEqual(blockedBuyer.state.inventory, state.inventory);
+    assert.strictEqual(blockedBuyer.state.adena, state.adena, 'a source event cannot buy inputs or acquire knowledge');
+    const beforeCached = LifeState.cachedState, beforePersist = LifeState.upsertState;
+    let current = { ...state, adena: state.adena + 3 }, sourceWrites = 0;
+    LifeState.cachedState = () => current;
+    LifeState.upsertState = async next => { sourceWrites++; current = next; return next; };
+    try {
+        const rejected = await Service.rejectAccepted(state);
+        assert.strictEqual(rejected.adena, state.adena + 3, 'a rejection preserves the newest native wallet after an await');
+        assert.strictEqual(rejected.stats.wishDirty, Sections.sectionBit('sources'));
+        assert.strictEqual(await Service.rejectAccepted(state), rejected);
+        assert.strictEqual(sourceWrites, 1, 'one accepted failure persists one source event, never a repeated invalidation loop');
+    } finally { LifeState.cachedState = beforeCached; LifeState.upsertState = beforePersist; }
     assert.strictEqual(purchases.length, writesBefore);
     Admission.configureTradeAdmission(id => LifeState.cachedState(Number(id)),
         id => invoke('GameServer/World/World').registeredActorById(Number(id))?.session);
-    assert.deepStrictEqual(Economy.summary().mainColdForState, {});
     console.log(JSON.stringify({ scope: 'declared unit clock plus genuine native unfunded execution',
         recipeId: recipe.recipeId, productId, wallet: originalState.adena, cash: unit.basket.cashCost,
         revenue: unit.revenue, labour, net: unit.expectedProfit, breakEven, ratio, nativePacket,

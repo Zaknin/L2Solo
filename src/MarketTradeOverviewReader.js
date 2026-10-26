@@ -2,14 +2,18 @@
 
 const path = require('path');
 const { Worker } = require('worker_threads');
+const { createAgeCache } = require('./WorldObserver/AgeCache');
+const PopulationConfig = require('./GameServer/Bot/Population/PopulationConfig');
 
 const CACHE_MS = 5000;
+// The default overview is shared within CACHE_MS; a timestamp or limit is read fresh.
+const overviewCache = createAgeCache(() => request({}), CACHE_MS);
 let worker = null;
 let databasePath = null;
 let nextId = 0;
-let cache = null;
-let cacheAt = 0;
-let inFlight = null;
+let workerStats = null;
+// The worker's heap as of its last answer (WorkerHeapTelemetry.heapRecord).
+let workerHeap = null;
 const pending = new Map();
 
 function rejectPending(error) {
@@ -18,7 +22,7 @@ function rejectPending(error) {
         entry.reject(error);
     }
     pending.clear();
-    inFlight = null;
+    overviewCache.reset();
     worker?.unref();
 }
 
@@ -26,13 +30,12 @@ function start(nextPath) {
     if (worker && databasePath === nextPath) return;
     if (worker) worker.terminate();
     rejectPending(new Error('market_overview_database_changed'));
-    cache = null;
-    cacheAt = 0;
     databasePath = nextPath;
     const instance = new Worker(path.join(__dirname, 'MarketTradeOverviewWorker.js'), {
-        workerData: { databasePath }
+        workerData: { databasePath, developerDiagnostics: PopulationConfig.developerDiagnostics === true }
     });
     worker = instance;
+    workerHeap = null;
     instance.on('message', (message = {}) => {
         if (instance !== worker) return;
         const entry = pending.get(Number(message.id));
@@ -40,14 +43,17 @@ function start(nextPath) {
         pending.delete(Number(message.id));
         clearTimeout(entry.timer);
         if (message.error) entry.reject(new Error(message.error));
-        else entry.resolve(message.overview);
+        else {
+            workerStats = message.stats || workerStats;
+            workerHeap = message.v8Heap || workerHeap;
+            entry.resolve(message.overview);
+        }
         if (!pending.size) instance.unref();
     });
     const failed = (error) => {
         if (instance !== worker) return;
         worker = null;
         databasePath = null;
-        cache = null;
         rejectPending(error);
     };
     instance.on('error', failed);
@@ -55,14 +61,9 @@ function start(nextPath) {
     instance.unref();
 }
 
-function read(nextPath, options = {}) {
-    if (!nextPath) return Promise.reject(new Error('market_overview_database_unavailable'));
-    start(String(nextPath));
-    const cacheable = options.timestamp == null && options.recentLimit == null;
-    if (cacheable && cache && Date.now() - cacheAt < CACHE_MS) return Promise.resolve(cache);
-    if (cacheable && inFlight) return inFlight;
+function request(options) {
     const id = ++nextId;
-    const request = new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
             pending.delete(id);
             reject(new Error('market_overview_worker_timeout'));
@@ -73,14 +74,16 @@ function read(nextPath, options = {}) {
         worker.ref();
         worker.postMessage({ type: 'overview', id, options });
     });
-    if (!cacheable) return request;
-    const job = request.then((result) => {
-        cache = result;
-        cacheAt = Date.now();
-        return result;
-    }).finally(() => { if (inFlight === job) inFlight = null; });
-    inFlight = job;
-    return job;
 }
 
-module.exports = { read };
+function read(nextPath, options = {}) {
+    if (!nextPath) return Promise.reject(new Error('market_overview_database_unavailable'));
+    start(String(nextPath));
+    const cacheable = options.timestamp == null && options.recentLimit == null;
+    return cacheable ? overviewCache() : request(options);
+}
+
+// Counters of the worker's window reuse and its heap, as of its last answer.
+function stats() { return { ...workerStats, v8Heap: workerHeap }; }
+
+module.exports = { read, stats };

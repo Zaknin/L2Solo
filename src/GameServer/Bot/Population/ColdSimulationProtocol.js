@@ -1,7 +1,11 @@
+const InventorySummary = require('./InventorySummary');
+// PartyGoalCalculation loads this module at its top: required once, at the
+// first party envelope, and held.
+let PartyGoalCalculation;
+
 const PROTOCOL_VERSION = 1;
 const MAX_BATCH = 64;
 const MAX_MESSAGE_BYTES = 256 * 1024;
-const ECONOMY_ROUTE_MAX_BYTES = 1536;
 
 const MAIN_TYPES = new Set([
     'init',
@@ -9,15 +13,10 @@ const MAIN_TYPES = new Set([
     'snapshot_page',
     'worker_presence_request',
     'worker_repair_request',
-    'economy_route_request',
     'clan_social_page',
     // ColdTableChannel pages: limited by size only, so no batch field below.
     'table_page',
-    'claim_ack',
-    'lease_renewal_probe',
-    'lease_renewal',
     'commit_ack',
-    'release_ack',
     'command_ack',
     'command_request',
     'maintenance_ack',
@@ -28,6 +27,7 @@ const MAIN_TYPES = new Set([
     'pause',
     'resume',
     'throttle',
+    'diagnostics_resync',
     'competition_release',
     'shutdown'
 ]);
@@ -36,11 +36,7 @@ const WORKER_TYPES = new Set([
     'ready',
     'worker_presence_ack',
     'worker_repair_ack',
-    'economy_route_result',
-    'claim_request',
-    'lease_renewal_candidates',
     'proposal_batch',
-    'release_request',
     'command_request',
     'command_ack',
     'maintenance_request',
@@ -53,11 +49,6 @@ const WORKER_TYPES = new Set([
     'fault'
 ]);
 
-function positiveInteger(value) {
-    const number = Number(value);
-    return Number.isSafeInteger(number) && number > 0;
-}
-
 function byteLength(value) {
     try {
         return Buffer.byteLength(JSON.stringify(value));
@@ -68,6 +59,46 @@ function byteLength(value) {
 
 const INCOME_REVIEW_KEYS = new Set(['characterId', 'accept', 'reason', 'soloIncome', 'partyIncome',
     'soloHours', 'partyHours', 'fee', 'soloSpotId', 'soloBuffPrice', 'at', 'soloSource', 'partySource']);
+function validRaidAssessment(joint, sources) {
+    const a = joint.raidAssessment;
+    if (joint.objective?.opportunisticRaid !== true || joint.objective.sourceKind !== 'raid'
+        || !a || typeof a !== 'object' || Array.isArray(a) || typeof a.ready !== 'boolean'
+        || typeof a.reason !== 'string' || !/^[a-z_]{1,80}$/.test(a.reason)
+        || Object.keys(a).some(key => !['ready', 'reason', 'seconds', 'grossDps', 'regen', 'healing', 'shotPlans', 'kits', 'supplies',
+            'reasons', 'unchecked', 'defense', 'healingRequired', 'workMs'].includes(key))) return false;
+    if (['seconds', 'grossDps', 'regen', 'healing', 'healingRequired', 'workMs'].some(key => a[key] !== undefined
+        && (typeof a[key] !== 'number' || !Number.isFinite(a[key]) || a[key] < 0))) return false;
+    const ids = new Set(sources.map(s => Number(s.characterId)));
+    for (const key of ['reasons', 'unchecked']) {
+        const list = a[key];
+        if (list !== undefined && (!Array.isArray(list) || list.length > 16
+            || new Set(list).size !== list.length || list.some(r => typeof r !== 'string' || !/^[a-z_]{1,80}$/.test(r)))) return false;
+    }
+    if (a.reasons !== undefined && (a.ready ? a.reasons.length !== 0
+        : a.reasons[0] !== a.reason)) return false;
+    if (a.ready && a.unchecked?.length) return false;
+    if (a.defense !== undefined) {
+        const d = a.defense, keys = ['tankId', 'pDef', 'maxHp', 'requiredHp', 'bossDps', 'guardDps'];
+        if (!d || typeof d !== 'object' || Array.isArray(d) || Object.keys(d).length !== keys.length
+            || Object.keys(d).some(k => !keys.includes(k)) || !ids.has(d.tankId)
+            || keys.slice(1).some(k => typeof d[k] !== 'number' || !Number.isFinite(d[k]) || d[k] < 0)) return false;
+    }
+    if (a.shotPlans !== undefined && (!Array.isArray(a.shotPlans) || a.shotPlans.length > 9
+        || a.shotPlans.some(p => !p || !ids.has(p.id) || !Number.isSafeInteger(p.selfId) || p.selfId <= 0
+            || ['stock', 'required', 'perAction'].some(key => !Number.isSafeInteger(p[key]) || p[key] < 0)))) return false;
+    if (a.supplies !== undefined && (!Array.isArray(a.supplies) || a.supplies.length > 9
+        || new Set(a.supplies.map(p => p?.id)).size !== a.supplies.length
+        || a.supplies.some(p => !p || !ids.has(p.id) || !Number.isSafeInteger(p.selfId) || p.selfId <= 0
+            || ['target', 'missing'].some(key => !Number.isSafeInteger(p[key]) || p[key] < 0)
+            || ['price', 'cost', 'cash'].some(key => typeof p[key] !== 'number' || !Number.isFinite(p[key]) || p[key] < 0)
+            || Object.keys(p).some(key => !['id', 'selfId', 'target', 'missing', 'price', 'cost', 'cash'].includes(key))))) return false;
+    if (a.kits !== undefined && (!Array.isArray(a.kits) || a.kits.length !== sources.length
+        || new Set(a.kits.map(row => row?.[0])).size !== sources.length
+        || a.kits.some(row => !Array.isArray(row) || row.length !== 2 || !ids.has(row[0])
+            || typeof row[1] !== 'string' || row[1].length > 256))) return false;
+    return !a.ready || a.seconds > 0 && a.grossDps > a.regen && a.shotPlans?.length >= 6 && !!a.kits;
+}
+
 function validPartyIncomeReviews(joint, sources) {
     if (joint.lastIncomeReviewAt === undefined && joint.incomeReviews === undefined) return true;
     if (!Number.isSafeInteger(joint.lastIncomeReviewAt) || joint.lastIncomeReviewAt <= 0
@@ -146,41 +177,6 @@ function competitionReceipt(value) {
         && ['accepted', 'deferred', 'observed', 'expired'].includes(value.status);
 }
 
-function exactObject(value, keys) {
-    return !!value && typeof value === 'object' && !Array.isArray(value)
-        && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
-}
-function routePoint(value) {
-    return value === null || exactObject(value, ['locX', 'locY', 'locZ'])
-        && ['locX', 'locY', 'locZ'].every(key => typeof value[key] === 'number' && Number.isFinite(value[key]));
-}
-function routeText(value) { return value === null || typeof value === 'string' && value.length <= 80; }
-function economyRouteFrame(value) {
-    return exactObject(value, ['activity', 'currentRegion', 'loc', 'inventory', 'stats'])
-        && typeof value.activity === 'string' && value.activity.length > 0 && value.activity.length <= 80
-        && routeText(value.currentRegion) && routePoint(value.loc)
-        && exactObject(value.inventory, ['736']) && exactObject(value.inventory[736], ['amount'])
-        && Number.isSafeInteger(value.inventory[736].amount) && value.inventory[736].amount >= 0
-        && exactObject(value.stats, ['karma', 'marketReturn', 'travel'])
-        && Number.isFinite(value.stats.karma) && value.stats.karma >= 0
-        && (value.stats.marketReturn === null || exactObject(value.stats.marketReturn, ['loc'])
-            && routePoint(value.stats.marketReturn.loc))
-        && (value.stats.travel === null || exactObject(value.stats.travel, ['townName', 'arrivalActivity', 'to'])
-            && routeText(value.stats.travel.townName) && routeText(value.stats.travel.arrivalActivity)
-            && routePoint(value.stats.travel.to));
-}
-function economyRoutePayload(payload, result = false) {
-    return exactObject(payload, ['characterId', 'requestId', 'key', result ? 'rows' : 'frame'])
-        && Number.isSafeInteger(payload.characterId) && payload.characterId > 0
-        && Number.isSafeInteger(payload.requestId) && payload.requestId > 0
-        && typeof payload.key === 'string' && payload.key.length > 0 && payload.key.length <= 600
-        && byteLength(payload) <= ECONOMY_ROUTE_MAX_BYTES
-        && (result ? Array.isArray(payload.rows) && (payload.rows.length === 0 || payload.rows.length === 16) && payload.rows.every(row =>
-            Array.isArray(row) && row.length === 3 && (row[0] === false ? row[1] === null && row[2] === null
-                : row[0] === true && Number.isFinite(row[1]) && row[1] >= 0 && Number.isFinite(row[2]) && row[2] >= 0))
-            : economyRouteFrame(payload.frame));
-}
-
 function validateEnvelope(message, direction, options = {}) {
     if (!message || typeof message !== 'object' || Array.isArray(message)) {
         return { ok: false, reason: 'invalid_envelope' };
@@ -200,17 +196,13 @@ function validateEnvelope(message, direction, options = {}) {
     if (!message.payload || typeof message.payload !== 'object' || Array.isArray(message.payload)) {
         return { ok: false, reason: 'invalid_payload' };
     }
-    if ((message.type === 'economy_route_request' || message.type === 'economy_route_result')
-        && !economyRoutePayload(message.payload, message.type === 'economy_route_result')) {
-        return { ok: false, reason: 'invalid_economy_route' };
-    }
     if (message.type === 'party_goal_request') {
         const payload = message.payload;
         const paged = payload.pageIndex !== undefined || payload.pageCount !== undefined;
         const party = paged && payload.pageIndex > 0
             ? { partyId: payload.partyId, memberIds: payload.members?.map(state => state?.characterId),
                 leaderId: payload.members?.[0]?.characterId } : payload.party;
-        if (!require('./PartyGoalCalculation').validMembers(party, payload.members, paged)
+        if (!(PartyGoalCalculation ||= require('./PartyGoalCalculation')).validMembers(party, payload.members, paged)
             || paged && (!Number.isSafeInteger(payload.pageIndex) || !Number.isSafeInteger(payload.pageCount)
                 || payload.pageCount < 1 || payload.pageCount > 9 || payload.pageIndex < 0
                 || payload.pageIndex >= payload.pageCount || payload.members.length !== 1
@@ -235,7 +227,8 @@ function validateEnvelope(message, direction, options = {}) {
                 || !payload.joint || typeof payload.joint !== 'object' || Array.isArray(payload.joint)
                 || !Array.isArray(payload.joint.memberGoals) || payload.joint.memberGoals.length !== payload.sources.length
                 || Object.keys(payload.joint).some(key => !['objective', 'memberGoals', 'wishFocus', 'dormantWishes',
-                    'lastIncomeReviewAt', 'incomeReviews'].includes(key))
+                    'lastIncomeReviewAt', 'incomeReviews', 'raidAssessment'].includes(key))
+                || payload.joint.raidAssessment !== undefined && !validRaidAssessment(payload.joint, payload.sources)
                 || !validPartyIncomeReviews(payload.joint, payload.sources)
             : typeof payload.reason !== 'string')) return { ok: false, reason: 'invalid_party_goal_result' };
     }
@@ -272,14 +265,8 @@ function validateEnvelope(message, direction, options = {}) {
         worker_repair_ack: 'results',
         clan_social_page: 'rows',
         catalog_page: 'rows',
-        claim_request: 'candidates',
-        claim_ack: 'grants',
-        lease_renewal_candidates: 'tokens',
-        lease_renewal: 'renewals',
         proposal_batch: 'proposals',
         commit_ack: 'results',
-        release_request: 'releases',
-        release_ack: 'results',
         command_request: 'requests',
         command_ack: 'results',
         party_formation_proposal: 'candidates'
@@ -289,29 +276,12 @@ function validateEnvelope(message, direction, options = {}) {
     if (batchField && (!Array.isArray(batch) || batch.length > Number(options.maxBatch || MAX_BATCH))) {
         return { ok: false, reason: 'batch_size' };
     }
-    if (message.type === 'lease_renewal_probe' && (!Number.isSafeInteger(message.payload.replyBy)
-        || message.payload.replyBy <= 0)) return { ok: false, reason: 'invalid_renewal_probe' };
-    if (message.type === 'lease_renewal_candidates' || message.type === 'lease_renewal') {
-        const payload = message.payload, ids = new Set();
-        if (message.type === 'lease_renewal_candidates' && (typeof payload.requestId !== 'string'
-            || !payload.requestId || payload.requestId.length > 160 || !Number.isSafeInteger(payload.pageIndex)
-            || payload.pageIndex < 0 || typeof payload.done !== 'boolean')) {
-            return { ok: false, reason: 'invalid_renewal_page' };
-        }
-        for (const value of batch) {
-            const token = leaseRenewalToken(value);
-            if (!token || ids.has(token.characterId) || (message.type === 'lease_renewal' && value.ok !== true)) {
-                return { ok: false, reason: 'invalid_renewal_token' };
-            }
-            ids.add(token.characterId);
-        }
-    }
-    if (message.type === 'commit_ack' || message.type === 'release_ack') {
+    if (message.type === 'commit_ack') {
         const ids = new Set();
         for (const result of batch) {
-            const identity = leaseAckIdentity(result, message.type);
-            if (!identity || ids.has(result.characterId)) return { ok: false, reason: 'invalid_lease_ack' };
-            ids.add(result.characterId);
+            const identity = commitAckIdentity(result);
+            if (!identity || ids.has(identity.characterId)) return { ok: false, reason: 'invalid_commit_ack' };
+            ids.add(identity.characterId);
         }
     }
     if (message.type === 'worker_presence_request' || message.type === 'worker_repair_request') {
@@ -360,9 +330,8 @@ function validateEnvelope(message, direction, options = {}) {
     return { ok: true, bytes };
 }
 
-const CHECKPOINT_FIELDS = ['characterId', 'phase', 'activity', 'simulationOwner', 'simulationRevision',
-    'simulationLeaseId', 'simulationLeaseUntil', 'activityStartedAt', 'nextResolveAt',
-    'lastResolvedAt', 'lastHotAt', 'updatedAt'];
+const CHECKPOINT_FIELDS = Object.freeze(['characterId', 'phase', 'activity', 'simulationRevision', 'activityStartedAt',
+    'nextResolveAt', 'lastResolvedAt', 'lastHotAt', 'updatedAt']);
 
 function safetyCheckpoint(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -375,10 +344,7 @@ function safetyCheckpoint(value) {
     };
     const checkpoint = {
         characterId: number(value.characterId), phase: value.phase, activity: value.activity,
-        simulationOwner: (nested ? value.simulation?.ownerId : value.simulationOwner) ?? 'legacy_main',
         simulationRevision: number(nested ? value.simulation?.revision : value.simulationRevision),
-        simulationLeaseId: (nested ? value.simulation?.leaseId : value.simulationLeaseId) ?? null,
-        simulationLeaseUntil: number(nested ? value.simulation?.leaseUntil : value.simulationLeaseUntil),
         activityStartedAt: number(nested ? value.timing?.activityStartedAt : value.activityStartedAt),
         nextResolveAt: number(nested ? value.timing?.nextResolveAt : value.nextResolveAt),
         lastResolvedAt: number(nested ? value.timing?.lastResolvedAt : value.lastResolvedAt),
@@ -387,9 +353,6 @@ function safetyCheckpoint(value) {
     };
     if (!checkpoint.characterId || typeof checkpoint.phase !== 'string' || !checkpoint.phase
         || typeof checkpoint.activity !== 'string' || !checkpoint.activity
-        || typeof checkpoint.simulationOwner !== 'string' || !checkpoint.simulationOwner
-        || (checkpoint.simulationLeaseId !== null
-            && (typeof checkpoint.simulationLeaseId !== 'string' || !checkpoint.simulationLeaseId))
         || CHECKPOINT_FIELDS.some(key => typeof checkpoint[key] === 'number' && !Number.isFinite(checkpoint[key]))) return null;
     return checkpoint;
 }
@@ -399,36 +362,39 @@ function sameSafetyCheckpoint(left, right) {
     return !!a && !!b && CHECKPOINT_FIELDS.every(key => a[key] === b[key]);
 }
 
-const COMMAND_CHECKPOINT_FIELDS = CHECKPOINT_FIELDS.filter(key => key !== 'simulationLeaseUntil');
+// The steps a `review` command runs after a far bot's commit: main names them
+// on the commit ack, the worker sends the command with their inputs.
+const REVIEW_STEPS = Object.freeze(['plan', 'buff', 'training']);
 
 function commandCheckpoint(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    // Native snapshots have nested ownership/timing; absent native values use
-    // the same conservative defaults as safety snapshots. Flat wire input must
-    // carry every typed field and cannot obtain those defaults.
-    const flat = Object.prototype.hasOwnProperty.call(value, 'simulationOwner');
+    // Native snapshots have nested revision/timing; absent native values use
+    // the same conservative defaults as safety snapshots. Flat wire input (a
+    // row or a checkpoint: a flat revision and no nested `simulation`) must
+    // carry every typed field and cannot obtain those defaults. A state that
+    // also carries a flat revision copy reads its nested one, as
+    // safetyCheckpoint does.
+    const flat = value.simulation === undefined && Object.prototype.hasOwnProperty.call(value, 'simulationRevision');
     let checkpoint;
     if (flat) {
-        if (!COMMAND_CHECKPOINT_FIELDS.every(key => Object.prototype.hasOwnProperty.call(value, key))) return null;
-        checkpoint = Object.fromEntries(COMMAND_CHECKPOINT_FIELDS.map(key => [key, value[key]]));
+        if (!CHECKPOINT_FIELDS.every(key => Object.prototype.hasOwnProperty.call(value, key))) return null;
+        checkpoint = Object.fromEntries(CHECKPOINT_FIELDS.map(key => [key, value[key]]));
     } else {
-        const native = safetyCheckpoint({ ...value, simulation: { ...value.simulation, leaseUntil: 0 } });
-        if (!native) return null;
-        checkpoint = Object.fromEntries(COMMAND_CHECKPOINT_FIELDS.map(key => [key, native[key]]));
+        // Not flat = nested, also without a `simulation` (revision 0).
+        checkpoint = safetyCheckpoint(value.simulation ? value : { ...value, simulation: {} });
+        if (!checkpoint) return null;
     }
     const integers = ['characterId', 'simulationRevision', 'activityStartedAt', 'nextResolveAt',
         'lastResolvedAt', 'lastHotAt', 'updatedAt'];
     if (!integers.every(key => Number.isSafeInteger(checkpoint[key]) && checkpoint[key] >= 0)
         || checkpoint.characterId === 0
-        || !['phase', 'activity', 'simulationOwner'].every(key => typeof checkpoint[key] === 'string' && checkpoint[key])
-        || (checkpoint.simulationLeaseId !== null
-            && (typeof checkpoint.simulationLeaseId !== 'string' || !checkpoint.simulationLeaseId))) return null;
+        || !['phase', 'activity'].every(key => typeof checkpoint[key] === 'string' && checkpoint[key])) return null;
     return checkpoint;
 }
 
 function sameCommandCheckpoint(left, right) {
     const a = commandCheckpoint(left), b = commandCheckpoint(right);
-    return !!a && !!b && COMMAND_CHECKPOINT_FIELDS.every(key => a[key] === b[key]);
+    return !!a && !!b && CHECKPOINT_FIELDS.every(key => a[key] === b[key]);
 }
 
 function meetingIdentity(value) {
@@ -448,69 +414,67 @@ function commandIdentity(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)
         || !Number.isSafeInteger(value.characterId) || value.characterId <= 0
         || typeof value.commandId !== 'string' || !value.commandId || value.commandId.length > 160) return null;
-    if (!value.commandCheckpoint || !COMMAND_CHECKPOINT_FIELDS.every(key =>
+    if (!value.commandCheckpoint || !CHECKPOINT_FIELDS.every(key =>
         Object.prototype.hasOwnProperty.call(value.commandCheckpoint, key))) return null;
     const checkpoint = commandCheckpoint(value.commandCheckpoint);
     if (!checkpoint || checkpoint.characterId !== value.characterId || checkpoint.phase !== 'cold'
         || (value.state !== undefined && (!value.state || typeof value.state !== 'object'
             || Array.isArray(value.state) || value.state.characterId !== value.characterId))) return null;
-    if (value.kind !== undefined && (value.kind !== 'lifecycle'
-        || !value.state || !sameCommandCheckpoint(value.state, checkpoint))) return null;
+    // A lifecycle request carries the state it was computed on; a review (the
+    // far bot's own actions after its commit) carries none, main reads its cache.
+    if (value.kind !== undefined && !(value.kind === 'lifecycle'
+        ? value.state && sameCommandCheckpoint(value.state, checkpoint)
+        : value.kind === 'review' && value.state === undefined)) return null;
     return { characterId: value.characterId, commandId: value.commandId, checkpoint };
 }
 
-function validateToken(token = {}) {
-    if (!positiveInteger(token.characterId)) return { ok: false, reason: 'invalid_character' };
-    if (!Number.isSafeInteger(Number(token.revision)) || Number(token.revision) < 0) {
-        return { ok: false, reason: 'invalid_revision' };
-    }
-    if (!token.leaseId || typeof token.leaseId !== 'string' || token.leaseId.length > 200) {
-        return { ok: false, reason: 'invalid_lease' };
-    }
-    if (!Number.isFinite(Number(token.leaseUntil)) || Number(token.leaseUntil) <= 0) {
-        return { ok: false, reason: 'invalid_lease_until' };
-    }
-    return { ok: true };
+// A commit ack names its step: the bot and the proposal (the kernel's
+// characterId:startedAt).
+function commitAckIdentity(result) {
+    if (!result || typeof result !== 'object' || Array.isArray(result) || typeof result.ok !== 'boolean'
+        || !Number.isSafeInteger(result.characterId) || result.characterId <= 0
+        || typeof result.proposalId !== 'string' || !result.proposalId || result.proposalId.length > 240) return null;
+    return { characterId: result.characterId, proposalId: result.proposalId };
 }
 
-function leaseRenewalToken(token) {
-    if (!token || typeof token !== 'object' || Array.isArray(token)
-        || !Number.isSafeInteger(token.characterId) || token.characterId <= 0
-        || token.ownerId !== 'cold_simulation_owner' || !Number.isSafeInteger(token.revision) || token.revision < 0
-        || typeof token.leaseId !== 'string' || !token.leaseId || token.leaseId.length > 200
-        || !Number.isSafeInteger(token.leaseUntil) || token.leaseUntil <= 0) return null;
-    return { characterId: token.characterId, ownerId: token.ownerId, revision: token.revision,
-        leaseId: token.leaseId, leaseUntil: token.leaseUntil };
+// The state main cached for an ok commit ack that carries the commit's numbers
+// instead of the state (ColdSimulationCoordinator ackNumbers): the proposal's
+// own state with the bag main committed (ColdSimulationOwner canonicalizes it),
+// released to main, with the row's clock and revisions. The ack
+// names the bag's revision as the row does; the state calls it bagRevision
+// (Database.stateRevisions, main-only). Null when a number is not one.
+function committedState(proposed, ack) {
+    const numbers = ['revision', 'updatedAt', 'inventoryRevision', 'skillsRevision', 'hennaRevision'];
+    if (!proposed || !ack || !numbers.every(key => Number.isSafeInteger(ack[key]) && ack[key] >= 0)) return null;
+    return { ...proposed, inventory: InventorySummary.canonicalize(proposed.inventory),
+        simulation: { revision: ack.revision },
+        bagRevision: ack.inventoryRevision, skillsRevision: ack.skillsRevision, hennaRevision: ack.hennaRevision,
+        updatedAt: ack.updatedAt };
 }
 
-function leaseAckIdentity(result, type) {
-    if (!['commit_ack', 'release_ack'].includes(type) || !result || typeof result !== 'object'
-        || Array.isArray(result) || typeof result.ok !== 'boolean') return null;
-    const token = leaseRenewalToken(result.inputToken);
-    const key = type === 'commit_ack' ? result.proposalId : result.releaseRequestId;
-    if (!token || result.characterId !== token.characterId || typeof key !== 'string' || !key
-        || key.length > (type === 'commit_ack' ? 240 : 160)) return null;
-    return { token, key };
+// A refused commit is stale when its reason or, for an aborted atomic group,
+// its detail names a stale fence (e.g. party_revision_stale).
+function staleRefusal(result) {
+    return `${result?.reason || ''} ${result?.detail || ''}`.includes('stale');
 }
 
 module.exports = {
     PROTOCOL_VERSION,
     MAX_BATCH,
     MAX_MESSAGE_BYTES,
-    ECONOMY_ROUTE_MAX_BYTES,
-    economyRouteFrame,
-    economyRoutePayload,
     envelope,
     envelopeBytes,
     validateEnvelope,
-    validateToken,
-    leaseRenewalToken,
-    leaseAckIdentity,
+    commitAckIdentity,
+    committedState,
+    staleRefusal,
+    CHECKPOINT_FIELDS,
     safetyCheckpoint,
     sameSafetyCheckpoint,
     commandCheckpoint,
     sameCommandCheckpoint,
     commandIdentity,
+    REVIEW_STEPS,
     meetingIdentity,
     byteLength,
     omitPlannedStates,

@@ -3,6 +3,9 @@ const VERSION = 1;
 const Help = require('./CombatHelpPolicy');
 const Aid = require('./OpponentAidPolicy');
 const Layers = require('./RelationshipLayers');
+// ClanSocialPolicy loads this module at its top: required once, at the first
+// clan episode, and held.
+let ClanSocialPolicy;
 const LIMITS = Object.freeze({ character: 32, clan: 8, alliance: 8 });
 const PROTECTED_LIMIT = 16;
 const RECENT_LIMIT = 128;
@@ -112,13 +115,17 @@ function event(input) {
     if (kind === 'character' && sourceId === targetId) throw new Error('interaction memory: self interaction');
     if (input.hours !== undefined && (!Number.isFinite(input.hours) || input.hours < 0)) throw Error('interaction memory: invalid loss hours');
     if (input.playedHours !== undefined && (!Number.isFinite(input.playedHours) || input.playedHours < 0)) throw Error('interaction memory: invalid playing hours');
-    if (input.traits && ['loyalty', 'resilience'].some(key => !Number.isFinite(Number(input.traits[key] ?? 0.5)))) throw Error('interaction memory: invalid traits');
+    if (input.traits && Layers.TRAIT_KEYS.some(key => !Number.isFinite(Number(input.traits[key] ?? 0.5)))) throw Error('interaction memory: invalid traits');
+    if (input.huntMs !== undefined && (input.type !== 'hunted_together' || kind !== 'character'
+        || !Number.isSafeInteger(input.huntMs) || input.huntMs < 0 || input.huntMs > 3600000)) throw Error('interaction memory: invalid hunt duration');
     return { key: input.key, sourceId, targetId, kind, type: input.type, at: time(input.at),
+        ...(input.huntMs !== undefined ? { huntMs: input.huntMs } : {}),
         ...(input.hours !== undefined ? { hours: input.hours } : {}),
         ...(input.playedHours !== undefined ? { playedHours: input.playedHours } : {}),
         ...(input.player === true ? { player: true } : {}),
-        ...(input.traits ? { traits: { loyalty: Number(input.traits.loyalty ?? 0.5), resilience: Number(input.traits.resilience ?? 0.5) } } : {}),
-        ...(input.clan ? { clan: require('../Clan/ClanSocialPolicy').evidence(input.clan) } : {}) };
+        ...(input.traits ? { traits: Object.fromEntries(Layers.TRAIT_KEYS.map(key => [key, Number(input.traits[key] ?? 0.5)])) } : {}),
+        // lazy: cycle ClanSocialPolicy loads InteractionMemoryPolicy at its top.
+        ...(input.clan ? { clan: (ClanSocialPolicy ||= require('../Clan/ClanSocialPolicy')).evidence(input.clan) } : {}) };
 }
 
 // The share of a feeling left after `elapsed` ms; nothing grows before its time.
@@ -217,12 +224,14 @@ function apply(snapshot, input, now) {
 
 function view(snapshot, playingHours = () => undefined, fastLayers = null, rowSource = null) {
     const rows = rowSource ? null : new Map((snapshot?.relations || []).map(row => [`${row.kind}:${row.targetId}`, row]));
+    const ids = rowSource ? null
+        : Object.freeze((snapshot?.relations || []).filter(row => row.kind === 'character').map(row => row.targetId));
     return Object.freeze({
         ownerId: snapshot?.ownerId || null,
         revision: snapshot?.revision || 0,
         ready: !!snapshot,
-        characterIds: Object.freeze(rowSource ? rowSource.characterIds
-            : (snapshot?.relations || []).filter(row => row.kind === 'character').map(row => row.targetId)),
+        // An iterable of the character targets in row order, read once per use.
+        get characterIds() { return rowSource ? rowSource.characterIds() : ids; },
         relation(kind, targetId, at) {
             time(at);
             const row = rowSource ? rowSource.row(kind, targetId) : rows.get(`${kind}:${targetId}`);
@@ -230,7 +239,9 @@ function view(snapshot, playingHours = () => undefined, fastLayers = null, rowSo
             return row ? { ...decayed(row, at, gameAt),
                 ...Layers.persistent(row, gameAt ?? row.gameAt ?? 0),
                 irritation: Layers.fastValue(fastLayers?.get(`${kind}:${targetId}`), gameAt ?? row.gameAt ?? 0),
-                social: { ...(row.social || {}) }, ...(row.abandonedAt ? { abandonedAt: row.abandonedAt } : {}),
+                // No per-type social counts: the worker's copy keeps none, so a
+                // decision cannot read them; main reads InteractionMemory.socialCounts.
+                ...(row.abandonedAt ? { abandonedAt: row.abandonedAt } : {}),
                 ...(row.lastHuntAt !== undefined ? { lastHuntAt: row.lastHuntAt } : {}),
                 ...(row.lastHelpAt ? { lastHelpAt: { ...row.lastHelpAt } } : {}),
                 ...(row.lastAidAt !== undefined ? { lastAidAt: row.lastAidAt } : {}),

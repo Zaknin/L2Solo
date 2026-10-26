@@ -33,15 +33,16 @@ class ColdTableChannel {
     }
 
     // key(row) gives a row's key; allRows() gives every current row.
-    register(name, { key, allRows, eventDriven = false, streamed = null }) {
+    register(name, { key, allRows, eventDriven = false, streamed = null, ready = null }) {
         if (streamed !== null) return this.registerActorStream(name, { key, eventDriven, streamed });
-        this.tables.set(String(name), { name: String(name), key, allRows, eventDriven,
+        this.tables.set(String(name), { name: String(name), key, allRows, eventDriven, ready,
             version: 0, pending: new Map(), changedUnseen: false });
     }
 
-    // change: a row, or { key, removed: true } for a removed row. With no
-    // worker attached nobody needs the row: a worker that attaches gets the
-    // table in full, so only the next version is marked.
+    // change: a row, or { key, removed: true } for a removed row, or (an
+    // ordinary table) a function returning the row when the row costs a copy.
+    // With no worker attached nobody needs the row: a worker that attaches
+    // gets the table in full, so only the next version is marked.
     changed(name, change) {
         const table = this.tables.get(String(name));
         if (!table || !change) return false;
@@ -50,6 +51,7 @@ class ColdTableChannel {
             table.changedUnseen = true;
             return true;
         }
+        if (typeof change === 'function' && !(change = change())) return false;
         if (change.removed === true) table.pending.set(change.key, REMOVED);
         else table.pending.set(table.key(change), change);
         if (table.eventDriven && !this.eventFlushQueued) {
@@ -124,6 +126,7 @@ class ColdTableChannel {
         const deltas = [];
         for (const table of this.tables.values()) {
             if (table.streamed) continue;
+            if (table.ready && table.ready() !== true) continue;
             if (!table.pending.size && !table.changedUnseen) continue;
             table.changedUnseen = false;
             const rows = [];
@@ -154,6 +157,7 @@ class ColdTableChannel {
             const fulls = [];
             for (const table of this.tables.values()) {
                 if (table.streamed) continue;
+                if (table.ready && table.ready() !== true) continue;
                 if (target.synced.has(table.name)) continue;
                 fulls.push(this.full(table));
                 target.synced.add(table.name);

@@ -30,14 +30,14 @@ const stateUpdates = [];
 
 LifeState.acceptAppearanceMetadata = (characterId, sex, appearanceVersion) => {
     stateUpdates.push({ characterId, sex, appearanceVersion });
-    return Promise.resolve({ characterId, stats: { sex, appearanceVersion } });
+    return Promise.resolve({ characterId, appearanceVersion });
 };
 
 (async () => {
     const candidates = [
         { characterId: 11, stats: { generatedCold: true, generatedIndex: 700 } },
-        { characterId: 12, stats: { generatedCold: true, generatedIndex: 10003, appearanceVersion: 1 } },
-        { characterId: 13, stats: { generatedCold: true, generatedIndex: 701, appearanceVersion: GeneratedColdSeeder.APPEARANCE_VERSION } },
+        { characterId: 12, appearanceVersion: 1, stats: { generatedCold: true, generatedIndex: 10003 } },
+        { characterId: 13, appearanceVersion: GeneratedColdSeeder.APPEARANCE_VERSION, stats: { generatedCold: true, generatedIndex: 701 } },
         { characterId: 14, stats: { generatedCold: false, generatedIndex: 702 } },
         { characterId: 15, stats: { generatedCold: true } }
     ];

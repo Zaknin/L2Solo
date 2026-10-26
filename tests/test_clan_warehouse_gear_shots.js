@@ -1,9 +1,10 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const world = require('./fixtures/native_stock_world')();
 const previousRate = process.env.L2NODE_PROGRESSION_RATE;
 // The existing x10 world input matches the user's world. x1 may honestly
 // prefer hunting without shots even with a large purse.
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 require('../src/Global');
 const DataCache = invoke('GameServer/DataCache');
 const Database = invoke('Database');
@@ -189,7 +190,6 @@ main().catch((error) => { console.error(error); process.exitCode = 1; }).finally
     World.npc = previousCatalog.npc; World.user = previousCatalog.user;
     SpotService.spots = previousCatalog.spots; SpotProfiles.cache = previousCatalog.profiles;
     invoke('GameServer/Bot/AI/SpotValueTable').useFile();
-    if (previousRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = previousRate;
+    useRate(previousRate);
     await world.close();
 });

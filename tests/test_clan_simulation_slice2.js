@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
@@ -59,10 +60,9 @@ async function main() {
     try {
         const x1 = Policy.scaledAdenaRequirement(0);
         const previousRate = process.env.L2NODE_PROGRESSION_RATE;
-        process.env.L2NODE_PROGRESSION_RATE = 'x10';
+        useRate('x10');
         const x10 = Policy.scaledAdenaRequirement(0);
-        if (previousRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-        else process.env.L2NODE_PROGRESSION_RATE = previousRate;
+        useRate(previousRate);
         assert.strictEqual(x1, 650000);
         assert(x10 > x1, 'level-one clan Adena requirement must scale with progression rate');
 

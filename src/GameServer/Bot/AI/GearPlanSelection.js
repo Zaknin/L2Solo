@@ -9,8 +9,22 @@ const OfferOrder = invoke('GameServer/Bot/Economy/OfferOrder');
 const SpotIndex = invoke('GameServer/Bot/AI/SpotIndex');
 const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 
-function deferredWishPlan(previousPlan, replanContext) {
+function deferredWishPlan(previousPlan, replanContext, state, timestamp = Date.now()) {
     const plan = { ...previousPlan, status: 'deferred', strategy: 'none', next: null, reason: 'wish_focus' };
+    const pausedInputs = previousPlan?.status === 'deferred' && previousPlan.reason === 'wish_focus' && plan.heldInputs;
+    if (state && !previousPlan?.clanGoal?.clanId && plan.target?.selfId) {
+        const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+        const preparing = state.stats?.shotCraft?.preparing;
+        const productionInputs = Number(preparing?.gearTarget) === Number(plan.target.selfId)
+            && preparing.gearInputs && Number(preparing.at) + 30 * 60 * 1000 > timestamp ? preparing.gearInputs : null;
+        if (!pausedInputs || productionInputs) {
+            delete plan.heldInputs;
+            const collected = Disposition.collectedEquipmentInputs(state, plan);
+            plan.heldInputs = productionInputs
+                ? Disposition.capDeferredInputs({ ...plan, heldInputs: productionInputs }, collected) : collected;
+        }
+    }
+    delete plan.economyInputKey;
     // Consume the native recovery wake/expiry once, retaining the inactive
     // target and its historical stamps for a later acquisition decision.
     if (previousPlan?.recoveryTargets || replanContext.recoveryTargets?.length) plan.recoveryTargets = replanContext.recoveryTargets;
@@ -18,7 +32,7 @@ function deferredWishPlan(previousPlan, replanContext) {
     return plan;
 }
 
-function withBridgeInputPreparation(state, previous, next) {
+function withBridgeInputPreparation(state, previous, next, timestamp = Date.now()) {
     if (!next?.weaponBridge || !['active', 'deferred'].includes(next.status)) return next;
     const retained = previous?.inputPreparation || previous;
     if (!retained?.target?.selfId || retained.reason === 'cancelled' || previous?.reason === 'cancelled'
@@ -31,19 +45,20 @@ function withBridgeInputPreparation(state, previous, next) {
         || ranks.indexOf(target.etc?.rank) <= ranks.indexOf(bridge.etc?.rank)
         || !GearAcquisitionPlanner.considerable(target, state)
         || GearAcquisitionPlanner.equipmentTargetFulfilled(state, retained)) return next;
-    const inputPreparation = { status: 'deferred', strategy: 'none', reason: 'wish_focus',
+    const inputPreparation = deferredWishPlan({
         target: retained.target, exchange: retained.exchange, recipeId: retained.recipeId,
-        materials: retained.materials, combine: retained.combine };
+        materials: retained.materials, combine: retained.combine, heldInputs: retained.heldInputs,
+        status: retained.status, reason: retained.reason }, {}, state, timestamp);
     const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
     const proposed = { ...state, stats: { ...state.stats, equipmentPlan: { ...next, inputPreparation } } };
     if (!Object.keys(Disposition.retainedEquipmentAmounts(proposed)).length) return next;
     return { ...next, inputPreparation };
 }
 
-function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, timestamp = Date.now(), planningOptions = {}, preparedEconomy = null, preparedReplanContext = null } = {}) {
+function selectAcquisitionPlan(state, previousPlan, { spots = [], timestamp = Date.now(), planningOptions = {}, preparedEconomy = null, preparedReplanContext = null } = {}) {
     if (previousPlan?.economyInputKey !== undefined) { previousPlan = { ...previousPlan }; delete previousPlan.economyInputKey; }
     const economy = preparedEconomy || invoke('GameServer/Bot/Economy/EconomyContext').forState(state, {
-        spots, occupancy, timestamp, board: planningOptions.board, buyOrderEscrow: planningOptions.buyOrderEscrow
+        spots, timestamp, board: planningOptions.board, buyOrderEscrow: planningOptions.buyOrderEscrow
     });
     const preparedAcquisition = invoke('GameServer/Bot/Economy/WishProviders').personalCraftPlan(state, economy);
     const preparedB = preparedAcquisition?.strategy === 'craft'
@@ -64,7 +79,7 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
         // Acquisition metadata remains resumable, but cannot override the
         // common engine's book, social, sale or production activity.
         const replanContext = preparedReplanContext || GearAcquisitionPlanner.replanContextFor(state, previousPlan, timestamp);
-        const acquisitionPlan = deferredWishPlan(previousPlan, replanContext);
+        const acquisitionPlan = deferredWishPlan(previousPlan, replanContext, state, timestamp);
         return { acquisitionPlan, replanContext,
             reusablePartyRequest: false, excludedSpotIds: SpotRiskPolicy.excludedSpotIdsForStates([state], timestamp), economy };
     }
@@ -103,7 +118,7 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     const availabilitySource = !replanContext.failure && previousPlan?.status === 'active'
         && ['direct_drop', 'craft'].includes(previousPlan.strategy)
         ? GearAcquisitionPlanner.bestSourceForPlan(state, previousPlan, spots, {
-            occupancy, excludedSpotIds, allowRaidSources: clanRaidPlan
+            excludedSpotIds, allowRaidSources: clanRaidPlan
         })
         : null;
     const availabilityRouteChanged = availabilitySource && (
@@ -112,7 +127,6 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     );
     const availabilityPlan = weaponBridgePlan || (previousPlan?.status === 'blocked' && !clanGoalLocked
         ? GearAcquisitionPlanner.replacementPlanFor(state, previousPlan, spots, {
-            occupancy,
             ...replanContext,
             ...planOptions
         })
@@ -122,7 +136,6 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
             && ['direct_drop', 'craft'].includes(previousPlan.strategy)
             && !clanGoalLocked
                 ? GearAcquisitionPlanner.replacementPlanFor(state, previousPlan, spots, {
-                    occupancy,
                     ...replanContext,
                     ...planOptions
                 })
@@ -139,12 +152,11 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     const upgradedPlan = availabilityPlan || (
         reusablePartyRequest || clanGoalLocked
             ? previousPlan
-            : GearAcquisitionPlanner.planFor(state, { spots, occupancy, ...replanContext, ...planOptions })
+            : GearAcquisitionPlanner.planFor(state, { spots, ...replanContext, ...planOptions })
     );
     const previousRefresh = previousPlan?.recipeId && !reusablePartyRequest && !clanGoalLocked
         ? GearAcquisitionPlanner.planFor(state, {
             spots,
-            occupancy,
             recipeId: previousPlan.recipeId,
             ...replanContext,
             ...planOptions
@@ -164,17 +176,17 @@ function selectAcquisitionPlan(state, previousPlan, { spots = [], occupancy, tim
     const finalizedPlan = preservePreviousPlan
         ? previousPlan
         : GearAcquisitionPlanner.finalizePlan(state, previousPlan, rawPlan, finalizationContext, timestamp);
-    const costedPlan = GearAcquisitionPlanner.withMaterialFarmEffort(finalizedPlan, state, spots, { occupancy });
+    const costedPlan = GearAcquisitionPlanner.withMaterialFarmEffort(finalizedPlan, state, spots);
     const retainedInputs = previousPlan?.crystalPreparation && ['complete', 'blocked'].includes(costedPlan.status)
         && !GearAcquisitionPlanner.equipmentTargetFulfilled(state, previousPlan)
         && GearAcquisitionPlanner.acquisitionTargetAllowed(state, previousPlan)
         && (previousPlan.materials || []).some(row => Number(state.inventory?.[row.selfId]?.amount || 0) > 0);
-    const acquisitionPlan = retainedInputs ? deferredWishPlan(previousPlan, replanContext) : withBridgeInputPreparation(state, previousPlan, {
+    const acquisitionPlan = retainedInputs ? deferredWishPlan(previousPlan, replanContext, state, timestamp) : withBridgeInputPreparation(state, previousPlan, {
         ...costedPlan,
         ...(costedPlan.target?.selfId === wishTargetId ? { target: { ...costedPlan.target, slot: Number(chosen.object.slot) } } : {}),
         marketFallback: finalizedPlan.status === 'active' && finalizedPlan.strategy === 'craft'
             && Number(finalizedPlan.acquisitionProgress?.at || finalizedPlan.startedAt || timestamp) + 20 * 60 * 1000 <= timestamp
-    });
+    }, timestamp);
     const result = { acquisitionPlan: { ...acquisitionPlan },
         replanContext, reusablePartyRequest, excludedSpotIds };
     economy.gearPlanMemo = { key, spots, result };

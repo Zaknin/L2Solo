@@ -38,6 +38,7 @@ const posted = [];
 const coordinator = new ColdSimulationCoordinator();
 coordinator.worker = { postMessage: (message) => posted.push(message) };
 coordinator.workerEpoch = 'test-epoch';
+coordinator.ready = true;
 
 assert(coordinator.post('pause', { reason: 'test' }));
 assert.strictEqual(posted[0].bytes, Protocol.byteLength({ ...posted[0], bytes: undefined }));
@@ -45,9 +46,9 @@ assert(coordinator.post('snapshot_page', { rows: [], done: false, initial: false
 assert.strictEqual(posted[1].bytes, 4321);
 assert.strictEqual(coordinator.counters.bytesOut, posted[0].bytes + 4321);
 
-assert.strictEqual(coordinator.postCollections('claim_ack', { grants: rows.slice(0, 3), rejected: [] }), 1);
-const claimAck = posted[2];
-assert(claimAck.bytes >= Protocol.byteLength({ ...claimAck, bytes: undefined }),
+assert.strictEqual(coordinator.postCollections('command_ack', { results: rows.slice(0, 3) }), 1);
+const pagedAck = posted[2];
+assert(pagedAck.bytes >= Protocol.byteLength({ ...pagedAck, bytes: undefined }),
     'a paged message carries its counted size');
 
 (async () => {

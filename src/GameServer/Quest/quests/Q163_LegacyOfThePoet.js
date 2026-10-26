@@ -41,6 +41,8 @@ module.exports = {
         : p("Starden", "I cannot ask this of you.");
     if (s.getInt("cond") !== 2)
       return p("Starden", "The poems are still missing.");
+    if (!P.every((id) => n(s, id)))
+      return p("Starden", "You do not have all four of Rumiel's Poems.");
     for (const id of P) await Q().takeItem(s.session, id, -1);
     await Q().rewardAdena(s.session, 13890);
     s.playSound("ItemSound.quest_finish");

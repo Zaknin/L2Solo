@@ -209,8 +209,30 @@ function prepareThreats(npcs) {
 function threatFor(npcId) { return threatMembership[Number(npcId)] || 0; }
 function threatBytes() { return threatMembership.byteLength; }
 
+const templatePassives = new Map();
+const emptyPassives = Object.freeze([]);
 function passiveSkillsFor(npc) {
-    return forNpc(npc).filter((skill) => skill.fetchPassive?.() === true);
+    // Pets can change rank with level, and summons add their own action rows.
+    const dynamic = npc.fetchIsPet?.() || npc.fetchIsSummon?.() || npc.fetchSummonSkillId?.();
+    const npcId = dynamic ? null : Number(npc.fetchSelfId?.());
+    if (!dynamic) {
+        if (!skillsByNpc.has(npcId)) return emptyPassives;
+        const held = templatePassives.get(npcId);
+        if (held) return held;
+    }
+    const skills = forNpc(npc).filter((skill) => skill.fetchPassive?.() === true);
+    if (dynamic) return skills;
+    // A rank overlays the flattened template. Never retain a borrowed nested
+    // rank value or freeze the owner's already-shared semantic graph.
+    if (skills.some(skill => Object.values(skill.model).some(value => value !== null
+        && (typeof value === 'object' || typeof value === 'function')))) return skills;
+    for (const skill of skills) {
+        Object.freeze(skill.model);
+        Object.freeze(skill);
+    }
+    Object.freeze(skills);
+    templatePassives.set(npcId, skills);
+    return skills;
 }
 
 function maxHpMultiplierFor(npc) {

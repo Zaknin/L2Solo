@@ -119,7 +119,7 @@ const ids = [730221, 730222, 730223], point = { locX: 83396, locY: 147904, locZ:
         // Stock below the survival line is paid from the survival reserve
         // first: the accept checks the buyer worker's kit cost (E198).
         const wallet = await funds(ids[0]);
-        await Database.execute(["UPDATE bot_life_state SET statsJson=json_set(statsJson,'$.money[2]',?) WHERE characterId=?", [wallet - 100, ids[0]]]);
+        await Database.execute(["UPDATE bot_life_state SET mindJson=json_set(mindJson,'$.money[2]',?) WHERE characterId=?", [wallet - 100, ids[0]]]);
         await assert.rejects(accept(await prepare()), /economy_funding_changed/, 'free cash above the reserve cannot pay 220');
         const kit = await prepare(); kit.parties[0].survivalCost = 200;
         const survival = (await accept(kit)).meeting.id;

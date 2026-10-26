@@ -117,45 +117,41 @@ function wait(ms) {
         'grid failure must not suppress DeleteObject'
     );
 
-    const reaperNpc = npc(9100004);
-    reaperNpc.corpseDecayState = 'scheduled';
-    reaperNpc.corpseDecayAt = Date.now() - 1;
-    const reaperWorld = world([reaperNpc]);
-    assert.strictEqual(NpcDecay.sweepExpired(reaperWorld), 1, 'the reaper must remove overdue corpses');
-    assert.strictEqual(reaperWorld.npc.spawns.length, 0, 'the reaper must remove overdue NPCs from the world');
+    const dueNpc = npc(9100004);
+    const dueWorld = world([dueNpc]);
+    NpcDecay.schedule(dueWorld, null, dueNpc, 0);
+    await wait(30);
+    assert.strictEqual(dueWorld.npc.spawns.length, 0, 'the corpse timer must remove a due corpse without any sweep');
+    assert.strictEqual(dueNpc.corpseDecayState, 'removed');
 
     const malformedNpc = {
-        corpseDecayState: 'scheduled',
-        corpseDecayAt: Date.now() - 1,
         fetchId() {
             throw new Error('malformed npc id');
         }
     };
     const laterNpc = npc(9100007);
-    laterNpc.corpseDecayState = 'scheduled';
-    laterNpc.corpseDecayAt = Date.now() - 1;
     const malformedWorld = world([malformedNpc, laterNpc]);
-    assert.doesNotThrow(() => NpcDecay.sweepExpired(malformedWorld), 'one malformed NPC must not abort the whole sweep');
-    assert.strictEqual(malformedWorld.npc.spawns.includes(laterNpc), false, 'later overdue NPCs must still decay');
-    assert.strictEqual(NpcDecay.sweepExpired(malformedWorld, Date.now()), 0, 'a malformed corpse should retry before being discarded');
-    assert.strictEqual(NpcDecay.sweepExpired(malformedWorld, Date.now()), 1, 'the final failed attempt should discard the malformed corpse');
+    NpcDecay.schedule(malformedWorld, null, malformedNpc, 0);
+    NpcDecay.schedule(malformedWorld, null, laterNpc, 0);
+    await wait(30);
+    assert.strictEqual(malformedWorld.npc.spawns.includes(laterNpc), false, 'one malformed NPC must not block a later corpse');
+    assert.strictEqual(malformedWorld.npc.spawns.includes(malformedNpc), true, 'a malformed corpse should retry before being discarded');
+    assert(malformedNpc.corpseDecayTimer, 'a failed removal must re-arm the corpse timer');
+    assert.strictEqual(NpcDecay.expire(malformedWorld, malformedNpc), false, 'the second failed attempt still retries');
+    assert.strictEqual(NpcDecay.expire(malformedWorld, malformedNpc), true, 'the final failed attempt should discard the malformed corpse');
     assert.strictEqual(malformedWorld.npc.spawns.includes(malformedNpc), false, 'an unremovable corpse must not retry forever');
     assert.strictEqual(malformedNpc.corpseDecayState, 'removed', 'discarded malformed corpses must be marked removed');
     assert.strictEqual(malformedNpc.corpseDecayAt, 0, 'discarded malformed corpses must clear their expiry');
+    assert.strictEqual(malformedNpc.corpseDecayTimer, undefined, 'a discarded corpse must not keep a timer');
 
-    const reaperTimerNpc = npc(9100008);
-    reaperTimerNpc.corpseDecayState = 'scheduled';
-    reaperTimerNpc.corpseDecayAt = Date.now() - 1;
-    const reaperTimerWorld = world([reaperTimerNpc]);
-    NpcDecay.start(reaperTimerWorld, 50);
-    try {
-        await wait(150);
-        assert.strictEqual(reaperTimerWorld.npc.spawns.length, 0, 'start must run the reaper for overdue corpses');
-    }
-    finally {
-        NpcDecay.stop(reaperTimerWorld);
-    }
-    assert.strictEqual(reaperTimerWorld.npc.corpseDecayReaper, undefined, 'stop must clear the reaper interval');
+    // A corpse a spoil sweep already took out of the list is not found by
+    // reference; another object that has the same id must stay.
+    const sweptNpc = npc(9100010);
+    const sameIdNpc = npc(9100010);
+    const sweptWorld = world([sameIdNpc]);
+    NpcDecay.schedule(sweptWorld, null, sweptNpc, 10000);
+    assert.strictEqual(NpcDecay.decay(sweptWorld, sweptNpc), true);
+    assert.deepStrictEqual(sweptWorld.npc.spawns, [sameIdNpc], 'decay must not remove another NPC by id');
 
     const rewardFailureNpc = npc(9100005);
     const rewardFailureWorld = world([rewardFailureNpc]);

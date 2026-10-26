@@ -177,7 +177,7 @@ function wait(ms) {
 
     const fistFuryActor = actor({ hp: 20, maxHp: 100, mp: 100 });
     const fistFury = skill(222, 'Fist Fury');
-    fistFury.fetchSemantic().toggleIntervalMs = 10;
+    fistFury.semantic = { ...fistFury.fetchSemantic(), toggleIntervalMs: 10 };
     assert.strictEqual(ToggleSkills.activate(session(fistFuryActor), fistFuryActor, fistFury, 'fist_fury'), true, 'Fist Fury should activate with dual fists');
     assert.strictEqual(fistFuryActor.fetchMp(), 92, 'Fist Fury should consume sourced activation MP');
     assert.strictEqual(EffectStats.multiplier(fistFuryActor, 'pAtkSpdMul'), 1.25, 'Fist Fury should grant sourced attack-speed multiplier');

@@ -11,18 +11,20 @@ const Tree = invoke('GameServer/Bot/Population/ColdSkillTree');
 
 // Capability, not execution: MP, reuse, arrival and ownership are still checked
 // by the native executor. A class/JSON role alone never proves a learned skill.
+// Skill semantics come from the shared resolveCached memo (keyed by every skill
+// field resolve reads), so each learned skill row resolves once, not per check.
 function learnedSkills(member = {}) {
     return Combat.skillsFor(member, Number(Roles.classIdOf(member) || 0), Number(member.level || 1));
 }
 
 function healingSkill(skill) {
-    const rule = Rules.resolve(skill);
+    const rule = Rules.resolveCached(skill);
     return !skill.passive && [Rules.HEAL, Rules.HEAL_HOT, Rules.HOT, Rules.HEAL_PERCENT].includes(rule.skillType)
         && (['friendly', 'party', 'ally'].includes(rule.target) || ['party', 'clan'].includes(rule.sourceTarget));
 }
 
 function mainBuffSkill(skill, beneficiaries = []) {
-    const semantic = Rules.resolve(skill);
+    const semantic = Rules.resolveCached(skill);
     if (skill.passive || semantic.effectType !== 'buff'
         || !(['friendly', 'party', 'ally'].includes(semantic.target) || ['party', 'clan'].includes(semantic.sourceTarget))) return false;
     const facade = { fetchSemantic: () => semantic };

@@ -3,7 +3,6 @@ const EquipmentService = invoke('GameServer/Clan/ClanEquipmentService');
 const EquipmentPolicy = invoke('GameServer/Clan/ClanEquipmentPolicy');
 const ClanPolicy = invoke('GameServer/Clan/ClanSimulationPolicy');
 const Config = invoke('GameServer/Clan/ClanSimulationConfig');
-const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 
 const CACHE_TTL_MS = 30 * 1000;
 const MAX_CACHE_ENTRIES = 128;
@@ -252,19 +251,7 @@ function networkCandidates(clan, previousGoal, planning) {
 
 async function snapshotFor(clan, previousGoal = null, options = {}) {
     const startedAt = Date.now();
-    let occupancy = options.occupancy || null;
-    if (!occupancy) {
-        try {
-            const spots = options.spots || SpotProfiles.ensure();
-            occupancy = SpotProfiles.currentOccupancy(spots) || {};
-        } catch (_) {
-            occupancy = {};
-        }
-    }
-    const availabilityKey = SpotProfiles.capacityFingerprint(occupancy, Config.operationMaxMembers, {
-        maxReservationGroups: SpotProfiles.MAX_CLAN_EQUIPMENT_RESERVATIONS_PER_SPOT
-    });
-    const key = `${fingerprint(clan, previousGoal)}:${availabilityKey}`;
+    const key = fingerprint(clan, previousGoal);
     prune(startedAt);
     const cached = cache.get(key);
     if (cached && startedAt - cached.createdAt <= CACHE_TTL_MS && !(options.reviewCauses || []).includes('recruitment_input')) {
@@ -274,7 +261,7 @@ async function snapshotFor(clan, previousGoal = null, options = {}) {
     const clanId = number(clan.id);
     const group = cacheGroups.get(clanId) || new Set();
     cacheGroups.set(clanId, group);
-    const planning = await EquipmentService.planningForClan(clan, previousGoal, { ...options, occupancy });
+    const planning = await EquipmentService.planningForClan(clan, previousGoal, options);
     let candidates = planning.economy ? networkCandidates(clan, previousGoal, planning)
         : rankedCandidates(clan, previousGoal, planning, options.limit);
     const selectedMember = planning.selection?.member;

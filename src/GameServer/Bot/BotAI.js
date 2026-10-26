@@ -25,6 +25,7 @@ const BotRangedCombatPositioning = invoke('GameServer/Bot/AI/BotRangedCombatPosi
 const HealingPotionStock = invoke('GameServer/Bot/AI/HealingPotionStock');
 const { performance } = require('perf_hooks');
 const ActorQueries = require('../World/ActorSpatialQueries');
+const BotTownTravel = invoke('GameServer/Bot/AI/BotTownTravel');
 
 // Visibility refreshes and damage can request an immediate AI pass from
 // several nearby actors at once.  Without a small gate each request cancels
@@ -99,7 +100,7 @@ function clearTacticalState(session) {
     session.lastTargetEvaluation = undefined;
     session.lastCombatDecision = undefined;
     session.lastPvpDecision = undefined;
-    session.healingPotionEncounter = undefined;
+    session.dangerMoment = undefined;
     session.spoilAttemptedTargetId = undefined;
     session.sweepAttemptedTargetId = undefined;
 }
@@ -191,7 +192,7 @@ const BotAI = {
     },
 
     scheduleTick(session, delayMs, { urgent = false } = {}) {
-        if (!session?.actor || !session.aiActive) return false;
+        if (!session?.actor || !session.aiActive || session.constActivityPaused) return false;
         this.cancelScheduledTick(session);
         const generation = Number(session.aiScheduleGeneration || 0);
         const runAiTick = () => {
@@ -217,6 +218,7 @@ const BotAI = {
     },
 
     init(session) {
+        if (session.constActivityPaused) return;
         this.cancelScheduledTick(session);
         session.aiActive = true;
         // Once per activation: a later re-init must not bring back a servitor
@@ -393,6 +395,7 @@ const BotAI = {
     },
 
     tick(session) {
+        if (session.constActivityPaused) return;
         // Position changes only when TeleportTo completes. Damage wakeups in
         // that interval must not restart actions in the previous raid region.
         if (session.pendingActorTeleport || session.followPlayerSession?.pendingActorTeleport) return;
@@ -441,7 +444,7 @@ const BotAI = {
 
         // Accepted board custody owns travel and waiting before ordinary AI;
         // combat and death still release that hold and retain their priority.
-        if (invoke('GameServer/Bot/AI/BotTownTravel').holdMeeting(session, bot, botDead || defendingPvp)) return;
+        if (BotTownTravel.holdMeeting(session, bot, botDead || defendingPvp)) return;
 
         if (!botDead && !defendingPvp
             && invoke('GameServer/Bot/AI/ClanAllianceSupportAI').tick(session, bot, invoke(path.actor))) return;
@@ -623,7 +626,8 @@ const BotAI = {
                     };
                 } else {
                     session.plan = 'hunting'; // Reset plan
-                    session.currentSpot = null;
+                    // A hot party member keeps the spot it hunts on: the party tick brings it back from town.
+                    if (!session.hotBackgroundPartyId) session.currentSpot = null;
                     session.noTargetTicks = 0;
                     spawnTarget = recoveryHall?.spawn || this.getDeathRespawnTarget(session, bot, false);
                 }
@@ -828,7 +832,12 @@ const BotAI = {
             Generics.skillExec(session,bot,{id:bot.fetchId(),selfId:selfTactic.skill.fetchSelfId(),ctrl:true});
             return true;
         }
-        const chargePlan = basicAttackOnly || !canCast ? null : BotCombatUtility.selectChargePlan(bot, role, combatPolicy, npc);
+        combatPolicy.rejectedAlternatives = [];
+        // One offensive select per call: the charge plan competes with it and
+        // the cast below uses it when no charge is prepared.
+        const offense = basicAttackOnly || !canCast ? null
+            : BotCombatUtility.selectAttackAndChargePlan(bot, npc, role, combatPolicy);
+        const chargePlan = offense?.charge;
         const chargeSkill = chargePlan?.skill;
         if (chargeSkill) {
             session.lastCombatDecision = {
@@ -850,10 +859,7 @@ const BotAI = {
             });
             return true;
         }
-        combatPolicy.rejectedAlternatives = [];
-        const decision = basicAttackOnly || !canCast
-            ? null
-            : BotCombatUtility.select(bot, npc, role, combatPolicy);
+        const decision = offense?.ready || null;
         if (decision) {
             session.lastCombatDecision = {
                 action: 'cast_skill',
@@ -933,8 +939,8 @@ const BotAI = {
         return invoke('GameServer/Bot/BotManager').botSay(session, text);
     },
 
-    tell(session, targetSession, text) {
-        invoke('GameServer/Bot/BotManager').botTell(session, targetSession, text);
+    tell(session, targetSession, text, delivery = {}) {
+        invoke('GameServer/Bot/BotManager').botTell(session, targetSession, text, delivery);
     },
 
     trade(session, text) {

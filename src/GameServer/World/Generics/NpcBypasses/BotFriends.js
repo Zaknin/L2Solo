@@ -34,8 +34,10 @@ function render(session, mode = 'friends', currentPage = 0, notice = null, optio
         }
         bots.forEach((bot) => {
             const profession = bot.className || 'Unknown profession';
+            const trust = Number(bot.trust ?? 0).toFixed(1);
+            const familiarity = Number(bot.familiarity ?? 0).toFixed(1);
             const action = isAdd
-                ? (bot.trust >= BotFriendship.FRIEND_TRUST ? Html.link('Add friend', `bot-friends request ${bot.name} ${currentPage}`, { color: Html.COLOR.ok }) : Html.font(`trust ${bot.trust}/${BotFriendship.FRIEND_TRUST}`, Html.COLOR.muted))
+                ? (bot.trust >= BotFriendship.FRIEND_TRUST ? Html.link('Add friend', `bot-friends request ${bot.name} ${currentPage}`, { color: Html.COLOR.ok }) : Html.font(`trust ${trust}/${BotFriendship.FRIEND_TRUST}`, Html.COLOR.muted))
                 : Html.link(bot.selected ? 'Const: ON' : 'Const: OFF', `bot-friends const ${bot.botId} ${currentPage}`, { color: bot.selected ? Html.COLOR.ok : Html.COLOR.link })
                     + '<br1>'
                     + Html.link('Remove', `bot-friends remove ${bot.botId} ${currentPage}`, { color: Html.COLOR.danger });
@@ -43,7 +45,7 @@ function render(session, mode = 'friends', currentPage = 0, notice = null, optio
                 Html.cell(`${Html.font(bot.name, Html.COLOR.title)}<br1>${Html.font(`Lv ${bot.level} ${profession}`, Html.COLOR.muted)} ${Html.font(bot.role, Html.COLOR.link)}`, { width: 190 }),
                 Html.cell(action, { width: 95, align: 'right' })
             ])]);
-            body += Html.font(`${bot.activity || 'hunting'} / ${bot.currentRegion || 'unknown'} / trust ${bot.trust} / familiarity ${bot.familiarity}`, Html.COLOR.muted);
+            body += Html.font(`${bot.activity || 'hunting'} / ${bot.currentRegion || 'unknown'} / trust ${trust} / familiarity ${familiarity}`, Html.COLOR.muted);
             body += '<br1>' + Html.line(Html.TEXTURE.blank, Html.WIDTH, 5);
         });
         if (!bots.length) body += Html.section('No Bots', Html.font(isAdd ? 'Run with bots to build trust first.' : 'No confirmed friends yet.', Html.COLOR.muted));
@@ -121,7 +123,25 @@ function handler(session, parts) {
             return render(session, 'friends', parts[3]);
         });
     }
-    if (mode === 'form') return BotFriendship.selected(session).then((bots) => bots.reduce((chain, bot) => chain.then(() => World.inviteFriendByName(session, session.actor, bot.characterName || bot.name, undefined, 'friend_const')), Promise.resolve()).then(() => render(session)));
+    if (mode === 'form') {
+        if (session.botFriendsForming) return;
+        const operation = session.botFriendsForming = {};
+        const current = () => session.actor === actor && session.botFriendsForming === operation;
+        let formation, formationComplete = false;
+        return BotFriendship.selected(session).then(async (bots) => {
+            if (!current()) return;
+            formation = await invoke('GameServer/Bot/AI/ConstPartySession').prepareFormation(session, actor, bots, current);
+            for (const bot of bots) {
+                if (!current()) return;
+                await World.inviteFriendByName(session, actor, bot.characterName || bot.name, undefined, 'friend_const');
+            }
+            formationComplete = true;
+            if (current()) return render(session);
+        }).finally(async () => {
+            try { if (formation && (!formationComplete || !current())) await formation.rollback(); }
+            finally { if (session.botFriendsForming === operation) session.botFriendsForming = null; }
+        });
+    }
     render(session, mode, parts[2]);
 }
 handler.render = render;

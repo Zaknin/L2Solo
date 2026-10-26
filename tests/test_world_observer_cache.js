@@ -8,6 +8,7 @@ invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics = true
 const World = invoke('GameServer/World/World');
 const Observer = invoke('WorldObserver/WorldObserverServer');
 const PlayerActivitySignal = invoke('GameServer/Bot/Population/PlayerActivitySignal');
+const ColdCoordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
 
 const originalUser = World.user;
 try {
@@ -66,6 +67,43 @@ try {
 } finally {
     World.user = originalUser;
     PlayerActivitySignal.reset();
+}
+
+const nativeColdSnapshot = ColdCoordinator.snapshot;
+let coldSnapshotReads = 0;
+try {
+    const head = { kind: 'normal', dueAt: Date.now() - 12345, overdue: true, ageMs: 12345, current: true };
+    ColdCoordinator.snapshot = () => {
+        coldSnapshotReads++;
+        return { epoch: 'current-worker', ready: true, snapshotsLoaded: true, heartbeatAgeMs: 400,
+            worker: { lastLoopAt: Date.now() - 450, states: 1700, heap: 1697, queueHead: head,
+                inFlight: 2, inFlightAgeMs: 900, dirty: 1, dirtyAgeMs: 300, commanding: 0,
+                commandingAgeMs: 0, maxInFlight: 32, paused: false, stopping: false },
+            queue: { depth: 1, oldestMs: 200, p0: 0, p1: 0, p2: 1 } };
+    };
+    const status = Observer.worldStatus(), worker = status.runtime.coldWorker;
+    assert.strictEqual(coldSnapshotReads, 1, 'status reuses its one existing coordinator read');
+    assert.strictEqual(status.population.coldQueue.due, 0,
+        'an empty main life-state queue does not erase an overdue worker heap head');
+    assert.deepStrictEqual(worker.queueHead, { ...head, alarmKind: null });
+    assert.notStrictEqual(worker.queueHead, head, 'the status owns its bounded projection');
+    assert.strictEqual(worker.heartbeatAgeMs, 400);
+    assert.strictEqual(worker.epoch, 'current-worker');
+    assert.strictEqual(typeof status.generatedAt, 'number', 'cached age readings retain their observation timestamp');
+    assert.deepStrictEqual([worker.inFlight, worker.inFlightAgeMs, worker.dirty, worker.commanding], [2, 900, 1, 0],
+        'the overlapping native stages remain separate rather than a fabricated total');
+    assert.deepStrictEqual(worker.commitQueue, { depth: 1, oldestMs: 200, p0: 0, p1: 0, p2: 1 });
+    ColdCoordinator.snapshot = () => ({ epoch: 'restarting-worker', ready: false, snapshotsLoaded: false,
+        heartbeatAgeMs: null, worker: { queueHead: head, inFlight: 0, inFlightAgeMs: 0, dirty: 0,
+            commanding: 0, lastLoopAt: Date.now() - 10000 }, queue: { depth: 0, oldestMs: 0, p0: 0, p1: 0, p2: 0 } });
+    const unknown = Observer.worldStatus().runtime.coldWorker;
+    assert.deepStrictEqual([unknown.queueHead, unknown.inFlight, unknown.inFlightAgeMs, unknown.dirty,
+        unknown.commanding, unknown.lastLoopAt, unknown.commitQueue, unknown.heartbeatAgeMs], Array(8).fill(null),
+    'a retained previous-epoch heartbeat cannot be reported as a current empty queue');
+    assert.strictEqual(unknown.ready, false);
+    assert.strictEqual(unknown.epoch, 'restarting-worker');
+} finally {
+    ColdCoordinator.snapshot = nativeColdSnapshot;
 }
 
 function requestAsset(headers = {}) {

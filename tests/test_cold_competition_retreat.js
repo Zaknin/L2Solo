@@ -11,7 +11,8 @@ const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Party = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
 const { ColdCompetitionActions, WAIT_MS } = require('../src/GameServer/Bot/Population/ColdCompetitionActions');
-const { AVOID_MS } = require('../src/GameServer/Bot/Population/ColdCompetitionRetreat');
+const { AVOID_STEPS } = require('../src/GameServer/Bot/Population/ColdCompetitionRetreat');
+const PartyRisk = require('../src/GameServer/Bot/Population/PartySpotRiskPolicy');
 const Risk = require('../src/GameServer/Bot/Population/SpotRiskPolicy');
 const Wait = require('../src/GameServer/Bot/Population/ColdCompetitionWait');
 const Kernel = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
@@ -33,14 +34,15 @@ async function createParty(ids) {
     const p = Party.prepareCommit({ partyId: `p${ids[0]}`, leaderId: ids[0], memberIds: ids,
         spotId: 'test', status: 'active', startedAt: at, nextResolveAt: at + 45000, stats: { objective: ids[0] <= 22 ? null : { npcId: 10 }, ...(ids[0] <= 22 ? { coldCompetition: oldEpisode } : {}) } });
     const assigned = ids.map(id => Life.preparePartyAssignment(state(id), p.row.partyId, 'dps', ids[0], at + 45000));
-    assert((await Database.commitBackgroundPartyMembership({ party: p.row, members: assigned })).ok);
-    Life.acceptPartyAssignments(assigned); Party.acceptCommit(p);
+    const formed = await Database.commitBackgroundPartyMembership({ party: p.row, members: assigned });
+    assert(formed.ok);
+    Life.acceptPartyAssignments(assigned, formed.lifeRows); Party.acceptRow(formed.partyRow);
 }
 function event(a, b, action = 'avoid') {
     const participant = id => {
         const party = Party.find(state(id).party?.partyId);
         return { id, revision: state(id).simulation.revision, memoryRevision: Memory.snapshot(id).revision,
-            partyId: party?.partyId, partyUpdatedAt: party?.updatedAt, size: party?.memberIds.length || 1 };
+            partyId: party?.partyId, partyRevision: party?.revision, size: party?.memberIds.length || 1 };
     };
     return { key: `retreat:${a}:${b}`, at, pressure: 3, spotId: 'test', npcId: 10, action, actor: participant(a), peer: participant(b) };
 }
@@ -84,7 +86,8 @@ async function run() {
             assert.strictEqual(s.activity, 'traveling');
             assert.strictEqual(s.loc.locX, 0, 'departure does not teleport to the new spot');
             assert.strictEqual(s.stats.travel.arrivalAt, at + 30000);
-            assert.strictEqual(s.stats.coldCompetition.avoid.until, at + AVOID_MS);
+            assert.strictEqual(s.stats.coldCompetition.avoid.untilStep, Risk.stepCount(s) + AVOID_STEPS,
+                'each member avoids the spot for ten of its own steps');
             const progress = Resolver.resolveSolo({ state: s, timestamp: at + 15000 });
             assert.strictEqual(progress.materialize.exp, 0, 'travel time cannot produce catch-up kills');
             assert.strictEqual(progress.patch.loc.locX, 0, 'ordinary gatekeeper transit remains at origin until arrival');
@@ -93,7 +96,8 @@ async function run() {
             assert.strictEqual(arrived.spotId, 'other');
             assert.deepStrictEqual(arrived.loc, destination);
             assert(Risk.excludedSpotIdsForStates([s], at + 30000).has('test'));
-            assert(!Risk.excludedSpotIdsForStates([s], at + AVOID_MS).has('test'), 'social avoidance expires without escalating death backoff');
+            const later = { ...s, stats: { ...s.stats, stepCount: Risk.stepCount(s) + AVOID_STEPS } };
+            assert(!Risk.excludedSpotIdsForStates([later]).has('test'), 'social avoidance expires without escalating death backoff');
             assert.strictEqual(Memory.snapshot(id).relations.length, 0);
         }
         if (actorIds.length > 1) {
@@ -103,6 +107,10 @@ async function run() {
             assert.strictEqual(party.stats.coldCompetition.conflictUntil, oldEpisode.conflictUntil);
             assert.strictEqual(party.spotId, 'other');
             assert.strictEqual(party.stats.travel.arrivalAt, at + 30000);
+            assert(PartyRisk.excludedSpotIds(party).has('test'), 'the party avoids the spot');
+            const later = { ...party, stats: { ...party.stats, partySpotRisk: { ...party.stats.partySpotRisk,
+                partyId: party.partyId, rounds: PartyRisk.rounds(party) + AVOID_STEPS } } };
+            assert(!PartyRisk.excludedSpotIds(later).has('test'), 'the party forgets it after ten of its rounds');
         }
         assert.strictEqual((await actions.apply(forecast)).ok, false, 'delivery cannot replay a departure');
     }
@@ -112,6 +120,10 @@ async function run() {
         const prior = Party.find(`p${a}`)?.nextResolveAt || state(a).timing.nextResolveAt, peerDue = state(b).timing.nextResolveAt;
         const result = await actions.apply(event(a, b, 'yield'));
         assert(result.ok, JSON.stringify(result));
+        for (const partyId of [`p${a}`, `p${b}`].filter(id => Party.find(id))) {
+            const [saved] = await Database.execute(['SELECT revision FROM bot_background_parties WHERE partyId=?', [partyId]]);
+            assert.strictEqual(Party.find(partyId).revision, Number(saved.revision), 'each side caches its own committed party row');
+        }
         for (const id of [...actorIds, ...peerIds]) {
             assert.strictEqual(state(id).stats.coldCompetition.outcome, 'yield');
             assert.strictEqual(state(id).stats.coldCompetition.endedAt, undefined);
@@ -135,24 +147,13 @@ async function run() {
     assert.strictEqual((await new ColdCompetitionActions({ ...base, participantAllowed: id => id !== 24 }).apply(pending)).ok, false);
     assert.strictEqual((await new ColdCompetitionActions({ ...base, contestContextAllowed: s => s.characterId !== 24 }).apply(pending)).ok, false);
     assert.strictEqual((await new ColdCompetitionActions({ ...base, retreatRoute: () => null }).apply(pending)).reason, 'no_retreat_route');
-    const partial = new ColdCompetitionActions({ ...base, owner: { ...Owner,
-        claimBatch: (states, opts) => Owner.claimBatch(states.slice(0, 1), opts) } });
-    assert.strictEqual((await partial.apply(pending)).reason, 'claim_rejected');
-    assert(!state(23).simulation.leaseId);
     const fresh = event(23, 25);
-    const race = new ColdCompetitionActions({ ...base, owner: { ...Owner, commitAndReleaseBatch: async (entries, opts) => {
-        await Database.execute(['UPDATE bot_background_parties SET updatedAt=updatedAt+1 WHERE partyId=?', ['p23']]);
-        return Owner.commitAndReleaseBatch(entries, opts);
+    const race = new ColdCompetitionActions({ ...base, owner: { ...Owner, commitBatch: async (entries, opts) => {
+        await Database.execute(['UPDATE bot_background_parties SET revision=revision+1 WHERE partyId=?', ['p23']]);
+        return Owner.commitBatch(entries, opts);
     } } });
     assert.strictEqual((await race.apply(fresh)).reason, 'commit_rejected');
-    assert([23, 24, 25].every(id => !state(id).stats.travel && !state(id).simulation.leaseId), 'membership race aborts every departure and releases leases');
-    const memoryRace = new ColdCompetitionActions({ ...base, owner: { ...Owner, claimBatch: async (...args) => {
-        const claims = await Owner.claimBatch(...args);
-        await Memory.recordBatch([{ key: 'retreat-help-race', sourceId: 26, targetId: 27, type: 'healed', at }]);
-        return claims;
-    } } });
-    assert.strictEqual((await memoryRace.apply(event(26, 27))).reason, 'retreat_changed_during_claim');
-    assert(!state(26).stats.travel && !state(26).simulation.leaseId);
+    assert([23, 24, 25].every(id => !state(id).stats.travel), 'membership race aborts every departure');
     // The scheduler report is developer diagnostics (off by default since c656911d):
     // the departure itself must happen with it off, and is counted when it is on.
     const Diagnostics = invoke('GameServer/Bot/Population/PopulationConfig');
@@ -171,7 +172,7 @@ async function run() {
     assert.strictEqual(persisted[0].activity, 'traveling');
     const saved = JSON.parse(persisted[0].statsJson);
     assert.strictEqual(saved.travel.spotId, 'other');
-    assert.strictEqual(saved.coldCompetition.avoid.until, at + AVOID_MS);
+    assert.strictEqual(saved.coldCompetition.avoid.untilStep, Risk.stepCount({ stats: saved }) + AVOID_STEPS);
     const parties = await Database.execute(['SELECT spotId, statsJson FROM bot_background_parties WHERE partyId=?', ['p9']]);
     assert.strictEqual(parties[0].spotId, 'other', 'party routing authority and members persist together');
     assert.strictEqual(JSON.parse(parties[0].statsJson).travel.arrivalAt, saved.travel.arrivalAt);

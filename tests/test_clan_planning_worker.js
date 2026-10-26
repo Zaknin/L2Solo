@@ -1,5 +1,6 @@
 process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -106,12 +107,12 @@ async function parityAndIntegration() {
     assert.equal(context.npcPriceRows.some(row => row.selfId === 1464), false,
         'a compact price snapshot must not invent an NPC C-shot source');
     assert.equal(context.shopEntries.some(row => Number(row.selfId) === 1464), false);
-    const worker = new ClanPlanningCoordinator();
+    const worker = new ClanPlanningCoordinator({ restartDelayMs: 0 });
     try {
         for (const [classId, level] of [[4, 20], [15, 40], [55, 52], [21, 61]]) {
             const member = { characterId: 990001, classId, level, phase: 'cold',
                 stats: { classId }, inventory: {}, adena: 100000, currentRegion: 'Giran' };
-            const payload = { member, spots: [], warehouseRows: [], context, options: { maxExpectedKills: 1500 } };
+            const payload = { member, spots: [], warehouseRows: [], options: { maxExpectedKills: 1500 } };
             const expected = planForMember(member, [], [], payload.options);
             assert.deepEqual(await worker.plan(payload, DataCache), expected,
                 `worker must preserve planning for class ${classId}, level ${level}`);
@@ -130,11 +131,10 @@ async function parityAndIntegration() {
             const member = { characterId: 990002, level: 20, classId: 4, phase: 'cold', inventory: {}, adena: 100000,
                 stats: { classId: 4, equipmentPlan: { status: 'active', strategy: 'market', rateModelVersion: 0,
                     target: { selfId: 123, slot: 7 } } } };
-            const marketContext = await Runtime.context();
             const expected = planForMember(member);
             assert.equal(expected.market.sourceType, 'afk_player_store');
             assert.equal(expected.market.price, 10, 'a buyer must not plan to buy from its own cheaper listing');
-            assert.deepEqual(await worker.plan({ member, spots: [], warehouseRows: [], options: {}, context: marketContext }, DataCache), expected);
+            assert.deepEqual(await worker.plan({ member, spots: [], warehouseRows: [], options: {} }, DataCache), expected);
 
             const swordLine = { selfId: 79, price: 78600000, count: 1 };
             AfkTrade._resetForTests();
@@ -160,50 +160,78 @@ async function parityAndIntegration() {
             assert.notEqual(unfunded.strategy === 'market' && unfunded.target?.selfId === 79, true,
                 'an unaffordable listing must release a retained clan market goal');
             assert.deepEqual(await worker.plan({ member: swordMember, spots: [], warehouseRows: [],
-                options: {}, context: swordContext }, DataCache), unfunded);
+                options: {} }, DataCache), unfunded);
 
             // A repriced or sold-out record reaches the worker through the
             // board table before the next plan (ClanPlanningCoordinator.plan).
             swordLine.price = 10000000;
             record(990111, 990011, 'Sword Seller', 'Heine', swordLine);
-            const affordableContext = swordContext;
             const repriced = planForMember(swordMember);
             assert.equal(repriced.strategy, 'market');
             assert.equal(repriced.target.selfId, 79, 'the funded listing must retain the requested sword');
             assert.equal(repriced.market.price, swordLine.price,
                 'a funded listing must update the retained target price');
             assert.deepEqual(await worker.plan({ member: swordMember, spots: [], warehouseRows: [],
-                options: {}, context: affordableContext }, DataCache), repriced);
+                options: {} }, DataCache), repriced);
 
             swordLine.count = 0;
             record(990111, 990011, 'Sword Seller', 'Heine', swordLine);
-            const soldOutContext = swordContext;
             const soldOut = planForMember(swordMember);
             assert.notEqual(soldOut.strategy === 'market' && soldOut.target?.selfId === 79, true,
                 'a sold-out listing must release the clan goal');
             assert.deepEqual(await worker.plan({ member: swordMember, spots: [], warehouseRows: [],
-                options: {}, context: soldOutContext }, DataCache), soldOut);
+                options: {} }, DataCache), soldOut);
         } finally {
             AfkTrade._resetForTests();
         }
         const oldRate = process.env.L2NODE_PROGRESSION_RATE;
         try {
-            process.env.L2NODE_PROGRESSION_RATE = 'x10';
+            useRate('x10');
             const member = { characterId: 990002, level: 40, classId: 4, phase: 'cold', stats: { classId: 4 }, inventory: {} };
-            const rateContext = await Runtime.context();
-            const result = await worker.plan({ member, spots: [], warehouseRows: [], options: {},
-                context: { ...rateContext, progressionRate: 'x10' } }, DataCache);
+            const result = await worker.plan({ member, spots: [], warehouseRows: [], options: {} }, DataCache);
             assert.deepEqual(result, planForMember(member), 'resolved runtime rates must be refreshed in an already running worker');
         } finally {
-            if (oldRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-            else process.env.L2NODE_PROGRESSION_RATE = oldRate;
+            useRate(oldRate);
         }
-        await assert.rejects(worker.plan({ context: null }, DataCache));
+        await assert.rejects(worker.plan({}, DataCache));
         assert.equal(worker.metrics().failures, 1, 'worker calculation failures must be observable');
+        // A restarted worker starts without the planning context; its first
+        // plan is the same as before the restart.
+        {
+            const old = worker.worker;
+            const exited = new Promise((resolve) => old.once('exit', resolve));
+            await old.terminate();
+            await exited;
+            const member = { characterId: 990001, classId: 15, level: 40, phase: 'cold',
+                stats: { classId: 15 }, inventory: {}, adena: 100000, currentRegion: 'Giran' };
+            const options = { maxExpectedKills: 1500 };
+            assert.deepEqual(await worker.plan({ member, spots: [], warehouseRows: [], options }, DataCache),
+                planForMember(member, [], [], options), 'a restarted worker must plan with the same market and settings');
+            assert.notEqual(worker.worker, old);
+        }
     } finally { await worker.shutdown(); }
 
+    // Two plans in flight across a context revision change: the worker gets
+    // revision 1, then 2, then plan A made under 1. Both plan with the
+    // newest static context it holds.
+    {
+        let revision = 0;
+        const moving = new ClanPlanningCoordinator({ restartDelayMs: 0,
+            planningContext: async () => ({ ...(await Runtime.context()), revision: ++revision }) });
+        try {
+            const members = [[4, 20], [15, 40]].map(([classId, level]) => ({ characterId: 990001, classId, level,
+                phase: 'cold', stats: { classId }, inventory: {}, adena: 100000, currentRegion: 'Giran' }));
+            const options = { maxExpectedKills: 1500 };
+            const plans = await Promise.all(members.map(member =>
+                moving.plan({ member, spots: [], warehouseRows: [], options }, DataCache)));
+            members.forEach((member, index) => assert.deepEqual(plans[index], planForMember(member, [], [], options),
+                'a plan made under an older context revision must still be planned'));
+            assert.equal(moving.metrics().contextPublishes, 2, 'each revision crosses once');
+        } finally { await moving.shutdown(); }
+    }
+
     const clan = { id: 99, level: 3, leaderId: 990001, state: { mode: 'autonomous', updatedAt: 123, warehouseRevision: 1 },
-        members: [{ characterId: 990001, level: 40, classId: 4, phase: 'cold', simulationOwner: 'legacy_main',
+        members: [{ characterId: 990001, level: 40, classId: 4, phase: 'cold',
             inventory: {}, adena: 100000, stats: { classId: 4 } }] };
     clan.members.push({ ...structuredClone(clan.members[0]), characterId: 990003 });
     const originalWarehouse = Database.fetchClanWarehouseItems;
@@ -265,7 +293,8 @@ parentPort.on('message', (m) => {
     }
     parentPort.postMessage({ id: m.id, result: m.type === 'plan' ? { plan: { ok: true }, durationMs: 1 } : true });
 });`);
-    const worker = new ClanPlanningCoordinator({ workerFile, timeoutMs: 1000, maxPending: 1, restartDelayMs: 0 });
+    const worker = new ClanPlanningCoordinator({ workerFile, timeoutMs: 1000, maxPending: 1, restartDelayMs: 0,
+        planningContext: async () => ({ revision: 1 }) });
     try {
         const timedOut = assert.rejects(worker.plan({ hang: true }, {}), /timed out/);
         await new Promise((resolve) => setImmediate(resolve));

@@ -200,7 +200,7 @@ async function run() {
     // Verify the ordinary hot-to-cold transaction accepts the newly formed roster.
     const party = Parties.find(partyId), states = party.memberIds.map(id => Life.cachedState(id));
     const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
-    const cooled = await Database.transitionBackgroundParty({ partyId, expectedStatus: 'hot', expectedUpdatedAt: party.updatedAt,
+    const cooled = await Database.transitionBackgroundParty({ partyId, expectedStatus: 'hot', expectedPartyRevision: party.revision,
         expectedPhase: 'hot', phase: 'cold', nextResolveAt: now + 30000, statsJson: JSON.stringify(party.stats),
         members: states.map(s => ({ characterId: s.characterId, expectedRevision: s.simulation.revision, expectedUpdatedAt: s.updatedAt,
             patch: Owner.persistencePatch({ ...s, phase: 'cold', activity: 'grouped', timing: { ...s.timing, lastResolvedAt: now } }, now) })) });

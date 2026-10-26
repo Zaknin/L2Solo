@@ -3,6 +3,7 @@ const path = require('path');
 const { Worker } = require('worker_threads');
 
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 
@@ -46,7 +47,7 @@ const scenario = (state) => workerData.scenarios[String(state.characterId)] || {
 invoke('GameServer/Bot/AI/GearPlanSelection').selectAcquisitionPlan = (state) => ({
     acquisitionPlan: scenario(state).plan, replanContext: {}, reusablePartyRequest: false, excludedSpotIds: new Set(),
     economy: { statsPacket: {}, network: { queue: [], activity: { activity: scenario(state).resting ? 'resting' : 'hunting',
-        ...(scenario(state).planned || {}) } }, riskWeight: 0 }
+        ...(scenario(state).planned || {}) } }, riskWeight: 0, stock: () => null }
 });
 invoke('GameServer/Bot/Population/PartyRequestPlanner').partyRequestForPlan = (state) => scenario(state).request || null;
 invoke('GameServer/Bot/AI/GearAcquisitionPlanner').safeFallbackForPlan = (state) => scenario(state).planned || null;
@@ -59,6 +60,7 @@ invoke('GameServer/Bot/AI/GearAcquisitionPlanner').safeFallbackForPlan = (state)
         workerData: {
             workerPath: path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js'),
             workerEpoch: epoch,
+            sharedGeodata: Geodata.sharedDescriptor(),
             scenarios
         }
     });
@@ -95,25 +97,14 @@ invoke('GameServer/Bot/AI/GearAcquisitionPlanner').safeFallbackForPlan = (state)
                 timing: { lastResolvedAt: now - 45000, nextResolveAt: now - 1 },
                 stats: { generatedCold: true, classId: 0, role: 'dps', equipment: [],
                     ...(scenario.resting ? { restUntil: now + 60000 } : {}) }
-            },
-            context: { spot: current, route: null }
+            }
         }));
         send('snapshot_page', { done: true, rows });
         const proposals = new Map();
-        const granted = new Set();
         const deadline = Date.now() + 20000;
         while (Object.keys(scenarios).some((id) => !proposals.has(Number(id)))) {
             if (workerError) throw workerError;
             if (Date.now() >= deadline) throw Error(`proposals: ${JSON.stringify(received.map((m) => m.type))}`);
-            for (const message of received.filter((m) => m.type === 'claim_request')) {
-                const fresh = message.payload.candidates.filter((c) => !granted.has(c.characterId));
-                fresh.forEach((c) => granted.add(c.characterId));
-                if (fresh.length) {
-                    send('claim_ack', { grants: fresh.map((c) => ({ ok: true, characterId: c.characterId,
-                        ownerId: 'cold_simulation_owner', revision: c.expectedRevision + 1,
-                        leaseId: `party-wait-${c.characterId}`, leaseUntil: Date.now() + 30000, purpose: c.purpose })) }, message.msgId);
-                }
-            }
             for (const message of received.filter((m) => m.type === 'proposal_batch')) {
                 for (const proposal of message.payload.proposals) proposals.set(Number(proposal.characterId), proposal);
             }
@@ -126,11 +117,15 @@ invoke('GameServer/Bot/AI/GearAcquisitionPlanner').safeFallbackForPlan = (state)
             const { bytes, ...sent } = message;
             assert.strictEqual(bytes, Protocol.byteLength(sent));
         }
-        const planned = (id) => proposals.get(id).baseState;
+        const planned = (id) => proposals.get(id).nextState;
 
         assert.strictEqual(planned(101).spotId, scenarios[101].planned.spotId,
             'a required waiter takes the safe fallback of its plan');
-        assert.strictEqual(planned(101).activity, 'hunting');
+        // The step that chose the fallback also starts the trip there (the
+        // route is the worker's own): no step hunts the old ground under the
+        // new spot id.
+        assert.strictEqual(planned(101).activity, 'traveling', 'the waiter leaves for its fallback in the same step');
+        assert.strictEqual(planned(101).stats.travel?.spotId, other.id);
         assert.strictEqual(planned(101).stats.partyRequest.priority, 'required');
 
         assert.strictEqual(planned(102).spotId, scenarios[102].planned.spotId);

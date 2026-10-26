@@ -3,22 +3,6 @@ const assert = require('assert');
 require('../src/Global');
 invoke('GameServer/DataCache').init();
 
-const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-const PartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
-const PartyResolver = invoke('GameServer/Bot/Population/BackgroundPartyResolver');
-const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
-const GoalService = invoke('GameServer/Bot/Goals/GoalService');
-const GoalExecutor = invoke('GameServer/Bot/Goals/GoalExecutor');
-const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
-const RecruitmentChat = invoke('GameServer/Bot/Population/ColdPartyRecruitmentChat');
-
-const originals = {
-    statesForParty: LifeState.statesForParty, applyResolve: LifeState.applyResolve, leaveParty: LifeState.leaveParty,
-    createOrUpdate: PartyState.createOrUpdate, findForState: SpotProfiles.findForState,
-    resolve: PartyResolver.resolve, review: GoalService.review, beginMarketTravel: GoalExecutor.beginMarketTravel,
-    announce: RecruitmentChat.maybeAnnounce
-};
-
 async function run() {
     const now = Date.now();
     const party = { partyId: 'market_break', leaderId: 1, memberIds: [1, 2, 3], spotId: 'cruma',
@@ -46,22 +30,6 @@ async function run() {
     assert(Break.sessionReady({ ...party, stats: { formedAt: now - config.partyMarketBreakMinSessionMs - 1,
         fightsResolved: config.partyMarketBreakMinFights, lastMarketBreakAt: 0 } }, members[2], null, now, config),
     'ordinary shopping remains available after the existing session and fight thresholds');
-    const savedParties = [];
-    const departed = [];
-    LifeState.statesForParty = () => Promise.resolve(members);
-    LifeState.applyResolve = (state) => Promise.resolve(state);
-    SpotProfiles.findForState = () => ({ id: 'cruma', name: 'Cruma Tower', route: {}, avgLevel: 20, rewards: {} });
-    PartyResolver.resolve = () => ({ memberResults: members.map((state) => ({ state, result: { materialize: {}, patch: {}, nextResolveAt: 1 } })), partyPatch: { cohesion: .7, risk: .2, stats: {} }, events: [], nextResolveAt: 2, debug: {} });
-    GoalService.review = (state) => Promise.resolve({ current: state.characterId === 3 ? gearGoal : null });
-    GoalExecutor.beginMarketTravel = (state, goal) => goal ? { ...state, activity: 'traveling' } : null;
-    LifeState.leaveParty = (state) => { departed.push(state.characterId); return Promise.resolve({ ...state, party: { ...state.party, partyId: null } }); };
-    PartyState.createOrUpdate = (next) => { savedParties.push(next); return Promise.resolve(next); };
-    RecruitmentChat.maybeAnnounce = (state) => ({ party: state, announced: false });
-
-    const result = await PopulationService.resolveBackgroundParty(party);
-    assert.strictEqual(result.ok, true, result.reason);
-    assert.deepStrictEqual(departed, [3]);
-    assert.deepStrictEqual(savedParties.at(-1).memberIds, [1, 2]);
     const shotGoal = { type: 'buy_craft_material', status: 'active',
         target: { itemId: 1463, amount: 390 }, plan: { wishKey: 'stock:shots',
             expectedBenefit: 'market_buy_craft_material', sourceType: 'configured_store', marketTown: 'Dion' } };
@@ -76,16 +44,7 @@ async function run() {
         members[2], now, null, shotGoal), 'a raid cannot be interrupted by a stock trip');
     assert(!Break.allowed(clanParty, members[2], now, null, { ...shotGoal, target: { itemId: 1864, amount: 390 } }),
         'a material order cannot impersonate a shot refill');
-    GoalService.review = state => Promise.resolve({ current: state.characterId === 3 ? shotGoal : null });
-    departed.length = 0;
-    const refill = await PopulationService.resolveBackgroundParty(clanParty);
-    assert.strictEqual(refill.ok, true, refill.reason);
-    assert.deepStrictEqual(departed, [3], 'the actual party resolve admits the named stock trip');
-    const absence = savedParties.at(-1).stats.marketAbsences[3];
-    assert.strictEqual(absence.cleanupReason, 'restock_shots');
-    assert.strictEqual(absence.objective.clanGoalKey, 'clan-duty');
-    assert(absence.until > now, 'the party reserves its returning member');
     console.log('Bot party market break checks passed');
 }
 
-run().catch((err) => { console.error(err); process.exitCode = 1; }).finally(() => Object.assign(LifeState, { statesForParty: originals.statesForParty, applyResolve: originals.applyResolve, leaveParty: originals.leaveParty }) && Object.assign(PartyState, { createOrUpdate: originals.createOrUpdate }) && Object.assign(SpotProfiles, { findForState: originals.findForState }) && Object.assign(PartyResolver, { resolve: originals.resolve }) && Object.assign(GoalService, { review: originals.review }) && Object.assign(GoalExecutor, { beginMarketTravel: originals.beginMarketTravel }) && Object.assign(RecruitmentChat, { maybeAnnounce: originals.announce }));
+run().catch((err) => { console.error(err); process.exitCode = 1; });

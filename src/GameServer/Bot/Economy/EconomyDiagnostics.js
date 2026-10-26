@@ -4,20 +4,27 @@
 const Config = require('../Population/PopulationConfig');
 const { isMainThread } = require('node:worker_threads');
 const LIMITS = Object.freeze({ recordBytes: 1024, batch: 16, batchBytes: 16384,
-    mainRecords: 256, workerRecords: 64, keys: 256, owners: 16, perSecond: 64,
-    layers: 16, durationSamples: 32 });
+    mainRecords: 256, workerRecords: 64, keys: 1024, owners: 16, perSecond: 64,
+    layers: 32, durationSamples: 32 });
 const NUMBER_FIELDS = ['revision', 'goalRevision', 'item', 'need', 'actual', 'remaining', 'recordId', 'lineId',
     'tripHours', 'tripFees', 'reserveDelta', 'quote', 'spent', 'edges', 'goalApplied', 'nativeId', 'sequence',
     'errandAt', 'receiptUnits', 'receiptSpent', 'decisionSeq', 'activityLeaf', 'inputHash', 'target', 'owned', 'missing', 'requested', 'planned',
     'wallet', 'available', 'budget', 'reserve', 'priorityReserve', 'escrow', 'unitPrice', 'valueHours',
-    'moneyPrice', 'cost', 'recipeId', 'npcId', 'durationMs', 'funded', 'before', 'after', 'commandKind'];
-const TEXT_FIELDS = ['trigger', 'phase', 'reason', 'town', 'source', 'wishKey', 'commandId', 'caller', 'layer', 'outcome', 'errandKey', 'proposalId'];
+    'moneyPrice', 'cost', 'recipeId', 'npcId', 'durationMs', 'funded', 'before', 'after', 'commandKind', 'soft'];
+const TEXT_FIELDS = ['trigger', 'phase', 'reason', 'town', 'source', 'wishKey', 'commandId', 'caller', 'layer', 'outcome', 'errandKey', 'proposalId',
+    'moved', 'gate', 'mask', 'heldFocus', 'freshFocus', 'heldLeaf', 'freshLeaf', 'social'];
 
 function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     capacity = thread === 'main' ? LIMITS.mainRecords : LIMITS.workerRecords, now = Date.now } = {}) {
     capacity = Math.min(thread === 'main' ? LIMITS.mainRecords : LIMITS.workerRecords, Math.max(1, capacity));
+    // Reserve final build evidence inside the existing budgets. Detailed
+    // alternatives emitted first must not consume every summary slot.
+    const summaryReserve = Math.min(capacity - 1, Math.ceil(capacity * LIMITS.owners / LIMITS.perSecond));
     let rows = null, bytes = 0, selected = null, explicit = null, selectionKey = null;
     let counters = null, durations = null, transport = null, inFlight = null;
+    // Heartbeat delta bookkeeping (worker thread): keys changed since the last delta that was really sent.
+    const dirtyKeys = new Set(), dirtyLayers = new Set();
+    let sentSeq = 0, needFull = true, deltaDropped = false;
     let selectionListener = null;
     let seq = 0, second = -1, rate = 0, dropped = 0, written = 0, offered = 0, sent = 0, batches = 0, attemptedBatches = 0, sentBytes = 0;
     let drops = null;
@@ -30,6 +37,7 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
         const key = `${String(layer).slice(0, 32)}:${String(outcome).slice(0, 32)}:${String(reason).slice(0, 48)}`;
         const slot = counters.has(key) || counters.size < LIMITS.keys - 1 ? key : 'overflow';
         counters.set(slot, (counters.get(slot) || 0) + amount);
+        dirtyKeys.add(slot);
     }
     function duration(layer, ms) {
         if (!active() || !Number.isFinite(ms) || ms < 0) return;
@@ -40,6 +48,19 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
         if (!row) { row = { count: 0, totalMs: 0, maxMs: 0, next: 0, samples: [] }; durations.set(layer, row); }
         row.count++; row.totalMs += ms; row.maxMs = Math.max(row.maxMs, ms);
         row.samples[row.next] = ms; row.next = (row.next + 1) % LIMITS.durationSamples;
+        dirtyLayers.add(layer);
+    }
+    // Wall time of the consecutive parts of one call: lap(part) closes the part
+    // since the previous lap, done() records each part as layer prefix+part.
+    // Null while diagnostics are off: no clock read, no allocation.
+    function laps(prefix) {
+        if (!active()) return null;
+        let last = performance.now();
+        const spent = {};
+        return {
+            lap(part) { const at = performance.now(); spent[part] = (spent[part] || 0) + at - last; last = at; },
+            done() { for (const part in spent) duration(prefix + part, spent[part]); }
+        };
     }
     function lose(reason, amount = 1) {
         dropped += amount; drops ||= { rate: 0, queue: 0, size: 0, transport: 0, writer: 0, invalid: 0, stop: 0, upstream: 0, admission: 0 };
@@ -113,7 +134,8 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
         offered++;
         const timestamp = now(), bucket = Math.floor(timestamp / 1000);
         if (second !== bucket) { second = bucket; rate = 0; }
-        if (rate >= LIMITS.perSecond) { lose('rate'); return false; }
+        const summary = input.phase === 'wish_context' && typeof input.gate === 'string';
+        if (rate >= LIMITS.perSecond || !summary && rate >= LIMITS.perSecond - LIMITS.owners) { lose('rate'); return false; }
         // Forward the event's original time and thread, never a late main snapshot.
         const record = { v: 1, at: Number.isFinite(input.at) ? input.at : timestamp,
             thread: imported && ['main', 'worker'].includes(input.thread) ? input.thread : thread, owner: Number(input.owner) };
@@ -123,9 +145,11 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
             .map(row => ({ town: String(row.action || row.town || '').slice(0, 32), hours: Number.isFinite(row.value) ? row.value : null }));
         const row = JSON.stringify(record), size = Buffer.byteLength(row);
         if (size + 1 > LIMITS.recordBytes) { lose('size'); return false; }
-        if ((rows?.length || 0) >= capacity || bytes + size > capacity * LIMITS.recordBytes) { lose('queue'); return false; }
+        if ((rows?.length || 0) >= (summary ? capacity : capacity - summaryReserve)
+            || bytes + size > capacity * LIMITS.recordBytes) { lose('queue'); return false; }
         // Every transition is eligible; minute-based owner/phase dedup broke correlation.
-        rate++; rows ||= []; rows.push(row); bytes += size; pump(); return true;
+        rate++;
+        rows ||= []; rows.push(row); bytes += size; pump(); return true;
     }
     function push(input) { return enqueue(input); }
     function accept(records) {
@@ -144,11 +168,13 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     }
     function disconnect() { if (inFlight) lose('transport', inFlight.count); inFlight = null; transport = null; }
     function stop() { disconnect(); if (rows?.length) lose('stop', rows.length); rows = null; bytes = 0;
-        selected = null; explicit = null; selectionKey = null; selectionListener = null; counters = null; durations = null; drops = null; }
+        selected = null; explicit = null; selectionKey = null; selectionListener = null; counters = null; durations = null; drops = null;
+        dirtyKeys.clear(); dirtyLayers.clear(); }
     function omitAggregatesOnOverflow(message, reason) {
         if (!active() || reason !== 'message_too_large' || message?.type !== 'heartbeat'
             || !Object.hasOwn(message.payload || {}, 'developerDiagnostics')) return false;
         delete message.payload.developerDiagnostics;
+        deltaDropped = true;
         count('transport', 'aggregate_drop', 'heartbeat_size');
         return true;
     }
@@ -164,12 +190,34 @@ function create({ config = Config, thread = isMainThread ? 'main' : 'worker',
     function metrics() {
         if (!active()) return { enabled: false };
         return { enabled: true, thread, counts: counters ? Object.fromEntries(counters) : {},
-            durations: durations ? Object.fromEntries([...durations].map(([layer, row]) => [layer,
-                { count: row.count, totalMs: row.totalMs, maxMs: row.maxMs, samples: row.samples.slice() }])) : {},
+            durations: durations ? Object.fromEntries([...durations].map(([layer, row]) => [layer, layerRow(row)])) : {},
             detail: stats() };
     }
-    return { active, enabled, ownerIds, followSelection, useSelection, push, accept, ack, disconnect, stop, count, duration, metrics, stats, omitAggregatesOnOverflow,
+    const layerRow = row => ({ count: row.count, totalMs: row.totalMs, maxMs: row.maxMs, samples: row.samples.slice() });
+    // The heartbeat form of metrics(): only the keys and layers changed since the last delta that was sent
+    // (everything when a full table is due). Clears nothing: deltaSent() does, after the send succeeded.
+    function delta() {
+        if (!active()) return { enabled: false };
+        deltaDropped = false;
+        const counts = {}, rows = {};
+        const keys = needFull ? (counters?.keys() || []) : dirtyKeys;
+        for (const key of keys) counts[key] = counters.get(key);
+        const layers = needFull ? (durations?.keys() || []) : dirtyLayers;
+        for (const layer of layers) rows[layer] = layerRow(durations.get(layer));
+        return { enabled: true, thread, seq: sentSeq + 1, full: needFull, counts, durations: rows, detail: stats() };
+    }
+    function deltaSent() {
+        if (deltaDropped) return;
+        dirtyKeys.clear(); dirtyLayers.clear(); needFull = false; sentSeq += 1;
+    }
+    function requestFull() { needFull = true; }
+    return { active, enabled, ownerIds, followSelection, useSelection, push, accept, ack, disconnect, stop, count, duration, laps, metrics, delta, deltaSent, requestFull, stats, omitAggregatesOnOverflow,
         noteDropped(amount) { if (active() && Number.isSafeInteger(amount) && amount > 0) lose('upstream', amount); },
         connect(send) { if (!detail()) return false; transport = send; pump(); return true; } };
 }
-module.exports = { ...create(), create, LIMITS };
+// One size scale for serialized economy payloads (source memo, retained projection).
+function sizeBucket(bytes) {
+    return bytes < 2048 ? 'lt2k' : bytes < 4096 ? '2_4k' : bytes <= 8192 ? '4_8k' : bytes <= 16384 ? '8_16k'
+        : bytes <= 32768 ? '16_32k' : 'over32k';
+}
+module.exports = { ...create(), create, LIMITS, sizeBucket };

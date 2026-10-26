@@ -173,7 +173,7 @@ function wait(ms) {
     const drainingOrc = actor(3);
     const drainingSession = session(drainingOrc);
     const drainingSkill = soulCry(1);
-    drainingSkill.fetchSemantic().toggleIntervalMs = 10;
+    drainingSkill.semantic = { ...drainingSkill.fetchSemantic(), toggleIntervalMs: 10 };
     ToggleSkills.handleRequest(drainingSession, drainingOrc, drainingSkill);
     assert.strictEqual(drainingOrc.fetchMp(), 1, 'Soul Cry level 1 should consume sourced initial MP 2');
     assert.strictEqual(EffectStats.add(drainingOrc, 'pAtkAdd'), 4.5, 'Soul Cry level 1 should apply sourced additive P.Atk');

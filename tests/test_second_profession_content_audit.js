@@ -3,6 +3,9 @@ const { createTrialWorld, abort, Service, DataCache, withRandom } = require('./h
 const { reloadActor } = require('./helpers/fighterProfessionHarness');
 const Dialogue = require('./helpers/npcDialogueHarness');
 const Response = invoke('GameServer/Network/Response');
+const NpcTalk = invoke('GameServer/World/Generics/NpcTalk');
+const Profession = invoke('GameServer/SecondProfession');
+const { secondProfMap } = invoke('GameServer/ClassProgression');
 
 // Authored C4 acceptance levels, eligible examples and initial issued items.
 const STARTS = [
@@ -33,7 +36,10 @@ function received(session, item) {
 
 (async () => {
     const characters = STARTS.map(([q,,level,classId,race]) => ({id:193000+q,level:level-1,classId,race}));
-    const c = await createTrialWorld('profession-content-audit', characters[0].id, characters.slice(1), characters[0]);
+    const transferCharacters = Profession.routes.map(route => ({ id:194000+route.classId, level:40, race:route.race,
+        classId:Number(Object.keys(secondProfMap).find(parent => secondProfMap[parent].includes(route.classId))) }));
+    const c = await createTrialWorld('profession-content-audit', characters[0].id,
+        [...characters.slice(1), ...transferCharacters], characters[0]);
     try {
         const quests = Service.quests().filter(q => q.id >= 211 && q.id <= 233);
         assert.deepEqual(quests.map(q => q.id).sort((a,b) => a-b), STARTS.map(r => r[0]));
@@ -67,6 +73,34 @@ function received(session, item) {
             await abort(c.session,q);
             assert.deepEqual(latestJournal(c),[]);
             for (const item of c.state(q).quest.questItems) assert.equal(await c.amount(item),0);
+        }
+        // Use each master's real title: priests and warehouse chiefs take
+        // different primary-menu paths from the generic guild-master stub.
+        let masterMenus = 0;
+        for (const route of Profession.routes) {
+            c.id = 194000+route.classId; c.session = await c.world.session(c.id);
+            await reloadActor(c);
+            for (const template of route.npcs) {
+                const data = DataCache.npcs.find(n => n.selfId === template);
+                const npc = { fetchSelfId: () => template, fetchId: () => 500000+template,
+                    fetchName: () => data.template.name, fetchTitle: () => data.template.title,
+                    fetchLocX: () => 0, fetchLocY: () => 0, fetchLocZ: () => 0, isDead: () => false };
+                c.runtime.npc.spawns.push(npc);
+                NpcTalk(c.session, npc); await Dialogue.settle(c.session);
+                assert.match(c.world.page(c.session), /Second profession transfer \(3 marks\)/,
+                    `${route.name}: ${data.template.name} exposes the transfer menu`);
+                assert(!c.world.page(c.session).includes('Second profession trials'));
+                await Dialogue.click(c.session, c.world, 'second-profession');
+                assert(c.world.page(c.session).includes(`bypass -h second-profession ${route.classId}"`),
+                    `${route.name}: ${data.template.name} offers the correct transfer`);
+                if (Service.handlesNpc(npc)) {
+                    const hasQuest = await Service.hasTalk(c.session, npc);
+                    await Dialogue.click(c.session, c.world, `html ${template}-quest`);
+                    if (hasQuest) assert.doesNotMatch(c.world.page(c.session), /You are either not on a quest/,
+                        `${route.name}: ${data.template.name} opens the available quest dialogue`);
+                }
+                masterMenus++;
+            }
         }
         // Source cond stays 1 throughout these item-driven quests, regardless
         // of the more detailed persisted server phase. No save migration.
@@ -118,6 +152,6 @@ function received(session, item) {
         witch.variables.cond = '5';
         for (const item of [3029,3331,3332]) await Service.giveItem(c.session,item,1);
         assert.equal(journal(Response.questList(Service.active(c.session))).find(q => q.id === 229).condition,8);
-        console.log('All 23 profession trials: NPC acceptance, exact issued items and receipts, persisted state, abort cleanup, spawn/template coverage, C4 journal phases and real monster-death drops passed');
+        console.log(`All 23 profession trials and ${masterMenus} master menus across 31 professions: NPC acceptance, quest/transfer links, exact issued items and receipts, persisted state, abort cleanup, spawn/template coverage, C4 journal phases and real monster-death drops passed`);
     } finally { await c.close(); }
 })().catch(error => {console.error(error);process.exitCode=1;});

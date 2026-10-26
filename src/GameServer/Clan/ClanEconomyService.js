@@ -1,5 +1,6 @@
 const { DiagnosticMetricMap } = require('../Bot/Population/DiagnosticMetricMap');
 const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
+const SavedStats = require('../Bot/SavedStats');
 const Database = invoke('Database');
 const ClanService = invoke('GameServer/Clan/ClanService');
 const Config = invoke('GameServer/Clan/ClanSimulationConfig');
@@ -44,7 +45,7 @@ async function clanProjection() {
                members.id AS characterId, members.name AS memberName,
                members.classId, members.level AS memberLevel, members.clanId AS memberClanId,
                life.accountName, life.activity, life.phase, life.adena, life.simulationRevision,
-               life.inventorySummary, life.statsJson
+               life.inventorySummary, life.statsJson, life.mindJson
         FROM clan_simulation_clans simulated
         JOIN clans ON clans.id = simulated.clanId
         JOIN characters members ON members.clanId = simulated.clanId
@@ -64,7 +65,7 @@ async function clanProjection() {
                 members: []
             });
         }
-        const stats = parseJson(row.statsJson, {});
+        const stats = SavedStats.merge(row.statsJson, row.mindJson);
         const member = {
             characterId: number(row.characterId),
             id: number(row.characterId),
@@ -89,6 +90,8 @@ async function clanProjection() {
 // contribution ledger; this action advances the level once the ledger holds the
 // requirement and, at level 1, deposits the members' surplus into the warehouse.
 async function resolveClan(clan, options = {}) {
+    const strategy = require('./ClanStrategyPolicy').active(clan);
+    if (strategy && strategy.objective !== 'advance_clan') return { ok: true, skipped: true, reason: 'strategy_focus' };
     if (!clan || number(clan.level) < 0 || number(clan.level) > 3) {
         return { ok: true, skipped: true, reason: 'level_out_of_slice' };
     }

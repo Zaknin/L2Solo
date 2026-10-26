@@ -8,13 +8,12 @@ function prepare(state, deps = {}, previous = null) {
     const observations = (stats.targetCombat?.lastDefeatedNpcIds || []).slice(-8).map(Number);
     const observed = observations.join(',');
     const spot = SpotIndex.spotById(deps.spots, stats.marketReturn?.spotId ?? state.spotId);
-    const revision = deps.memory?.revision ?? stats.memoryRevision ?? 0;
     const relations = deps.memory?.relations || stats.relations || [];
     const hostile = relations.some(row => Number(row.hostility ?? row.anger ?? 0) > 0);
     const pvp = Boolean(stats.pvpEncounter || state.pvpEncounter);
     const scores = String(stats.wishFocus?.[0] || '').startsWith('scores:');
     if (previous && previous.observed === observed && previous.spot === spot
-        && previous.revision === revision && previous.hostile === hostile
+        && previous.hostile === hostile
         && previous.pvp === pvp && previous.scores === scores) return previous;
     let mask = 3;
     if (spot && observations.length && !pvp && !scores
@@ -27,7 +26,7 @@ function prepare(state, deps = {}, previous = null) {
         }
         if (matched && !uncertain) mask = 1;
     }
-    return { observed, spot, revision, hostile, pvp, scores, mask };
+    return { observed, spot, hostile, pvp, scores, mask };
 }
 function maskFor(state, deps) { return prepare(state, deps).mask; }
 module.exports = { prepare, maskFor };

@@ -13,10 +13,12 @@ const { createKnowledgeBaseService } = require('./KnowledgeBaseService');
 const { createExportedCatalogue } = require('../GameServer/Knowledge/ExportedCatalogueAdapter');
 const GameCatalogue = require('../GameServer/Knowledge/GameDataCatalogue');
 const { createJsonResponseCache, sendCachedJson } = require('./JsonResponseCache');
+const { createAgeCache } = require('./AgeCache');
 const marketJson = createJsonResponseCache(() => marketSnapshot());
 const ActorEconomy = require('./ActorEconomyProjection');
 const { createActorCollections } = require('./ActorCollections');
 const BotBrainContext = invoke('GameServer/Bot/AI/BotBrainContext');
+const DecisionEvents = invoke('GameServer/Bot/AI/DecisionEvents');
 const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
 const BotServiceIdentity = invoke('GameServer/Bot/AI/BotServiceIdentity');
 const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -26,6 +28,11 @@ const ClanOrderService = invoke('GameServer/Clan/ClanOrderService');
 const ClanService = invoke('GameServer/Clan/ClanService');
 const ClanSimulationConfig = invoke('GameServer/Clan/ClanSimulationConfig');
 const Database = invoke('Database');
+const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
+const ColdSimulationCoordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
+const HotResourceCompetition = invoke('GameServer/Bot/AI/HotResourceCompetition');
+const ClanSocialRuntime = invoke('GameServer/Clan/ClanSocialRuntime');
+const HistoryDatabase = invoke('HistoryDatabase');
 const PopulationConfig = invoke('GameServer/Bot/Population/PopulationConfig');
 const PlayerActivitySignal = invoke('GameServer/Bot/Population/PlayerActivitySignal');
 const ProgressionRates = invoke('GameServer/ProgressionRates');
@@ -33,6 +40,10 @@ const DataCache = invoke('GameServer/DataCache');
 const { equipmentValue, liveEquipmentValue } = invoke('GameServer/Item/EquipmentValue');
 const WorldAreaCatalog = invoke('GameServer/World/WorldAreaCatalog');
 const WorldProjection = invoke('WorldObserver/WorldObserverProjection');
+// Main-thread cost of the open map: durations observer_dynamic (hot actors per
+// /world/changes poll), observer_changes, observer_status, observer_cold_change
+// (changed cold actors coalesced per poll), observer_json.
+const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 const MIME_TYPES = {
     '.html': 'text/html; charset=utf-8',
     '.css': 'text/css; charset=utf-8',
@@ -362,7 +373,7 @@ function compactHotBot(status, pkIds = new Set(), session = null) {
 let persistedPkIds = new Set();
 
 async function refreshPersistedPkIds() {
-    const rows = await Database.execute(['SELECT id FROM characters WHERE karma > 0', []]);
+    const rows = await Database.execute(['SELECT id FROM characters WHERE karma > 0', []], 'observer:pk-ids');
     const previous = persistedPkIds;
     persistedPkIds = new Set(rows.map(row => Number(row.id)));
     return new Set([...previous, ...persistedPkIds]);
@@ -441,8 +452,12 @@ const projectionRuntime = {
     initialized: false,
     initializing: null,
     dynamicKeys: new Set(),
+    pendingColdIds: new Set(),
+    coldReset: false,
     unsubscribe: null
 };
+// Read through worldStatus().runtime.developerDiagnostics.observer.
+const observerStats = { clanContributionBuilds: 0, clanContributionReuses: 0 };
 const PROJECTION_FIELDS = Object.freeze([
     'id', 'name', 'phase', 'mode', 'intent', 'role', 'level', 'classId', 'className',
     'raceId', 'exp', 'adena', 'equipmentValue', 'loc', 'area', 'region', 'online',
@@ -622,6 +637,33 @@ function clanOverviewQuery() {
     `, [], { read: true }], 'observer:clans');
 }
 
+// The newest id moves when a row is added and the row count when one leaves (a
+// deleted member or a dissolved clan takes its rows by cascade); the sums scan
+// the whole history and are rebuilt only when either moved.
+const clanContributions = { tail: -1, count: -1, rows: [] };
+async function clanContributionTotals() {
+    const [row] = await Database.execute(
+        ['SELECT COALESCE(MAX(id), 0) AS tail, COUNT(*) AS n FROM clan_contributions', []],
+        'observer:clan-contribution-tail');
+    const tail = Number(row?.tail || 0);
+    const count = Number(row?.n || 0);
+    if (tail === clanContributions.tail && count === clanContributions.count) {
+        observerStats.clanContributionReuses += 1;
+        return clanContributions.rows;
+    }
+    const rows = await Database.execute([`
+        SELECT clanId, targetLevel, COUNT(*) AS entries, COALESCE(SUM(amount), 0) AS amount
+        FROM clan_contributions
+        GROUP BY clanId, targetLevel
+        ORDER BY clanId ASC, targetLevel ASC
+    `, []], 'observer:clan-contributions');
+    observerStats.clanContributionBuilds += 1;
+    clanContributions.tail = tail;
+    clanContributions.count = count;
+    clanContributions.rows = rows;
+    return rows;
+}
+
 function clanAuxiliaryRows() {
     const bloodMarkId = Number(ClanSimulationConfig.bloodMarkItemId || 1419);
     return Promise.all([
@@ -634,12 +676,7 @@ function clanAuxiliaryRows() {
             WHERE amount > 0
             GROUP BY clanId
         `, [bloodMarkId]], 'observer:clan-warehouse'),
-        Database.execute([`
-            SELECT clanId, targetLevel, COUNT(*) AS entries, COALESCE(SUM(amount), 0) AS amount
-            FROM clan_contributions
-            GROUP BY clanId, targetLevel
-            ORDER BY clanId ASC, targetLevel ASC
-        `, []], 'observer:clan-contributions'),
+        clanContributionTotals(),
         Database.execute([`
             SELECT clanId, COUNT(*) AS openDemands,
                    COALESCE(SUM(amount), 0) AS requestedUnits,
@@ -665,6 +702,32 @@ function clanAuxiliaryRows() {
             GROUP BY clanId
         `, []], 'observer:clan-actions')
     ]).then(([warehouse, contributions, demands, operations, actions]) => ({ warehouse, contributions, demands, operations, actions }));
+}
+
+function compactClanStrategy(value) {
+    const Policy = invoke('GameServer/Clan/ClanStrategyPolicy');
+    if (invoke('GameServer/Clan/ClanSimulationConfig').strategicManagementEnabled === false) return null;
+    if (value?.version !== 1 || !Policy.LABELS[value.objective]) return null;
+    const descriptions = {
+        advance_clan: `Reach clan level ${clanNumber(value.target?.level)}`,
+        equip_roster: `Complete ${clanNumber(value.target?.upgrades?.length)} member upgrades`,
+        raid_preparation: 'Prepare the roster and complete a useful raid upgrade',
+        recruit: `Build a ${clanNumber(value.target?.members)} member core${value.target?.roles?.length ? `; needed: ${value.target.roles.filter(role => ['tank', 'healer', 'buffer'].includes(role)).join(', ')}` : ''}`,
+        treasury: `Save ${clanNumber(value.target?.adena).toLocaleString('en-US')} Adena before discretionary purchases`,
+        clan_hall: 'Acquire a residence and fund its maintenance', maintain: 'Continue personal progression and preserve clan resources'
+    };
+    return { objective: value.objective, label: Policy.LABELS[value.objective], description: descriptions[value.objective],
+        status: ['active', 'completed', 'blocked'].includes(value.status) ? value.status : 'active',
+        progress: clanNumber(value.progress), required: clanNumber(value.required), unit: String(value.unit || 'milestone').slice(0, 32),
+        percent: Math.max(0, Math.min(100, clanNumber(value.percent))),
+        reason: Policy.REASONS.includes(value.reason) ? value.reason : 'leader_preference',
+        source: value.source === 'llm' ? 'llm' : 'deterministic', selectedAt: clanNumber(value.selectedAt),
+        progressAt: clanNumber(value.progressAt), lastDecisionAt: clanNumber(value.lastDecisionAt),
+        achievements: { upgrades: clanNumber(value.achievements?.upgrades) },
+        history: (value.history || []).slice(-3).map(row => ({ label: Policy.LABELS[row.objective] || 'Clan objective',
+            progress: clanNumber(row.progress), required: clanNumber(row.required), status: row.status })),
+        inference: { requests: clanNumber(value.inference?.requests), promptTokens: clanNumber(value.inference?.promptTokens),
+            completionTokens: clanNumber(value.inference?.completionTokens) } };
 }
 
 function compactClanOverview(row, auxiliary = {}) {
@@ -726,6 +789,7 @@ function compactClanOverview(row, auxiliary = {}) {
             latestAt: clanNumber(operation.latestOperationAt)
         },
         goal: compactClanGoal(state.goal),
+        strategy: compactClanStrategy(state.strategy),
         productionGoal: level < 3 ? compactClanGoal(state.productionGoal) : null
     };
 }
@@ -765,6 +829,12 @@ async function clanSnapshot() {
     }, { members: 0, bots: 0, players: 0, online: 0, autonomous: 0, playerManaged: 0, levels: {} });
     return { generatedAt: Date.now(), total: clans.length, totals, clans };
 }
+
+// The directory is shared by every open tab's 10 s poll and by each clan card
+// (clanDetail reads its overview from it); nothing orders clan changes into one
+// revision, so tabs share a build for a short age.
+const CLAN_DIRECTORY_CACHE_MS = 5000;
+const cachedClanSnapshot = createAgeCache(clanSnapshot, CLAN_DIRECTORY_CACHE_MS);
 
 function clanMemberQuery(clanId) {
     return Database.execute([`
@@ -916,7 +986,7 @@ async function clanDetail(clanId) {
     const id = Number(clanId);
     if (!Number.isSafeInteger(id) || id <= 0) return null;
     const [directory, members, events, warehouse, contributions, demands, operation, actions, orders] = await Promise.all([
-        clanSnapshot(),
+        cachedClanSnapshot(),
         clanMemberQuery(id),
         Database.fetchClanGoalEvents(id, 24),
         Database.fetchClanWarehouseItems(id),
@@ -937,8 +1007,10 @@ async function clanDetail(clanId) {
         , Database.fetchClanActions({ clanId: id, limit: 24 }),
         Database.fetchPlayerManagedClanOrders({ clanId: id, limit: 12 })
     ]);
-    const overview = directory.clans.find((clan) => clan.id === id);
-    if (!overview) return null;
+    const listed = directory.clans.find((clan) => clan.id === id);
+    if (!listed) return null;
+    // The directory is shared between callers; the goal rewrites below are this card's own.
+    const overview = { ...listed };
     const row = await Database.execute([`
         SELECT clans.leaderId, simulated.stateJson
         FROM clans
@@ -952,6 +1024,7 @@ async function clanDetail(clanId) {
     // The goal card and its durable carrier plan must describe the same
     // snapshot even if a clan action changed the goal during these reads.
     overview.goal = compactClanGoal(clanState.goal);
+    overview.strategy = compactClanStrategy(clanState.strategy);
     overview.productionGoal = overview.level < 3 ? compactClanGoal(clanState.productionGoal) : null;
     const craftGoals = [clanState.goal, overview.productionGoal ? clanState.productionGoal : null]
         .filter(goal => goal?.plan?.kind === 'craft' && goal.controlledBy !== 'player');
@@ -1508,7 +1581,7 @@ function effectiveColdCombat(state) {
             : Object.fromEntries((state.stats?.equipment || []).map((item) => [
                 String(item.selfId), { ...item, equipped: true }
             ]));
-    const profile = ColdCombatProfile.profileFor({ ...state, inventory });
+    const profile = ColdCombatProfile.profileFor({ ...state, inventory }, Date.now(), { store: false });
     return {
         pAtk: Number(profile.pAtk || 0),
         mAtk: Number(profile.mAtk || 0),
@@ -1646,11 +1719,11 @@ function observerWishName(kind, reference) {
 }
 
 function actorEconomy(state, session = null) {
-    const decisionStats = { ...state?.stats, ...session?.decisionStats };
-    const held = session && session.economySeq === Number(decisionStats.decisionSeq || 0) ? session.heldEconomy?.statsPacket : null;
-    const stats = { ...decisionStats, ...held };
+    // A near body's held decision (its stats packet and leaf), a far bot's card.
+    const held = session ? DecisionEvents.held(session) : null;
+    const stats = { ...state?.stats, ...session?.decisionStats, ...held?.statsPacket };
     const decision = !session && state ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.inspect(state) : null;
-    const activity = held ? session.heldEconomy.network?.activity : decision?.activity;
+    const activity = held ? held.network?.activity : decision?.activity;
     return ActorEconomy.project({ ...state, stats,
         adena: session?.actor?.backpack?.fetchTotalAdena?.() ?? state?.adena }, { itemFor: observerItem, wishName: observerWishName, activity });
 }
@@ -2000,19 +2073,50 @@ function projectionRow(actor) {
 function bindColdProjection() {
     if (projectionRuntime.unsubscribe) return;
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
-    projectionRuntime.unsubscribe = LifeState.subscribeChanges((state) => {
-        if (!projectionRuntime.initialized || !state?.characterId) return;
-        const BotManager = invoke('GameServer/Bot/BotManager');
-        if (BotManager.findSessionById(Number(state.characterId))) return;
-        const leaderId = Number(state.party?.leaderId || state.stats?.leaderId || 0);
-        const actor = compactStateBot(state, new Set(), LifeState.cachedState(leaderId));
-        if (actor) WorldProjection.apply({ upserts: [projectionActor(actor, 'bot')] });
+    // Native worker receipts publish the cache directly; subscribeChanges is
+    // only the main-thread path that also sends changes back to the worker.
+    // Keep ids, not historical state objects, and compact the latest row once
+    // per poll even if several receipts arrive while the Observer is idle.
+    projectionRuntime.unsubscribe = LifeState.subscribePublications(({ characterId, kind }) => {
+        if (kind === 'reset') projectionRuntime.coldReset = true;
+        else if (Number(characterId) > 0) projectionRuntime.pendingColdIds.add(Number(characterId));
     });
+}
+
+function refreshColdProjection() {
+    if (projectionRuntime.coldReset) {
+        for (const actor of WorldProjection.snapshot().actors) {
+            if (actor.kind === 'bot') projectionRuntime.pendingColdIds.add(Number(actor.id));
+        }
+        projectionRuntime.coldReset = false;
+    }
+    if (!projectionRuntime.pendingColdIds.size) return;
+    const clock = Diagnostics.active() ? performance.now() : null;
+    const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+    const BotManager = invoke('GameServer/Bot/BotManager');
+    const upserts = [], removals = [], hotIds = new Set();
+    for (const id of projectionRuntime.pendingColdIds) {
+        if (BotManager.findSessionById(id)) continue;
+        const state = LifeState.cachedState(id);
+        if (!state) {
+            removals.push({ kind: 'bot', id });
+            continue;
+        }
+        const leaderId = Number(state.party?.leaderId || state.stats?.leaderId || 0);
+        const actor = compactStateBot(state, hotIds, LifeState.cachedState(leaderId));
+        if (actor) upserts.push(projectionActor(actor, 'bot'));
+    }
+    projectionRuntime.pendingColdIds.clear();
+    WorldProjection.apply({ upserts, removals });
+    if (clock !== null) Diagnostics.duration('observer_cold_change', performance.now() - clock);
 }
 
 async function ensureWorldProjection() {
     if (projectionRuntime.initialized) return WorldProjection.snapshot();
     if (projectionRuntime.initializing) return projectionRuntime.initializing;
+    // Subscribe before the cooperative bootstrap captures its rows, so a
+    // publication during collection is reconciled before returning the frame.
+    bindColdProjection();
     projectionRuntime.initializing = collectWorldActors().then(({ bots, players }) => {
         const actors = [
             ...bots.map((actor) => projectionActor(actor, 'bot')),
@@ -2024,7 +2128,6 @@ async function ensureWorldProjection() {
             ...players.map((actor) => `player:${Number(actor.id)}`)
         ]);
         projectionRuntime.initialized = true;
-        bindColdProjection();
         return result;
     }).finally(() => {
         projectionRuntime.initializing = null;
@@ -2034,6 +2137,10 @@ async function ensureWorldProjection() {
 
 async function refreshDynamicProjection() {
     await ensureWorldProjection();
+    // Main-thread time only: the persisted PK read between the two halves is
+    // its own Database operation (observer:pk-ids).
+    let clock = Diagnostics.active() ? performance.now() : null;
+    let busyMs = 0;
     const BotManager = invoke('GameServer/Bot/BotManager');
     const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
     const pkHotIds = new Set(BotManager.sessions
@@ -2052,7 +2159,9 @@ async function refreshDynamicProjection() {
         ...players.map((actor) => `player:${Number(actor.id)}`)
     ]);
     const upserts = [...hot, ...players];
+    if (clock !== null) busyMs += performance.now() - clock;
     const pkIds = await refreshPersistedPkIds();
+    if (clock !== null) clock = performance.now();
     for (const id of pkIds) {
         if (nextDynamicKeys.has(`bot:${id}`)) continue;
         const state = LifeState.cachedState(id);
@@ -2077,7 +2186,10 @@ async function refreshDynamicProjection() {
         } else removals.push({ kind, id });
     });
     projectionRuntime.dynamicKeys = nextDynamicKeys;
-    return WorldProjection.apply({ upserts, removals });
+    refreshColdProjection();
+    const applied = WorldProjection.apply({ upserts, removals });
+    if (clock !== null) Diagnostics.duration('observer_dynamic', busyMs + performance.now() - clock);
+    return applied;
 }
 
 async function worldBootstrap() {
@@ -2085,7 +2197,7 @@ async function worldBootstrap() {
     await refreshDynamicProjection();
     const projection = WorldProjection.snapshot();
     const actors = projection.actors;
-    const status = worldStatus();
+    const status = cachedWorldStatus();
     return {
         ...status,
         epoch: WORLD_EPOCH,
@@ -2104,25 +2216,70 @@ async function worldBootstrap() {
 
 function worldStatus() {
     const PopulationStatus = invoke('GameServer/Bot/Population/PopulationStatus');
-    const memory = (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? process.memoryUsage() : null;
-    return {
+    const diagnostics = PopulationConfig.developerDiagnostics === true;
+    const clock = diagnostics ? performance.now() : null;
+    const memory = diagnostics ? process.memoryUsage() : null;
+    const cold = diagnostics ? ColdSimulationCoordinator.snapshot() : null;
+    // Coordinator retains the last worker packet across a restart. A new
+    // ready/catalog handoff must finish before those stage fields are usable.
+    const worker = cold?.ready === true && cold.snapshotsLoaded === true ? cold.worker : null;
+    const commitQueue = worker ? cold.queue : null;
+    const status = {
         epoch: WORLD_EPOCH,
         generatedAt: Date.now(),
         uptimeMs: Math.round(process.uptime() * 1000),
         raidBosses: raidBossSnapshot(),
         population: PopulationStatus.counts(),
-        coldCompetition: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.competition || null : null,
-        coldCompetitionActions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().competitionActions || null : null,
-        hotCompetitionActions: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/AI/HotResourceCompetition').report : null,
-        partyReviews: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().partyReviews || null : null,
-        clanSocial: (invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true) ? invoke('GameServer/Clan/ClanSocialRuntime').summary() : null,
+        coldCompetition: cold ? cold.worker?.competition || null : null,
+        coldCompetitionActions: cold ? cold.competitionActions || null : null,
+        hotCompetitionActions: diagnostics ? HotResourceCompetition.report : null,
+        partyReviews: cold ? cold.partyReviews || null : null,
+        clanSocial: diagnostics ? ClanSocialRuntime.summary() : null,
         runtime: memory ? {
             heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
             rssMb: Math.round(memory.rss / 1024 / 1024),
+            // The existing heartbeat's heap head excludes claimed work;
+            // dirty proposals are already included in inFlight. Native age
+            // readings are retained; generatedAt also dates this cached view.
+            coldWorker: cold ? {
+                epoch: cold.epoch ?? null,
+                ready: cold.ready ?? null,
+                snapshotsLoaded: cold.snapshotsLoaded ?? null,
+                heartbeatAgeMs: cold.heartbeatAgeMs ?? null,
+                lastLoopAt: worker?.lastLoopAt ?? null,
+                states: worker?.states ?? null,
+                heap: worker?.heap ?? null,
+                queueHead: worker?.queueHead ? {
+                    kind: worker.queueHead.kind ?? null,
+                    alarmKind: worker.queueHead.alarmKind ?? null,
+                    dueAt: worker.queueHead.dueAt ?? null,
+                    overdue: worker.queueHead.overdue ?? null,
+                    ageMs: worker.queueHead.ageMs ?? null,
+                    current: worker.queueHead.current ?? null
+                } : null,
+                inFlight: worker?.inFlight ?? null,
+                inFlightAgeMs: worker?.inFlightAgeMs ?? null,
+                dirty: worker?.dirty ?? null,
+                dirtyAgeMs: worker?.dirtyAgeMs ?? null,
+                commanding: worker?.commanding ?? null,
+                commandingAgeMs: worker?.commandingAgeMs ?? null,
+                maxInFlight: worker?.maxInFlight ?? null,
+                paused: worker?.paused ?? null,
+                stopping: worker?.stopping ?? null,
+                commitQueue: commitQueue ? {
+                    depth: commitQueue.depth ?? null,
+                    oldestMs: commitQueue.oldestMs ?? null,
+                    p0: commitQueue.p0 ?? null,
+                    p1: commitQueue.p1 ?? null,
+                    p2: commitQueue.p2 ?? null
+                } : null
+            } : null,
+            heap: PopulationStatus.heaps({ coldWorker: cold.worker }),
             developerDiagnostics: {
-                main: invoke('GameServer/Bot/Economy/EconomyDiagnostics').metrics(),
-                worker: invoke('GameServer/Bot/Population/ColdSimulationCoordinator').snapshot().worker?.developerDiagnostics || null,
-                transport: invoke('HistoryDatabase').stats().economyDiagnostics || { enabled: false }
+                main: Diagnostics.metrics(),
+                worker: cold.worker?.developerDiagnostics || null,
+                transport: HistoryDatabase.stats().economyDiagnostics || { enabled: false },
+                observer: observerDiagnostics()
             },
             townNavigation: {
                 paths: invoke('GameServer/Bot/AI/TownNavigation').forPool(invoke('GameServer/Geodata/PathfindingWorkerPool')).stats(),
@@ -2130,6 +2287,24 @@ function worldStatus() {
                 traffic: invoke('GameServer/Bot/AI/TownTraffic').stats()
             }
         } : null
+    };
+    // This build's own time shows in the next one.
+    if (clock !== null) Diagnostics.duration('observer_status', performance.now() - clock);
+    return status;
+}
+
+// The status panel polls every 30 s per tab and reads the population counts
+// (three passes over the life states, the market summary); tabs and the
+// bootstrap that precedes the first poll share one build.
+const WORLD_STATUS_CACHE_MS = 15000;
+const cachedWorldStatus = createAgeCache(worldStatus, WORLD_STATUS_CACHE_MS);
+
+function observerDiagnostics() {
+    return {
+        ...observerStats,
+        worldStatusCache: cachedWorldStatus.stats(),
+        clanDirectoryCache: cachedClanSnapshot.stats(),
+        marketOverviewWorker: MarketTradeOverviewReader.stats()
     };
 }
 
@@ -2198,7 +2373,10 @@ async function marketHistorySnapshot(selfId, range = '24h') {
 async function worldChanges(revision) {
     await ensureWorldProjection();
     await refreshDynamicProjection();
-    return { epoch: WORLD_EPOCH, ...WorldProjection.changesSince(revision) };
+    const clock = Diagnostics.active() ? performance.now() : null;
+    const changes = { epoch: WORLD_EPOCH, ...WorldProjection.changesSince(revision) };
+    if (clock !== null) Diagnostics.duration('observer_changes', performance.now() - clock);
+    return changes;
 }
 
 async function snapshot() {
@@ -2372,11 +2550,14 @@ function teleportPlayerToRaid(playerName, bossTemplateId) {
 }
 
 function sendJson(response, data, statusCode = 200) {
+    const clock = Diagnostics.active() ? performance.now() : null;
+    const body = JSON.stringify(data);
+    if (clock !== null) Diagnostics.duration('observer_json', performance.now() - clock);
     response.writeHead(statusCode, {
         'Content-Type': 'application/json; charset=utf-8',
         'Cache-Control': 'no-store'
     });
-    response.end(JSON.stringify(data));
+    response.end(body);
 }
 
 function sendSnapshotJson(request, response, json) {
@@ -2569,7 +2750,7 @@ function serveWorldReads(request, response, url) {
     }
     if (url.pathname === '/observer/api/world/status') {
         try {
-            sendJson(response, worldStatus());
+            sendJson(response, cachedWorldStatus());
         } catch (err) {
             sendJson(response, { error: err.message }, 500);
         }
@@ -2701,7 +2882,7 @@ function serveChangesAndClanReads(request, response, url) {
     }
 
     if (url.pathname === '/observer/api/clans') {
-        clanSnapshot()
+        cachedClanSnapshot()
             .then((data) => sendJson(response, data))
             .catch((err) => sendJson(response, { error: err.message }, 500));
         return true;
@@ -2974,6 +3155,7 @@ const WorldObserverServer = {
     compactColdDetail,
     compactHotDetail,
     compactClanGoal,
+    compactClanStrategy,
     compactClanCraftPlan,
     compactClanOverview,
     compactClanMember,

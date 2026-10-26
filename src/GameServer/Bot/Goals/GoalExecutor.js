@@ -6,6 +6,8 @@ const SpotRiskPolicy = invoke('GameServer/Bot/Population/SpotRiskPolicy');
 const BotErrands = invoke('GameServer/Bot/Population/BotErrands');
 const ColdTrip = invoke('GameServer/Bot/Population/ColdTrip');
 const TravelRoutes = invoke('GameServer/Bot/Travel/TravelRoutes');
+const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
+const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const CombinedErrands = require('../Population/CombinedErrandPolicy');
 // Other errands are excluded by the activity check and the goal planner.
 const MARKET_TRIP_BUSY_FLAGS = ['partyMarketReturn'];
@@ -25,6 +27,9 @@ function marketTown(name = 'Giran') {
 // other towns. economy: the caller's economy of this same state, if it has one.
 function beginMarketTravel(state, goal, timestamp = Date.now(), { economy = null } = {}) {
     if (!state || !goal || ['traveling', 'shopping', 'merchant', 'crafting'].includes(state.activity)) return null;
+    const ticket = state.stats?.partyMarketReturn;
+    if (Number(ticket?.until) > 0 && Number(ticket.until) <= timestamp)
+        state = { ...state, stats: { ...state.stats, partyMarketReturn: null } };
     if (BotErrands.busyWith(state, MARKET_TRIP_BUSY_FLAGS)) return null;
     const buyingGear = goal.type === 'upgrade_gear'
         && ['market_search_for_weapon', 'market_search_for_gear'].includes(goal.plan?.expectedBenefit);
@@ -100,11 +105,11 @@ function finishVisit(state, timestamp, options) {
         ? invoke('GameServer/Bot/Population/BackgroundPartyState').find(state.stats.partyMarketReturn.partyId) : null;
     let clanReturn = !!state.stats?.partyMarketReturn;
     if (returningParty?.status === 'active') {
-        const leader = invoke('GameServer/Bot/Population/BotLifeState').cachedState(returningParty.leaderId);
+        const leader = BotLifeState.cachedState(returningParty.leaderId);
         if (leader?.loc) destination = { loc: leader.loc, spotId: returningParty.spotId, regionName: leader.currentRegion };
     }
     if (!destination?.loc && options.recoverMissingReturn) {
-        const fallback = invoke('GameServer/Bot/Population/SpotProfiles').findForState({
+        const fallback = SpotProfiles.findForState({
             ...state, activity: 'hunting'
         }, { timestamp });
         const loc = fallback && SpotService.arrivalPointForState(state, fallback);
@@ -134,8 +139,15 @@ function finishVisit(state, timestamp, options) {
     const spotBackoff = returnState && !clanReturn
         ? SpotRiskPolicy.backoffForStates([returnState], destination.spotId, timestamp)
         : null;
+    // returnState stands at the saved spot, so the search's room filter takes
+    // it for the bot's own spot and never refuses it: the saved spot's room
+    // is read here, on main's world index, and a full one is left out of the
+    // search, which then picks another spot (ROUTE-ROOM-4). With no other
+    // spot the bot still goes home; the room is read again at arrival.
+    const refused = !!savedSpot && !clanReturn
+        && !SpotProfiles.roomFilterFor(BotLifeState.occupancyIndex(), SpotProfiles.ensure(), [state])(savedSpot.id);
     const selectedSpot = clanReturn ? savedSpot : returnState
-        ? invoke('GameServer/Bot/Population/SpotProfiles').findForState(returnState, { timestamp })
+        ? SpotProfiles.findForState(returnState, { timestamp, excludedSpotIds: refused ? [savedSpot.id] : [] })
             || (spotBackoff ? null : savedSpot)
         : null;
     // Remaining in town is safer than silently returning to a spot that is

@@ -43,7 +43,7 @@ const sandbox = { module: { exports: {} }, invoke: global.invoke, utils: { infoW
 vm.runInNewContext(fs.readFileSync(root + '/src/GameServer/Bot/Economy/ColdMarketService.js', 'utf8'), sandbox, { filename: 'ColdMarketService.js' });
 const Market = sandbox.module.exports;
 const bot = extra => ({ characterId: 7, name: 'Arrival', phase: 'cold', activity: 'shopping', level: 45, adena: 100000,
-    currentRegion: 'Giran', stats: {}, timing: {}, inventory: {}, simulation: { revision: 3, ownerId: 'legacy_main' }, ...extra });
+    currentRegion: 'Giran', stats: {}, timing: {}, inventory: {}, simulation: { revision: 3 }, ...extra });
 const gear = (adena, plan = {}) => ({ type: 'upgrade_gear', status: 'active',
     target: { itemId: 48, itemName: 'Short Gloves', adena }, plan: { marketTown: 'Giran', ...plan } });
 

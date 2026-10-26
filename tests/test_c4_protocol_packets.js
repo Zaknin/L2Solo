@@ -437,8 +437,8 @@ assert.strictEqual(etcStatusUpdate.readInt32LE(5), 0, 'C4 EtcStatusUpdate should
 const userInfo = ServerResponse.userInfo(actor);
 assert.strictEqual(userInfo[0], 0x04);
 assert.strictEqual(userInfo.readInt32LE(13), 0, 'C4 UserInfo must send boat object id, not character heading');
-assert.deepStrictEqual(actor.paperdollIdSlots, [7, ...Array.from({ length: 14 }, (_, i) => i)]);
-assert.deepStrictEqual(actor.paperdollSelfIdSlots, [7, ...Array.from({ length: 14 }, (_, i) => i)]);
+assert.deepStrictEqual(actor.paperdollIdSlots, [7, ...Array.from({ length: 14 }, (_, i) => i).filter(slot => slot !== 7)]);
+assert.deepStrictEqual(actor.paperdollSelfIdSlots, [7, ...Array.from({ length: 14 }, (_, i) => i).filter(slot => slot !== 7)]);
 assert.ok(userInfo.includes(0xff), 'C4 UserInfo should include trailing name-color bytes');
 
 const fullBodyActor = fakeActor();
@@ -510,6 +510,11 @@ assert.strictEqual(ServerResponse.charInfo(boatActor).readInt32LE(13), 7000001, 
 const nameColorOffset = charInfo.lastIndexOf(Buffer.from([0xff, 0xff, 0xff, 0x00]));
 assert.ok(nameColorOffset > 0, 'C4 CharInfo should end its meaningful payload with name color');
 const charInfoTail = charInfo.subarray(nameColorOffset + 4 - 37, nameColorOffset + 4);
+assert.strictEqual(charInfo.readUInt8(nameColorOffset + 4 - 40), 9, 'C4 public recommendation allowance');
+assert.strictEqual(charInfo.readUInt16LE(nameColorOffset + 4 - 39), 2, 'C4 public recommendation score drives blue names');
+const ownNameColorOffset = userInfo.lastIndexOf(Buffer.from([0xff, 0xff, 0xff, 0x00]));
+assert.strictEqual(userInfo.readUInt16LE(ownNameColorOffset + 4 - 51), 9, 'C4 own recommendation allowance');
+assert.strictEqual(userInfo.readUInt16LE(ownNameColorOffset + 4 - 49), 2, 'C4 own recommendation score');
 assert.strictEqual(charInfoTail.readInt32LE(0), 1000000, 'C4 CharInfo should send mount NPC id with the client NPC offset before class id');
 assert.strictEqual(charInfoTail.readInt32LE(4), 10, 'C4 CharInfo should send class id after mount NPC id');
 assert.strictEqual(charInfoTail.readInt32LE(8), 0, 'C4 CharInfo should not send CP in the public tail');
@@ -641,6 +646,13 @@ const dualPaperdoll = fakePaperdoll();
 dualPaperdoll[7] = {};
 dualPaperdoll[8] = {};
 dualPaperdoll[14] = { id: 4000014, selfId: 999014 };
+const dualUserInfo = ServerResponse.userInfo(fakeActor(dualPaperdoll));
+for (const slot of [7, 14]) {
+    assert.strictEqual(dualUserInfo.readInt32LE(userInfoEquipmentOffset + slot * 4), 4000014,
+        `C4 UserInfo must put the two-hand weapon object id in weapon field ${slot}`);
+    assert.strictEqual(dualUserInfo.readInt32LE(userInfoEquipmentOffset + (16 + slot) * 4), 999014,
+        `C4 UserInfo must put the two-hand weapon display id in weapon field ${slot}`);
+}
 const dualCharInfo = ServerResponse.charInfo(fakeActor(dualPaperdoll));
 const dualEquipment = charInfoEquipment(dualCharInfo);
 assert.strictEqual(dualEquipment.weapon, 999014, 'C4 CharInfo should display slot 14 two-hand weapons in the weapon field');

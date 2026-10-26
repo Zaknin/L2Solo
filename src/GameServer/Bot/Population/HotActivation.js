@@ -94,12 +94,14 @@ const HotActivation = {
 
         return loadState.then((state) => {
             if (!state) return { ok: false, reason: 'missing_state' };
+            const playerInvite = ['remote_invite', 'party_invite'].includes(reason);
+            if (playerInvite && state.party?.partyId) return { ok: false, reason: 'already_grouped', state };
             const encounter = invoke('GameServer/Bot/Population/PvpEncounterRuntime').active(state);
             if (encounter) return invoke('GameServer/Bot/Population/PvpEncounterLifecycle').activate(encounter, reason, options);
             if (state.stats?.coldCompetition?.wait?.combat && state.stats.coldCompetition.wait.until > Date.now()) {
                 return { ok: false, reason: 'cold_pvp_settling' };
             }
-            if (state.phase === 'hot') return { ok: false, reason: 'already_hot', state };
+            if (state.phase === 'hot' && !(options.constParty && state.stats?.constPartySession)) return { ok: false, reason: 'already_hot', state };
             if (state.party?.partyId && options.interruptBackgroundActivity !== true
                 && !['remote_invite', 'party_invite'].includes(reason)) {
                 return invoke('GameServer/Bot/Population/HotPartyLifecycle').activate(state.party.partyId, reason, options);
@@ -144,17 +146,15 @@ const HotActivation = {
                 if (!fence.ok && fence.reason !== 'worker_not_ready') {
                     utils.infoWarn('ColdWorker', 'activation fence fallback for %s: %s', state.name, fence.reason);
                 }
-                return ColdSimulationOwner.handoffToMain(LifeState.cachedState(state.characterId) || state);
+                const current = LifeState.cachedState(state.characterId) || state;
+                if (playerInvite && current.party?.partyId) throw Object.assign(Error('already_grouped'), { partyRefusal: true });
+                if (playerInvite) state = current;
+                return ColdSimulationOwner.handoffToMain(current);
             }).then((handoff) => {
                 if (!handoff.ok) throw new Error(`simulation_owner_handoff_failed:${handoff.reason}`);
                 state = {
                     ...state,
-                    simulation: {
-                        ownerId: handoff.ownerId,
-                        revision: handoff.revision,
-                        leaseId: handoff.leaseId,
-                        leaseUntil: handoff.leaseUntil
-                    }
+                    simulation: { ...state.simulation, revision: handoff.revision }
                 };
                 if (leavesTrip && ['traveling', 'pk_hunting'].includes(state.activity)) {
                     state = {
@@ -234,7 +234,8 @@ const HotActivation = {
                     : Promise.resolve(null);
                 return restore.then(() => {
                     pendingActivations.delete(state.characterId);
-                    const failureReason = craftActivation ? 'craft_recipe_sync_failed' : 'activation_prepare_failed';
+                    const failureReason = error.partyRefusal ? 'already_grouped'
+                        : craftActivation ? 'craft_recipe_sync_failed' : 'activation_prepare_failed';
                     utils.infoWarn('BotPopulation', 'activation failed for %s: %s', state.name, error.message || error);
                     return { ok: false, reason: failureReason, state };
                 });

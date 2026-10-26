@@ -1,4 +1,5 @@
 const Policy = require('../../Social/RevengePolicy');
+const TendencyRoll = require('../AI/TendencyRoll');
 const MAX_ACTORS = 128;
 const partyId = state => state.party?.partyId || state.partyId || null;
 const unitId = state => partyId(state) || `solo:${state.characterId}`;
@@ -14,26 +15,31 @@ function nearby(a, b) {
         && Math.abs(a?.loc?.locZ - b?.loc?.locZ) <= 500;
 }
 class ColdRevengeMonitor {
-    constructor({ onCooldown = () => {} } = {}) {
+    // leaderParty(characterId): the party row a bot leads, or null (the
+    // worker's parties table, ColdSimulationKernel.leaderParty).
+    constructor({ onCooldown = () => {}, leaderParty = () => null } = {}) {
         this.onCooldown = onCooldown;
+        this.leaderParty = leaderParty;
         this.cursor = 0; this.cooldowns = new Map(); this.report = { evaluated: 0, intents: 0 };
     }
-    sample(entries, memory, at, personaFor, rng) {
+    sample(entries, memory, at, personaFor) {
         for (const [id, until] of this.cooldowns) if (until <= at) this.cooldowns.delete(id);
         const byId = new Map(entries.map(e => [e.state.characterId, e]));
         const active = entries.filter(e => available(e.state, at));
         const selected = active.slice(this.cursor % (active.length || 1)).concat(active.slice(0, this.cursor % (active.length || 1)));
-        const events = this.sampleActors(selected.slice(0, MAX_ACTORS), id => byId.get(id), memory, at, personaFor, rng);
+        const events = this.sampleActors(selected.slice(0, MAX_ACTORS), id => byId.get(id), memory, at, personaFor);
         this.report.active = active.length;
         this.cursor += Math.min(MAX_ACTORS, active.length);
         return events;
     }
-    sampleActors(actors, read, memory, at, personaFor, rng, acceptEvent = () => true) {
+    // `rng` is the test override of the roll (tests force outcomes with () => 0).
+    sampleActors(actors, read, memory, at, personaFor, rng = null, acceptEvent = () => true) {
         const events = [];
         const identity = s => ({ id: s.characterId, clanId: Number(s.stats?.clanId || 0), partyId: partyId(s) });
         const participant = e => ({ id: e.state.characterId, name: e.state.name, partyId: partyId(e.state),
-            size: e.context?.party?.memberIds?.length || 1, partyUpdatedAt: e.context?.party?.updatedAt,
-            revision: Number(e.state.simulation?.revision || 0), memoryRevision: memory.views.get(e.state.characterId)?.revision });
+            size: this.leaderParty(e.state.characterId)?.memberIds?.length || 1,
+            partyRevision: this.leaderParty(e.state.characterId)?.revision,
+            revision: Number(e.state.simulation?.revision || 0), memoryRevision: memory.revision(e.state.characterId) });
         const examined = Math.min(MAX_ACTORS, actors.length);
         Object.assign(this.report, { at, active: actors.length, sampledActors: examined, overflow: false });
         for (let i = 0; i < examined; i++) {
@@ -46,8 +52,10 @@ class ColdRevengeMonitor {
                 if (!memory.views.get(id)?.ready) continue;
                 const social = Policy.evaluate(memory.assess(identity(a), identity(b), {}, at), personaFor(a));
                 if (!(social.chance > 0)) continue;
-                // One roll per group per cooldown, independent of observer/heartbeat frequency.
-                const roll = rng();
+                // One roll per grievance (actor, peer) and retry window, the cooldown
+                // this decision starts: independent of the sample time, the batch
+                // order and the observer/heartbeat frequency. The chance stays the policy's.
+                const roll = rng ? rng() : TendencyRoll.roll('revenge', a.characterId, b.characterId, Math.floor(at / Policy.RETRY_MS));
                 if (roll < social.chance) {
                     const event = { key: `revenge:${at}:${a.characterId}:${b.characterId}`, at, action: 'revenge', reason: social.reason,
                         spotId: a.spotId, npcId: 0, contextVersion: 1, pvpIntent: true, revengeRoll: roll, chance: social.chance,

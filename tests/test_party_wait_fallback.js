@@ -3,8 +3,8 @@ const assert = require('assert');
 require('../src/Global');
 
 // A bot whose gear plan needs a party waits for one while it hunts a safe
-// spot. Two places decide this on the main thread: the coordinator route
-// (routeFor) and the command resolve (resolveColdState). These checks pin
+// spot. Two places decide this: the bot's route (BotRoute, in the worker)
+// and the command resolve (resolveColdState). These checks pin
 // who waits and which spot the waiter hunts.
 
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
@@ -18,7 +18,8 @@ const GoalService = invoke('GameServer/Bot/Goals/GoalService');
 const LifeEvents = invoke('GameServer/Bot/Population/BotLifeEvents');
 const GlobalChat = invoke('GameServer/Bot/Population/BotGlobalChat');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
-const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
+const BotRoute = require('../src/GameServer/Bot/Population/BotRoute');
+const PartyWaitFallback = require('../src/GameServer/Bot/Population/PartyWaitFallback');
 
 invoke('GameServer/DataCache').init();
 
@@ -80,10 +81,8 @@ function routeState(characterId, stats, extra = {}) {
         timing: { lastResolvedAt: Date.now() - 30000 }, stats, ...extra };
 }
 
-function coordinatorChecks() {
-    const coordinator = new ColdSimulationCoordinator();
-    const index = () => ({ occupancy: {}, profiles, spots: new Map(profiles.map((entry) => [entry.id, entry])) });
-    const route = (state) => coordinator.routeFor(state, currentSpot, null, [], index());
+function routeChecks() {
+    const route = (state) => BotRoute.route(state, currentSpot, null, [], { spots: profiles, timestamp: Date.now() });
 
     // Waiter: a required request with a party-only plan hunts the plan's safe fallback.
     GearPlanner.safeFallbackForPlan = () => ({ spotId: plannedFallback.id, npcId: 321 });
@@ -102,6 +101,19 @@ function coordinatorChecks() {
     assert.strictEqual(route(routeState(3, { equipmentPlan: partyPlan, partyRequest: requiredRequest })).spotId,
         genericFallback.id, 'an unsafe planned fallback gives way to a plan-free level search');
     assert(searches.some((entry) => entry.spotId === null && !entry.plan), 'the generic search drops plan and saved spot');
+
+    // ROUTE-ROOM-3: the worker's room filter refuses a planned fallback spot
+    // with no room (the plan-free level search decides), but not the spot the
+    // bot stands on.
+    GearPlanner.safeFallbackForPlan = () => ({ spotId: plannedFallback.id, npcId: 321 });
+    const fallbackWith = (state, hasRoom) => PartyWaitFallback.spotFor(state, partyPlan, profiles,
+        { excludedSpotIds: new Set(), timestamp: Date.now(), hasRoom })?.spot?.id;
+    assert.strictEqual(fallbackWith(routeState(7, {}), id => id !== plannedFallback.id), genericFallback.id,
+        'a full planned fallback is skipped: the plan-free search decides');
+    assert.strictEqual(fallbackWith(routeState(8, {}, { spotId: plannedFallback.id }), () => false), plannedFallback.id,
+        'the planned fallback the bot stands on is kept even when it counts as full');
+    assert.strictEqual(fallbackWith(routeState(9, {}), () => true), plannedFallback.id,
+        'a fallback with room is taken');
 
     // No fallback at all: the waiter keeps the ordinary route search.
     GearPlanner.safeFallbackForPlan = () => null;
@@ -164,20 +176,24 @@ async function commandChecks() {
     LifeEvents.recordMany = () => Promise.resolve(null);
     GlobalChat.maybeAnnounce = () => null;
     // The worker's plan is used as it is: a 'farm' plan has no drop source
-    // for main to re-check.
-    const command = (state, plan, context = {}) => {
+    // for main to re-check. The plan arrives with the party request the
+    // worker built for it (main builds none), and the request's route names
+    // the trip it started or the ground it fought on.
+    const command = (state, plan, route) => {
         applied.length = 0;
         upserted.length = 0;
         reviewed.length = 0;
         return PopulationService.resolveColdState(state, {
-            precomputedPlan: { previousPlan: null, acquisitionPlan: plan, replanFailure: null },
+            precomputedPlan: { previousPlan: null, acquisitionPlan: plan, replanFailure: null,
+                partyRequest: invoke('GameServer/Bot/Population/PartyRequestPlanner')
+                    .partyRequestForPlan(state, plan, Date.now(), { economy: { worth: () => 0 } }) },
             precomputedResult: workerFight(),
-            context
+            route
         });
     };
     const farmPartyPlan = { ...partyPlan, strategy: 'farm' };
     const farmSoloPlan = { ...soloPlan, strategy: 'farm' };
-    const worked = { spot: currentSpot, route: null };
+    const worked = { needed: false, spotId: currentSpot.id };
 
     // A waiter with a worker fight is relabelled to the plan's safe fallback.
     GearPlanner.safeFallbackForPlan = () => ({ spotId: plannedFallback.id, npcId: 321 });
@@ -202,7 +218,7 @@ async function commandChecks() {
     assert.strictEqual(applied[0].spotId, plannedFallback.id);
     assert.strictEqual(applied[0].activity, 'resting', 'D3: a found fallback does not skip the rest');
 
-    // Not a waiter: main takes the spot the coordinator chose and keeps the
+    // Not a waiter: main takes the spot the worker fought on and keeps the
     // worker fight; it runs no spot search of its own (step 1.3 U3).
     SpotProfiles.findForState = () => assert.fail('a command runs no second spot search');
     result = await command(routeState(15, {}), farmSoloPlan, worked);
@@ -211,13 +227,12 @@ async function commandChecks() {
     assert.strictEqual(applied[0].spotId, currentSpot.id);
     assert(reviewed.length && reviewed.every((id) => id === currentSpot.id),
         'the goal review sees the ground the worker fought on');
-    // A trip the coordinator started names its destination.
-    result = await command(routeState(17, {}), farmSoloPlan,
-        { spot: currentSpot, route: { needed: true, spotId: levelSpot.id } });
+    // A trip the worker's step started (its request's route) names its destination.
+    result = await command(routeState(17, {}), farmSoloPlan, { needed: true, spotId: levelSpot.id });
     assert.strictEqual(applied.length, 1);
     assert(reviewed.length && reviewed.every((id) => id === levelSpot.id), 'the goal review sees the trip\'s destination');
-    // Without any spot in the worker's context the rest stays.
-    result = await command(routeState(16, {}), farmSoloPlan, {});
+    // Without any spot in the worker's route the rest stays.
+    result = await command(routeState(16, {}), farmSoloPlan, { needed: false, spotId: null });
     assert.strictEqual(result.reason, 'missing_spot_recovery', 'no spot anywhere: the bot rests and retries');
     assert.strictEqual(upserted[0].value.activity, 'resting');
     SpotProfiles.findForState = findForStateStub;
@@ -250,7 +265,7 @@ async function run() {
     SpotService.findCurrentSpot = () => currentSpot;
     SpotService.arrivalPointForState = (state, destination) => ({ ...destination.center });
     LevelingRoutes.isSpotAllowedForState = (candidate) => candidate.id !== unsafeFallback.id;
-    coordinatorChecks();
+    routeChecks();
     await commandChecks();
     console.log('Party wait fallback checks passed');
 }

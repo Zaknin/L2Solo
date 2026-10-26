@@ -1,11 +1,9 @@
 const Protocol = require('./ColdSimulationProtocol');
 const { WorkerCommandAdmissionRefusal, checkWorkerCommandAdmission } = require('./WorkerCommandAdmission');
 
-const columns = Object.freeze(['characterId', 'phase', 'activity', 'simulationOwner', 'simulationRevision',
-    'simulationLeaseId', 'activityStartedAt', 'nextResolveAt', 'lastResolvedAt', 'lastHotAt', 'updatedAt']);
+const columns = Protocol.CHECKPOINT_FIELDS;
 const timing = ['activityStartedAt', 'nextResolveAt', 'lastResolvedAt', 'lastHotAt'];
-// The bound lifecycle statement is the native 29-column BotLifeState.save ROW.
-// Ownership fields remain unchanged in its UPDATE and come from the private proof.
+// The bound lifecycle statement is the native 32-column BotLifeState.save ROW (and its revision).
 const rowParameters = Object.freeze({ characterId: 0, activity: 10, phase: 11,
     activityStartedAt: 12, nextResolveAt: 13, lastResolvedAt: 14, lastHotAt: 15, updatedAt: 28 });
 const sessions = new WeakMap();
@@ -91,7 +89,7 @@ function checkRow(proof, statement) {
     const proposed = { ...captured.expected };
     for (const [key, index] of Object.entries(rowParameters)) proposed[key] = statement[1][index];
     const next = nativePoint(proposed);
-    if (!next || next.phase !== 'cold' || next.simulationOwner !== 'legacy_main') refuse('outgoing_checkpoint', captured, proposed);
+    if (!next || next.phase !== 'cold') refuse('outgoing_checkpoint', captured, proposed);
 }
 
 function checkTarget(proof, characterId) {
@@ -101,8 +99,19 @@ function checkTarget(proof, characterId) {
 
 function check(proof, row) {
     const captured = captures.get(proof), current = nativePoint(row);
-    if (!captured || !current || current.phase !== 'cold' || current.simulationOwner !== 'legacy_main'
-        || !Protocol.sameCommandCheckpoint(captured.expected, current)) refuse('native_checkpoint', captured, current || row);
+    if (!captured || !current || current.phase !== 'cold'
+        || !Protocol.sameCommandCheckpoint(captured.expected, current)) refuseDrift(captured, current, row);
+}
+
+// Failure-only detail: the checkpoint fields the row moved past the command's
+// copy, as the diagnostic's differences (the save failure log, L127) and as
+// `checkpointDrift`, the names the caller reloads. A fence moves only the
+// revision and updatedAt; a real state change also moves activity or the clocks.
+function refuseDrift(captured, current, row) {
+    const error = diagnose(new WorkerCommandAdmissionRefusal('stale_command'), 'native_checkpoint', captured, current || row);
+    const differences = refusalDiagnostics.get(error)?.checkpointDifferences;
+    if (captured && current && differences) error.checkpointDrift = Object.keys(differences);
+    throw error;
 }
 
 // Database calls this only with its same queued successful ROW RETURNING.
@@ -110,7 +119,7 @@ function check(proof, row) {
 function advance(proof, row) {
     const captured = captures.get(proof), next = nativePoint(row);
     if (!captured || !next || next.characterId !== captured.characterId
-        || next.phase !== 'cold' || next.simulationOwner !== 'legacy_main'
+        || next.phase !== 'cold'
         || !Protocol.sameCommandCheckpoint(captured.expected, captured.session.expected)) refuse('advance_checkpoint', captured, next);
     captured.session.expected = Object.freeze({ ...next });
 }

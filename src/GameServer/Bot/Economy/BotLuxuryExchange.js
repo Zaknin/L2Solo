@@ -1,6 +1,7 @@
 'use strict';
 
 const Shop = require('../../World/Generics/NpcExchangeShopLists');
+const Index = require('../../Item/ItemTemplateIndex');
 const NPC_IDS = [7097, 7098], CRYSTAL_D = 1458;
 let spawns, items, catalog;
 // One immutable index per thread, rebuilt only when authored spawns change.
@@ -13,7 +14,7 @@ function recipes() {
     for (const region of spawns || []) for (const row of region.spawns || [region])
         if (Number(row.total) > 0 && NPC_IDS.includes(Number(row.selfId))) enabled.add(Number(row.selfId));
     for (const npcId of enabled) Shop.fetchForNpc(npcId).forEach((row, recipeIndex) => {
-        if (require('../../Item/ItemTemplateIndex').find(items, row.result.selfId)?.etc?.rank !== 'c') return;
+        if (Index.find(items, row.result.selfId)?.etc?.rank !== 'c') return;
         const required = row.required.filter(item => Number(item.selfId) === CRYSTAL_D);
         if (required.length !== 1 || !(Number(required[0].amount) > 0)) return;
         catalog.set(Number(row.result.selfId), Object.freeze({ npcId, recipeIndex,
@@ -32,7 +33,7 @@ function eligible(state, recipe, forCrystals = false) {
     if (!recipe || !Progression.allowsCGradeAcquisition(state) || Number(state.level) < 20
         || Number(state.level) < 40 && Progression.assess(state).required) return false;
     const Data = invoke('GameServer/DataCache'), Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
-    const item = require('../../Item/ItemTemplateIndex').find(Data.items, recipe.itemId);
+    const item = Index.find(Data.items, recipe.itemId);
     return !!item && (forCrystals && Number(state.level) >= 40 || Planner.suitable(item, state, Planner.roleFor(state), 'c'));
 }
 module.exports = { recipes, resolve, eligible, NPC_IDS, CRYSTAL_D };

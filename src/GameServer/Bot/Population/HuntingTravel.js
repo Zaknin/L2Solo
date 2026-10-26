@@ -15,7 +15,7 @@ function routeDestination(state = {}, route = {}) {
     return route?.destinations?.[String(state.characterId)] || route?.to || null;
 }
 
-// Starts one bot's trip along a route: the coordinator's (routeFor), or one
+// Starts one bot's trip along a route: the bot's own (BotRoute), or one
 // main builds from a spot (PopulationService.beginHuntingTravel). A party
 // trip arrives `grouped` and leaves the party's backoff out of the member's
 // own record; a solo trip records its backoff on the bot.
@@ -40,12 +40,14 @@ function beginHuntingTrip(state = {}, route = null, timestamp = Date.now()) {
             : route.reason || (state.stats?.equipmentPlan?.status === 'active'
                 ? 'equipment_source_replan'
                 : 'level_replan'),
-        ...(route.cause ? { cause: route.cause } : {})
+        ...(route.cause ? { cause: route.cause } : {}),
+        // The held leaf's spot this trip stands in for (BotRoute.trip).
+        ...(route.leafSpotId != null ? { leafSpotId: route.leafSpotId } : {})
     }, timestamp, {
         durationMs: Number(route.travelMs) || HUNTING_TRAVEL_MS,
         // A party travels as one: every member arrives at the party's time.
         sharedMs: isPartyRoute ? Number(route.travelMs) || 0 : 0,
-        extraStats: { pveEncounter: null, ...(isPartyRoute ? { backgroundPartySpotId: route.spotId } : {}) }
+        extraStats: { pveEncounter: null }
     });
 }
 

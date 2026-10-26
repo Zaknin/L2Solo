@@ -1,5 +1,6 @@
 process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
@@ -97,13 +98,13 @@ async function main() {
     try {
         const requirements = {};
         for (const rate of ['x1', 'x10', 'x50']) {
-            process.env.L2NODE_PROGRESSION_RATE = rate;
+            useRate(rate);
             requirements[rate] = ContributionPolicy.scaledAdenaRequirement(0);
         }
         assert(requirements.x1 < requirements.x10 && requirements.x10 < requirements.x50);
         assert(requirements.x50 < requirements.x1 * 50, 'Adena scaling must remain sublinear');
 
-        process.env.L2NODE_PROGRESSION_RATE = 'x1';
+        useRate('x1');
         ClanSimulationService.resetMetrics();
         const firstHours = await ClanSimulationService.resolveBatch(64, { budgetMs: 5000 });
         assert(firstHours.created > 0, 'eligible first-hours population must create autonomous clans');
@@ -210,8 +211,7 @@ async function main() {
         }));
         console.log('Clan simulation Slice 6 checks passed');
     } finally {
-        if (previousRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-        else process.env.L2NODE_PROGRESSION_RATE = previousRate;
+        useRate(previousRate);
         await Database.close();
     }
 }

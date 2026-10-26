@@ -1,15 +1,15 @@
 const { performance } = require('perf_hooks');
 const BoardReviewEvents = require('./BoardReviewEvents');
+const Diagnostics = require('./EconomyDiagnostics');
 
+// A hot review is fenced by the revision; the phase is the DB's hot check.
+// No hot time: every hot merge moves lastHotAt without a new decision.
 function authorityOf(state) {
-    return { ownerId: state.simulation?.ownerId || 'legacy_main',
-        revision: Number(state.simulation?.revision || 0), leaseId: state.simulation?.leaseId || null };
+    return { revision: Number(state.simulation?.revision || 0) };
 }
 
-function sameAuthority(state, expected) {
-    const actual = authorityOf(state);
-    return actual.ownerId === expected.ownerId && actual.revision === expected.revision
-        && actual.leaseId === expected.leaseId;
+function sameRevision(state, expected) {
+    return authorityOf(state).revision === expected.revision;
 }
 
 function botSession(session) {
@@ -96,6 +96,7 @@ class HotBoardReviewService {
         if (session.tradeMeetingPresence) require('../../AfkTrade/TradeMeetingService').wake(session.actor.fetchId());
         if (!this.running) return false;
         const id = Number(session.actor?.fetchId?.());
+        // lazy: cycle ColdSimulationCoordinator loads this service
         invoke('GameServer/Bot/Population/ColdSimulationCoordinator').requestEconomyLook(id);
         this.ownerChanged(id, 'natural');
         return true;
@@ -112,8 +113,20 @@ class HotBoardReviewService {
     ownerChanged(id, reason = 'owner', revision = null) {
         if (!this.running) return;
         id = Number(id);
-        if (!this.life.hotRow(id) || !this.events.ownerStatus(id).priced) this.forgetLook(id);
-        this.events.ownerChanged(Number(id), reason, revision);
+        if (!this.life.hotRow(id)) {
+            // Only a hot owner is reviewed here; drain defers any other. A cold
+            // owner's commit or claim carries nothing for it, and its move to
+            // hot is a phase change that raises this event with the hot row.
+            // Forgetting readies nothing, so no pump: the registry tick
+            // (PopulationService.startHotBoardReviews) retries a pressure-denied
+            // drain of hot owners instead of every cold commit.
+            this.forgetLook(id);
+            this.events.forget(id);
+            if (Diagnostics.active()) Diagnostics.count('hot_board_review', 'skip', 'not_hot');
+            return;
+        }
+        if (!this.events.ownerStatus(id).priced) this.forgetLook(id);
+        this.events.ownerChanged(id, reason, revision);
         this.pump();
     }
 
@@ -160,19 +173,11 @@ class HotBoardReviewService {
                 currentRegion: record.session.currentRegion || hot.currentRegion,
                 spotId: record.session.currentSpot?.id ?? hot.spotId,
                 marketTrades: hot.marketTrades || {}, stats: { ...hot.stats, classId: Number(actor.fetchClassId?.() ?? hot.stats?.classId ?? 0) } };
-            const persona = invoke('GameServer/Bot/AI/BotPersona').of(state), packet = state.stats?.money;
             // A natural look consumes accepted scalar prices of time/money.
             // It cannot build a whole hunt/stock/recipe forecast on main.
-            const prepared = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.decided?.(state);
-            const readyWorth = id => require('../Population/ColdEconomyDecision').preparedCardWorth(prepared,
-                id, state, Number(packet?.[1]), persona.understanding, invoke('GameServer/Bot/AI/KnowledgeLearning').knowledgeEnabled());
-            const economy = { persona, hourAdena: Number(packet?.[0]), moneyPrice: Number(packet?.[1]),
-                gapHorizonHours: NaN, worth: readyWorth };
             const Look = require('./BoardLook'), lines = this.board.ownerLines(id);
             const mask = invoke('GameServer/Bot/Population/ColdSimulationCoordinator').economyDecisions.feasibilityFor(state);
-            const ctx = this.pricing.traderContext(state, { economy, persona, board: this.board,
-                npcOffersFor: selfId => invoke('GameServer/Bot/Economy/MarketOpportunity').npcOffersAll(selfId),
-                preparedWorth: readyWorth, preparedBuffer: prepared?.data,
+            const ctx = this.listings.cardTraderContext(state, { board: this.board,
                 canSell: Look.feasibilityPredicate(state, lines, mask) });
             // The cursor is attached to the native hot session, so >8 lines
             // advance on successive natural breaks without a polling timer.
@@ -187,7 +192,7 @@ class HotBoardReviewService {
                 return this.running && this.generation === generation && this.afk.isBoardReady()
                     && current?.token === record.token && current.session === record.session
                     && current.actor === record.actor && !!usableOwner(current) && !!life
-                    && sameAuthority(life, hotAuthority);
+                    && sameRevision(life, hotAuthority);
             };
             const result = await this.market.applyReview(id, review, { hotAuthority, canCommitReview });
             if (!this.running || this.generation !== generation) return;

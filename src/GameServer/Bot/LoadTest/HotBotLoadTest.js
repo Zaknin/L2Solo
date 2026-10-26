@@ -284,7 +284,6 @@ const HotBotLoadTest = {
         const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
         const candidates = LifeState.allStates(Math.max(100, coldMin + 100))
             .filter((state) => state.phase === 'cold'
-                && (!state.simulation?.ownerId || state.simulation.ownerId === 'legacy_main')
                 && !state.partyId
                 && !state.party?.partyId
                 && ['hunting', 'resting'].includes(state.activity))

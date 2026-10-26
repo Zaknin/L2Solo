@@ -342,7 +342,7 @@ assert.strictEqual(shotDelay(speeds, { spell: false, hitTime: 1200 }), 1200, 'ph
 // The cold profile stores the C4 rate once: base 8 x WIT bonus (a weapon is held) x magic-critical buffs.
 const sorcererWit = Number(sorcererProfileFor().base.wit);
 function sorcererProfileFor(effects = []) {
-    return ColdCombatProfile.profileFor({ ...sorcerer, stats: { ...sorcerer.stats, coldCombat: { effects } } }, TS);
+    return ColdCombatProfile.fightProfile({ ...sorcerer, stats: { ...sorcerer.stats, coldCombat: { effects } } }, TS);
 }
 const plainSorcerer = sorcererProfileFor();
 const Formulas = invoke('GameServer/Formulas');

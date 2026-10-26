@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 
 require('../src/Global');
 
@@ -40,10 +41,9 @@ function saleItem(item, count = 1, price = 1000) {
 const seller = { characterId: 10, name: 'Seller', level: 40, stats: {} };
 const originalRate = process.env.L2NODE_PROGRESSION_RATE;
 function atRate(rate, work) {
-    process.env.L2NODE_PROGRESSION_RATE = rate;
+    useRate(rate);
     try { return work(); } finally {
-        if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-        else process.env.L2NODE_PROGRESSION_RATE = originalRate;
+        useRate(originalRate);
     }
 }
 

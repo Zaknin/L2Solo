@@ -123,8 +123,9 @@ function tryStart(session, now = Date.now(), rng = Math.random) {
     if (!invoke('GameServer/Effects/EffectRestrictions').canUseBasicAction(session.actor)) return false;
     const life = invoke('GameServer/Bot/Population/BotLifeState').cachedState(Number(session.actor.fetchId()));
     if (now < Math.max(Number(life?.stats?.revengeUntil || 0), Number(life?.stats?.coldCompetition?.conflictUntil || 0))) return false;
-    const enemies = Memory.views.get(Number(session.actor.fetchId()))?.characterIds || [];
-    if (!enemies.length || now < Number(session.nextRevengeScanAt || 0)) return false;
+    if (now < Number(session.nextRevengeScanAt || 0)) return false;
+    const enemies = [...(Memory.views.get(Number(session.actor.fetchId()))?.characterIds || [])];
+    if (!enemies.length) return false;
     session.nextRevengeScanAt = now + SCAN_MS;
     for (const enemyId of enemies) {
         const target = invoke('GameServer/Bot/AI/BotPvpIndex').actor(enemyId);

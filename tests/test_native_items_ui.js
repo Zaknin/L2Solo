@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('fs');
 require('../src/Global');
 // Advance a monotonic test clock between intentional UI actions. Burst behavior
@@ -21,7 +22,7 @@ const command = (text) => { requestTime += 250; return Native(session, ['native-
 const speak = (text) => { requestTime += 250; return Speak(session, new Send(0x38).writeS(text).writeD(0).fetchBuffer(false)); };
 const fixture = () => fixtures.push(body());
 try {
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     const rareChances = [0, 100, 1.666, 0.05, 0.01, 0.00432, 0.000001, 0.00000001];
     for (const tab of ['drops', 'spoils']) {
         const detail = { id: 1, sources: { [tab]: rareChances.map((chancePercent) => ({ id: 0, chancePercent })) } };
@@ -51,7 +52,7 @@ try {
     }
     command('filter all all 1'); assert.strictEqual(rows()[0][1], '1', 'exact item ID ranks first');
     for (const preset of ['x1', 'x10', 'x50']) {
-        process.env.L2NODE_PROGRESSION_RATE = preset;
+        useRate(preset);
         for (const id of [1, 57, 1872]) {
             command(`filter all all ${id}`); assert.strictEqual(Number(rows()[0][1]), id);
             command(`inspect ${id}`);
@@ -81,5 +82,5 @@ try {
     assert.throws(() => Protocol.encode({ rows: Array(9).fill({}) }), /bounds/);
     console.log(`Native item database: real .items and bypass, legacy fallback, filters, exact search, preserved pages, rates, ${fixtures.length} wire fixtures passed`);
 } finally {
-    if (oldRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE; else process.env.L2NODE_PROGRESSION_RATE = oldRate;
+    useRate(oldRate);
 }

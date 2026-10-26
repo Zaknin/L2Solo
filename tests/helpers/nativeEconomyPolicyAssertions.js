@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const nativeDecision = require('./workerEconomyDecision');
 const Decision = require('../../src/GameServer/Bot/Population/ColdEconomyDecision');
+const Sections = require('../../src/GameServer/Bot/Economy/DecisionSections');
 
 // Independent E3 oracle over the real worker packet: C(r) is the cumulative
 // cost of wishes above r. This helper never creates or alters a money packet.
@@ -54,7 +55,7 @@ async function captureAndRead(state, { timestamp, context = {}, needsOptions = {
     const accepted = { ...state, stats: { ...state.stats, ...captured.statsPacket } };
     const native = Decision.compact(captured.decision);
     assert.equal(native.updatedAt, state.updatedAt);
-    assert.equal(native.key, Decision.stateKey(state));
+    assert.deepEqual(native.echo, Decision.stateEcho({ ...state, stats: { ...state.stats, ...captured.statsPacket } }));
     assert.deepEqual(captured.forbiddenLoaded, []);
     assert.equal(Floor.forState(accepted, timestamp), null, 'this fixture reaches the voluntary decision reader');
     const originalFull = Economy.forState;
@@ -103,9 +104,11 @@ async function captureAndRead(state, { timestamp, context = {}, needsOptions = {
         assertFunding(accepted);
         assert.deepEqual(Needs.evaluate({ ...accepted, updatedAt: accepted.updatedAt + 1 }, options), [],
             'a later main timestamp cannot consume the previous decision');
-        assert.deepEqual(Needs.evaluate({ ...accepted, level: accepted.level + 1 }, options), [],
-            'a different native class/level key cannot consume the previous decision');
-        assert.deepEqual(Economy.summary().mainColdForState, {}, 'all main cold checks use a stored capture');
+        // A level move raises the build section (its event check): a card
+        // holds only while no section is raised.
+        assert.deepEqual(Needs.evaluate({ ...accepted, level: accepted.level + 1, stats: { ...accepted.stats,
+            wishDirty: Sections.sectionMask(['build']) } }, options), [],
+            'a raised build section cannot consume the previous decision');
         console.log(JSON.stringify({ characterId: state.characterId, nativeActivity: leaf.activity,
             goalType: goal.type, money: accepted.stats.money, nativeQueue: captured.queue }));
         return { state: accepted, captured, activity: leaf, goal };

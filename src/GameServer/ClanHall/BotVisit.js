@@ -3,6 +3,7 @@ const Services = require('./Services');
 const Approach = invoke('GameServer/Bot/AI/TownNpcApproach');
 const Navigation = invoke('GameServer/Bot/AI/CompanionNavigationRecovery');
 const VisitPolicy = require('./VisitPolicy');
+const { local } = require('./VisitNeed');
 const RETRY_MS = 300000;
 const VISIT_MS = 180000;
 
@@ -21,14 +22,6 @@ function safe(session, actor) {
         !session.spotRelocation &&
         !session.townEscape &&
         !session.pendingTownTrip
-    );
-}
-function local(actor, hall) {
-    const p = Services.point(actor);
-    const town = invoke('GameServer/World/TownRespawn').getClosestTown(p.locX, p.locY, p.locZ);
-    return (
-        Runtime.Policy.inside(hall, actor) ||
-        (town?.name === hall.town && Math.hypot(p.locX - hall.spawn.locX, p.locY - hall.spawn.locY) <= 7500)
     );
 }
 function finish(session, actor, retryAt) {
@@ -79,7 +72,7 @@ function tick(session, actor, timestamp = Date.now()) {
             return false;
         const needsBuffs = Services.missing(actor, hall, timestamp).length > 0;
         const nearby = local(actor, hall);
-        if (!needsBuffs && (!nearby || !Services.recovery(actor, hall))) return false;
+        if (!needsBuffs && (!nearby || !Services.recovery(actor, hall, timestamp))) return false;
         session.clanHallVisit = { hallId: hall.id, startedAt: timestamp, expiresAt: timestamp + VISIT_MS };
         actor.automation?.abortAll?.(actor);
         actor.unselect?.();
@@ -135,7 +128,7 @@ function tick(session, actor, timestamp = Date.now()) {
         finish(session, actor, timestamp + RETRY_MS);
         return false;
     }
-    if (!grouped && Runtime.Policy.inside(hall, actor) && Services.recovery(actor, hall)) {
+    if (!grouped && Runtime.Policy.inside(hall, actor) && Services.recovery(actor, hall, timestamp)) {
         if (!actor.state?.fetchSeated?.()) {
             actor.state.setSeated(true);
             session.dataSendToOthers?.(invoke('GameServer/Network/Response').sitAndStand(actor), actor);

@@ -271,6 +271,52 @@ conversation-only, with no tools or game actions. The clan shares a bounded
 in-memory conversation history, separate from party chat and private tells;
 it expires after 30 minutes of inactivity and resets on server restart.
 
+### Autonomous clan strategy
+
+With inference configured, autonomous clans choose a persistent strategic objective
+using the leader's stored drive and seven personality traits, capable roster,
+available treasury and recent strategic outcomes. Supported objectives are clan
+progression (through the existing level-four trial), member equipment, a native
+raid upgrade, recruitment, a treasury reserve and a clan hall. Native planners
+still own routes, readiness, spending checks and execution. Strategic equipment
+planning replaces the additional per-item LLM selection.
+
+`[ClanSimulation] strategicManagementEnabled` enables this layer by default;
+`llmGoalManagementEnabled` controls its inference calls. An installation without
+configured inference and without an existing strategy keeps its legacy lifecycle.
+Setting `strategicManagementEnabled = false` restores that lifecycle explicitly.
+Existing strategies continue deterministically during an inference outage.
+Their next decision still discovers fresh native equipment plans, even with
+inference disabled. Disabling inference retires pending strategic advice without
+waiting for its response or applying it later.
+
+A cheap review checks progress and significant changes; elapsed time alone does
+not require an LLM call. Choices survive restarts, and ordinary loot, movement and
+simulation revisions do not invalidate them. `strategyMinHoldMs` defaults to 30
+minutes, `strategyStallMs` to six hours, and `strategyRetryMs` to five minutes.
+Accepted equipment targets survive changed quotes, routes and personal gear
+preferences. A missing tactical route must persist for the retry interval before
+another strategic choice; gathering materials also refreshes the stall timer.
+Clan crystal shortages enter the shared economy's native purchase, crystallization
+and Luxury exchange chain, retaining the accepted equipment owner and reservations.
+Completion, an unavailable route or a changed leader can trigger an earlier
+review. Each clan has at most one model request in flight. The compact request
+has an estimated input limit of 1800 tokens and a 128-token completion limit.
+It skips the gateway's expanding schema-repair generation. Failed or stale responses use
+validated deterministic choices with a persisted retry backoff.
+
+The strategy directs discretionary clan purchases and prioritizes recruitment.
+Ordinary recruitment continues alongside every strategic objective and aims for
+the clan level's full member limit (10, 15, 20, 30, 40, 40 at levels 0–5).
+Candidate suitability and the configured population share limit still apply;
+selected raid and crafting recruits retain their reserved places.
+Existing raid/trial commitments and player orders retain priority; maintenance and personal
+bot lifecycles retain their native executors. Observer's clan detail shows the
+strategic objective, measurable progress, reason and cumulative reported token
+usage separately from the current operational task. A durable completed-upgrade
+counter carries progress across objectives and restores prior completions from
+the clan history when upgrading an existing world.
+
 ## In-Game Commands
 
 - `.admin` - open the admin menu.

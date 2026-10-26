@@ -45,6 +45,22 @@ async function until(predicate, label, turns = 200) {
     }
     throw new Error(`timed out: ${label}`);
 }
+// Posts one state page the worker never gets. The table page that goes
+// ahead of it (the memory row ensureMany published) reaches the worker.
+async function sendLostStatePage(coordinator, worker, entry) {
+    const post = worker.postMessage;
+    const lost = [];
+    let sent;
+    try {
+        worker.postMessage = message => {
+            if (message.type === 'snapshot_page') lost.push(message.type);
+            else Reflect.apply(post, worker, [message]);
+        };
+        sent = await coordinator.sendSnapshotPage([entry]);
+    } finally { worker.postMessage = post; }
+    assert.deepEqual(lost, ['snapshot_page'], 'the one state page was posted and lost');
+    return sent;
+}
 
 (async () => {
     try {
@@ -60,11 +76,11 @@ async function until(predicate, label, turns = 200) {
             locX: 1, locY: 1, locZ: 0 });
         const characterId = Number((await Database.fetchCharacters('bot_safety_runtime_fixture'))[0].id);
         await Database.execute([`INSERT INTO bot_life_state
-            (characterId, accountName, characterName, phase, activity, simulationOwner,
-             simulationRevision, simulationLeaseUntil, activityStartedAt, nextResolveAt,
+            (characterId, accountName, characterName, phase, activity,
+             simulationRevision, activityStartedAt, nextResolveAt,
              lastResolvedAt, updatedAt, statsJson, inventorySummary, hp, maxHp, mp, maxMp)
             VALUES (?, 'bot_safety_runtime_fixture', 'SafetyRuntimeFixture', 'cold', 'resting',
-                'legacy_main', 4, 0, 100, 9999999999999, 100, 1234, '{}', '{}', 100, 100, 100, 100)`, [characterId]]);
+                4, 100, 9999999999999, 100, 1234, '{}', '{}', 100, 100, 100, 100)`, [characterId]]);
         const page = await Life.safetyPage({ limit: 64 });
         assert.equal(page.rows.length, 1);
         assert.equal(page.rows[0].characterId, characterId);
@@ -143,7 +159,7 @@ async function until(predicate, label, turns = 200) {
         coordinator.watchdogTimer = null;
         assert(coordinator.worker instanceof Worker);
         assert.equal(Metrics.coldSafetySource.epoch, coordinator.workerEpoch, 'epoch begins at actual unique Worker creation');
-        assert.equal(coordinator.projectedEntryFor(characterId).ok, true, 'actual initial producer retained valid healthy context');
+        assert.equal(coordinator.projectedEntryFor(characterId).ok, true, 'the repair projects the healthy owner from the cached state');
         const healthy = Protocol.safetyCheckpoint(Life.cachedState(characterId));
         const healthyReceipt = await coordinator.requestSafety('presence', [healthy], coordinator.safetyCurrent());
         assert.equal(healthyReceipt.ok, true);
@@ -153,23 +169,16 @@ async function until(predicate, label, turns = 200) {
             classId: 0, maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0, locX: 1, locY: 1, locZ: 0 });
         const lostId = Number((await Database.fetchCharacters('bot_safety_runtime_fixture')).find(row => row.name === 'SafetyLostFixture').id);
         await execute.call(Database, [`INSERT INTO bot_life_state
-            (characterId, accountName, characterName, phase, activity, simulationOwner,
-             simulationRevision, simulationLeaseUntil, activityStartedAt, nextResolveAt,
+            (characterId, accountName, characterName, phase, activity,
+             simulationRevision, activityStartedAt, nextResolveAt,
              lastResolvedAt, updatedAt, statsJson, inventorySummary, hp, maxHp, mp, maxMp)
             VALUES (?, 'bot_safety_runtime_fixture', 'SafetyLostFixture', 'cold', 'resting',
-                'legacy_main', 4, 0, 100, 9999999999999, 100, 1234, '{}', '{}', 100, 100, 100, 100)`, [lostId]]);
+                4, 100, 9999999999999, 100, 1234, '{}', '{}', 100, 100, 100, 100)`, [lostId]]);
         const lostNative = (await execute.call(Database, ['SELECT * FROM bot_life_state WHERE characterId = ?', [lostId]]))[0];
         const lostState = Life.acceptLifecycleRow(lostNative);
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([lostId]);
-        const prepared = coordinator.snapshotEntry(lostState);
-        const workerPost = coordinator.worker.postMessage;
-        try {
-            coordinator.worker.postMessage = message => {
-                assert.equal(message.type, 'snapshot_page');
-            };
-            assert.equal(await coordinator.sendSnapshotPage([prepared]), true);
-        } finally { coordinator.worker.postMessage = workerPost; }
-        assert.equal(coordinator.projectedEntryFor(lostId).entry, prepared);
+        assert.equal(await sendLostStatePage(coordinator, coordinator.worker, { state: lostState }), true);
+        assert.equal(coordinator.projectedEntryFor(lostId).entry.state, lostState, 'the repair projects the cached state');
         const lostCheckpoint = Protocol.safetyCheckpoint(lostState);
         assert.equal(coordinator.canRepairSafety(lostCheckpoint), true);
         for (const name of ['fencedBots', 'commandInflight']) {
@@ -192,7 +201,7 @@ async function until(predicate, label, turns = 200) {
         const missing = await coordinator.requestSafety('presence', [lostCheckpoint], coordinator.safetyCurrent());
         assert.equal(missing.ok, true);
         assert.equal(missing.results[0].normal.status, 'uncovered');
-        assert.equal(missing.results[0].normal.reason, 'missing_state', 'actual lost delivery, not a context stub');
+        assert.equal(missing.results[0].normal.reason, 'missing_state', 'actual lost delivery, not a stub');
 
         Population.lifecycleSafetySweep = createLifecycleSafetyRuntime(Population, coordinator);
         assert.equal(await Population.startLifecycleSafetySweep(), true);
@@ -255,12 +264,12 @@ async function until(predicate, label, turns = 200) {
         assert.equal(coordinator.worker, replacement, 'late completion of a repeated stop cannot retire replacement');
         assert.equal(Metrics.coldSafetySource.epoch, replacementEpoch);
         assert.notEqual(replacementEpoch, oldEpoch);
-        const beforeLate = coordinator.projectedEntryFor(characterId).entry;
+        const beforeLate = coordinator.projectedEntryFor(characterId).entry.state;
         oldWorker.emit('message', Protocol.envelope('heartbeat', replacementEpoch,
             { safety: { stateRepairs: 999, coverageRepairs: 999, orphanRepairs: 999 } }));
         oldWorker.emit('exit', 0);
         assert.equal(coordinator.worker, replacement, 'late old exit cannot retire replacement');
-        assert.equal(coordinator.projectedEntryFor(characterId).entry, beforeLate, 'late old exit cannot clear new projection');
+        assert.equal(coordinator.projectedEntryFor(characterId).entry.state, beforeLate, 'late old exit cannot clear new projection');
         assert.equal(Metrics.coldSafetySource.epoch, replacementEpoch);
         assert.equal(Metrics.counters.missedEventsRecovered, recovered, 'wrong old Worker cannot report replacement totals');
         Population.stopLifecycleSafetySweep();
@@ -290,22 +299,17 @@ async function until(predicate, label, turns = 200) {
             classId: 0, maxHp: 100, maxMp: 100, sex: 0, face: 0, hair: 0, hairColor: 0, locX: 1, locY: 1, locZ: 0 });
         const awaitId = Number((await Database.fetchCharacters('bot_safety_runtime_fixture')).find(row => row.name === 'SafetyAwaitFixture').id);
         await execute.call(Database, [`INSERT INTO bot_life_state
-            (characterId, accountName, characterName, phase, activity, simulationOwner,
-             simulationRevision, simulationLeaseUntil, activityStartedAt, nextResolveAt,
+            (characterId, accountName, characterName, phase, activity,
+             simulationRevision, activityStartedAt, nextResolveAt,
              lastResolvedAt, updatedAt, statsJson, inventorySummary, hp, maxHp, mp, maxMp)
-            SELECT ?, accountName, 'SafetyAwaitFixture', phase, activity, simulationOwner,
-                simulationRevision, simulationLeaseUntil, activityStartedAt, nextResolveAt,
+            SELECT ?, accountName, 'SafetyAwaitFixture', phase, activity,
+                simulationRevision, activityStartedAt, nextResolveAt,
                 lastResolvedAt, updatedAt, statsJson, inventorySummary, hp, maxHp, mp, maxMp
             FROM bot_life_state WHERE characterId = ?`, [awaitId, characterId]]);
         const awaitNative = (await execute.call(Database, ['SELECT * FROM bot_life_state WHERE characterId = ?', [awaitId]]))[0];
         const awaitState = Life.acceptLifecycleRow(awaitNative);
         await invoke('GameServer/Social/InteractionMemoryRuntime').ensureMany([awaitId]);
-        const awaitEntry = coordinator.snapshotEntry(awaitState);
-        const replacementPost = replacement.postMessage;
-        try {
-            replacement.postMessage = message => { assert.equal(message.type, 'snapshot_page'); };
-            await coordinator.sendSnapshotPage([awaitEntry]);
-        } finally { replacement.postMessage = replacementPost; }
+        await sendLostStatePage(coordinator, replacement, { state: awaitState });
         let readEntered = false, releaseRead;
         const readGate = new Promise(resolve => { releaseRead = resolve; });
         let heldReads = 0;

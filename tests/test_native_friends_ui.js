@@ -13,7 +13,7 @@ function replace(object, key, value) { const old = object[key]; restores.push(()
 const packets = [];
 const session = { actor: { fetchId: () => 42 }, dataSendToMe: (p) => packets.push(p) };
 const rows = Array.from({ length: 9 }, (_, i) => ({ botId: 100 + i, name: `Friend${i}`, level: 55,
-    classId: 16, className: 'Bishop', role: 'healer', trust: i ? 20.5 : 2, familiarity: 7.25,
+    classId: 16, className: 'Bishop', role: 'healer', trust: i ? 20.543219876 : 5.9999, familiarity: 7.256789,
     selected: i === 1, activity: 'hunting', currentRegion: 'Giran' }));
 function body() {
     const p = packets.at(-1); assert.strictEqual(p[0], 0x0f);
@@ -40,10 +40,14 @@ const command = (value) => Native(session, ['native-friends', ...value.split(' '
         replace(Friends, 'selectedCount', async () => 1);
         await Menu.render(session, 'add', 0, null, { open: true });
         assert(body().includes('<title>Bot Friends</title>'));
+        assert(body().includes('trust 20.5 / familiarity 7.3'));
+        assert(body().includes('trust 6.0/6'));
+        assert(!body().includes('bot-friends request Friend0 '), 'display rounding cannot enable a friend request below the trust threshold');
         invoke('GameServer/World/Generics/NpcTalkResponse')(session, { link: 'native-friends open 1' });
         await new Promise((resolve) => setImmediate(resolve));
-        assert(body().includes('state\tadd\t0\t1\t1\t8\t1\t8\t'));
-        assert(body().includes('\t20.5\t7.25\t1\t'));
+        assert(body().includes('state\tadd\t0\t1\t1\t6\t1\t8\t'));
+        assert(body().includes('\t20.5\t7.3\t1\t'));
+        assert(body().includes('\t6.0\t7.3\t0\thunting\tGiran\t0'), 'native display rounding keeps eligibility based on the full trust value');
         if (process.argv[2]) require('fs').writeFileSync(process.argv[2], Buffer.from(body(), 'utf16le'));
         for (const invalid of ['tab bad', 'page -1', 'page 99', 'const 100', 'request 999', 'form']) {
             const before = packets.length; await command(invalid); assert.strictEqual(packets.length, before);

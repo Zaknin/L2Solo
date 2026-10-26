@@ -1,5 +1,6 @@
 const Policy = require('./Policy');
 const ReviewEvents = require('../Clan/ClanReviewEvents');
+const SavedStats = require('../Bot/SavedStats');
 const { integer: n, DAY, WEEK, AUCTION_DURATION } = Policy;
 const json = (raw) => {
     try {
@@ -18,7 +19,6 @@ module.exports = function ({
     inPreparedTransactionBatch,
     withCharacterFlush,
     updateColdInventorySnapshotUnsafe,
-    syncInventorySummaryUnsafe,
     rememberClanContributionUnsafe
 }) {
     function ensure(timestamp) {
@@ -103,7 +103,7 @@ module.exports = function ({
                 const row = stored.get(member.characterId) || {};
                 return { ...member, ...(state || row), characterId: member.characterId,
                     classId: state?.stats?.classId ?? member.classId,
-                    stats: state?.stats || json(row.statsJson), inventory: state?.inventory || json(row.inventorySummary),
+                    stats: state?.stats || SavedStats.merge(row.statsJson, row.mindJson), inventory: state?.inventory || json(row.inventorySummary),
                     persona: state?.persona || { traits: json(member.traitsJson), primaryDrive: member.primaryDrive, archetype: member.archetype } };
             });
             const lots = all('SELECT * FROM clan_halls').map(row => ({ ...Policy.definition(row.id), ...row, functions: json(row.functionsJson) }));
@@ -270,43 +270,16 @@ module.exports = function ({
         );
         return true;
     }
-    // A member's wallet as the dues read it, or null while another owner holds the
-    // member (a party, a live actor or a leased worker snapshot): it pays next time.
-    function memberWallet(id, timestamp) {
+    // A member's wallet as the dues read it (its adena item rows), or null while
+    // another owner holds the member (a party or a live actor): it pays next time.
+    function memberWallet(id) {
         const life = one('SELECT * FROM bot_life_state WHERE characterId=?', [id]);
-        if (
-            !life ||
-            life.phase !== 'cold' ||
-            life.partyId ||
-            !['legacy_main', 'cold_simulation_owner'].includes(life.simulationOwner || 'legacy_main') ||
-            Number(life.simulationLeaseUntil) > timestamp
-        )
-            return null;
+        if (!life || life.phase !== 'cold' || life.partyId) return null;
         const rows = all('SELECT id,amount FROM items WHERE characterId=? AND selfId=57 ORDER BY id', [id]);
-        const workerOwned = life.simulationOwner === 'cold_simulation_owner';
-        const virtual = json(life.inventorySummary);
-        const amount = workerOwned ? n(virtual['57']?.amount ?? life.adena) : rows.reduce((s, r) => s + n(r.amount), 0);
-        return { id, life, rows, workerOwned, virtual, amount };
+        return { id, life, rows, amount: rows.reduce((s, r) => s + n(r.amount), 0) };
     }
     // Pays (delta < 0) or credits (delta > 0) a wallet read by memberWallet.
     function changeWallet(w, delta, clanId, timestamp) {
-        const next = w.amount + delta;
-        if (w.workerOwned) {
-            // Only an unleased persisted worker snapshot can change. Advance its revision
-            // in the same transaction; a proposal based on the old snapshot cannot commit.
-            w.virtual['57'] = { ...(w.virtual['57'] || {}), selfId: 57, name: 'Adena', amount: next };
-            const stats = json(w.life.statsJson);
-            stats.lastClanWarehouseTransfer = { clanId, selfId: 57, amount: delta, at: timestamp };
-            const changed = write(
-                `UPDATE bot_life_state SET inventorySummary=?,adena=?,statsJson=?,simulationRevision=simulationRevision+1,
-                simulationLeaseId=NULL,simulationLeaseUntil=0,updatedAt=? WHERE characterId=? AND phase='cold'
-                AND simulationOwner='cold_simulation_owner' AND simulationRevision=? AND simulationLeaseUntil<=?`,
-                [JSON.stringify(w.virtual), next, JSON.stringify(stats), timestamp, w.id, w.life.simulationRevision, timestamp]
-            );
-            if (changed.affectedRows !== 1) throw Error('Clan dues owner changed');
-            syncInventorySummaryUnsafe(w.id, { 57: w.virtual['57'] });
-            return;
-        }
         if (delta > 0 && w.rows.length) write('UPDATE items SET amount=amount+? WHERE id=?', [delta, w.rows[0].id]);
         else if (delta > 0)
             write(`INSERT INTO items(selfId,name,amount,enchant,equipped,slot,characterId) VALUES (57,'Adena',?,0,0,0,?)`, [delta, w.id]);
@@ -580,6 +553,9 @@ module.exports = function ({
                         id = Number(characterId);
                     if (!c || c.mode !== 'autonomous' || !pay) return { ok: false, code: 'clan_payment_invalid' };
                     const currentGoal = json(c.stateJson).goal;
+                    if (pay > 0 && !invoke('GameServer/Clan/ClanStrategyPolicy').spendingAllowed(
+                        { ...c, state: json(c.stateJson) }, kind === 'clan_level_purchase' ? 'level' : 'equipment'))
+                        return { ok: false, code: 'clan_strategy_reserve' };
                     // Only the exact still-current progression purchase spends
                     // its own earmark. Ordinary member/hall payments cannot.
                     const progressionPurchase = progressionGoal && kind === 'clan_level_purchase'
@@ -593,7 +569,7 @@ module.exports = function ({
                     const maintenance = residence ? Policy.reserve(Policy.definition(residence.id), json(residence.functionsJson)) : 0;
                     const budget = progressionPurchase ? Math.max(0, available(c.id) - maintenance) : spendable(c);
                     if (pay > 0 && budget < pay) return { ok: false, code: 'clan_funds_short' };
-                    const member = memberWallet(id, timestamp);
+                    const member = memberWallet(id);
                     if (!member) return { ok: false, code: 'member_busy' };
                     if (pay < 0 && member.amount < -pay) return { ok: false, code: 'member_funds_short' };
                     money(c.id, -pay, 0, kind, timestamp, id);
@@ -614,9 +590,10 @@ module.exports = function ({
         settleClanDues({ clanId, characterId, rate = 0, investFraction = 0, timestamp = Date.now() }) {
             return withCharacterFlush(Number(characterId), () => {
                 // ARCH-NOTE: Dues also spend a bot's wallet; read its fixed money packet before the transaction instead of stripping it.
+                // The packet is a mind key (SavedStats.MIND_KEYS): its own column.
                 const member = one(`SELECT c.level, c.classId,
                     COALESCE((SELECT SUM(amount) FROM items WHERE characterId=c.id AND selfId=57),0) AS adena,
-                    json_extract(l.statsJson,'$.money') AS money FROM characters c
+                    json_extract(l.mindJson,'$.money') AS money FROM characters c
                     LEFT JOIN bot_life_state l ON l.characterId=c.id WHERE c.id=?`, [Number(characterId)]);
                 const personal = { level: n(member?.level), adena: n(member?.adena), stats: { classId: n(member?.classId),
                     money: member?.money ? json(member.money) : undefined } };
@@ -629,7 +606,7 @@ module.exports = function ({
                         m = one('SELECT clanId,level FROM characters WHERE id=?', [id]);
                     if (!c || c.mode !== 'autonomous' || m?.clanId !== c.id) return { ok: false, code: 'member_busy' };
                     const level = n(c.level);
-                    const payer = memberWallet(id, timestamp);
+                    const payer = memberWallet(id);
                     if (!payer) return { ok: false, code: 'member_busy' };
                     const cursor = one('SELECT * FROM clan_hall_earnings WHERE clanId=? AND characterId=?', [c.id, id]);
                     const wealth = payer.amount + n(cursor?.contributed),

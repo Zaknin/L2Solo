@@ -42,7 +42,7 @@ const Cooldown = {
         // The hand-back of a hot row (a sold-out merchant leaves without markCold).
         return LifeState.upsertState({ ...state, phase: 'cold' }, reason, { releaseHot: true }).then((saved) => {
             if (!saved) return { ok: false, reason: 'state_save_failed' };
-            LifeState.setSessionSnapshotsPhase(session, 'cold');
+            LifeState.setSessionSnapshotsAuthority(session, saved);
 
             return ColdSimulationCoordinator.acceptColdState(saved).then((accepted) => {
                 if (!accepted.ok) {
@@ -72,6 +72,7 @@ const Cooldown = {
 
     canCooldown(session, options = {}) {
         if (!session || !session.actor) return { ok: false, reason: 'missing_actor' };
+        if (session.constActivityPaused) return { ok: false, reason: 'const_activity_paused' };
         if (session.hotCompetitionCommit) return { ok: false, reason: 'social_party_commit' };
         const encounterHandoff = options.encounterKey && session.pvpEncounter?.key === options.encounterKey;
         if (!encounterHandoff && (session.pvpDefense || session.pvpRevenge || session.pendingPvpProvocation)) return { ok: false, reason: 'pvp_active' };

@@ -1,7 +1,8 @@
 const assert = require('assert');
 const Policy = require('../src/GameServer/Social/ResourceCompetitionPolicy');
 const ColdPolicy = require('../src/GameServer/Bot/Population/ColdCompetitionPolicy');
-const { ColdCompetitionMonitor, INTERVAL_MS, seeded } = require('../src/GameServer/Bot/Population/ColdCompetitionMonitor');
+const { ColdCompetitionMonitor, INTERVAL_MS } = require('../src/GameServer/Bot/Population/ColdCompetitionMonitor');
+const { seeded } = require('../src/GameServer/Bot/AI/TendencyRoll');
 const Memory = require('../src/GameServer/Social/InteractionMemory');
 const P = require('../src/GameServer/Social/InteractionMemoryPolicy');
 
@@ -39,11 +40,10 @@ const at = 1800000000000;
 const memory = new Memory();
 const spot = { id: 'null-persona', npcEntries: [{ selfId: 10, count: 1 }] };
 const entries = Array.from({ length: 8 }, (_, i) => ({ state: { characterId: i + 1, name: `Bot${i + 1}`,
-    phase: 'cold', activity: 'hunting', level: 40, spotId: spot.id, vitals: { hp: 100 }, stats: {} },
-    context: { spot, targetNpcId: 10 } }));
+    phase: 'cold', activity: 'hunting', level: 40, spotId: spot.id, vitals: { hp: 100 }, stats: {} } }));
 entries.forEach(e => memory.accept(P.empty(e.state.characterId)));
 function forecast(persona) {
-    const monitor = new ColdCompetitionMonitor({ capacityForSpot: () => 1, personaFor: () => persona });
+    const monitor = new ColdCompetitionMonitor({ capacityForSpot: () => 1, personaFor: () => persona, spotOf: () => spot });
     for (let i = 0; i <= 60; i++) monitor.sample(entries, memory, at + i * INTERVAL_MS);
     return monitor.snapshot();
 }

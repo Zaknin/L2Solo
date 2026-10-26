@@ -34,32 +34,21 @@ async function main() {
         } } }, 'departed_leader_fixture');
     const oldParty = { partyId: 'old-departed-party', status: 'active', leaderId: id,
         memberIds: [id, id + 1], nextResolveAt: at + 3600000 };
-    const staleContext = { isPartyLeader: true, party: oldParty,
-        partyMembers: [{ characterId: id + 1, compact: true }], targetNpcId: 1005,
-        route: { mode: 'party', spotId: 'old-hunt' }, requirementRefresh: true };
+    // The departed leader's party is not in the worker's parties table (main
+    // publishes the row it holds; a departure changes or removes it).
     const kernel = new ColdSimulationKernel({ now: () => at, resolveSolo: input => Resolver.resolveSolo(input),
         projectResolve: (state, result, timestamp) => Life.prepareResolve(state, result, { timestamp, persist: false }),
         emit: (type, payload, msgId) => messages.push({ type, payload, msgId }) });
-    kernel.upsert({ state: paid, context: staleContext });
-    const current = kernel.states.get(id);
-    assert.equal(current.context.isPartyLeader, false, 'a departed leader cannot inherit the active old party context');
-    assert.equal(current.context.party, null);
-    assert.equal(current.context.targetNpcId, null, 'the solo trip cannot retain a former party target');
-    assert.equal(current.context.route, null);
-    assert.equal(staleContext.party, oldParty, 'the shared catalog object is not mutated');
+    kernel.upsert({ state: paid });
+    assert.equal(kernel.leaderParty(id), null, 'a departed leader leads no party row');
     assert.equal(kernel.scheduleTokens.get(id).dueAt, paid.timing.nextResolveAt, 'arrival owns the deadline, not the old hunt');
     kernel.tick();
-    const claim = messages.find(m => m.type === 'claim_request');
-    assert(claim, 'the overdue solo trip must enter its next worker batch');
-    assert.equal(claim.payload.candidates[0].purpose.kind, 'resolver');
-    const grant = await Owner.claim(paid, { timestamp: at, allowLifecycle: true });
-    assert(grant.ok);
-    kernel.onClaimAck({ grants: [{ ...grant, purpose: { kind: 'resolver' } }] }, claim.msgId);
+    assert(kernel.inFlight.has(id), 'the overdue solo trip must enter its next worker step');
     await kernel.resolveChain;
     kernel.flush(null, true);
     const proposal = messages.find(m => m.type === 'proposal_batch')?.payload.proposals[0];
     assert(proposal, 'the native arrival resolver must issue a durable proposal');
-    const [committed] = await Owner.commitAndReleaseBatch([{ token: proposal.token, nextState: proposal.nextState,
+    const [committed] = await Owner.commitBatch([{ revision: proposal.revision, nextState: proposal.nextState,
         proposal, options: proposal.options }], { timestamp: at });
     assert(committed.ok, JSON.stringify(committed));
     const saved = Life.cachedState(id);
@@ -70,23 +59,48 @@ async function main() {
     const amounts = Object.fromEntries((await DB.fetchItems(id)).map(item => [item.selfId, Number(item.amount)]));
     assert.equal(amounts[57], 479600, 'arrival does not charge the trip twice');
     assert.equal(amounts[736], 1);
-    kernel.onCommitAck({ results: [{ characterId: id, ok: true, inputToken: proposal.token,
-        proposalId: proposal.proposalId, state: saved, context: staleContext }] });
-    assert.equal(lifecycleKind(kernel.states.get(id).state, kernel.states.get(id).context), 'command',
-        'town errands can run after the arrival receipt, even with stale party context');
-    kernel.upsert({ state: paid, context: staleContext });
+    kernel.onCommitAck({ results: [{ characterId: id, ok: true,
+        proposalId: proposal.proposalId, state: saved }] });
+    assert.equal(lifecycleKind(kernel.states.get(id).state, kernel), 'command',
+        'town errands can run after the arrival receipt');
+    kernel.upsert({ state: paid });
     assert.equal(kernel.states.get(id).state.activity, 'shopping', 'an older snapshot cannot roll arrival back');
-    assert.equal(kernel.states.get(id).context.party, null, 'an older page cannot resurrect former leadership');
 
     const attached = { ...paid, characterId: id + 10, party: { partyId: oldParty.partyId } };
-    kernel.upsert({ state: attached, context: { ...staleContext,
-        partyMembers: [attached, { characterId: attached.characterId + 1, party: attached.party }],
-        party: { ...oldParty, leaderId: attached.characterId,
-            memberIds: [attached.characterId, attached.characterId + 1] } } });
-    assert.equal(lifecycleKind(attached, kernel.states.get(attached.characterId).context), 'party',
+    const follower = { ...paid, characterId: id + 11, party: attached.party, activity: 'grouped', stats: {},
+        timing: { lastResolvedAt: at - 1000, nextResolveAt: at + 3600000 } };
+    kernel.upsert({ state: attached });
+    kernel.upsert({ state: follower });
+    kernel.partyPut(oldParty.partyId, { ...oldParty, leaderId: attached.characterId,
+        memberIds: [attached.characterId, follower.characterId] });
+    assert.equal(lifecycleKind(attached, kernel), 'party',
         'an attached leader keeps the group writer');
     assert.equal(kernel.scheduleTokens.get(attached.characterId).dueAt, oldParty.nextResolveAt);
     await kernel.shutdown();
+
+    // Main sends the departed leader's solo state at once and rewrites the
+    // party row only after later awaits: a stale row that still names it
+    // leader must not make the solo trip a party writer.
+    const soloKernel = new ColdSimulationKernel({ now: () => at, resolveSolo: input => Resolver.resolveSolo(input),
+        projectResolve: (state, result, timestamp) => Life.prepareResolve(state, result, { timestamp, persist: false }),
+        emit: () => {} });
+    const leftAt = at + 20000;
+    const departed = { ...paid, characterId: id + 20,
+        timing: { lastResolvedAt: at - 1000, nextResolveAt: leftAt },
+        stats: { ...paid.stats, travel: { ...paid.stats.travel, startedAt: at - 1000, arrivalAt: leftAt } } };
+    const staleParty = { partyId: 'stale-departed-party', status: 'active', leaderId: departed.characterId,
+        memberIds: [departed.characterId, id + 21, id + 22], nextResolveAt: at + 3600000 };
+    soloKernel.upsert({ state: departed });
+    for (const followerId of [id + 21, id + 22]) {
+        soloKernel.upsert({ state: { ...follower, characterId: followerId,
+            party: { partyId: staleParty.partyId, leaderId: departed.characterId } } });
+    }
+    soloKernel.partyPut(staleParty.partyId, staleParty);
+    assert.equal(soloKernel.leaderParty(departed.characterId), null, 'a solo state leads no stale party row');
+    assert.equal(lifecycleKind(departed, soloKernel), 'resolver', 'the solo trip keeps its own writer');
+    assert.equal(soloKernel.scheduleTokens.get(departed.characterId).dueAt, leftAt,
+        'the paid trip owns the deadline, no party step');
+    await soloKernel.shutdown();
 
     // Native group results repeat the same party row for every member. The
     // leader's postcommit review can dissolve it before the follower's tail.
@@ -110,6 +124,6 @@ async function main() {
     assert(!Parties.active().some(party => party.partyId === oldParty.partyId));
     assert.equal((await DB.execute(['SELECT status FROM bot_background_parties WHERE partyId=?', [oldParty.partyId]]))[0].status,
         'dissolved', 'the accepted cache agrees with native membership');
-    console.log('PASS detached leader finishes paid market travel through native worker claim/commit; stale context and older pages cannot restore the party');
+    console.log('PASS detached leader finishes paid market travel through native worker step/commit; an older page cannot roll the arrival back');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => world.close());

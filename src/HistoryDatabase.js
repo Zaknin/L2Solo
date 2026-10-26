@@ -23,10 +23,17 @@ let reader = null;
 let config = null;
 let stopping = false;
 let writerTelemetry = null;
+// The history thread's heap as of its last once-a-minute tick (WorkerHeapTelemetry.heapRecord).
+let workerHeap = null;
 let restartTimer = null;
 let nextId = 0;
 const pending = new Map();
-const counters = { moved: 0, failed: 0, flushes: 0, starts: 0, restarts: 0, errors: 0, lastError: null, upTo: 0 };
+// A wake message is pending until the history thread reports a tick; writes
+// that end meanwhile are counted so the report can send the next wake.
+let wakePending = false;
+let writesSinceWake = 0;
+const counters = { moved: 0, failed: 0, flushes: 0, starts: 0, restarts: 0, errors: 0, lastError: null, upTo: 0,
+    wakes: 0, wakesCoalesced: 0 };
 
 function normalizeRow(row) {
     if (!row || typeof row !== 'object') return row;
@@ -80,6 +87,33 @@ function rejectPending(error) {
     [...pending.keys()].forEach((id) => settle(id, error));
 }
 
+// A world write job ended: the history thread should look at the outbox. One
+// message per burst; a write that ends while one is pending is picked up by
+// the wake sent when the thread reports its tick.
+function wake() {
+    if (!worker || stopping) return;
+    if (wakePending) {
+        writesSinceWake += 1;
+        if (PopulationConfig.developerDiagnostics) counters.wakesCoalesced += 1;
+        return;
+    }
+    wakePending = true;
+    writesSinceWake = 0;
+    if (PopulationConfig.developerDiagnostics) counters.wakes += 1;
+    try {
+        worker.postMessage({ type: 'wake' });
+    } catch (error) {
+        // A write job must not fail because the thread is gone; the restart
+        // path starts a new thread whose first tick moves everything.
+        wakePending = false;
+    }
+}
+
+function tickReported() {
+    wakePending = false;
+    if (writesSinceWake > 0) wake();
+}
+
 function reportMoved(upTo) {
     if (upTo <= counters.upTo) return;
     counters.upTo = upTo;
@@ -97,6 +131,9 @@ function spawn() {
             ...(config.diagnostics ? { developerDiagnostics: true, diagnostics: config.diagnostics } : {}) }
     });
     worker = instance;
+    workerHeap = null;
+    wakePending = false;
+    writesSinceWake = 0;
     if (config.diagnostics) Diagnostics.connect(batch => {
         if (worker !== instance) return false;
         const message = { type: 'economy_diagnostics', ...batch };
@@ -107,6 +144,7 @@ function spawn() {
     if (PopulationConfig.developerDiagnostics) counters.starts += 1;
     instance.on('message', (message = {}) => {
         if (instance !== worker) return;
+        if (message.v8Heap && PopulationConfig.developerDiagnostics) workerHeap = message.v8Heap;
         if (message.type === 'economy_diagnostics_ack') {
             if (!config?.diagnostics || !PopulationConfig.developerDiagnostics) return;
             Diagnostics.ack(message.id, message.written);
@@ -114,15 +152,18 @@ function spawn() {
             if (report?.enabled === true) writerTelemetry = { enabled: true, batches: Number(report.batches || 0), records: Number(report.records || 0),
                 dropped: Number(report.dropped || 0), bytes: Number(report.bytes || 0), writeMs: Number(report.writeMs || 0), rotations: Number(report.rotations || 0), fileBytes: Number(report.fileBytes || 0) };
             return; }
+        if (message.type === 'idle') { tickReported(); return; }
         if (message.type === 'moved' || message.type === 'flushed' || message.type === 'stopped') {
             if (PopulationConfig.developerDiagnostics) counters.moved += Number(message.moved || 0);
             if (PopulationConfig.developerDiagnostics) counters.failed += Number(message.failed || 0);
             reportMoved(Number(message.upTo || 0));
+            if (message.type === 'moved') tickReported();
         }
         if (message.type === 'errors' || message.type === 'error') {
             if (PopulationConfig.developerDiagnostics) counters.errors += 1;
             counters.lastError = message.error || (message.errors || []).join('; ');
             utils.infoWarn('DB', 'history transfer: %s', counters.lastError);
+            if (message.type === 'error') tickReported();
         }
         if (message.type === 'flushed' || message.type === 'stopped') {
             settle(Number(message.id), message.error ? new Error(message.error) : null, Number(message.upTo || 0));
@@ -238,8 +279,8 @@ function one(sql, params = []) {
 
 function stats() {
     if (!PopulationConfig.developerDiagnostics) return { path: config?.historyPath || null, running: !!worker, upTo: counters.upTo, diagnostics: { enabled: false } };
-    return { path: config?.historyPath || null, running: !!worker, ...counters,
+    return { path: config?.historyPath || null, running: !!worker, ...counters, v8Heap: workerHeap,
         ...(PopulationConfig.developerDiagnostics && PopulationConfig.economyDiagnostics ? { economyDiagnostics: { ...Diagnostics.stats(), writer: writerTelemetry } } : {}) };
 }
 
-module.exports = { all, flush, one, prepare, start, stats, stop };
+module.exports = { all, flush, one, prepare, start, stats, stop, wake };

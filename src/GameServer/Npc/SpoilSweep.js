@@ -41,21 +41,8 @@ function rollSpoils(npc) {
             return;
         }
 
-        let number = Math.random() * 100;
-        let rewardPartition = 0;
-
-        for (const item of group.items ?? []) {
-            rewardPartition += item.chance;
-
-            if (number <= rewardPartition) {
-                const baseAmount = utils.oneFromSpan(item.min, item.max);
-                awarded.push({
-                    selfId: item.selfId,
-                    name: item.name,
-                    amount: ProgressionRates.scaleAmount(baseAmount, groupRoll.amountMultiplier)
-                });
-                break;
-            }
+        for (const { item, amount } of ProgressionRates.rollSpoilGroup(group, groupRoll.amountMultiplier)) {
+            awarded.push({ selfId: item.selfId, name: item.name, amount });
         }
     });
 

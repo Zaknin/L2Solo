@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const shared = require('./secondProfessionHarness');
 const { H, Service } = shared;
+const Dialogue = require('./npcDialogueHarness');
 
 async function createClericWorld(label, id, extra = []) {
     return shared.createTrialWorld(label, id, extra, { classId: 15, race: 0, level: 34 });
@@ -47,6 +48,9 @@ async function healer(c, donate, foreign = null) {
     assert.equal(H.personalSpawns(c.state(226), 5134).length, 1);
     await c.ownedKill(226, 5134);
     for (const npc of [7428, 7424, 7658]) await c.click(226, 'handin', npc);
+    await Dialogue.talk(c.session, c.world, 7659);
+    assert.match(c.world.page(c.session), /Gupu asks for a donation/);
+    assert.equal(c.cond(226), 6, 'the orphan dialogue does not choose a donation branch');
     if (donate) {
         await Service.giveItem(c.session, 57, 99999);
         assert.equal(await c.event(226, 'donate', 7658), false); assert.equal(await c.amount(57), 99999);
@@ -71,7 +75,7 @@ async function healer(c, donate, foreign = null) {
     await c.kill(5123); assert.equal(await c.amount(2816), 1);
     assert.equal(H.personalSpawns(c.state(226)).length, 0);
     await c.click(226, 'handin', 7674); assert.equal(await c.amount(2816), 1, 'Daurin keeps the original letter for Kristina');
-    await c.click(226, 'guide', 7662);
+    for (const npc of [7662, 7663, 7664]) await c.click(226, 'guide', npc);
     assert(c.session.questWaypoints.size > 0);
     for (const [template, item] of [[5124, 2817], [5125, 2818], [5127, 2819]]) {
         await c.click(226, 'challenge', 7661);
@@ -85,7 +89,8 @@ async function healer(c, donate, foreign = null) {
         await c.kill(template); assert.equal(await c.amount(item), 1);
     }
     for (const i of [2816, 2817, 2818, 2819]) assert.equal(await c.amount(i), 1);
-    await c.click(226, 'handin', 7661); await c.click(226, 'guide', 7663);
+    await c.click(226, 'handin', 7661);
+    for (const npc of [7662, 7663, 7664]) await c.click(226, 'guide', npc);
     assert.equal(c.cond(226), 21);
     await c.click(226, 'handin', 7665); await c.click(226, 'handin', 7327);
     await c.reopen(); await c.click(226, 'finish', 7473);

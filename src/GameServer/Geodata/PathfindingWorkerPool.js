@@ -2,6 +2,7 @@ const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const os = require('os');
 const path = require('path');
 const { Worker } = require('worker_threads');
+const GeodataEngine = require('./GeodataEngine');
 
 function taskError(message, code) {
     const error = new Error(message);
@@ -15,7 +16,10 @@ class BoundedPathfindingWorkerPool {
         this.size = Math.max(1, Math.min(2, Number(options.size) || Math.max(1, available - 1)));
         this.queueLimit = Math.max(this.size, Number(options.queueLimit) || 128);
         this.workerPath = options.workerPath || path.join(__dirname, 'PathfindingWorker.js');
-        this.workerFactory = options.workerFactory || ((workerPath) => new Worker(workerPath, { workerData: { developerDiagnostics: invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true } }));
+        this.workerFactory = options.workerFactory || ((workerPath) => new Worker(workerPath, { workerData: {
+            developerDiagnostics: DiagnosticConfig.developerDiagnostics === true,
+            sharedGeodata: GeodataEngine.sharedDescriptor()
+        } }));
         this.restartLimit = Math.max(0, Number(options.restartLimit) || 3);
         this.workers = [];
         this.restartAttempts = [];
@@ -181,6 +185,7 @@ class BoundedPathfindingWorkerPool {
         const task = slot.task;
         if (!task || Number(message?.id) !== task.id) return;
         slot.task = null;
+        if (message.v8Heap) slot.v8Heap = message.v8Heap;
         const workerMs = Math.max(0, Number(message.workerMs) || 0);
         DiagnosticConfig.developerDiagnostics && (this.metrics.workerMs += workerMs);
         if (task.request.townCorridor && task.priority < 100) this.townWorkMs += workerMs;
@@ -250,7 +255,9 @@ class BoundedPathfindingWorkerPool {
             queue: this.queue.length,
             companionBusy: this.workers.filter((slot) => isCompanion(slot?.task)).length,
             companionQueue: this.queue.filter(isCompanion).length,
-            inFlight: this.tasks.size
+            inFlight: this.tasks.size,
+            // Each worker's heap as of its last path answer (WorkerHeapTelemetry.heapRecord).
+            ...(DiagnosticConfig.developerDiagnostics ? { v8Heaps: this.workers.map(slot => slot?.v8Heap || null) } : {})
         };
     }
 

@@ -1,8 +1,10 @@
+const { isMainThread } = require('node:worker_threads');
 const Tendency = require('../AI/TendencyRoll');
 const Valuation = require('./EconomicValuation');
 const { fnv1a32 } = require('../Fnv1a');
 const Diagnostics = require('./EconomyDiagnostics');
 const { packetRowWishes } = require('./PurchaseFunding');
+const Bytes = require('./CompactBytes');
 const NEEDS = Object.freeze(['power', 'status', 'care', 'scores']);
 const MAX_NODES = 40;
 const MAX_ROOTS = 12;
@@ -13,6 +15,223 @@ const MAX_DEPTH = 6;
 // (EconomicValuation.OUTCOME_LIMIT); a larger composition is unresolved.
 const MAX_BRANCHES = 8;
 const nonnegative = value => Math.max(0, Number(value) || 0);
+// Native stock questions, before owned children disappear from a plan. Exact
+// answers also preserve the prior claims in every subsequent allocation pass.
+// This is one build's bounded evidence, never a second allocation or bag index.
+// It is held packed (the codec below, ~3-6 B a row); the rows exist only
+// while a build records them and while one verdict reads them. The byte cap
+// bounds the packed form, the one form that is held, saved and sent.
+const QUANTITY_INPUT_LIMIT = 1024;
+const QUANTITY_INPUT_BYTES = 8192;
+const QUANTITY_SCALARS = new Set(['physical', 'present', 'freePresent', 'incoming', 'free', 'crystalFree']);
+const QUANTITY_KINDS = Object.freeze([...QUANTITY_SCALARS, 'stock', 'stockPhysical']);
+// Exact transport of the native read list: no rows are merged, inferred or
+// discarded. Each id, root and root literal is written once, at its first
+// use (an id as the signed delta from the previous new id), and
+// as its first-use index after that. Values 0 and 1 live in the row header.
+// The saved decision codec treats this owner's bytes opaquely.
+function packQuantityInputs(proof) {
+    if (proof?.version !== 1 || !Array.isArray(proof.rows) || proof.rows.length > QUANTITY_INPUT_LIMIT) return null;
+    try {
+        const write = Bytes.writer(), ids = new Map(), roots = new Map(), literals = new Map();
+        let lastId = 0;
+        const numberTag = value => {
+            if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw Error('quantity value');
+            return Object.is(value, -0) || !Number.isSafeInteger(value) ? 3 : value <= 1 ? value : 2;
+        };
+        const number = (value, tag) => {
+            if (tag === 2) write.uint(value);
+            else if (tag === 3) write.double(value);
+        };
+        const literal = text => {
+            if (literals.has(text)) { write.uint(literals.get(text)); return; }
+            write.uint(literals.size); literals.set(text, literals.size); write.text(text);
+        };
+        write.byte(3); write.uint(proof.rows.length);
+        for (const row of proof.rows) {
+            if (!Array.isArray(row)) return null;
+            const kind = QUANTITY_KINDS.indexOf(row[0]), rooted = kind >= 6;
+            if (kind < 0 || row.length !== (kind === 6 ? 5 : kind === 7 ? 4 : 3)) return null;
+            const id = row[rooted ? 2 : 1], value = row[rooted ? 3 : 2];
+            if (!Number.isSafeInteger(id) || id <= 0 || rooted && typeof row[1] !== 'string') return null;
+            const first = numberTag(value), second = kind === 6 ? numberTag(row[4]) : 0, fresh = !ids.has(id);
+            write.byte(kind + first * 8 + second * 32 + (fresh ? 128 : 0));
+            if (fresh) {
+                write.signed(id - lastId);
+                ids.set(id, ids.size); lastId = id;
+            } else write.uint(ids.get(id));
+            if (rooted) {
+                const root = row[1];
+                if (roots.has(root)) write.uint(roots.get(root));
+                else {
+                    write.uint(roots.size); roots.set(root, roots.size);
+                    // Tag 1: the root embeds this row's own id between two literals.
+                    const decimal = String(id), at = root.indexOf(decimal);
+                    if (at < 0) { write.byte(0); literal(root); }
+                    else { write.byte(1); literal(root.slice(0, at)); literal(root.slice(at + decimal.length)); }
+                }
+            }
+            number(value, first);
+            if (kind === 6) number(row[4], second);
+        }
+        const bytes = write.finish();
+        return bytes.length <= QUANTITY_INPUT_BYTES ? bytes : null;
+    } catch (_) { return null; }
+}
+// The one decoder: calls visit(row) for each row in order. False on a
+// malformed or over-cap stream, or when visit returns false; a reader
+// error inside visit is not a codec refusal and propagates.
+function eachQuantityRow(value, visit) {
+    if (!(value instanceof Uint8Array) || value.byteLength > QUANTITY_INPUT_BYTES) return false;
+    let visiting = false;
+    try {
+        const read = Bytes.reader(value);
+        const number = tag => {
+            if (tag <= 1) return tag;
+            if (tag === 2) { const result = read.uint(); if (result <= 1) throw Error('quantity integer tag'); return result; }
+            const result = read.double();
+            if (!Number.isFinite(result) || result < 0 || Number.isSafeInteger(result) && !Object.is(result, -0)) throw Error('quantity value');
+            return result;
+        };
+        const literals = [], seenLiterals = new Set();
+        const literal = () => {
+            const index = read.uint();
+            if (index < literals.length) return literals[index];
+            if (index > literals.length) throw Error('quantity literal');
+            const text = read.text();
+            if (seenLiterals.has(text)) throw Error('quantity literal');
+            seenLiterals.add(text); literals.push(text);
+            return text;
+        };
+        if (read.byte() !== 3) return false;
+        const count = read.uint();
+        if (count > QUANTITY_INPUT_LIMIT) return false;
+        const ids = [], seenIds = new Set(), roots = [], seenRoots = new Set();
+        let lastId = 0;
+        for (let i = 0; i < count; i++) {
+            const header = read.byte(), kind = header % 8, first = Math.floor(header / 8) % 4, second = Math.floor(header / 32) % 4;
+            if (kind !== 6 && second) return false;
+            let id;
+            if (header >= 128) {
+                id = lastId + read.signed();
+                if (!Number.isSafeInteger(id) || id <= 0 || seenIds.has(id)) return false;
+                seenIds.add(id); ids.push(id); lastId = id;
+            } else {
+                const index = read.uint();
+                if (index >= ids.length) return false;
+                id = ids[index];
+            }
+            let row;
+            if (kind >= 6) {
+                const index = read.uint();
+                if (index > roots.length) return false;
+                if (index === roots.length) {
+                    const tag = read.byte();
+                    if (tag > 1) return false;
+                    const text = tag ? literal() + String(id) + literal() : literal();
+                    if (seenRoots.has(text) || Buffer.byteLength(text) > QUANTITY_INPUT_BYTES) return false;
+                    seenRoots.add(text); roots.push(text);
+                }
+                row = kind === 6 ? [QUANTITY_KINDS[kind], roots[index], id, number(first), number(second)]
+                    : [QUANTITY_KINDS[kind], roots[index], id, number(first)];
+            } else row = [QUANTITY_KINDS[kind], id, number(first)];
+            visiting = true;
+            if (visit(row) === false) return false;
+            visiting = false;
+        }
+        return read.done();
+    } catch (error) {
+        if (visiting) throw error;
+        return false;
+    }
+}
+// The whole list, frozen (tests, inspection). A verdict streams instead.
+function unpackQuantityInputs(value) {
+    const rows = [];
+    if (!eachQuantityRow(value, row => { rows.push(Object.freeze(row)); })) return null;
+    return Object.freeze({ version: 1, rows: Object.freeze(rows) });
+}
+function createQuantityInputs() {
+    const rows = [], seen = new Map();
+    // invalid: '' or the first reason the proof is void (diagnostics name it).
+    let invalid = '', finished = false, packed = null;
+    const record = row => {
+        if (invalid || finished) return;
+        const key = row[0] === 'stock' || row[0] === 'stockPhysical'
+            ? `${row[0]}:${row[1]}:${row[2]}` : `${row[0]}:${row[1]}`;
+        const previous = seen.get(key);
+        if (previous) {
+            for (let at = 0; at < row.length; at++) if (previous[at] !== row[at]) invalid ||= 'conflict';
+            return;
+        }
+        if (rows.length >= QUANTITY_INPUT_LIMIT) { invalid = 'rows'; return; }
+        seen.set(key, row); rows.push(row);
+    };
+    const scalar = kind => (id, value) => {
+        if (!Number.isSafeInteger(Number(id)) || Number(id) <= 0 || !Number.isFinite(nonnegative(value))) invalid ||= 'value';
+        if (kind === 'incoming' && Number(value || 0) < 0) invalid ||= 'value';
+        record([kind, Number(id), kind === 'present' || kind === 'freePresent' ? Number(nonnegative(value) > 0) : nonnegative(value)]);
+        return value;
+    };
+    return {
+        stock(id, rootKey, value) {
+            if (typeof rootKey !== 'string' || !Number.isSafeInteger(Number(id)) || Number(id) <= 0
+                || !Number.isFinite(nonnegative(value?.owned)) || !Number.isFinite(nonnegative(value?.incoming))) invalid ||= 'value';
+            record(['stock', String(rootKey), Number(id), nonnegative(value?.owned), nonnegative(value?.incoming)]);
+            return value;
+        },
+        stockPhysical(rootKey, id, value) {
+            if (typeof rootKey !== 'string' || !Number.isSafeInteger(Number(id)) || Number(id) <= 0
+                || !Number.isFinite(nonnegative(value))) invalid ||= 'value';
+            record(['stockPhysical', rootKey, Number(id), nonnegative(value)]);
+            return value;
+        },
+        physical: scalar('physical'), present: scalar('present'), freePresent: scalar('freePresent'),
+        incoming: scalar('incoming'), free: scalar('free'), crystalFree: scalar('crystalFree'),
+        unsupported() { invalid ||= 'unsupported'; },
+        // The packed proof (eachQuantityRow reads it) or null.
+        finish() {
+            if (!finished) {
+                finished = true;
+                if (!invalid) packed = packQuantityInputs({ version: 1, rows });
+                if (!invalid && !packed) invalid = 'bytes';
+                // Diagnostics: why a completed build has no quantity proof.
+                if (invalid && Diagnostics.active()) Diagnostics.count('context', 'quantity_invalid', invalid);
+                seen.clear(); rows.length = 0;
+            }
+            return packed;
+        }
+    };
+}
+// Whether every row of the packed proof still answers the same; skip(row)
+// true leaves a row out. Rows come from the decoder, so their shape and
+// values are already valid; a missing reader is never quiet. A moved
+// answer pushes 'quantity' to why; false without it is a stream the
+// codec refuses (or a missing reader). stockFor gets the row it answers.
+function quantityInputsHold(packed, readers, normalizeStock = null, skip = null, why = null) {
+    const moved = () => { why?.push('quantity'); return false; };
+    return eachQuantityRow(packed, row => {
+        if (skip?.(row)) return true;
+        if (row[0] === 'stock') {
+            if (typeof readers?.stockFor !== 'function') return false;
+            const stock = readers.stockFor(row[2], row[1], row);
+            const owned = nonnegative(stock?.owned);
+            const comparable = normalizeStock ? normalizeStock('stock', row[1], row[2], owned, row[3]) : owned;
+            return comparable === row[3] && nonnegative(stock?.incoming) === row[4] || moved();
+        }
+        if (row[0] === 'stockPhysical') {
+            if (typeof readers?.physical !== 'function') return false;
+            const owned = nonnegative(readers.physical(row[2]));
+            return (normalizeStock ? normalizeStock('stockPhysical', row[1], row[2], owned, row[3]) : owned) === row[3] || moved();
+        }
+        const read = row[0] === 'present' ? readers?.physical : row[0] === 'freePresent' ? readers?.free : readers?.[row[0]];
+        if (typeof read !== 'function') return false;
+        const raw = read(row[1]);
+        if (row[0] === 'incoming' && (!Number.isFinite(Number(raw || 0)) || Number(raw || 0) < 0)) return moved();
+        const value = nonnegative(raw);
+        return (row[0] === 'present' || row[0] === 'freePresent' ? Number(value > 0) : value) === row[2] || moved();
+    });
+}
 // Native commands for `batches`: a path without perCommand runs one batch each.
 const commands = (batches, perCommand) => Math.ceil(batches / (Number(perCommand) >= 1 ? Number(perCommand) : 1));
 // A trip is one row per town: a quoted seller or workshop, or a farm spot
@@ -24,6 +243,27 @@ const travels = path => !!path.town && (path.quoted || path.activity === 'huntin
 function remainingQuantity({ required = 0, freePhysical = 0, acceptedIncoming = 0 } = {}) {
     const free = nonnegative(required) - nonnegative(freePhysical);
     return { toOrder: Math.max(0, free - nonnegative(acceptedIncoming)), toExecute: Math.max(0, free) };
+}
+// A one-way diagnostic loss event for the retained craft's own batch.
+// 'unchanged' covers only these necessary inputs, never allocation readiness.
+// The caller supplies the same native stock reader as the held allocation.
+function craftMaterialLoss(proof, stockFor) {
+    if (!proof || typeof stockFor !== 'function' || typeof proof.rootKey !== 'string'
+        || !Array.isArray(proof.output) || proof.output.length !== 3
+        || !Array.isArray(proof.inputs) || !proof.inputs.length || proof.inputs.length > MAX_NODES) return 'unknown';
+    const [itemId, owned, incoming] = proof.output;
+    if (!Number.isSafeInteger(itemId) || itemId <= 0 || !Number.isFinite(owned) || owned < 0
+        || !Number.isFinite(incoming) || incoming < 0) return 'unknown';
+    const output = stockFor(itemId, proof.rootKey) || {};
+    if (nonnegative(output.owned) !== owned || nonnegative(output.incoming) !== incoming) return 'unknown';
+    for (const row of proof.inputs) {
+        if (!Array.isArray(row) || row.length !== 2 || !Number.isSafeInteger(row[0]) || row[0] <= 0
+            || !Number.isSafeInteger(row[1]) || row[1] <= 0) return 'unknown';
+        const stock = stockFor(row[0], proof.rootKey) || {};
+        const remaining = remainingQuantity({ required: row[1], freePhysical: stock.owned, acceptedIncoming: stock.incoming });
+        if (remaining.toExecute) return 'loss';
+    }
+    return 'unchanged';
 }
 // Independent identical batches merged by success count: a multiset of k
 // outcomes out of B kinds, C(B + k - 1, k). Two kinds give k + 1.
@@ -89,9 +329,14 @@ function moneyQueue(wishes, wallet, survivalReserve = 0, floor = 0) {
 // Per-actor results are a cache, not state: memory per bot is budgeted
 // (design 16.26). They serve the several readers of one decision (a commit,
 // a resolve, a hot tick); a bot's next decision rebuilds the cheap layer
-// anyway (new adena, exp), while the expensive one is kept per build
-// (ColdCombatProfile.buildGainsFor). So few are held, least recently used out.
+// anyway (new adena, exp), while the expensive one is kept per kit
+// (ColdCombatProfile.profileFor). So few are held, least recently used out.
+// Only the main thread holds them (its group solve and repeated readers hit).
+// The cold worker keeps the result in the held plan (EconomyContext cache,
+// 2048 plans), so a second per-actor copy there never hit and only cost
+// copies and evictions.
 const ACTOR_LIMIT = 64;
+const RETAIN_ACTORS = isMainThread;
 function remember(map, key, value, limit = ACTOR_LIMIT) {
     map.delete(key);
     map.set(key, value);
@@ -134,7 +379,7 @@ function sameResult(before, after) {
 // use the same path facts, quantity reader and root valuation (MVP-6); its
 // scratch maps die with the caller's build.
 function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, wallet = 0, survivalReserve = 0,
-    diagnostic = false, detail = false, trace = null }) {
+    diagnostic = false, detail = false, trace = null, captureReadyCraft = false }) {
     const byKey = new Map();
     for (const node of nodes) {
         if (typeof node?.key !== 'string' || !node.key || byKey.has(node.key)
@@ -144,6 +389,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         byKey.set(node.key, node);
     }
     const plans = new Map(), ordinaryPlans = new Map(), visiting = new Set();
+    const proofPlans = captureReadyCraft ? [] : null;
     // A finite trial may plan a future purchase before a seller appears.
     // Its source choice cannot overwrite ordinary executable-first item
     // plans. These scratch maps are bounded by the graph and depth limit;
@@ -173,13 +419,15 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         const fees = tripValue(entries, 'fees');
         return tripValue(entries, 'hours') + (fees > 0 ? fees * adenaToHours : 0);
     };
-    const priceOf = path => {
+    // ownInput: the path's own-input value, or 0 where held units are priced
+    // by the allocation instead (no copy of the path per call).
+    const priceOf = (path, ownInput = path.ownInputOpportunityValue) => {
         if (!Number.isFinite(adenaToHours)) return nonnegative(path.price)
-            + nonnegative(path.ownInputOpportunityValue) + nonnegative(path.actualCashFees) > 0 ? Infinity
+            + nonnegative(ownInput) + nonnegative(path.actualCashFees) > 0 ? Infinity
             : nonnegative(path.costHours) + nonnegative(path.riskHours) * nonnegative(riskWeight);
         const value = Valuation.opportunity({ moneyPrice: adenaToHours, riskWeight }, [{ probability: 1,
             cashNow: nonnegative(path.price), foregoneBenefitHours: nonnegative(path.costHours),
-            ownInputOpportunityValue: nonnegative(path.ownInputOpportunityValue),
+            ownInputOpportunityValue: nonnegative(ownInput),
             actualCashFees: nonnegative(path.actualCashFees), riskHours: nonnegative(path.riskHours) }]);
         return value.known ? -value.valueHours : Infinity;
     };
@@ -196,7 +444,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         repeatables.set(key, result);
         return result;
     };
-    const solve = (key, depth = 0, requested = 1, allocation = null, planning = false, completionFirst = false) => {
+    const solve = (key, depth = 0, requested = 1, allocation = null, planning = false, completionFirst = false, stockFacts = null) => {
         if (visiting.has(key)) throw new TypeError('cyclic_wish_network');
         const node = byKey.get(key);
         if (!node) throw new TypeError('missing_wish_requirement');
@@ -211,13 +459,17 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         }
         visiting.add(key);
         const itemId = key.startsWith('item:') ? Number(key.slice(5)) : 0;
-        let amount = requested, ownValue = 0, incomingHeld = 0;
+        let amount = requested, ownValue = 0, incomingHeld = 0, outputStock = null;
         if (allocation && itemId) {
             const stock = stockFor(itemId, allocation.rootKey) || {};
             const prior = allocation.used.get(itemId) || 0;
             const remaining = remainingQuantity({ required: requested,
                 freePhysical: Math.max(0, nonnegative(stock.owned) - prior),
                 acceptedIncoming: Math.max(0, nonnegative(stock.incoming) - Math.max(0, prior - nonnegative(stock.owned))) });
+            // Optional diagnostic facts come from this exact native subtraction,
+            // before an owned child disappears from the selected requirements.
+            if (stockFacts) stockFacts.push([itemId, requested, prior, remaining.toOrder, remaining.toExecute]);
+            if (captureReadyCraft && depth === 1) outputStock = [itemId, nonnegative(stock.owned), nonnegative(stock.incoming)];
             const owned = requested - remaining.toExecute;
             incomingHeld = remaining.toExecute - remaining.toOrder;
             amount = remaining.toOrder;
@@ -256,11 +508,17 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
             const units = allocation && ['craft', 'crystallize'].includes(path.kind)
                 ? Math.ceil(amount / Number(path.productCount || 1)) : allocation ? amount : 1;
             if (!Number.isSafeInteger(units) || units <= 0) continue;
+            // ARCH-NOTE: PERF path-only facts, once per path (both evaluations read them).
+            const unitEffort = allocation ? priceOf(path, 0) : priceOf(path);
+            const inputs = allocation ? path.grossRequirements || path.requirements || [] : path.requirements || path.grossRequirements || [];
+            const leaf = Array.isArray(inputs) && inputs.length === 0;
             // Forecast the complete output first. A native batch limit only
             // bounds the next command, never the materials or price of the goal.
             const evaluate = (units, command = false) => {
-                const local = allocation ? { rootKey: allocation.rootKey, used: new Map(allocation.used) } : null;
-                let price = nonnegative(path.price) * units, effort = (allocation ? priceOf({ ...path, ownInputOpportunityValue: 0 }) : priceOf(path)) * units,
+                // ARCH-NOTE: PERF a path without inputs solves no child: it claims no stock, so the
+                // claims need no copy and no merge back.
+                const local = allocation && !leaf ? { rootKey: allocation.rootKey, used: new Map(allocation.used) } : null;
+                let price = nonnegative(path.price) * units, effort = unitEffort * units,
                     available = true, height = 0, awaitingIncoming = !command && incomingHeld > 0;
                 if (allocation && !command && ownValue > 0) effort += ownValue * adenaToHours;
                 let executable = path.executable !== false;
@@ -281,7 +539,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
                     hours = nonnegative(valuation.cycleHours);
                 }
                 const requirements = [];
-                const inputs = allocation ? path.grossRequirements || path.requirements || [] : path.requirements || path.grossRequirements || [];
+                const inputFacts = captureReadyCraft && allocation && depth === 1 && path.kind === 'craft' && !command ? [] : null;
                 // Exact once-per-path inputs (a recipe scroll) are paid once,
                 // never per attempt; consumed inputs of one attempt are the rest.
                 const untilSuccess = !planning && path.kind === 'craft' && successProbability > 0 && successProbability < 1
@@ -289,7 +547,7 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
                 for (const requirement of inputs) {
                     const amount = nonnegative(requirement.amount ?? 1) * (allocation ? requirement.once ? 1 : units : 1);
                     if (!Number.isSafeInteger(amount) || amount <= 0) { available = false; break; }
-                    const child = solve(requirement.key, depth + 1, amount, local, planning, completionFirst);
+                    const child = solve(requirement.key, depth + 1, amount, local, planning, completionFirst, inputFacts);
                     if (!child || !amount) { available = false; break; }
                     if (!child.executable || Number(child.availableUnits ?? Infinity) < amount) executable = false;
                     supported &&= child.supported !== false;
@@ -324,15 +582,31 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
                     branches += mergedBranches(2, commands(units, path.perCommand)) - 1;
                 }
                 price += onceCash; effort += onceEffort; hours += onceHours;
+                // E303: counted only where the branch cap itself cuts (not when a child already left the
+                // path unresolved, not in the native command pass); no check counter, the denominator is
+                // provider:admission:evaluation. The depth cap is counted by provider:admission_pending:evaluation_limit
+                // for provider roots; the group path (EconomyContext) depth is not counted.
+                const ownCut = resolved && branches > MAX_BRANCHES;
                 resolved &&= branches <= MAX_BRANCHES;
+                if (ownCut && !command && diagnostic) Diagnostics.count('cap', 'branches', 'cut');
                 const basePrice = price, baseEffort = effort, baseHours = hours;
                 price += tripValue(tripEntries, 'fees'); effort += tripEffort(tripEntries); hours += tripValue(tripEntries, 'hours');
-                if (available && allocation && !command) for (const [id, count] of local.used) alternativeUse.set(id, Math.max(alternativeUse.get(id) || 0, count));
-                if (available) return { ...path, executable, supported, resolved, branches, quoted, tripEntries,
-                    successProbability: probability, attemptProbability: successProbability, untilSuccess,
-                    ...(allocation ? { requestedAmount: requested, missingAmount: amount, batches: units, awaitingIncoming } : {}),
-                    basePrice, baseEffort, baseHours, price, effort, hours, requirements, height };
-                else if (diagnostic) Diagnostics.count('network', 'path_refused', 'missing_requirement');
+                if (available && local && !command) for (const [id, count] of local.used) alternativeUse.set(id, Math.max(alternativeUse.get(id) || 0, count));
+                if (available) {
+                    const result = { ...path, executable, supported, resolved, branches, quoted, tripEntries,
+                        successProbability: probability, attemptProbability: successProbability, untilSuccess,
+                        ...(allocation ? { requestedAmount: requested, missingAmount: amount, batches: units, awaitingIncoming } : {}),
+                        basePrice, baseEffort, baseHours, price, effort, hours, requirements, height };
+                    if (inputFacts?.length && inputFacts.length === inputs.length && outputStock
+                        && executable && !awaitingIncoming && !requirements.length
+                        && inputFacts.every(([, , , toOrder, toExecute]) => toOrder === 0 && toExecute === 0)
+                        && new Set(inputFacts.map(row => row[0])).size === inputFacts.length) {
+                        Object.defineProperty(result, 'readyCraftProof', { configurable: true, value: { output: outputStock,
+                            inputs: inputFacts.map(([id, required]) => [id, required]) } });
+                        proofPlans.push(result);
+                    }
+                    return result;
+                } else if (diagnostic) Diagnostics.count('network', 'path_refused', 'missing_requirement');
                 return null;
             };
             const choice = evaluate(units);
@@ -396,6 +670,12 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         return node?.object?.kind === 'resale' && node.paths?.some(path => ['craft', 'spoil_sale'].includes(path.kind)
             && path.trial === true && path.repeatable === false);
     };
+    // A direct production root is itself the craft path. Its finite output
+    // quantity must enter allocation, just like an item requirement does;
+    // otherwise even an eleven-batch goal requests one batch of inputs.
+    const rootAmount = node => node?.object?.kind === 'resale'
+        && node.paths?.some(path => path.kind === 'craft' && path.trial === true && path.repeatable === false)
+        && Number.isSafeInteger(node.object.amount) && node.object.amount > 0 ? node.object.amount : 1;
     // MVP-4: one horizon H per root; a benefit per hour starts when the
     // path is ready (funding delay at net income, then the path's hours).
     // An unknown delay keeps the interest unresolved: no money, no gap.
@@ -435,7 +715,8 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
     // returned claims enter the caller's map only when it keeps the root.
     const allocate = (wish, used) => {
         const allocation = { rootKey: wish.key, used: new Map(used) };
-        const plan = solve(wish.key, 0, 1, allocation, finiteProduction(wish.key), byKey.get(wish.key).progressionPriority > 0);
+        const plan = solve(wish.key, 0, rootAmount(byKey.get(wish.key)), allocation,
+            finiteProduction(wish.key), byKey.get(wish.key).progressionPriority > 0);
         wish.progressionPriority = nonnegative(byKey.get(wish.key).progressionPriority);
         wish.progressionFunding = !!byKey.get(wish.key).progressionFunding;
         wish.plan = plan; wish.price = plan?.price ?? Infinity; wish.effort = plan?.effort ?? Infinity;
@@ -451,12 +732,22 @@ function createSolver({ nodes, hourAdena = 0, riskWeight = 1, stockFor = null, w
         plans.set(wish.key, plan);
         return allocation.used;
     };
-    return { byKey, plans, finiteProduction, tripValue, tripEffort, rootWish, allocate };
+    const takeReadyCraftProof = !captureReadyCraft ? null : (rootKey, nodeKey) => {
+        const requirements = plans.get(rootKey)?.requirements;
+        const proof = requirements?.length === 1 && requirements[0].key === nodeKey
+            ? requirements[0].plan?.readyCraftProof || null : null;
+        // No diagnostic properties survive in the returned network or card.
+        for (const plan of proofPlans || []) delete plan.readyCraftProof;
+        if (proofPlans) proofPlans.length = 0;
+        return proof;
+    };
+    return { byKey, plans, finiteProduction, tripValue, tripEffort, rootWish, allocate, takeReadyCraftProof };
 }
 // MVP-6: roots in the caller's rank order while the union of their reachable
 // nodes stays within the bound. A root that does not fit is pending (not
 // deleted, not zero cost); the smaller roots after it still proceed.
-function admitRoots(roots, byKey, { rootLimit = MAX_ROOTS, nodeLimit = MAX_NODES } = {}) {
+// label 'solo' (a bot's own review, counted in WishProviders as provider:admission_pending) or 'group' (EconomyContext).
+function admitRoots(roots, byKey, { rootLimit = MAX_ROOTS, nodeLimit = MAX_NODES, label = 'solo' } = {}) {
     const kept = new Set(), admitted = [], pending = [];
     for (const key of roots) {
         if (admitted.length >= rootLimit) { pending.push({ key, reason: 'root_limit' }); continue; }
@@ -475,6 +766,22 @@ function admitRoots(roots, byKey, { rootLimit = MAX_ROOTS, nodeLimit = MAX_NODES
         for (const at of reach) kept.add(at);
         admitted.push(key);
     }
+    if (Diagnostics.active()) {
+        // E303: how often the caps cut. The solo dropped counts already exist as provider:admission_pending
+        // root_limit/node_limit, so solo counts only checks and cuts; the group path has no other counter.
+        let rootDropped = 0, nodeDropped = 0;
+        for (const row of pending) row.reason === 'root_limit' ? rootDropped++ : nodeDropped++;
+        const group = label === 'group';
+        Diagnostics.count('cap', group ? 'roots_group' : 'roots_solo', 'check');
+        if (rootDropped) {
+            Diagnostics.count('cap', group ? 'roots_group' : 'roots_solo', 'cut');
+            if (group) Diagnostics.count('cap', 'roots_group', 'dropped', rootDropped);
+        }
+        if (nodeDropped) {
+            Diagnostics.count('cap', group ? 'nodes_group' : 'nodes_solo', 'cut');
+            if (group) Diagnostics.count('cap', 'nodes_group', 'dropped', nodeDropped);
+        }
+    }
     return { roots: admitted, kept, pending };
 }
 class WishNetwork {
@@ -488,11 +795,14 @@ class WishNetwork {
     }
 
     // `remembered: false` builds without touching the per-actor cache (a
-    // caller that holds the result itself, or a one-off proposal).
+    // caller that holds the result itself, or a one-off proposal). The worker
+    // never retains (RETAIN_ACTORS).
     build({ actorKey, inputKey, characterId, decisionSeq = 0, activityLeaf = 0, nodes, roots, wallet = 0, survivalReserve = 0,
         playedHours = 0, persona = {}, previous = {}, hourAdena = 0, riskWeight = 1, moneyPaths = [], remembered = true,
-        caller = 'wish_network', trigger = 'request', stockFor = null, preserveFocus = false, completionKey = null }) {
+        caller = 'wish_network', trigger = 'request', stockFor = null, completionKey = null, reconsider = true,
+        reconsiderReasons = null, onReadyCraftProof = null }) {
         const diagnostic = Diagnostics.active();
+        const captureReadyCraft = typeof onReadyCraftProof === 'function';
         if (diagnostic) Diagnostics.count('network', 'request');
         if (typeof actorKey !== 'string' || !actorKey || typeof inputKey !== 'string'
             || !Array.isArray(nodes) || nodes.length > MAX_NODES || !Array.isArray(roots) || roots.length > MAX_ROOTS
@@ -502,9 +812,11 @@ class WishNetwork {
         const individual = Number(characterId) > 0;
         decisionSeq = Math.max(0, Math.trunc(Number(decisionSeq) || 0));
         activityLeaf = Number(activityLeaf) >>> 0;
-        const cached = remembered ? this.cache.get(actorKey) : null;
+        const retain = remembered && RETAIN_ACTORS;
+        const cached = retain ? this.cache.get(actorKey) : null;
         if (cached?.inputKey === inputKey && cached.decisionSeq === decisionSeq && cached.activityLeaf === activityLeaf
-            && cached.completionKey === completionKey) {
+            && cached.completionKey === completionKey && cached.reconsider === reconsider) {
+            if (captureReadyCraft) onReadyCraftProof(null);
             if (diagnostic) Diagnostics.count('network', 'hit', 'same_inputs');
             return remember(this.cache, actorKey, cached).result;
         }
@@ -512,11 +824,13 @@ class WishNetwork {
         const detail = diagnostic && Diagnostics.enabled(characterId);
         const trace = detail ? { owner: Number(characterId), caller, trigger,
             inputHash: fnv1a32(inputKey), decisionSeq, activityLeaf } : null;
-        if (diagnostic) Diagnostics.count('network', 'miss', !remembered ? 'uncached_actor' : cached ? 'input_dependency_changed' : 'not_retained');
-        // ARCH-NOTE: group and clan decisions retain their existing event-key seed.
+        if (diagnostic) Diagnostics.count('network', 'miss', !remembered ? 'uncached_actor' : !retain ? 'held_plan_only' : cached ? 'input_dependency_changed' : 'not_retained');
+        // Group and clan decisions roll on their input name: a group's
+        // is its members' facts keys, so a party's choice is rolled again only
+        // when a member's facts, market reads, decision sequence, leaf or focus move.
         const roll = kind => individual ? Tendency.roll(characterId, decisionSeq, kind)
             : Tendency.roll(actorKey, inputKey, kind);
-        const solver = createSolver({ nodes, hourAdena, riskWeight, stockFor, wallet, survivalReserve, diagnostic, detail, trace });
+        const solver = createSolver({ nodes, hourAdena, riskWeight, stockFor, wallet, survivalReserve, diagnostic, detail, trace, captureReadyCraft });
         const { byKey, plans, finiteProduction, tripValue, tripEffort } = solver;
         const kept = wish => wish.valueHours > 0 && wish.plan
             && (!finiteProduction(wish.key) || wish.valueHours > wish.effort);
@@ -562,10 +876,14 @@ class WishNetwork {
         const focusWishes = wishes.filter(wish => wish.progressionPriority === activePriority);
         const loyalty = Math.min(1, nonnegative(persona.traits?.commitment ?? 0.5));
         const score = wish => wish.valueHours / Math.max(1 / 3600, wish.effort);
+        // Only an event (reconsider: the caller's raised sections or due soft changes)
+        // weighs a held choice against the others; an ordinary rebuild keeps it.
+        // A held choice survives a reconsideration while no row beats it by the bot's loyalty.
+        // Leaf values already carry the off-focus (1 - loyalty) weight; the margin is the same trait.
+        const loyal = (choice, rows) => !reconsider || rows.every(row => score(row) <= score(choice) * (1 + loyalty));
         const held = focusWishes.find(wish => wish.key === previous.focus?.[0]);
-        const challenger = focusWishes.reduce((best, wish) => !best || score(wish) > score(best) ? wish : best, null);
         const focused = focusWishes.find(wish => wish.key === completionKey)
-            || (held && (preserveFocus || !challenger || score(challenger) <= score(held) * (1 + loyalty)) ? held
+            || (held && loyal(held, focusWishes) ? held
                 : choose(focusWishes, score, roll('focus')));
         const focus = focused ? [focused.key, held === focused ? previous.focus[1] : playedHours,
             nonnegative(focused.price)] : null;
@@ -664,21 +982,38 @@ class WishNetwork {
             || funded.has(leaf.rootKey) || leaf.price === 0 && (leaf.rootKey === unfunded?.key || unfundable.has(leaf.rootKey)));
         // A cheap intermediate material cannot claim the whole upgrade's
         // benefit as an instantaneous income. Use the complete chosen path.
-        const heldActivity = individual && activityLeaf ? candidates.find(leaf => fnv1a32(leaf.key) === activityLeaf) : null;
+        const heldLeaf = individual && activityLeaf ? candidates.find(leaf => fnv1a32(leaf.key) === activityLeaf) : null;
+        const heldActivity = heldLeaf && loyal(heldLeaf, candidates) ? heldLeaf : null;
         if (individual && activityLeaf && !heldActivity && decisionSeq === inputDecisionSeq) {
-            // Completion or an impossible accepted step is a real event;
+            // A completed, impossible or outscored step is a real reconsideration;
             // rebuilding the same valid step is not another tendency roll.
             decisionSeq++; activityLeaf = 0;
         }
         const completion = candidates.find(leaf => leaf.rootKey === completionKey && leaf.kind === 'luxury_exchange');
-        const activity = completion || heldActivity || choose(candidates, leaf => leaf.valueHours / Math.max(1 / 3600, leaf.effort),
-            roll('activity'));
+        const activity = completion || heldActivity || choose(candidates, score, roll('activity'));
         const result = { inputKey, queue, moneyPrice, available, gap, hourAdena,
             quantityPrepared: !!stockFor,
             focus, dormant, activity, demands, plans, decisionSeq,
             activityLeaf: individual && activity ? fnv1a32(activity.key) : 0 };
+        const selectedProof = captureReadyCraft ? solver.takeReadyCraftProof(activity?.rootKey, activity?.nodeKey) : null;
+        let readyCraftProof = null;
+        if (selectedProof && activity?.kind === 'craft' && activity.activity === 'crafting' && !activity.funding) {
+            const root = byKey.get(activity.rootKey), paths = root?.paths, inputs = paths?.[0]?.grossRequirements || paths?.[0]?.requirements;
+            // Only the root's direct output: an upstream stock change can alter
+            // a nested craft's batch count before that upstream goal completes.
+            if (paths?.length === 1 && inputs?.length === 1 && inputs[0].key === activity.nodeKey)
+                readyCraftProof = { rootKey: activity.rootKey, nodeKey: activity.nodeKey, ...selectedProof };
+        }
+        if (captureReadyCraft) onReadyCraftProof(readyCraftProof);
         if (diagnostic) {
             Diagnostics.count('network', 'build');
+            const outcome = completion ? 'completion' : heldActivity ? 'held'
+                : heldLeaf ? 'outscored' : !inputActivityLeaf ? activity ? 'fresh' : 'none'
+                : focus?.[0] !== previous.focus?.[0] ? 'focus_moved' : 'gone';
+            Diagnostics.count('network', 'activity', outcome);
+            // Which event (the caller's reasons, 'quiet' for none) kept or moved a held choice.
+            if (reconsiderReasons && (outcome === 'held' || outcome === 'outscored' || outcome === 'focus_moved'))
+                for (const reason of reconsiderReasons) Diagnostics.count('network', 'reconsider', `${reason}:${outcome}`);
             Diagnostics.count('network', cached ? sameResult(cached.result, result) ? 'unchanged' : 'changed' : 'comparison_unavailable');
             Diagnostics.duration('network', performance.now() - started);
         }
@@ -688,14 +1023,14 @@ class WishNetwork {
             item: activity?.itemId, planned: activity?.amount, quote: activity?.price,
             npcId: activity?.npcId, town: activity?.town, recipeId: activity?.recipeId,
             valueHours: activity?.valueHours, available, reserve: survivalReserve });
-        if (remembered) {
+        if (retain) {
             if (diagnostic && !this.cache.has(actorKey) && this.cache.size >= ACTOR_LIMIT)
                 Diagnostics.count('network', 'eviction', 'capacity');
-            remember(this.cache, actorKey, { inputKey, completionKey, decisionSeq: inputDecisionSeq,
+            remember(this.cache, actorKey, { inputKey, completionKey, reconsider, decisionSeq: inputDecisionSeq,
                 activityLeaf: inputActivityLeaf, result });
         }
         return result;
     }
 }
 
-module.exports = { WishNetwork, createSolver, admitRoots, moneyQueue, remainingQuantity, fundable, cashCharge, remember, NEEDS, MAX_NODES, MAX_ROOTS, MAX_DEPTH, ACTOR_LIMIT };
+module.exports = { WishNetwork, createSolver, createQuantityInputs, quantityInputsHold, eachQuantityRow, packQuantityInputs, unpackQuantityInputs, admitRoots, moneyQueue, remainingQuantity, craftMaterialLoss, fundable, cashCharge, remember, NEEDS, MAX_NODES, MAX_ROOTS, MAX_DEPTH, ACTOR_LIMIT, QUANTITY_INPUT_LIMIT, QUANTITY_INPUT_BYTES };

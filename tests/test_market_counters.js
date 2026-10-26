@@ -47,7 +47,7 @@ assert.strictEqual(stems.prices.length, 21, 'the last 21 prices');
 assert.strictEqual(stems.prices[20], stem * 3);
 assert.strictEqual(stems.units, 5, 'units a deal takes');
 assert.deepStrictEqual([stems.sellers[0], stems.sellers.length], [0, 21], 'who sold at each kept price');
-assert.strictEqual(MarketCounters.moveOf('gear s', end), counter.move, 'a counter with no move takes the measured ones');
+assert.strictEqual(MarketCounters.moveOf('gear s'), counter.move, 'a counter with no move takes the measured ones');
 // Its buyers per town (the shop town, б7): Giran took two of three deals of the last hour.
 const byTown = new Map(MarketCounters.townDemand('material none', end).map((entry) => [entry.town, entry.perHour]));
 assert.deepStrictEqual([...byTown.keys()].sort(), ['Dion', 'Giran']);

@@ -2,8 +2,9 @@
 // magic success roll passes (Lisvus Spoil.java, Formulas.calcMagicSuccess):
 // the fail chance grows as 1.3^(mob level - the skill's magic level).
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 
-process.env.L2NODE_PROGRESSION_RATE = 'x1';
+useRate('x1');
 require('../src/Global');
 
 const DataCache = invoke('GameServer/DataCache');

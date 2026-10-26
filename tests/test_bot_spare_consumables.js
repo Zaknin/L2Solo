@@ -66,7 +66,7 @@ async function run() {
     }
     // A recipe material (Rope of Magic, a compressed-shot input) and an item the NPC
     // pays nothing for (Ancient Adena, a soul crystal) are not spare consumables.
-    // Surplus crystals can still be sold by the shared market decision.
+    // Grade crystals remain market stock rather than NPC cleanup.
     for (const selfId of [57, 956, 1458, 1463, 5192, 5575, 4629]) {
         assert(!ItemDisposition.isSpareConsumable({ selfId }), `${selfId} is not a spare consumable`);
     }
@@ -122,8 +122,10 @@ async function run() {
     const npc = new Map(visit.npc
         .map((entry) => [entry.selfId, entry.count]));
     assert.deepStrictEqual([...npc.entries()].sort((a, b) => a[0] - b[0]),
-        [[17, 500], [736, 1], [1060, 10], [1061, 20], [1458, 40], [1661, 2], [1831, 4]],
-        'the cold visit sells spare consumables and the unreserved crystal surplus to the NPC');
+        [[17, 500], [736, 1], [1060, 10], [1061, 20], [1661, 2], [1831, 4]],
+        'the cold visit sells spare consumables to the NPC while retaining grade crystals for the market');
+    assert(visit.listings.some(entry => entry.selfId === 1458 && entry.count === 40),
+        'the unreserved crystal surplus earns a market quote without a current buyer');
     // The hot visit sells first, as the cold one: what it sells to the NPC is not
     // stored at the warehouse stop before the sale.
     const BotWarehouse = invoke('GameServer/Bot/Economy/BotWarehouseService');

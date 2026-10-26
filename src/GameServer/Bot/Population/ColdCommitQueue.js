@@ -5,6 +5,11 @@ const { MAX_BATCH: MAX_MEMORY_EVENTS } = require('../../Social/InteractionMemory
 // Admission and batch sizing must agree on the cost of one ordinary row.
 const EARLY_COMMIT_ROW_BUDGET_MS = 4;
 
+// The queue used to poll every 25 ms. It now sleeps until an entry is due, but
+// wakes only on that same 25 ms grid, so entries that fall due between two
+// ticks are still taken together in one batch (the commit batching is kept).
+const TICK_MS = 25;
+
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -13,6 +18,32 @@ function percentile(values, ratio = 0.95) {
     if (!values.length) return 0;
     const sorted = [...values].sort((a, b) => a - b);
     return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))];
+}
+
+function pushSample(samples, durationMs) {
+    samples.push(Math.max(0, Number(durationMs) || 0));
+    if (samples.length > 256) samples.shift();
+}
+
+// An early calculation keeps its social episode's original clock. Invalid
+// event clocks still reach SQL validation instead of parking work forever.
+function memoryReadyAt(proposal) {
+    const events = proposal.result?.memoryEvents;
+    if (!Array.isArray(events)) return 0;
+    let at = 0;
+    for (const event of events) {
+        if (!Number.isSafeInteger(event?.at) || event.at < 0) return 0;
+        at = Math.max(at, event.at);
+    }
+    return at;
+}
+
+const groupReadyAt = group => group.reduce((at, entry) => Math.max(at, entry.memoryReadyAt), 0);
+
+function stampEventWait(group) {
+    const queuedAt = group.reduce((at, entry) => Math.max(at, entry.queuedAt), 0);
+    const eventWaitMs = Math.max(0, groupReadyAt(group) - queuedAt);
+    for (const entry of group) entry.eventWaitMs = eventWaitMs;
 }
 
 class ColdCommitQueue {
@@ -27,7 +58,7 @@ class ColdCommitQueue {
         this.onResume = options.onResume || (() => {});
         this.admitEarlyFlush = options.admitEarlyFlush || (() => null);
         this.completeEarlyFlush = options.completeEarlyFlush || (() => {});
-        this.capacityBlocked = false;
+        this.capacityPressure = false;
         this.nextEarlyAttemptAt = 0;
         this.now = options.now || Date.now;
         this.targetMs = Math.max(100, Number(options.targetMs) || 2000);
@@ -44,12 +75,18 @@ class ColdCommitQueue {
         this.p2 = new Map();
         this.bytes = 0;
         this.timer = null;
+        this.timerFireAt = 0;
+        this.gridOrigin = 0;
+        this.started = false;
         this.flushing = false;
         this.stopping = false;
         this.paused = false;
         this.p1Credit = 0;
-        this.samples = { claim: [], commit: [], queue: [] };
-        this.stageSamples = { prepare: [], commitCall: [], afterCommit: [], ackBuild: [] };
+        this.samples = { commit: [], queue: [] };
+        // partyAck: from the flush's results to a held party leader's ack.
+        this.stageSamples = { prepare: [], commitCall: [], afterCommit: [], ackBuild: [], partyAck: [] };
+        // afterCommit split by the caller's step names: one sum per step per flush.
+        this.stepSamples = {};
         this.flushReasons = {};
         this.lastBatchReason = null;
         this.counters = {
@@ -67,14 +104,94 @@ class ColdCommitQueue {
             highWaterHits: 0,
             earlyAttempts: 0,
             earlyDenied: 0,
-            earlyEmpty: 0
+            earlyEmpty: 0,
+            timerArms: 0,
+            timerFires: 0,
+            timerIdle: 0,
+            groupIndexes: 0
         };
     }
 
+    // Set by the coordinator when the worker reports a full inventory or
+    // clan-hall capacity: the early flush then needs a wake-up of its own.
+    get capacityBlocked() { return this.capacityPressure; }
+
+    set capacityBlocked(value) {
+        this.capacityPressure = value;
+        if (value) this.arm();
+    }
+
     start() {
-        if (this.timer) return;
-        this.timer = setInterval(() => this.flushDue(), 25);
+        if (this.started) return;
+        this.started = true;
+        this.gridOrigin = this.now();
+        this.arm();
+    }
+
+    // Visit only the bounded queued proposals. Held groups neither hide ready
+    // neighbours nor make the timer keep waking for an already reached age.
+    scheduleState() {
+        const groups = this.groupIndex(), seen = new Set();
+        const lanes = Object.fromEntries(['P0', 'P1', 'P2'].map(priority => [priority,
+            { readyAt: Infinity, dueAt: Infinity }]));
+        const ages = [['P0', 1, 0], ['P1', 2, this.p1TargetMs], ['P2', 4, this.targetMs]];
+        let overdueAt = Infinity;
+        for (const lane of [this.p0, this.p1, this.p2]) for (const entry of lane.values()) {
+            const id = entry.atomicGroup?.id;
+            if (id && seen.has(id)) continue;
+            if (id) seen.add(id);
+            const group = id ? groups.get(id) : [entry];
+            let readyAt = 0, queuedAt = Infinity, priorities = 0;
+            for (const member of group) {
+                readyAt = Math.max(readyAt, member.memoryReadyAt);
+                queuedAt = Math.min(queuedAt, member.queuedAt);
+                priorities |= member.priority === 'P0' ? 1 : member.priority === 'P1' ? 2 : 4;
+            }
+            for (const [priority, bit, ageMs] of ages) {
+                if (!(priorities & bit)) continue;
+                const timing = lanes[priority];
+                timing.readyAt = Math.min(timing.readyAt, readyAt);
+                timing.dueAt = Math.min(timing.dueAt, Math.max(readyAt, queuedAt + ageMs));
+            }
+            if (priorities & 4) overdueAt = Math.min(overdueAt, Math.max(readyAt, queuedAt + this.overdueMs));
+        }
+        return { groups, lanes, overdueAt, readyAt: Math.min(lanes.P0.readyAt, lanes.P1.readyAt, lanes.P2.readyAt) };
+    }
+
+    nextDueAt(force = false) {
+        const { lanes, overdueAt, readyAt } = this.scheduleState();
+        if (force) return readyAt;
+        return Math.min(lanes.P0.dueAt, lanes.P1.dueAt, lanes.P2.dueAt, overdueAt,
+            this.capacityPressure ? Math.max(readyAt, this.nextEarlyAttemptAt) : Infinity);
+    }
+
+    // Sleeps until the next due entry. Called wherever the due set can change:
+    // an enqueue, the end of a flush, a capacity flag, start. A running flush
+    // re-arms itself when it ends, so a wake-up during it is not needed.
+    arm() {
+        if (!this.started || this.stopping || this.flushing || !this.size()) return;
+        const now = this.now();
+        const dueAt = this.nextDueAt();
+        let fireAt = this.gridOrigin + Math.ceil((Math.max(dueAt, now) - this.gridOrigin) / TICK_MS) * TICK_MS;
+        if (fireAt <= now) fireAt += TICK_MS;
+        if (this.timer && this.timerFireAt <= fireAt) return;
+        clearTimeout(this.timer);
+        this.timerFireAt = fireAt;
+        this.timer = setTimeout(() => this.onTimer(), Math.min(2147483647, Math.max(1, fireAt - now)));
         this.timer.unref?.();
+        DiagnosticConfig.developerDiagnostics && (this.counters.timerArms += 1);
+    }
+
+    async onTimer() {
+        this.timer = null;
+        this.timerFireAt = 0;
+        DiagnosticConfig.developerDiagnostics && (this.counters.timerFires += 1);
+        try {
+            const flushed = await this.flushDue();
+            if (!flushed) DiagnosticConfig.developerDiagnostics && (this.counters.timerIdle += 1);
+        } finally {
+            this.arm();
+        }
     }
 
     size() {
@@ -90,17 +207,18 @@ class ColdCommitQueue {
 
     enqueue(proposal, measuredBytes = null) {
         if (this.stopping) return { ok: false, reason: 'queue_stopping' };
-        if (!proposal || !proposal.characterId || !proposal.token) return { ok: false, reason: 'invalid_proposal' };
+        if (!proposal || !proposal.characterId || !Number.isSafeInteger(proposal.revision) || proposal.revision < 0) {
+            return { ok: false, reason: 'invalid_proposal' };
+        }
         const bytes = this.proposalBytes(proposal, measuredBytes);
         if (!Number.isFinite(bytes) || bytes > Protocol.MAX_MESSAGE_BYTES) return { ok: false, reason: 'proposal_too_large' };
         const priority = ['P0', 'P1', 'P2'].includes(proposal.priority) ? proposal.priority : 'P2';
-        const queued = { ...proposal, priority, bytes, queuedAt: this.now() };
+        const queued = { ...proposal, priority, bytes, queuedAt: this.now(), memoryReadyAt: memoryReadyAt(proposal) };
 
         if (priority === 'P2') {
             const previous = this.p2.get(Number(proposal.characterId));
             if (previous) {
-                if (String(previous.token?.leaseId) !== String(proposal.token?.leaseId)
-                    || Number(previous.token?.revision) !== Number(proposal.token?.revision)) {
+                if (previous.revision !== proposal.revision) {
                     return { ok: false, reason: 'coalesce_boundary' };
                 }
                 this.bytes -= previous.bytes;
@@ -123,6 +241,7 @@ class ColdCommitQueue {
         }
 
         if (priority === 'P0') setImmediate(() => this.flushDue(true));
+        this.arm();
         return { ok: true, priority, size: this.size(), bytes: this.bytes };
     }
 
@@ -140,31 +259,69 @@ class ColdCommitQueue {
         this.onResume();
     }
 
+    // The lanes keep queuedAt order: arrays are pushed in time order, and a
+    // coalesced P2 entry keeps both its Map position and its first queuedAt.
     oldest(lane) {
         if (lane instanceof Map) {
-            return [...lane.values()].reduce((oldest, entry) => Math.min(oldest, entry.queuedAt), this.now());
+            const first = lane.values().next();
+            return first.done ? this.now() : Number(first.value.queuedAt || this.now());
         }
         return lane.length ? Number(lane[0].queuedAt || this.now()) : this.now();
     }
 
-    takeLaneBatch(lane, limit) {
-        const selected = [];
-        const selectedEntries = new Set();
-        let memoryEvents = 0;
-        for (const entry of lane) {
-            if (selectedEntries.has(entry)) continue;
+    // Share an atomic group's readiness across priorities and handoff paths.
+    // This index exists only for the bounded queue's current selection pass.
+    groupIndex() {
+        const groups = new Map();
+        for (const lane of [this.p0, this.p1, this.p2]) for (const entry of lane.values()) {
             const groupId = entry.atomicGroup?.id;
-            const group = groupId
-                ? lane.filter((candidate) => candidate.atomicGroup?.id === groupId)
-                : [entry];
+            if (!groupId) continue;
+            const group = groups.get(groupId);
+            if (group) group.push(entry);
+            else groups.set(groupId, [entry]);
+        }
+        DiagnosticConfig.developerDiagnostics && (this.counters.groupIndexes += 1);
+        return groups;
+    }
+
+    *laneGroups(lane, groups) {
+        const seen = new Set();
+        for (const entry of lane.values()) {
+            const id = entry.atomicGroup?.id;
+            if (id && seen.has(id)) continue;
+            if (id) seen.add(id);
+            yield id ? groups.get(id) : [entry];
+        }
+    }
+
+    removeBatch(batch) {
+        const selected = new Set(batch);
+        for (const lane of [this.p0, this.p1]) {
+            let kept = 0;
+            for (const entry of lane) if (!selected.has(entry)) lane[kept++] = entry;
+            lane.length = kept;
+        }
+        for (const entry of batch) {
+            if (this.p2.get(Number(entry.characterId)) === entry) this.p2.delete(Number(entry.characterId));
+        }
+    }
+
+    // Takes the batch out of the lane itself: an array lane (P0, P1) or the P2
+    // Map keyed by characterId, both read in queuedAt order without a copy.
+    takeLaneBatch(lane, limit, groups = this.groupIndex()) {
+        const selected = [];
+        let memoryEvents = 0;
+        const timestamp = this.now();
+        for (const group of this.laneGroups(lane, groups)) {
+            if (groupReadyAt(group) > timestamp) continue;
             if (selected.length && selected.length + group.length > limit) break;
             if (!selected.length && group.length > limit) break;
             const groupMemoryEvents = group.reduce((count, candidate) =>
                 count + (candidate.result?.memoryEvents?.length || 0), 0);
             if (selected.length && memoryEvents + groupMemoryEvents > MAX_MEMORY_EVENTS) break;
+            stampEventWait(group);
             group.forEach((candidate) => {
                 selected.push(candidate);
-                selectedEntries.add(candidate);
             });
             memoryEvents += groupMemoryEvents;
             // An oversized group cannot be split. Submit it alone so database
@@ -173,41 +330,35 @@ class ColdCommitQueue {
             if (selected.length >= limit) break;
         }
         if (!selected.length) return [];
-        const selectedSet = new Set(selected);
-        for (let index = lane.length - 1; index >= 0; index--) {
-            if (selectedSet.has(lane[index])) lane.splice(index, 1);
-        }
+        this.removeBatch(selected);
         return selected;
     }
 
     takeBatch(force = false, rowLimit = this.maxRows) {
         const timestamp = this.now();
+        const { groups, lanes, overdueAt } = this.scheduleState();
         this.lastBatchReason = null;
-        if (this.p0.length) {
+        if (lanes.P0.readyAt <= timestamp) {
             this.lastBatchReason = force ? 'forced' : 'p0';
-            return this.takeLaneBatch(this.p0, Math.min(16, rowLimit));
+            return this.takeLaneBatch(this.p0, Math.min(16, rowLimit), groups);
         }
-        const p2Overdue = this.p2.size > 0 && timestamp - this.oldest(this.p2) >= this.overdueMs;
-        const p1Ready = this.p1.length > 0 && (force || timestamp - this.oldest(this.p1) >= this.p1TargetMs);
-        const p2Ready = this.p2.size > 0 && (force || timestamp - this.oldest(this.p2) >= this.targetMs);
+        const p2Overdue = overdueAt <= timestamp;
+        const p1Ready = (force ? lanes.P1.readyAt : lanes.P1.dueAt) <= timestamp;
+        const p2Ready = (force ? lanes.P2.readyAt : lanes.P2.dueAt) <= timestamp;
         if (p2Overdue || (p2Ready && (this.p1Credit >= 4 || !p1Ready))) {
             this.lastBatchReason = force ? 'forced' : p2Overdue ? 'p2_overdue' : 'p2_target';
-            const batch = this.takeLaneBatch([...this.p2.values()]
-                .sort((a, b) => a.queuedAt - b.queuedAt), rowLimit);
-            batch.forEach((entry) => this.p2.delete(Number(entry.characterId)));
+            const batch = this.takeLaneBatch(this.p2, rowLimit, groups);
             this.p1Credit = 0;
             return batch;
         }
         if (p1Ready) {
             this.lastBatchReason = force ? 'forced' : 'p1';
             this.p1Credit += 1;
-            return this.takeLaneBatch(this.p1, Math.min(16, rowLimit));
+            return this.takeLaneBatch(this.p1, Math.min(16, rowLimit), groups);
         }
         if (p2Ready) {
             this.lastBatchReason = force ? 'forced' : 'p2_target';
-            const batch = this.takeLaneBatch([...this.p2.values()]
-                .sort((a, b) => a.queuedAt - b.queuedAt), rowLimit);
-            batch.forEach((entry) => this.p2.delete(Number(entry.characterId)));
+            const batch = this.takeLaneBatch(this.p2, rowLimit, groups);
             this.p1Credit = 0;
             return batch;
         }
@@ -217,7 +368,7 @@ class ColdCommitQueue {
     async retryBusy(work) {
         const waits = [10, 25, 50, 100, 200];
         let attempt = 0;
-        while (true) {
+        for (;;) {
             try {
                 return await work();
             } catch (error) {
@@ -234,7 +385,8 @@ class ColdCommitQueue {
         if (this.flushing) return false;
         let batch = this.takeBatch(force);
         let earlyLease = null;
-        if (!batch.length && this.capacityBlocked && this.size() && this.now() >= this.nextEarlyAttemptAt) {
+        if (!batch.length && this.capacityBlocked && this.size()
+            && this.now() >= Math.max(this.nextEarlyAttemptAt, this.nextDueAt(true))) {
             DiagnosticConfig.developerDiagnostics && (this.counters.earlyAttempts += 1);
             this.nextEarlyAttemptAt = this.now() + 100;
             earlyLease = this.admitEarlyFlush();
@@ -251,15 +403,26 @@ class ColdCommitQueue {
         }
         if (!batch.length) {
             if (earlyLease) this.completeEarlyFlush(earlyLease, 0);
+            this.arm();
             return false;
         }
+        await this.flushBatch(batch, earlyLease);
+        if (this.size() && (force || this.p0.length) && this.nextDueAt(true) <= this.now())
+            setImmediate(() => this.flushDue(force));
+        return true;
+    }
+
+    async flushBatch(batch, earlyLease = null, settleDeferred = false) {
         this.flushing = true;
         const reason = this.lastBatchReason || 'unknown';
         if (DiagnosticConfig.developerDiagnostics) this.flushReasons[reason] = Number(this.flushReasons[reason] || 0) + 1;
         batch.forEach((entry) => { this.bytes = Math.max(0, this.bytes - entry.bytes); });
         const startedAt = this.now();
         let results = [];
+        let handoffError = null;
         let afterCommitMs = 0;
+        // The afterCommit callback adds each step's time here (entry.stepMs).
+        const stepMs = DiagnosticConfig.developerDiagnostics ? {} : null;
         try {
             const prepared = [];
             for (const proposal of batch) {
@@ -269,9 +432,10 @@ class ColdCommitQueue {
                         results.push({ ok: false, characterId: proposal.characterId, reason: 'prepare_rejected', proposal });
                         continue;
                     }
-                    prepared.push({ proposal, token: proposal.token, nextState, options: proposal.options || {},
-                        atomicGroup: proposal.atomicGroup || null });
+                    prepared.push({ proposal, revision: proposal.revision, nextState, options: proposal.options || {},
+                        atomicGroup: proposal.atomicGroup || null, ...(stepMs ? { stepMs } : {}) });
                 } catch (error) {
+                    handoffError ||= error;
                     results.push({ ok: false, characterId: proposal.characterId, reason: error?.message || 'prepare_error', proposal });
                 }
             }
@@ -301,16 +465,19 @@ class ColdCommitQueue {
                             if (DiagnosticConfig.developerDiagnostics) afterCommitMs += this.now() - afterStartedAt;
                         }
                         DiagnosticConfig.developerDiagnostics && (this.counters.committed += 1);
-                    } else if (String(result.reason || '').includes('stale') || ['lease_changed', 'owner_changed'].includes(result.reason)) {
+                    } else if (Protocol.staleRefusal(result)) {
                         DiagnosticConfig.developerDiagnostics && (this.counters.stale += 1);
                     } else {
                         DiagnosticConfig.developerDiagnostics && (this.counters.rejected += 1);
                     }
-                    results.push({ ...result, proposal: entry?.proposal, nextState: entry?.nextState });
+                    // `deferred`: party work afterCommit left for after the flush; onResults
+                    // starts it and holds that ack until it settles.
+                    results.push({ ...result, proposal: entry?.proposal, nextState: entry?.nextState, deferred: entry?.deferred });
                 }
             }
             DiagnosticConfig.developerDiagnostics && (this.counters.flushes += 1);
         } catch (error) {
+            handoffError ||= error;
             DiagnosticConfig.developerDiagnostics && (this.counters.errors += 1);
             results.push(...batch.map((proposal) => ({
                 ok: false,
@@ -320,6 +487,7 @@ class ColdCommitQueue {
             })));
         } finally {
             DiagnosticConfig.developerDiagnostics && this.recordStage('afterCommit', afterCommitMs);
+            if (stepMs) for (const [step, ms] of Object.entries(stepMs)) this.recordStep(step, ms);
             if (earlyLease) this.completeEarlyFlush(earlyLease, this.now() - startedAt);
             if (!this.size()) this.capacityBlocked = false;
             if (DiagnosticConfig.developerDiagnostics) {
@@ -330,84 +498,69 @@ class ColdCommitQueue {
             }
             this.flushing = false;
             this.maybeResume();
+            this.arm();
         }
+        // A fence hands the bot over only after the entire group's party work.
+        if (settleDeferred) for (const result of results) {
+            await result.deferred?.();
+            delete result.deferred;
+        }
+        results = results.map(result => ({ ...result, eventWaitMs: result.proposal?.eventWaitMs || 0 }));
         this.onResults(results);
-        if (this.size() && (force || this.p0.length)) setImmediate(() => this.flushDue(force));
-        return true;
+        if (settleDeferred && handoffError) throw handoffError;
+        return results;
     }
 
     async flushCharacter(characterId) {
         const id = Number(characterId);
-        while (this.flushing) await delay(5);
-        let proposal = this.p2.get(id);
-        if (!proposal) {
-            let index = this.p0.findIndex((entry) => Number(entry.characterId) === id);
-            if (index >= 0) proposal = this.p0.splice(index, 1)[0];
-            if (!proposal) {
-                index = this.p1.findIndex((entry) => Number(entry.characterId) === id);
-                if (index >= 0) proposal = this.p1.splice(index, 1)[0];
+        for (;;) {
+            while (this.flushing) await delay(5);
+            const proposal = this.p2.get(id)
+                || this.p0.find(entry => Number(entry.characterId) === id)
+                || this.p1.find(entry => Number(entry.characterId) === id);
+            if (!proposal) return null;
+            const group = proposal.atomicGroup?.id ? this.groupIndex().get(proposal.atomicGroup.id) : [proposal];
+            const waitMs = groupReadyAt(group) - this.now();
+            if (waitMs > 0) {
+                await delay(Math.min(waitMs, 2147483647));
+                continue;
             }
+            stampEventWait(group);
+            this.removeBatch(group);
+            this.lastBatchReason = 'forced';
+            const results = await this.flushBatch(group, null, true);
+            return results.find(result => Number(result.characterId) === id) || null;
         }
-        if (!proposal) return null;
-        this.p2.delete(id);
-        this.bytes = Math.max(0, this.bytes - proposal.bytes);
-        let nextState;
-        try { nextState = await this.prepare(proposal); }
-        catch (error) {
-            this.onResults([{ ok: false, characterId: id, reason: error?.message || 'prepare_error', proposal }]);
-            throw error;
-        }
-        if (!nextState) {
-            const rejected = { ok: false, characterId: id, reason: 'prepare_rejected', proposal };
-            this.onResults([rejected]);
-            return rejected;
-        }
-        let results;
-        try {
-            results = await this.retryBusy(() => this.commit([{
-                proposal,
-                token: proposal.token,
-                nextState,
-                atomicGroup: proposal.atomicGroup || null,
-                options: proposal.options || {}
-            }]));
-        } catch (error) {
-            this.onResults([{ ok: false, characterId: id, reason: error?.message || 'commit_error', proposal }]);
-            throw error;
-        }
-        const result = results?.[0] || { ok: false, characterId: id, reason: 'missing_commit_result' };
-        if (result.ok) {
-            try { await this.afterCommit({ proposal, token: proposal.token, nextState }, result); }
-            catch (error) { DiagnosticConfig.developerDiagnostics && (this.counters.errors += 1); result.afterCommitError = error?.message || 'after_commit_error'; }
-        }
-        this.onResults([{ ...result, proposal, nextState }]);
-        return { ...result, proposal, nextState };
     }
 
     async drain(timeoutMs = 10000) {
         this.stopping = true;
-        if (this.timer) clearInterval(this.timer);
+        clearTimeout(this.timer);
         this.timer = null;
         const deadline = this.now() + Math.max(100, Number(timeoutMs) || 10000);
         while ((this.size() || this.flushing) && this.now() < deadline) {
-            if (!this.flushing) await this.flushDue(true);
-            else await delay(10);
+            if (!this.flushing) {
+                if (!await this.flushDue(true) && this.size())
+                    await delay(Math.max(1, Math.min(deadline - this.now(), this.nextDueAt(true) - this.now())));
+            } else await delay(10);
         }
         return { drained: this.size() === 0 && !this.flushing, ...this.snapshot() };
+    }
+
+    recordStep(step, durationMs) {
+        if (DiagnosticConfig.developerDiagnostics) pushSample(this.stepSamples[step] ||= [], durationMs);
     }
 
     recordStage(stage, durationMs) {
         if (!DiagnosticConfig.developerDiagnostics) return;
         const samples = this.stageSamples[stage];
-        if (!samples) return;
-        samples.push(Math.max(0, Number(durationMs) || 0));
-        if (samples.length > 256) samples.shift();
+        if (samples) pushSample(samples, durationMs);
     }
 
     snapshot() {
         const now = this.now();
-        const queued = [...this.p0, ...this.p1, ...this.p2.values()];
-        const oldestAt = queued.reduce((oldest, entry) => Math.min(oldest, Number(entry.queuedAt || now)), now);
+        // Each lane is in queuedAt order: its head is its oldest entry.
+        const oldestAt = Math.min(this.oldest(this.p0), this.oldest(this.p1), this.oldest(this.p2));
         return {
             ...(DiagnosticConfig.developerDiagnostics ? this.counters : { diagnosticsEnabled: false }),
             depth: this.size(),
@@ -415,7 +568,7 @@ class ColdCommitQueue {
             p0: this.p0.length,
             p1: this.p1.length,
             p2: this.p2.size,
-            oldestMs: queued.length ? Math.max(0, now - oldestAt) : 0,
+            oldestMs: this.size() ? Math.max(0, now - oldestAt) : 0,
             paused: this.paused,
             flushing: this.flushing,
             ...(DiagnosticConfig.developerDiagnostics ? {
@@ -423,6 +576,8 @@ class ColdCommitQueue {
             stages: Object.fromEntries(Object.entries(this.stageSamples).map(([stage, samples]) => [stage, {
                 count: samples.length, p95Ms: percentile(samples)
             }])),
+            afterCommitSteps: Object.fromEntries(Object.entries(this.stepSamples)
+                .map(([step, samples]) => [step, Math.round(percentile(samples))])),
             commitP95Ms: percentile(this.samples.commit),
             queueP95Ms: percentile(this.samples.queue)
             } : {})

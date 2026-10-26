@@ -12,7 +12,6 @@ require('../src/Global');
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Database = invoke('Database');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
-const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Events = invoke('GameServer/Clan/ClanReviewEvents');
 const Raid = invoke('GameServer/Clan/ClanRaidPolicy');
 const Capabilities = invoke('GameServer/Clan/ClanCandidateCapabilities');
@@ -62,8 +61,6 @@ async function main() {
         assert.deepEqual((await Life.clanOperationCandidates({ classIds: [15], minLevel: 45, maxLevel: 55, cursor })).map(member => member.characterId),
             next.map(member => member.characterId), 'unrelated timestamp changes never move continuation');
         assert.equal((await Life.statesByIds(Array.from({ length: 240 }, (_, i) => base + i))).length, 64);
-        const [hydrated] = await Life.statesByIds([base]);
-        assert.equal(hydrated.simulationOwner, hydrated.simulation.ownerId, 'clan readers see the flat owner on the returned row');
         assert(!Object.hasOwn(Life.cachedState(base), 'simulationOwner'), 'E272: cached worker snapshot source has no flat owner');
         assert(require('../src/GameServer/Bot/Population/ColdSimulationProtocol').commandCheckpoint(Life.cachedState(base)),
             'E272: cached state stays commandable by the cold worker');
@@ -90,7 +87,7 @@ async function main() {
         assert.equal((await projection(identity)).joinAvailability, 1);
         await query("UPDATE characters SET username='bot_pop_demand' WHERE id=?", [identity]);
         await query("UPDATE bot_life_state SET accountName='bot_pop_demand' WHERE characterId=?", [identity]);
-        const clauses = ["phase='hot'", "simulationOwner='cold_worker'", "partyId='foreign-party'", "activity='crafting'", 'spotId=NULL',
+        const clauses = ["phase='hot'", "statsJson=json_set(statsJson,'$.craftShop',json('{}'))", "partyId='foreign-party'", "activity='crafting'", 'spotId=NULL',
             "statsJson=json_set(statsJson,'$.craftStationId',1)", "statsJson=json_set(statsJson,'$.playerPartyTakeover',1)"];
         for (let i = 0; i < clauses.length; i++) await query(`UPDATE bot_life_state SET ${clauses[i]} WHERE characterId=?`, [base + 150 + i]);
         await query("INSERT INTO accounts(username,password) VALUES('bot_craft_demand','fixture')");
@@ -189,24 +186,17 @@ async function main() {
         const current = (await query('SELECT simulationRevision FROM bot_life_state WHERE characterId=?', [coldId]))[0];
         const unchangedProjection = (await query('SELECT payloadJson,ordinaryEligible FROM bot_party_candidate_projection WHERE characterId=?', [coldId]))[0];
         const timestamp = Date.now();
-        const [grant] = await Database.claimColdSimulationLeases([{ characterId: coldId, expectedRevision: current.simulationRevision,
-            ownerId: Owner.OWNER_ID, leaseId: 'demand-fixture', timestamp, leaseUntil: timestamp + 60000 }]);
-        assert(grant.ok); await events();
-        assert.equal((await Life.statesByIds([coldId]))[0].simulationOwner, Owner.OWNER_ID, 'leased member reads as worker-owned');
-        assert(Life.cachedState(coldId).simulation.ownerId === Owner.OWNER_ID && !Object.hasOwn(Life.cachedState(coldId), 'simulationOwner'));
-        assert.deepEqual((await query('SELECT payloadJson,ordinaryEligible FROM bot_party_candidate_projection WHERE characterId=?', [coldId]))[0],
-            unchangedProjection, 'native lease claim preserves payload and ordinary identity');
-        const request = { characterId: coldId, expectedRevision: grant.revision, ownerId: Owner.OWNER_ID, leaseId: grant.leaseId,
-            timestamp: timestamp + 1, patch: { level: 51 }, physical: { classId: 17, level: 51, maxHp: 500, maxMp: 300 } };
+        const request = { characterId: coldId, expectedRevision: current.simulationRevision,
+            timestamp: timestamp + 1, allowLifecycle: true, patch: { phase: 'cold', level: 51 }, physical: { classId: 17, level: 51, maxHp: 500, maxMp: 300 } };
         await assert.rejects(Database.commitAndReleaseColdSimulationLeases([{ ...request,
             physical: { ...request.physical, pvpKills: Array(19).fill({ victimId: 1 }) } }]), /too many kills/);
         assert.deepEqual(await events(), [], 'rolled back native cold row/class changes publish no pending capability event');
         assert.equal((await projection(coldId)).classId, 15);
-        assert.equal((await projection(coldId)).joinAvailability, 0);
+        assert.equal((await projection(coldId)).joinAvailability, 1, 'a far bot is never loaned away from the clan view');
         assert((await Database.commitAndReleaseColdSimulationLeases([request]))[0].ok);
         assert.deepEqual((await query('SELECT payloadJson,ordinaryEligible FROM bot_party_candidate_projection WHERE characterId=?', [coldId]))[0],
-            unchangedProjection, 'native lease release reuses identity without changing the legacy payload');
-        assert.deepEqual(await events(), [820500], 'successful commit coalesces availability and class into one addressed review');
+            unchangedProjection, 'a native cold commit reuses identity without changing the legacy payload');
+        assert.deepEqual(await events(), [820500], 'a successful commit publishes the class change as one addressed review');
         assert(!(await Database.commitAndReleaseColdSimulationLeases([request]))[0].ok);
         assert.deepEqual(await events(), [], 'rejected cold replay cannot publish a wave');
         await Database.setSkill({ selfId: 1015, level: 1, name: 'Heal', passive: false }, coldId);
@@ -235,7 +225,7 @@ async function main() {
 function pureCapabilities() {
     const readiness = Gear.combatReadiness;
     Gear.combatReadiness = () => ({ hasWeapon: true, armorCount: 5, armorRank: 2, weaponRank: 2, effectiveLevel: 54 });
-    const member = (id, classId, skills = []) => ({ characterId: id, classId, level: 50, phase: 'cold', simulationOwner: 'legacy_main',
+    const member = (id, classId, skills = []) => ({ characterId: id, classId, level: 50, phase: 'cold',
         stats: { classId, coldCombat: { skillSource: 'database', skills: Combat.skillSnapshotsFromRecords(skills) } } });
     const heal = [{ selfId: 1015, level: 1 }], buff = [{ selfId: 1068, level: 1 }];
     try {

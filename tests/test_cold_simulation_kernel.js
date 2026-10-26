@@ -14,6 +14,11 @@ const {
 } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
 const { beginHuntingTrip } = require('../src/GameServer/Bot/Population/HuntingTravel');
 
+// The facts a kernel gives the free functions (its parties table, its
+// states, the board's escrow) for a bot that leads `party`.
+const leading = (party, members = []) => ({ leaderParty: () => party, partyMembers: () => members, buyOrderEscrow: () => 0,
+    hallNeeded: () => false, playerWaiting: () => false });
+
 function state(characterId = 1, overrides = {}) {
     return {
         characterId,
@@ -22,30 +27,46 @@ function state(characterId = 1, overrides = {}) {
         level: 20,
         timing: { lastResolvedAt: 1000, nextResolveAt: 2000 },
         stats: {},
-        simulation: { ownerId: 'legacy_main', revision: 3, leaseId: null, leaseUntil: 0 },
+        simulation: { revision: 3 },
         updatedAt: 1000,
         ...overrides
     };
 }
 
 
-// Capture the actual emitted request id; manual ACKs use the same wire
-// correlation as the worker instead of a missing-id compatibility path.
-const claimRequestIds = new WeakMap();
+// The steps each tick started (new inFlight entries, in start order): a step
+// starts from the kernel's own copy at the tick, with no message to main.
+const startedSteps = new WeakMap();
 const sentProposals = new WeakMap();
 const sentCommands = new WeakMap();
+// The spot the worker finds a bot standing at (its spotOf), as the fixture states it.
+const standing = new WeakMap();
+function standOn(kernel, entry, spot) {
+    standing.get(kernel).set(Number(entry.state.characterId), spot);
+    return entry;
+}
 function recordingKernel(options) {
     let kernel;
-    const requests = new Map();
+    const steps = [];
     const proposals = new Map();
     const commands = new Map();
-    kernel = new ColdSimulationKernel({ ...options, emit: (type, payload, msgId, ...rest) => {
-        if (type === 'claim_request') for (const candidate of payload.candidates) requests.set(candidate.characterId, msgId);
+    const spots = new Map();
+    kernel = new ColdSimulationKernel({ spotOf: value => spots.get(Number(value?.characterId)) || null,
+        ...options, emit: (type, payload, msgId, ...rest) => {
         if (type === 'proposal_batch') for (const proposal of payload.proposals) proposals.set(proposal.characterId, proposal);
         if (type === 'command_request') for (const request of payload.requests) commands.set(request.characterId, request);
         return options.emit?.(type, payload, msgId, ...rest);
     } });
-    claimRequestIds.set(kernel, requests);
+    const tick = kernel.tick.bind(kernel);
+    kernel.tick = (...args) => {
+        const before = new Set(kernel.inFlight.keys());
+        const result = tick(...args);
+        const started = [...kernel.inFlight.keys()].filter(id => !before.has(id));
+        if (started.length) steps.push(started);
+        return result;
+    };
+    startedSteps.set(kernel, steps);
+    standing.set(kernel, spots);
     sentProposals.set(kernel, proposals);
     sentCommands.set(kernel, commands);
     return kernel;
@@ -60,19 +81,16 @@ function commitAck(kernel, payload) {
     kernel.onCommitAck({ results: payload.results.map(result => {
         const proposal = sentProposals.get(kernel).get(result.characterId);
         assert(proposal, 'fixture commit ACK echoes an actual sent proposal');
-        return { ...result, inputToken: proposal.token, proposalId: proposal.proposalId };
+        return { ...result, proposalId: proposal.proposalId };
     }) });
 }
-function claimAck(kernel, payload) {
-    const rows = [...(payload.grants || []), ...(payload.rejected || [])];
-    const ids = rows.map(row => claimRequestIds.get(kernel).get(row.characterId));
-    assert(ids.length && ids.every(id => typeof id === 'string' && id === ids[0]), 'fixture ACK echoes one captured request id');
-    kernel.onClaimAck(payload, ids[0]);
-}
+// The bots the last stepping tick started, and whether a bot ever stepped.
+const lastSteps = kernel => startedSteps.get(kernel).at(-1) || [];
+const everStepped = (kernel, id) => startedSteps.get(kernel).some(ids => ids.includes(id));
 
 (async () => {
     {
-        // Developer diagnostics: every scheduler tick is counted as claimed or
+        // Developer diagnostics: every scheduler tick is counted as stepped or
         // as empty with its reason; a not-yet-due head records its distance.
         const PopulationConfig = require('../src/GameServer/Bot/Population/PopulationConfig');
         const Diagnostics = require('../src/GameServer/Bot/Economy/EconomyDiagnostics');
@@ -85,25 +103,25 @@ function claimAck(kernel, payload) {
         const probe = recordingKernel({ resolveSolo: () => null, now: () => at, maxInFlight: 1 });
         probe.tick();
         assert.strictEqual(added('worker_tick:empty:heap_empty'), 1);
-        probe.upsert({ state: state(91, { timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }), context: {} });
+        probe.upsert({ state: state(91, { timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }) });
         probe.tick();
         assert.strictEqual(added('worker_tick:empty:not_due'), 1);
         assert.strictEqual(added('worker_tick_gap:lt1s:unknown'), 1);
         at = 2000;
         probe.tick();
-        assert.strictEqual(added('worker_tick:claimed:unknown'), 1);
+        assert.strictEqual(added('worker_tick:stepped:unknown'), 1);
         probe.tick();
         assert.strictEqual(added('worker_tick:empty:no_capacity'), 1);
         probe.paused = true;
         probe.tick();
         assert.strictEqual(added('worker_tick:empty:paused'), 1);
         // A due bot inside a PvP encounter is requeued past it: the tick took due
-        // work but sent no claim, so it is not idle even though the head is not due.
+        // work but started no step, so it is not idle even though the head is not due.
         const encounter = recordingKernel({ resolveSolo: () => null, now: () => at, maxInFlight: 1 });
         encounter.upsert({ state: state(93, { stats: { pvpEncounter: { expiresAt: at + 5000 } },
-            timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }), context: {} });
+            timing: { lastResolvedAt: 1000, nextResolveAt: 1500 } }) });
         encounter.tick();
-        assert.strictEqual(added('worker_tick:empty:no_claim'), 1);
+        assert.strictEqual(added('worker_tick:empty:no_step'), 1);
         assert.strictEqual(added('worker_tick:empty:not_due'), 1, 'a requeued bot is not counted as an idle tick');
         const off = { ...counts() };
         PopulationConfig.developerDiagnostics = false;
@@ -114,15 +132,14 @@ function claimAck(kernel, payload) {
         PopulationConfig.developerDiagnostics = wasOn;
     }
 
-    const valid = Protocol.validateEnvelope(Protocol.envelope('claim_request', 'epoch', { candidates: [] }), 'worker', { workerEpoch: 'epoch' });
+    const valid = Protocol.validateEnvelope(Protocol.envelope('command_request', 'epoch', { requests: [] }), 'worker', { workerEpoch: 'epoch' });
     assert.strictEqual(valid.ok, true);
     assert.strictEqual(Protocol.validateEnvelope(null, 'worker').reason, 'invalid_envelope');
     assert.strictEqual(Protocol.validateEnvelope({
         version: 999, type: 'ready', msgId: 'x', workerEpoch: 'epoch', payload: {}
     }, 'worker').reason, 'protocol_version');
-    assert.strictEqual(Protocol.validateEnvelope(Protocol.envelope('claim_request', 'epoch', {
-        candidates: Array.from({ length: 65 }, (_, index) => ({ characterId: index + 1 }))
-    }), 'worker').reason, 'batch_size');
+    assert.strictEqual(Protocol.validateEnvelope(Protocol.envelope('claim_request', 'epoch', {}), 'worker').reason,
+        'message_type', 'no claim message exists: a step needs nothing from main to start');
     assert.strictEqual(Protocol.validateEnvelope(Protocol.envelope('command_request', 'epoch', {
         requests: Array.from({ length: 65 }, (_, index) => ({ characterId: index + 1 }))
     }), 'worker').reason, 'batch_size');
@@ -143,19 +160,10 @@ function claimAck(kernel, payload) {
         flushTargetMs: 2000,
         flushHardMs: 5000
     });
-    kernel.upsert({ state: state(), context: { spot: { id: 'spot', rewards: {} } } });
+    kernel.upsert(standOn(kernel, { state: state() }, { id: 'spot', rewards: {} }));
     kernel.tick();
-    const claimRequest = emitted.shift();
-    assert.strictEqual(claimRequest.type, 'claim_request');
-    assert.strictEqual(claimRequest.payload.candidates[0].expectedRevision, 3);
-    claimAck(kernel, { grants: [{
-        ok: true,
-        characterId: 1,
-        ownerId: 'cold_simulation_owner',
-        revision: 4,
-        leaseId: 'lease-1',
-        leaseUntil: 33000
-    }] });
+    assert.deepStrictEqual(emitted, [], 'a step goes out without a claim: the tick sends main nothing');
+    assert.deepStrictEqual(lastSteps(kernel), [1]);
     await kernel.resolveChain;
     assert.strictEqual(kernel.snapshot().resolved, 1);
     kernel.flushDue();
@@ -169,7 +177,9 @@ function claimAck(kernel, payload) {
         'a partial ownership window must not request early commit admission');
     const proposal = proposalMessage.payload.proposals[0];
     assert.strictEqual(proposal.priority, 'P2');
-    assert.strictEqual(proposal.token.revision, 4);
+    assert.strictEqual(proposal.revision, 3, 'the proposal carries the revision its step started from');
+    assert.strictEqual(proposal.proposalId, '1:3000', 'the step is named by its bot and start');
+    assert.strictEqual(proposal.token, undefined);
 
     const first = deterministicRandom(state());
     const second = deterministicRandom(state());
@@ -178,15 +188,13 @@ function claimAck(kernel, payload) {
     const staleLeaderRun = {
         party: { partyId: 'bgp_stale_leader', leaderId: 99, memberIds: [99, 1, 2] },
         members: [state(1), state(2)],
-        grants: new Map([
-            [1, { leaseId: 'stale-1', revision: 4 }],
-            [2, { leaseId: 'stale-2', revision: 4 }]
-        ])
+        startedAt: 4000
     };
     const staleLeaderProposals = partyTransitionProposals(
         staleLeaderRun,
         staleLeaderRun.members,
         { ...staleLeaderRun.party, status: 'dissolved' },
+        5000,
         5000,
         { type: 'party_invalid_size' },
         'party_invalid_size'
@@ -204,21 +212,33 @@ function claimAck(kernel, payload) {
         state: state(1, {
             activity: 'resting',
             timing: { lastResolvedAt: now, nextResolveAt: now + 30000 },
-            simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
+            simulation: { revision: 5 }
         })
     }] });
     assert.strictEqual(kernel.snapshot().inFlight, 0);
-    assert.strictEqual(kernel.upsert({ state: state(1), context: { spot: { id: 'refreshed-context' } } }), false,
+    assert.strictEqual(kernel.upsert({ state: state(1) }), false,
         'an out-of-order catalog snapshot must not replace a newer committed revision');
     assert.strictEqual(kernel.states.get(1).state.simulation.revision, 5,
         'worker ownership revisions must remain monotonic across catalog refreshes');
-    assert.strictEqual(kernel.states.get(1).context.spot.id, 'refreshed-context',
-        'a stale state page may still refresh non-authoritative routing context');
     const heapBeforeRefresh = kernel.heap.size;
     const currentState = kernel.states.get(1).state;
-    assert.strictEqual(kernel.upsert({ state: { ...currentState }, context: { spot: { id: 'same-due-context' } } }), true);
+    assert.strictEqual(kernel.upsert({ state: { ...currentState } }), true);
     assert.strictEqual(kernel.heap.size, heapBeforeRefresh,
         'same-revision catalog refresh must coalesce without growing the due heap');
+    // A near bot's fact post that crossed its cooldown: the cold row came
+    // first at the same revision (hot -> cold keeps it), the hot post is stale.
+    {
+        const nearKernel = recordingKernel({ resolveSolo: () => null, now: () => 1000 });
+        const cooled = state(95);
+        assert.strictEqual(nearKernel.upsert({ state: cooled }), true);
+        assert.strictEqual(nearKernel.upsert({ state: { ...cooled, phase: 'hot' } }), false,
+            'a hot row at the cold row\'s revision must not replace the cold row');
+        assert.strictEqual(nearKernel.states.get(95).state.phase, 'cold', 'the cooled bot stays a far bot that steps');
+        const activated = { ...cooled, phase: 'hot', simulation: { ...cooled.simulation, revision: cooled.simulation.revision + 1 } };
+        assert.strictEqual(nearKernel.upsert({ state: activated }), true,
+            'a hot row at a higher revision (the handoff moved it) is accepted');
+        assert.strictEqual(nearKernel.states.get(95).state.phase, 'hot');
+    }
 
     const route = {
         needed: true,
@@ -291,26 +311,22 @@ function claimAck(kernel, payload) {
                 debug: { activity: current.activity }
             };
         },
-        planLifecycle: ({ state: current, context, timestamp }) => ({
-            plannedState: beginHuntingTrip(current, context.route, timestamp) || current
+        // The worker's plan starts the bot's own route (BotRoute) in its step.
+        planLifecycle: ({ state: current, timestamp }) => ({
+            plannedState: beginHuntingTrip(current, route, timestamp) || current
         }),
         emit: () => {},
         now: () => 5000
     });
-    routeKernel.upsert({
+    routeKernel.upsert(standOn(routeKernel, {
         state: state(71, {
             level: 16,
             spotId: 'starter-field',
             loc: { locX: 115000, locY: -176000, locZ: -1000 },
             timing: { lastResolvedAt: 1000, nextResolveAt: 2000 }
-        }),
-        context: { spot: { id: 'starter-field' }, route }
-    });
+        })
+    }, { id: 'starter-field' }));
     routeKernel.tick();
-    claimAck(routeKernel, { grants: [{
-        ok: true, characterId: 71, ownerId: 'cold_simulation_owner', revision: 4,
-        leaseId: 'route-lease', leaseUntil: 35000
-    }] });
     await routeKernel.resolveChain;
     assert.strictEqual(routeStates.length, 1);
     assert.strictEqual(routeStates[0].activity, 'traveling', 'worker resolve must execute the route transition before combat');
@@ -344,21 +360,19 @@ function claimAck(kernel, payload) {
         adena: 1000,
         stats: { equipmentPlan: { strategy: 'market', market: { price: 500, reserve: 100 } } }
     })), 'command');
-    assert.strictEqual(lifecycleKind(state(2, { party: { partyId: 'party' } }), { isPartyLeader: true }), 'party');
+    assert.strictEqual(lifecycleKind(state(2, { party: { partyId: 'party' } }), leading({ partyId: 'party', leaderId: 2 })), 'party');
 
-    // An absent main decision sends target 0; the worker's own hunting pick
-    // remains the target for the native solo resolver.
+    // The worker's own hunting pick is the target for the native solo
+    // resolver (the record carries no target).
     let pickedTarget = 0;
     const pickKernel = recordingKernel({ now: () => 5000,
         resolveSolo: input => { pickedTarget = input.targetNpcId; return resolver(input); },
         planLifecycle: ({ state }) => ({ plannedState: state, targetNpcId: 0,
             activityPick: { activity: 'hunting', npcId: 20101, spotId: 'worker-ground' } }) });
-    pickKernel.upsert({ state: state(79), context: { targetNpcId: 0, spot: { id: 'worker-ground' } } });
+    pickKernel.upsert(standOn(pickKernel, { state: state(79) }, { id: 'worker-ground' }));
     pickKernel.tick();
-    claimAck(pickKernel, { grants: [{ ok: true, characterId: 79, ownerId: 'cold_simulation_owner', revision: 4,
-        leaseId: 'pick-lease', leaseUntil: 35000 }] });
     await pickKernel.resolveChain;
-    assert.strictEqual(pickedTarget, 20101, 'native solo resolve uses worker activityPick when main target is absent');
+    assert.strictEqual(pickedTarget, 20101, 'native solo resolve uses the worker activityPick');
 
     const commandMessages = [];
     let plannedOnWorker = 0;
@@ -371,13 +385,15 @@ function claimAck(kernel, payload) {
                 targetNpcId: 0, activityPick: { activity: 'hunting', npcId: 20101 },
                 statsPacket: { money: [30000, .00001, 1000, 0], wishFocus: ['worker', 1], decisionSeq: 5, activityLeaf: 19, dormantWishes: [] },
                 acquisitionPlan: { strategy: 'direct_drop', status: 'active' },
+                // The trip the step started (BotRoute.record's shape).
+                route: { needed: true, mode: 'solo', spotId: 'trip-ground', destinations: { 3: { locX: 1, locY: 2, locZ: 3 } } },
                 plannedState: { ...commandState, stats: { ...commandState.stats, workerPlanned: true } }
             };
         },
         emit: (type, payload) => commandMessages.push({ type, payload }),
         now: () => now
     });
-    commandKernel.upsert({ state: state(3, { activity: 'shopping' }), context: {} });
+    commandKernel.upsert({ state: state(3, { activity: 'shopping' }) });
     commandKernel.tick();
     await commandKernel.resolveChain;
     const commandRequest = commandMessages.find((entry) => entry.type === 'command_request');
@@ -386,15 +402,17 @@ function claimAck(kernel, payload) {
     assert.strictEqual(commandRequest.payload.requests[0].precomputedPlan.statsPacket.activityLeaf, 19, 'kernel forwards whole packet');
     assert(commandRequest.payload.requests[0].precomputedResult, 'main command gateway must receive worker-computed lifecycle output');
     assert.strictEqual(commandRequest.payload.requests[0].computedAt, now);
+    assert.deepStrictEqual(commandRequest.payload.requests[0].route, { needed: true, spotId: 'trip-ground' },
+        'main\'s command reads the spot of the trip the worker\'s step started');
     assert.strictEqual(commandKernel.scheduleTokens.has(3), false,
         'a command request must consume its due token while the command is in flight');
     assert.strictEqual(commandKernel.snapshot().commandingAgeMs, 0,
         'command age starts at zero on the deterministic test clock');
     const commandState = commandKernel.states.get(3).state;
-    commandKernel.upsert({ state: { ...commandState }, context: { refreshed: true } });
+    commandKernel.upsert({ state: { ...commandState } });
     assert.strictEqual(commandKernel.scheduleTokens.has(3), false,
         'a catalog refresh must not create a second writer while the command is in flight');
-    commandAck(commandKernel, { characterId: 3, state: { ...commandState }, context: { refreshed: true } });
+    commandAck(commandKernel, { characterId: 3, state: { ...commandState } });
     assert.strictEqual(commandKernel.scheduleTokens.has(3), true,
         'a same-revision command ACK must restore the consumed due token');
     assert.strictEqual(commandKernel.snapshot().commanding, 0);
@@ -409,26 +427,25 @@ function claimAck(kernel, payload) {
     const waitingMembers = [720, 721, 722].map(id => state(id, { party: { partyId: 'after-commands' },
         timing: { nextResolveAt: now - 1000 } }));
     const waitingParty = { partyId: 'after-commands', leaderId: 720, memberIds: [720, 721, 722] };
-    waitingMembers.forEach((s, i) => commandPressureKernel.upsert({ state: s,
-        context: { isPartyLeader: i === 0, party: waitingParty, partyMembers: waitingMembers } }));
+    waitingMembers.forEach(s => commandPressureKernel.upsert({ state: s }));
+    commandPressureKernel.partyPut(waitingParty.partyId, waitingParty);
     commandPressureKernel.tick();
     assert.strictEqual(commandPressureKernel.commanding.size, 2,
-        'lifecycle commands must share the ownership limit with combat claims');
+        'lifecycle commands must share the in-flight limit with combat steps');
     await commandPressureKernel.resolveChain;
     for (const s of blockedCommands.slice(0, 2)) {
         commandAck(commandPressureKernel, { characterId: s.characterId, ok: false,
-            reason: 'missing_spot', retryAfterMs: 30000, state: s, context: {} });
-        commandPressureKernel.upsert({ state: s, context: { refreshed: true } });
+            reason: 'missing_spot', retryAfterMs: 30000, state: s });
+        commandPressureKernel.upsert({ state: s });
         assert.strictEqual(commandPressureKernel.scheduleTokens.get(s.characterId).dueAt, now + 30000,
             'a failed command with an unchanged state must respect retry delay after a catalog refresh');
     }
     commandPressureKernel.tick();
     await commandPressureKernel.resolveChain;
     commandAck(commandPressureKernel, { characterId: 712, ok: false, reason: 'missing_spot',
-        retryAfterMs: 30000, state: blockedCommands[2], context: {} });
+        retryAfterMs: 30000, state: blockedCommands[2] });
     commandPressureKernel.tick();
-    const resumedParty = commandPressureMessages.find(m => m.type === 'claim_request');
-    assert.deepStrictEqual(resumedParty?.payload.candidates.map(c => c.characterId), [720, 721, 722],
+    assert.deepStrictEqual(lastSteps(commandPressureKernel), [720, 721, 722],
         'rejected commands must drain so an overdue atomic party can progress');
 
     const transitionKernel = recordingKernel({
@@ -437,7 +454,7 @@ function claimAck(kernel, payload) {
         emit: () => {},
         now: () => now
     });
-    transitionKernel.upsert({ state: state(5, { activity: 'shopping' }), context: {} });
+    transitionKernel.upsert({ state: state(5, { activity: 'shopping' }) });
     transitionKernel.tick();
     await transitionKernel.resolveChain;
     const transitioned = state(5, {
@@ -445,61 +462,94 @@ function claimAck(kernel, payload) {
         timing: { lastResolvedAt: now, nextResolveAt: now - 1 },
         updatedAt: now
     });
-    transitionKernel.upsert({ state: transitioned, context: {} });
+    transitionKernel.upsert({ state: transitioned });
     transitionKernel.tick();
     assert.strictEqual(transitionKernel.scheduleTokens.has(5), false,
         'an interim durable refresh can be consumed while the lifecycle ACK is pending');
-    commandAck(transitionKernel, { characterId: 5, state: transitioned, context: {} });
+    commandAck(transitionKernel, { characterId: 5, state: transitioned });
     assert.strictEqual(transitionKernel.scheduleTokens.has(5), true,
         'the lifecycle ACK must restore a transition node consumed during the command');
 
     const memberOnlyKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => now });
-    memberOnlyKernel.upsert({ state: state(4, { party: { partyId: 'member-only' } }), context: {} });
+    memberOnlyKernel.upsert({ state: state(4, { party: { partyId: 'member-only' } }) });
     assert.strictEqual(memberOnlyKernel.heap.values.filter(entry => entry.kind !== 'alarm').length, 0,
         'party members must be scheduled only through their leader');
     assert.strictEqual([...memberOnlyKernel.alarms.values()].filter(entry => entry.alarmKind === 'worker_safety').length, 0);
     assert.strictEqual(memberOnlyKernel.snapshot().due, 0,
         'party members must not inflate independent worker due-age telemetry');
 
+    // A step whose proposal never reached main (the send failed) is requeued
+    // 30 s after its start; an ack arriving later misses it and is dropped.
     let recoveryNow = now;
-    const recoveryKernel = recordingKernel({
-        resolveSolo: resolver,
-        emit: () => {},
-        now: () => recoveryNow,
-        claimAckTimeoutMs: 5000
-    });
-    recoveryKernel.upsert({ state: state(6), context: { spot: { id: 'spot' } } });
+    const unsent = type => type !== 'proposal_batch';
+    const recoveryKernel = recordingKernel({ resolveSolo: resolver, emit: unsent, now: () => recoveryNow });
+    recoveryKernel.upsert(standOn(recoveryKernel, { state: state(6) }, { id: 'spot' }));
     recoveryKernel.tick();
-    assert.strictEqual(recoveryKernel.snapshot().claiming, 1);
-    recoveryNow += 5001;
-    recoveryKernel.tick();
-    assert.strictEqual(recoveryKernel.snapshot().claiming, 0,
-        'a lost claim ACK must not leave a bot permanently claiming');
-    assert.strictEqual(recoveryKernel.snapshot().claimRecoveries, 1);
-    assert.strictEqual(recoveryKernel.scheduleTokens.has(6), true);
-
-    recoveryNow += 1000;
-    recoveryKernel.tick();
-    claimAck(recoveryKernel, { grants: [{
-        ok: true, characterId: 6, ownerId: 'cold_simulation_owner', revision: 4,
-        leaseId: 'lost-commit-ack', leaseUntil: recoveryNow + 1000
-    }] });
+    const stalledAt = recoveryNow;
     await recoveryKernel.resolveChain;
+    recoveryKernel.flush(null, true);
     assert.strictEqual(recoveryKernel.snapshot().inFlight, 1);
-    recoveryNow += 1001;
+    assert.strictEqual(recoveryKernel.nextWakeAt(), stalledAt + 30000, 'the oldest step\'s stall is the next wake');
+    recoveryNow = stalledAt + 29999;
+    recoveryKernel.tick();
+    assert.strictEqual(recoveryKernel.snapshot().inFlight, 1, 'a step within its 30 s waits for its commit ack');
+    assert.strictEqual(recoveryKernel.snapshot().inFlightAgeMs, 29999);
+    recoveryNow = stalledAt + 30000;
     recoveryKernel.tick();
     assert.strictEqual(recoveryKernel.snapshot().inFlight, 0,
-        'an expired lease after a lost commit ACK must release the worker busy fence');
-    assert.strictEqual(recoveryKernel.snapshot().dirty, 0,
-        'an expired proposal must never be retried outside its lease CAS boundary');
-    assert.strictEqual(recoveryKernel.snapshot().leaseRecoveries, 1);
-    assert.strictEqual(recoveryKernel.scheduleTokens.has(6), true);
+        'a step with no commit ack 30 s after its start frees its slot');
+    assert.strictEqual(recoveryKernel.snapshot().dirty, 0);
+    assert.strictEqual(recoveryKernel.snapshot().stallRecoveries, 1);
+    assert.strictEqual(recoveryKernel.scheduleTokens.get(6).dueAt, recoveryNow + 1000, 'the stalled bot is requeued');
+    commitAck(recoveryKernel, { results: [{ ok: true, characterId: 6, state: state(6) }] });
+    assert.strictEqual(recoveryKernel.snapshot().lateAcks, 1, 'the late ack is dropped');
+    assert.strictEqual(recoveryKernel.states.get(6).state.simulation.revision, 3, 'a dropped ack changes no state');
+
+    // A sent step waits for its commit ack past 30 s (main's commit queue holds
+    // it): it is not requeued, its stall is no wake, and the ack lands.
+    let sentNow = now;
+    const sentKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => sentNow });
+    sentKernel.upsert(standOn(sentKernel, { state: state(8) }, { id: 'spot' }));
+    sentKernel.tick();
+    const sentAt = sentNow;
+    await sentKernel.resolveChain;
+    sentKernel.flush(null, true);
+    assert.strictEqual(sentKernel.nextWakeAt(), Number(sentKernel.heap.peek()?.dueAt ?? Infinity),
+        'a sent step\'s stall is no wake');
+    sentNow = sentAt + 60000;
+    sentKernel.tick();
+    assert.strictEqual(sentKernel.inFlight.size, 1, 'a sent step keeps its slot until its commit ack');
+    assert.strictEqual(sentKernel.snapshot().stallRecoveries, 0);
+    commitAck(sentKernel, { results: [{ ok: true, characterId: 8,
+        state: state(8, { simulation: { revision: 4 } }) }] });
+    assert.strictEqual(sentKernel.snapshot().lateAcks, 0, 'the ack of a slow commit is not late');
+    assert.strictEqual(sentKernel.inFlight.size, 0);
+    assert.strictEqual(sentKernel.states.get(8).state.simulation.revision, 4, 'the slow commit\'s state lands');
+
+    // A stalled party step (its proposal never sent) frees every member and
+    // requeues the party by its leader.
+    let partyStallNow = now;
+    const partyStallKernel = recordingKernel({ resolveSolo: resolver, emit: unsent, now: () => partyStallNow,
+        resolveParty: ({ timestamp }) => ({ memberResults: [], events: [], partyPatch: {}, nextResolveAt: timestamp + 60000 }) });
+    [260, 261].forEach(id => partyStallKernel.upsert({ state: state(id, { party: { partyId: 'stall-party', leaderId: 260 } }) }));
+    partyStallKernel.partyPut('stall-party', { partyId: 'stall-party', leaderId: 260, memberIds: [260, 261], stats: {},
+        status: 'active', nextResolveAt: partyStallNow - 1000, revision: 4 });
+    partyStallKernel.tick();
+    assert.deepStrictEqual(lastSteps(partyStallKernel), [260, 261]);
+    await partyStallKernel.resolveChain;
+    partyStallKernel.flush(null, true);
+    partyStallNow += 30000;
+    partyStallKernel.tick();
+    assert.strictEqual(partyStallKernel.inFlight.size, 0, 'a stalled party step frees every member');
+    assert.strictEqual(partyStallKernel.partyRuns.size, 0);
+    assert.strictEqual(partyStallKernel.snapshot().stallRecoveries, 2, 'each freed member counts');
+    assert.strictEqual(partyStallKernel.scheduleTokens.get(260).dueAt, partyStallNow + 1000, 'the leader requeues the party');
+    assert.notStrictEqual(partyStallKernel.scheduleTokens.get(261)?.dueAt, partyStallNow + 1000, 'a member is not requeued alone');
 
     const orphanKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => recoveryNow });
-    orphanKernel.upsert({
-        state: state(7, { timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow + 3600000 } }),
-        context: { spot: { id: 'spot' } }
-    });
+    orphanKernel.upsert(standOn(orphanKernel, {
+        state: state(7, { timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow + 3600000 } })
+    }, { id: 'spot' }));
     const orphanedEntry = orphanKernel.heap.values.find(entry => entry.kind !== 'alarm' && entry.characterId === 7);
     assert.strictEqual(orphanKernel.heap.remove(orphanedEntry), true);
     orphanKernel.consumeHeapEntry(orphanedEntry);
@@ -519,20 +569,16 @@ function claimAck(kernel, payload) {
         emit: () => {},
         now: () => recoveryNow
     });
-    ackRaceKernel.upsert({ state: state(8, {
+    ackRaceKernel.upsert(standOn(ackRaceKernel, { state: state(8, {
         timing: { lastResolvedAt: recoveryNow - 1000, nextResolveAt: recoveryNow }
-    }), context: { spot: { id: 'spot' } } });
+    }) }, { id: 'spot' }));
     ackRaceKernel.tick();
-    claimAck(ackRaceKernel, { grants: [{
-        ok: true, characterId: 8, ownerId: 'cold_simulation_owner', revision: 4,
-        leaseId: 'catalog-before-ack', leaseUntil: recoveryNow + 30000
-    }] });
     await ackRaceKernel.resolveChain;
     ackRaceKernel.flush(null, true);
-    ackRaceKernel.upsert({ state: state(8, {
+    ackRaceKernel.upsert(standOn(ackRaceKernel, { state: state(8, {
         timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow },
-        simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
-    }), context: { spot: { id: 'newer-catalog' } } });
+        simulation: { revision: 5 }
+    }) }, { id: 'newer-catalog' }));
     assert.strictEqual(ackRaceKernel.scheduleTokens.has(8), false,
         'a newer catalog snapshot must not schedule a second writer while the prior revision is in flight');
     commitAck(ackRaceKernel, { results: [{
@@ -540,7 +586,7 @@ function claimAck(kernel, payload) {
         characterId: 8,
         state: state(8, {
             timing: { lastResolvedAt: recoveryNow, nextResolveAt: recoveryNow },
-            simulation: { ownerId: 'legacy_main', revision: 4, leaseId: null, leaseUntil: 0 }
+            simulation: { revision: 4 }
         })
     }] });
     assert.strictEqual(ackRaceKernel.scheduleTokens.has(8), true,
@@ -568,36 +614,25 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => partyMessages.push({ type, payload }),
         now: () => now
     });
-    partyKernel.upsert({ state: members[0], context: { isPartyLeader: true, party, partyMembers: members, spot: { id: 'party-spot' } } });
-    partyKernel.upsert({ state: members[1], context: {} });
+    partyKernel.upsert(standOn(partyKernel, { state: members[0] }, { id: 'party-spot' }));
+    partyKernel.partyPut(party.partyId, party);
+    partyKernel.upsert({ state: members[1] });
     partyKernel.upsert({
         state: {
             ...members[1],
-            simulation: { ownerId: 'legacy_main', revision: 9, leaseId: null, leaseUntil: 0 }
-        },
-        context: {}
+            simulation: { revision: 9 }
+        }
     });
     partyKernel.tick();
-    const partyClaim = partyMessages.shift();
-    assert.strictEqual(partyClaim.type, 'claim_request');
-    assert.deepStrictEqual(partyClaim.payload.candidates.map((candidate) => candidate.characterId), [20, 21]);
-    assert.deepStrictEqual(partyClaim.payload.candidates.map((candidate) => candidate.expectedRevision), [3, 9],
-        'party claims must use current member revisions instead of the leader context snapshot');
-    assert(partyClaim.payload.candidates.every((candidate) => candidate.purpose.kind === 'party'));
-    claimAck(partyKernel, {
-        grants: partyClaim.payload.candidates.map((candidate) => ({
-            ok: true,
-            characterId: candidate.characterId,
-            ownerId: 'cold_simulation_owner',
-            revision: candidate.expectedRevision + 1,
-            leaseId: `party-lease-${candidate.characterId}`,
-            leaseUntil: now + 30000,
-            purpose: candidate.purpose
-        }))
-    });
+    assert.deepStrictEqual(partyMessages, [], 'a party step goes out without a claim');
+    assert.deepStrictEqual(lastSteps(partyKernel), [20, 21]);
     await partyKernel.resolveChain;
     const partyProposal = partyMessages.find((entry) => entry.type === 'proposal_batch');
-    assert.strictEqual(partyProposal.payload.proposals.length, 2, 'party compute must produce one CAS proposal per claimed member');
+    assert.strictEqual(partyProposal.payload.proposals.length, 2, 'party compute must produce one CAS proposal per member');
+    assert.deepStrictEqual(partyProposal.payload.proposals.map(entry => entry.revision), [3, 9],
+        'each member commits on its own current revision, not the leader snapshot');
+    assert.deepStrictEqual(partyProposal.payload.proposals.map(entry => entry.proposalId), [`20:${now}`, `21:${now}`],
+        'party members share the step start');
     assert(partyProposal.payload.proposals.every((proposalEntry) => proposalEntry.options.allowParty === true));
     assert(partyProposal.payload.proposals.find((proposalEntry) => proposalEntry.characterId === 20).partyResolution,
         'the leader proposal must carry the party durable update');
@@ -614,20 +649,78 @@ function claimAck(kernel, payload) {
         planPartyRequirement: ({ state }) => { refreshed.push(state.characterId); return { acquisitionPlan: state.characterId === 120
             ? { status: 'active', strategy: 'market', target: { selfId: 55 } } : state.stats.equipmentPlan }; },
         emit: (type, payload) => refreshMessages.push({ type, payload }) });
-    refreshKernel.upsert({ state: refreshMembers[0], context: { isPartyLeader: true, party: refreshParty,
-        partyMembers: refreshMembers, spot: { id: 'refresh-spot' }, requirementRefresh: true } });
-    refreshKernel.upsert({ state: refreshMembers[1], context: {} }); refreshKernel.tick();
-    const refreshClaim = refreshMessages.find(message => message.type === 'claim_request');
-    claimAck(refreshKernel, { grants: refreshClaim.payload.candidates.map(candidate => ({ ok: true,
-        characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
-        leaseId: `refresh-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
+    refreshKernel.upsert(standOn(refreshKernel, { state: refreshMembers[0] }, { id: 'refresh-spot' }));
+    refreshKernel.upsert({ state: refreshMembers[1] });
+    refreshKernel.partyPut(refreshParty.partyId, { ...refreshParty, requirementRefresh: true }); refreshKernel.tick();
     await refreshKernel.resolveChain;
     const refreshProposal = refreshMessages.find(message => message.type === 'proposal_batch').payload.proposals.find(proposal => proposal.partyResolution);
     assert.deepStrictEqual(refreshed, [120, 121], 'the party resolve refreshes each member after its projection');
     assert.deepStrictEqual(refreshProposal.partyResolution.memberPlans.map(row => row.characterId), [120], 'only changed requirement keys cross the worker boundary');
     assert.strictEqual(refreshProposal.partyResolution.requirementRefreshedAt, now);
     assert.strictEqual(refreshKernel.partyRequirementProgress.size, 0, 'completed refresh scratch is released');
-    assert(refreshKernel.snapshot().partyRequirementRefreshMaxMs < 20);
+
+    // A member whose own step moved its kit opens the re-plan with
+    // no due mark from main; members already passed wait for the next step.
+    for (const moved of [false, true]) {
+        const kitMessages = [], kitPlanned = [];
+        const kitKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
+            resolveParty: ({ members, timestamp }) => ({ memberResults: members.map(member => ({ state: member, result: {} })),
+                partyPatch: {}, events: [], nextResolveAt: timestamp + 45000 }),
+            projectResolve: state => ({ state, kitMoved: moved && state.characterId === 121 }),
+            planPartyRequirement: ({ state }) => { kitPlanned.push(state.characterId); return { acquisitionPlan: state.stats.equipmentPlan }; },
+            emit: (type, payload) => kitMessages.push({ type, payload }) });
+        kitKernel.upsert(standOn(kitKernel, { state: refreshMembers[0] }, { id: 'refresh-spot' }));
+        kitKernel.upsert({ state: refreshMembers[1] });
+        kitKernel.partyPut(refreshParty.partyId, refreshParty); kitKernel.tick();
+        await kitKernel.resolveChain;
+        assert.deepStrictEqual(kitPlanned, moved ? [121] : [], 'a moved kit opens the re-plan at that member');
+        assert.strictEqual(kitKernel.partyRequirementProgress.has('refresh-party'), moved,
+            'the re-plan stays open for the member passed before the raise');
+    }
+
+    // A pending join main recorded on the party row: the leader's step runs
+    // the recruit check on this thread's copy of the recruit, its proposal
+    // carries the answer, and the party row leaves the step without it.
+    // A recruit mid-step keeps the join pending; after a decline or gone recruit
+    // the next formation pass picks again.
+    for (const outcome of ['accepted', 'declined', 'gone', 'unavailable']) {
+        const joinMessages = [], reviewed = [];
+        const recruitId = outcome === 'gone' ? 999 : 122;
+        const joinParty = { ...refreshParty, partyId: `join-${outcome}`,
+            stats: { pendingRecruits: { ids: [recruitId] } } };
+        const joinMembers = refreshMembers.map(member => ({ ...member, party: { partyId: joinParty.partyId } }));
+        const joinKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
+            resolveParty: ({ members, timestamp }) => ({ memberResults: members.map(member => ({ state: member, result: {} })),
+                partyPatch: {}, events: [], nextResolveAt: timestamp + 45000 }),
+            projectResolve: state => ({ state }),
+            reviewRecruits: ({ members }) => {
+                reviewed.push(members.map(member => member.characterId));
+                return outcome === 'accepted' ? { memberGoals: [], incomeReviews: [], lastIncomeReviewAt: now, agreement: null } : null;
+            },
+            emit: (type, payload) => joinMessages.push({ type, payload }) });
+        joinKernel.upsert(standOn(joinKernel, { state: joinMembers[0] }, { id: 'refresh-spot' }));
+        joinKernel.upsert({ state: joinMembers[1] });
+        joinKernel.partyPut(joinParty.partyId, joinParty);
+        // The recruit is not due: it waits idle, not started by this tick.
+        if (outcome !== 'gone') joinKernel.upsert({ state: state(122, { timing: { lastResolvedAt: now, nextResolveAt: now + 3600000 } }) });
+        if (outcome === 'unavailable') { const busy = joinKernel.busy.bind(joinKernel);
+            joinKernel.busy = id => Number(id) === 122 || busy(id); }
+        joinKernel.tick();
+        await joinKernel.resolveChain;
+        const leader = joinMessages.find(message => message.type === 'proposal_batch').payload.proposals
+            .find(proposal => proposal.partyResolution);
+        assert.strictEqual(leader.partyResolution.recruitCheck.outcome, outcome);
+        assert.deepStrictEqual(leader.partyResolution.party.stats.pendingRecruits,
+            outcome === 'unavailable' ? { ids: [122] } : undefined,
+            'the party row leaves the leader\'s step without its pending join, unless a recruit is mid-step');
+        assert.deepStrictEqual(reviewed, ['gone', 'unavailable'].includes(outcome) ? [] : [[120, 121, 122]],
+            'the check reads the members with the recruit, once');
+        if (outcome === 'accepted') {
+            assert.deepStrictEqual(leader.partyResolution.recruitCheck.recruitIds, [122]);
+            assert.deepStrictEqual(leader.partyResolution.recruitCheck.memberIds, [120, 121]);
+            assert.deepStrictEqual(leader.partyResolution.recruitCheck.sources.map(row => [row.characterId, row.revision]), [[122, 3]]);
+        }
+    }
 
     for (const complete of [false, true]) {
         const materialMessages = [], objective = { materialParty: true, status: 'open', reason: 'craft_material', spotId: 'material-spot' };
@@ -645,13 +738,9 @@ function claimAck(kernel, payload) {
             projectResolve: state => ({ state }),
             planPartyRequirement: () => { throw Error('a material hunt rebuilt its wish plan'); },
             emit: (type, payload) => materialMessages.push({ type, payload }) });
-        materialKernel.upsert({ state: materialMembers[0], context: { isPartyLeader: true, party: materialParty,
-            partyMembers: materialMembers, spot: { id: objective.spotId }, requirementRefresh: true } });
-        materialKernel.upsert({ state: materialMembers[1], context: {} }); materialKernel.tick();
-        const claim = materialMessages.find(message => message.type === 'claim_request');
-        claimAck(materialKernel, { grants: claim.payload.candidates.map(candidate => ({ ok: true,
-            characterId: candidate.characterId, ownerId: 'cold_simulation_owner', revision: candidate.expectedRevision + 1,
-            leaseId: `material-${complete}-${candidate.characterId}`, leaseUntil: now + 30000, purpose: candidate.purpose })) });
+        materialKernel.upsert(standOn(materialKernel, { state: materialMembers[0] }, { id: objective.spotId }));
+        materialKernel.upsert({ state: materialMembers[1] });
+        materialKernel.partyPut(materialParty.partyId, { ...materialParty, requirementRefresh: true }); materialKernel.tick();
         await materialKernel.resolveChain;
         const proposals = materialMessages.find(message => message.type === 'proposal_batch')?.payload.proposals;
         assert(proposals?.length === 2, 'material progress and completion both publish all members without a generic requirement refresh');
@@ -663,84 +752,6 @@ function claimAck(kernel, payload) {
         if (complete) assert(proposals.every(proposal => !proposal.nextState.party?.partyId
             && proposal.nextState.activity === 'hunting'), 'native completion releases every physical state');
     }
-
-    const stalePartyMessages = [];
-    let stalePartyNow = now;
-    const stalePartyMembers = [
-        state(220, { party: { partyId: 'stale-party-220', leaderId: 220 } }),
-        state(221, { party: { partyId: 'stale-party-220', leaderId: 220 } })
-    ];
-    const staleParty = {
-        partyId: 'stale-party-220',
-        leaderId: 220,
-        memberIds: [220, 221],
-        stats: {},
-        nextResolveAt: stalePartyNow
-    };
-    const stalePartyKernel = recordingKernel({
-        resolveSolo: resolver,
-        resolveParty: () => { throw new Error('partial stale party claim must not resolve'); },
-        emit: (type, payload, msgId) => stalePartyMessages.push({ type, payload, msgId }),
-        now: () => stalePartyNow
-    });
-    stalePartyKernel.upsert({
-        state: stalePartyMembers[0],
-        context: { isPartyLeader: true, party: staleParty, partyMembers: stalePartyMembers, spot: { id: 'stale-party-spot' } }
-    });
-    stalePartyKernel.upsert({ state: stalePartyMembers[1], context: {} });
-    stalePartyKernel.tick();
-    const stalePartyClaim = stalePartyMessages.shift();
-    const leaderCandidate = stalePartyClaim.payload.candidates.find((candidate) => candidate.characterId === 220);
-    const memberCandidate = stalePartyClaim.payload.candidates.find((candidate) => candidate.characterId === 221);
-    const refreshedMember = {
-        ...stalePartyMembers[1],
-        simulation: { ownerId: 'legacy_main', revision: 9, leaseId: null, leaseUntil: 0 }
-    };
-    claimAck(stalePartyKernel, {
-        grants: [{
-            ok: true,
-            characterId: 220,
-            ownerId: 'cold_simulation_owner',
-            revision: leaderCandidate.expectedRevision + 1,
-            leaseId: 'stale-party-leader-lease',
-            leaseUntil: stalePartyNow + 30000,
-            purpose: leaderCandidate.purpose
-        }],
-        rejected: [{
-            ok: false,
-            characterId: 221,
-            reason: 'stale_revision',
-            expectedRevision: memberCandidate.expectedRevision,
-            actualRevision: 9,
-            actualOwner: 'legacy_main',
-            state: refreshedMember,
-            context: {},
-            purpose: memberCandidate.purpose
-        }]
-    });
-    assert.strictEqual(stalePartyKernel.states.get(221).state.simulation.revision, 9,
-        'a stale party claim must refresh the member revision before retrying');
-    const partialRelease = stalePartyMessages.find((entry) => entry.type === 'release_request');
-    assert(partialRelease, 'a partial party claim must release grants accepted before the rejection');
-    stalePartyKernel.onReleaseAck({ results: [{
-        ok: true,
-        characterId: 220,
-        inputToken: partialRelease.payload.releases[0].token,
-        releaseRequestId: partialRelease.msgId,
-        state: {
-            ...stalePartyMembers[0],
-            simulation: { ownerId: 'legacy_main', revision: 5, leaseId: null, leaseUntil: 0 }
-        },
-        context: { isPartyLeader: true, party: staleParty, partyMembers: stalePartyMembers, spot: { id: 'stale-party-spot' } }
-    }] });
-    stalePartyNow += 1000;
-    stalePartyKernel.tick();
-    const retriedPartyClaim = stalePartyMessages.find((entry) => entry.type === 'claim_request');
-    assert.deepStrictEqual(
-        retriedPartyClaim.payload.candidates.map((candidate) => candidate.expectedRevision),
-        [5, 9],
-        'the next party claim must use revisions returned by release and stale ACKs'
-    );
 
     const expiredPartyMessages = [];
     const expiredPartyMembers = [
@@ -772,25 +783,11 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => expiredPartyMessages.push({ type, payload }),
         now: () => now
     });
-    expiredPartyKernel.upsert({
-        state: expiredPartyMembers[0],
-        context: { isPartyLeader: true, party: expiredParty, partyMembers: expiredPartyMembers, spot: { id: 'old-party-spot' } }
-    });
-    expiredPartyKernel.upsert({ state: expiredPartyMembers[1], context: {} });
+    expiredPartyKernel.upsert(standOn(expiredPartyKernel, { state: expiredPartyMembers[0] }, { id: 'old-party-spot' }));
+    expiredPartyKernel.upsert({ state: expiredPartyMembers[1] });
+    expiredPartyKernel.partyPut(expiredParty.partyId, expiredParty);
     expiredPartyKernel.tick();
-    const expiredClaim = expiredPartyMessages.shift();
-    assert.strictEqual(expiredClaim.type, 'claim_request');
-    claimAck(expiredPartyKernel, {
-        grants: expiredClaim.payload.candidates.map((candidate) => ({
-            ok: true,
-            characterId: candidate.characterId,
-            ownerId: 'cold_simulation_owner',
-            revision: candidate.expectedRevision + 1,
-            leaseId: `expired-party-lease-${candidate.characterId}`,
-            leaseUntil: now + 30000,
-            purpose: candidate.purpose
-        }))
-    });
+    assert.deepStrictEqual(lastSteps(expiredPartyKernel), [22, 23]);
     await expiredPartyKernel.resolveChain;
     const expiryProposal = expiredPartyMessages.find((entry) => entry.type === 'proposal_batch');
     assert.strictEqual(expiryProposal.payload.proposals.length, 2, 'expired party release must include every member');
@@ -828,23 +825,16 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => expiryScheduleMessages.push({ type, payload }),
         now: () => expiryScheduleNow
     });
-    expiryScheduleKernel.upsert({
-        state: expiryScheduleMembers[0],
-        context: {
-            isPartyLeader: true,
-            party: expiryScheduleParty,
-            partyMembers: expiryScheduleMembers,
-            spot: { id: 'scheduled-expiry-spot' }
-        }
-    });
-    expiryScheduleKernel.upsert({ state: expiryScheduleMembers[1], context: {} });
+    expiryScheduleKernel.upsert(standOn(expiryScheduleKernel, { state: expiryScheduleMembers[0] }, { id: 'scheduled-expiry-spot' }));
+    expiryScheduleKernel.upsert({ state: expiryScheduleMembers[1] });
+    expiryScheduleKernel.partyPut(expiryScheduleParty.partyId, expiryScheduleParty);
     expiryScheduleKernel.tick();
     assert.strictEqual(expiryScheduleMessages.length, 0,
         'a valid party must remain scheduled until its earliest resolve or expiry');
     expiryScheduleNow += 5001;
     expiryScheduleKernel.tick();
-    assert.strictEqual(expiryScheduleMessages[0].type, 'claim_request',
-        'a valid party must be claimed at session expiry even when nextResolveAt is later');
+    assert.deepStrictEqual(lastSteps(expiryScheduleKernel), [25, 26],
+        'a valid party must step at session expiry even when nextResolveAt is later');
 
     const partyDue = expiryScheduleNow + 3000;
     const partyDueLeader = state(27, {
@@ -855,35 +845,32 @@ function claimAck(kernel, payload) {
         timing: { lastResolvedAt: expiryScheduleNow - 1000, nextResolveAt: null },
         party: { partyId: 'party-row-scheduled', leaderId: 27 }
     });
-    const partyDueContext = {
-        isPartyLeader: true,
-        party: {
-            partyId: 'party-row-scheduled',
-            leaderId: 27,
-            memberIds: [27, 28],
-            nextResolveAt: partyDue,
-            stats: { sessionExpiresAt: expiryScheduleNow + 60000 }
-        },
-        partyMembers: [partyDueLeader, partyDueMember]
+    const partyDueParty = {
+        partyId: 'party-row-scheduled',
+        leaderId: 27,
+        memberIds: [27, 28],
+        nextResolveAt: partyDue,
+        stats: { sessionExpiresAt: expiryScheduleNow + 60000 }
     };
-    assert.strictEqual(nextDueAt(partyDueLeader, expiryScheduleNow, partyDueContext), partyDue,
+    const partyDueFacts = leading(partyDueParty, [partyDueLeader, partyDueMember]);
+    assert.strictEqual(nextDueAt(partyDueLeader, expiryScheduleNow, {}, false, partyDueFacts), partyDue,
         'a newly assigned leader with no personal due time must use the durable party schedule');
     assert.strictEqual(nextDueAt({
         ...partyDueLeader,
         timing: { ...partyDueLeader.timing, nextResolveAt: expiryScheduleNow + 1000 }
-    }, expiryScheduleNow, partyDueContext), partyDue,
+    }, expiryScheduleNow, {}, false, partyDueFacts), partyDue,
         'a stale leader schedule must not outrun the authoritative party row');
 
     const priorityParty = {
-        ...partyDueContext.party,
+        ...partyDueParty,
         nextResolveAt: expiryScheduleNow
     };
-    const priorityContext = { ...partyDueContext, party: priorityParty };
     const partyCapacityKernel = recordingKernel({ now: () => expiryScheduleNow, resolveSolo: resolver });
-    partyCapacityKernel.upsert({ state: partyDueLeader, context: priorityContext });
-    partyCapacityKernel.upsert({ state: partyDueMember, context: {} });
+    partyCapacityKernel.upsert({ state: partyDueLeader });
+    partyCapacityKernel.upsert({ state: partyDueMember });
+    partyCapacityKernel.partyPut(priorityParty.partyId, priorityParty);
     assert.deepStrictEqual(partyCapacityKernel.dueCandidates(expiryScheduleNow, 1), [],
-        'an atomic party claim must wait when the current capacity cannot fit every member');
+        'an atomic party step must wait when the current capacity cannot fit every member');
     assert.strictEqual(partyCapacityKernel.dueCandidates(expiryScheduleNow, 2).length, 2,
         'a capacity-blocked party must retain priority instead of moving behind overdue solo work');
 
@@ -908,31 +895,12 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => singletonMessages.push({ type, payload }),
         now: () => singletonNow
     });
-    singletonKernel.upsert({
-        state: singletonMember,
-        context: {
-            isPartyLeader: true,
-            party: singletonParty,
-            partyMembers: [singletonMember],
-            spot: { id: 'singleton-spot' }
-        }
-    });
+    singletonKernel.upsert(standOn(singletonKernel, { state: singletonMember }, { id: 'singleton-spot' }));
+    singletonKernel.partyPut(singletonParty.partyId, singletonParty);
     singletonKernel.tick();
-    const singletonClaim = singletonMessages.shift();
-    assert.strictEqual(singletonClaim.type, 'claim_request', 'invalid singleton must enter the cleanup path immediately');
-    assert.deepStrictEqual(singletonClaim.payload.candidates.map((candidate) => candidate.characterId), [24]);
-    assert.strictEqual(singletonClaim.payload.candidates[0].purpose.invalidReason, 'party_min_size');
-    claimAck(singletonKernel, {
-        grants: singletonClaim.payload.candidates.map((candidate) => ({
-            ok: true,
-            characterId: candidate.characterId,
-            ownerId: 'cold_simulation_owner',
-            revision: candidate.expectedRevision + 1,
-            leaseId: 'singleton-party-lease',
-            leaseUntil: singletonNow + 30000,
-            purpose: candidate.purpose
-        }))
-    });
+    assert.strictEqual(singletonMessages.length, 0, 'a step sends nothing before its proposal');
+    assert.deepStrictEqual(lastSteps(singletonKernel), [24], 'invalid singleton must enter the cleanup path immediately');
+    assert.strictEqual(singletonKernel.partyRuns.get('singleton-party').purpose.invalidReason, 'party_min_size');
     await singletonKernel.resolveChain;
     const singletonProposal = singletonMessages.find((entry) => entry.type === 'proposal_batch');
     assert(singletonProposal, 'invalid singleton must produce a durable release proposal');
@@ -983,33 +951,22 @@ function claimAck(kernel, payload) {
     const partyRouteKernel = recordingKernel({
         resolveSolo: resolver,
         resolveParty: () => { throw new Error('party combat must not run during route travel'); },
+        partyRoute: () => partyRoute,
         emit: (type, payload) => partyRouteMessages.push({ type, payload }),
         now: () => now
     });
-    partyRouteKernel.upsert({
-        state: partyRouteMembers[0],
-        context: {
-            isPartyLeader: true,
-            party: partyRouteParty,
-            partyMembers: partyRouteMembers,
-            spot: { id: 'starter-field' },
-            route: partyRoute
-        }
-    });
-    partyRouteKernel.upsert({ state: partyRouteMembers[1], context: {} });
+    partyRouteKernel.upsert(standOn(partyRouteKernel, { state: partyRouteMembers[0] }, { id: 'starter-field' }));
+    partyRouteKernel.upsert({ state: partyRouteMembers[1] });
+    partyRouteKernel.partyPut(partyRouteParty.partyId, partyRouteParty);
+    // A member's kept solo route: a new state keeps it, the party run's
+    // step takes the member and drops it.
+    partyRouteKernel.states.get(31).route = { spotId: 'solo-kept' };
+    partyRouteKernel.upsert({ state: { ...partyRouteMembers[1], level: 17,
+        simulation: { ...partyRouteMembers[1].simulation, revision: Number(partyRouteMembers[1].simulation?.revision || 0) + 1 } } });
+    assert.deepStrictEqual(partyRouteKernel.states.get(31).route, { spotId: 'solo-kept' }, 'a committed state keeps the bot\'s route');
     partyRouteKernel.tick();
-    const partyRouteClaim = partyRouteMessages.shift();
-    claimAck(partyRouteKernel, {
-        grants: partyRouteClaim.payload.candidates.map((candidate) => ({
-            ok: true,
-            characterId: candidate.characterId,
-            ownerId: 'cold_simulation_owner',
-            revision: candidate.expectedRevision + 1,
-            leaseId: `route-party-lease-${candidate.characterId}`,
-            leaseUntil: now + 30000,
-            purpose: candidate.purpose
-        }))
-    });
+    assert.strictEqual(partyRouteKernel.states.get(31).route, null, 'the party step drops the member\'s solo route');
+    assert.deepStrictEqual(lastSteps(partyRouteKernel), [30, 31]);
     await partyRouteKernel.resolveChain;
     const partyRouteProposal = partyRouteMessages.find((entry) => entry.type === 'proposal_batch');
     assert.strictEqual(partyRouteProposal.payload.proposals.length, 2);
@@ -1027,25 +984,11 @@ function claimAck(kernel, payload) {
         now: () => now
     });
     const compactLeader = state(35, { party: { partyId: 'compact-party' } });
-    const compactMember = {
-        characterId: 36,
-        phase: 'cold',
-        activity: 'grouped',
-        partyId: 'compact-party',
-        party: { partyId: 'compact-party' },
-        simulation: { ownerId: 'legacy_main', revision: 3 },
-        compact: true
-    };
-    compactFallbackKernel.upsert({
-        state: compactLeader,
-        context: {
-            isPartyLeader: true,
-            party: { partyId: 'compact-party', leaderId: 35, memberIds: [35, 36] },
-            partyMembers: [compactLeader, compactMember]
-        }
-    });
+    // The member's state never reached this kernel: the party waits for it.
+    compactFallbackKernel.upsert({ state: compactLeader });
+    compactFallbackKernel.partyPut('compact-party', { partyId: 'compact-party', leaderId: 35, memberIds: [35, 36] });
     compactFallbackKernel.tick();
-    assert(!compactFallbackMessages.some((entry) => entry.type === 'claim_request'),
+    assert.deepStrictEqual(lastSteps(compactFallbackKernel), [],
         'a compact party reference must wait until its full authoritative state is loaded');
 
     const burstMessages = [];
@@ -1056,64 +999,15 @@ function claimAck(kernel, payload) {
         maxBatch: 64,
         maxInFlight: 3
     });
-    for (let id = 80; id < 85; id++) burstKernel.upsert({
-        state: state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: now - 1 } }),
-        context: { spot: { id: 'spot' } }
-    });
+    for (let id = 80; id < 85; id++) burstKernel.upsert(standOn(burstKernel, {
+        state: state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: now - 1 } })
+    }, { id: 'spot' }));
     burstKernel.tick();
-    const burstClaim = burstMessages.find((entry) => entry.type === 'claim_request');
-    assert.strictEqual(burstClaim.payload.candidates.length, 3,
+    assert.strictEqual(lastSteps(burstKernel).length, 3,
         'a catch-up tick must honor the smaller in-flight burst even when the protocol batch is larger');
 
-    const renewalKernel = recordingKernel({ resolveSolo: resolver, now: () => now });
-    const renewalGrant = {
-        ok: true,
-        characterId: 90,
-        ownerId: 'cold_simulation_owner',
-        revision: 4,
-        leaseId: 'renewal-lease',
-        leaseUntil: now + 1000
-    };
-    renewalKernel.upsert({ state: state(90), context: {} });
-    renewalKernel.inFlight.set(90, {
-        grant: renewalGrant,
-        state: state(90),
-        context: {},
-        startedAt: now
-    });
-    renewalKernel.onLeaseRenewal({ renewals: [{
-        ...renewalGrant,
-        leaseUntil: now + 10000
-    }] });
-    assert.strictEqual(renewalKernel.snapshot().leaseRenewals, 1,
-        'worker must accept a matching lease renewal for an active claim');
-    renewalKernel.recoverStalled(now + 2000);
-    assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 0,
-        'a renewed claim must not be recovered using its old deadline');
-    assert.strictEqual(renewalKernel.inFlight.get(90).grant.leaseUntil, now + 10000);
-    // The tick skips the expiry scan until the earliest lease can be due; a
-    // lease added later with an earlier deadline lowers that bound.
-    assert.strictEqual(renewalKernel.inFlight.checkAt, now + 10000);
-    renewalKernel.upsert({ state: state(92), context: {} });
-    renewalKernel.inFlight.set(92, {
-        grant: { ...renewalGrant, characterId: 92, leaseId: 'early-lease', leaseUntil: now + 4000 },
-        state: state(92),
-        context: {},
-        startedAt: now
-    });
-    assert.strictEqual(renewalKernel.inFlight.checkAt, now + 4000);
-    renewalKernel.recoverStalled(now + 3999);
-    assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 0);
-    renewalKernel.recoverStalled(now + 4000);
-    assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 1, 'the early lease expires at its own deadline');
-    assert.deepStrictEqual([...renewalKernel.inFlight.keys()], [90]);
-    assert.strictEqual(renewalKernel.inFlight.checkAt, now + 10000);
-    renewalKernel.recoverStalled(now + 10000);
-    assert.strictEqual(renewalKernel.snapshot().leaseRecoveries, 2, 'the renewed lease expires at its new deadline');
-    assert.strictEqual(renewalKernel.inFlight.size, 0);
-    assert.strictEqual(renewalKernel.inFlight.checkAt, Infinity);
-
-    const oversizedInventory = Object.fromEntries(Array.from({ length: 1200 }, (_, index) => [
+    // ~316 KB of bag: the next state alone is over the 240 KB proposal limit.
+    const oversizedInventory = Object.fromEntries(Array.from({ length: 2400 }, (_, index) => [
         String(index), {
             selfId: index + 1000,
             name: `Oversized item ${index} ${'x'.repeat(42)}`,
@@ -1124,7 +1018,7 @@ function claimAck(kernel, payload) {
     const oversizedState = state(91, {
         inventory: oversizedInventory,
         stats: { equipmentPlan: { status: 'active' } },
-        simulation: { ownerId: 'cold_simulation_owner', revision: 5, leaseId: 'oversized-lease', leaseUntil: now + 30000 }
+        simulation: { revision: 5 }
     });
     const oversizedEmitted = [];
     const oversizedKernel = recordingKernel({
@@ -1133,36 +1027,19 @@ function claimAck(kernel, payload) {
         now: () => now + 10000
     });
     const oversizedProposal = {
-        proposalId: 'oversized-lease:5',
+        proposalId: `91:${now}`,
         characterId: 91,
         priority: 'P2',
         enqueuedAt: now,
-        token: {
-            ok: true,
-            characterId: 91,
-            ownerId: 'cold_simulation_owner',
-            revision: 5,
-            leaseId: 'oversized-lease',
-            leaseUntil: now + 30000
-        },
-        baseState: oversizedState,
+        revision: 5,
+        // The shape the kernel builds: the bag flag next to the whole next state.
+        bagChanged: false,
         nextState: oversizedState,
         durable: null,
-        result: {
-            patch: { inventory: oversizedInventory, stats: oversizedState.stats },
-            events: [],
-            materialize: { exp: 0, sp: 0, adena: 0, items: [] },
-            nextResolveAt: now + 30000,
-            debug: { activity: 'hunting' }
-        },
+        result: { events: [], debug: { activity: 'hunting' } },
         options: { allowLifecycle: true }
     };
-    oversizedKernel.inFlight.set(91, {
-        grant: oversizedProposal.token,
-        state: oversizedState,
-        context: {},
-        startedAt: now
-    });
+    oversizedKernel.inFlight.set(91, { state: oversizedState, startedAt: now });
     oversizedKernel.dirty.set(91, oversizedProposal);
     oversizedKernel.flushDue();
     const compactedMessage = oversizedEmitted.find((entry) => entry.type === 'proposal_batch');
@@ -1172,8 +1049,6 @@ function claimAck(kernel, payload) {
         'worker',
         { workerEpoch: 'epoch' }
     ).ok, 'compacted proposal batch must stay within the IPC envelope limit');
-    assert.strictEqual(compactedMessage.payload.proposals[0].result.patch, undefined,
-        'compacted proposals must remove duplicate result state when nextState is present');
     assert.strictEqual(oversizedKernel.snapshot().dirty, 0,
         'an oversized first proposal must not remain stuck in the dirty queue');
     assert.strictEqual(oversizedKernel.snapshot().proposalCompactions, 1);
@@ -1184,10 +1059,10 @@ function claimAck(kernel, payload) {
     for (let id = 200; id < 209; id++) {
         const before = state(id, { stats: { history: 'h'.repeat(40000), removed: 1, list: [1, 2] } });
         const next = { ...before, stats: { history: before.stats.history, list: [3], added: null }, hp: 8 };
-        const entry = { ...oversizedProposal, characterId: id, token: { ...oversizedProposal.token, characterId: id },
-            baseState: { ...before, hp: 8 }, nextState: next,
+        const entry = { ...oversizedProposal, characterId: id, proposalId: `${id}:${now}`,
+            nextState: next,
             atomicGroup: { id: 'large-clan', memberIds: Array.from({ length: 9 }, (_, i) => 200 + i) } };
-        oversizedKernel.inFlight.set(id, { state: before, grant: entry.token });
+        oversizedKernel.inFlight.set(id, { state: before, startedAt: now });
         oversizedKernel.dirty.set(id, entry);
         largeGroup.push({ before, next });
     }
@@ -1199,7 +1074,7 @@ function claimAck(kernel, payload) {
     sparse.payload.proposals.forEach((p, i) => {
         assert(p.nextStateDelta && !p.nextState);
         assert.deepStrictEqual(Delta.apply(largeGroup[i].before, p.nextStateDelta), largeGroup[i].next,
-            'transport retains planning changes, deletions, arrays and nulls against the claimed state');
+            'transport retains planning changes, deletions, arrays and nulls against the step base state');
         assert.strictEqual(largeGroup[i].before.stats.removed, 1, 'applying transport must not mutate its base');
     });
     assert.strictEqual(oversizedKernel.snapshot().proposalOversizeRejected, 0);
@@ -1215,23 +1090,11 @@ function claimAck(kernel, payload) {
         flushHardMs: 5000
     });
     const capacityFlushStates = Array.from({ length: 8 }, (_, index) => state(200 + index));
-    capacityFlushStates.forEach((entry) => capacityFlushKernel.upsert({
-        state: entry,
-        context: { spot: { id: 'spot', rewards: {} } }
-    }));
+    capacityFlushStates.forEach((entry) => capacityFlushKernel.upsert(standOn(capacityFlushKernel, {
+        state: entry
+    }, { id: 'spot', rewards: {} })));
     capacityFlushKernel.tick();
-    const capacityFlushClaim = capacityFlushMessages.shift();
-    assert.strictEqual(capacityFlushClaim.payload.candidates.length, 8);
-    claimAck(capacityFlushKernel, {
-        grants: capacityFlushStates.map((entry) => ({
-            ok: true,
-            characterId: entry.characterId,
-            ownerId: 'cold_simulation_owner',
-            revision: 4,
-            leaseId: `capacity-flush-${entry.characterId}`,
-            leaseUntil: now + 30000
-        }))
-    });
+    assert.strictEqual(lastSteps(capacityFlushKernel).length, 8);
     await capacityFlushKernel.resolveChain;
     assert.strictEqual(capacityFlushKernel.snapshot().dirty, 8);
     const readyProposals = [...capacityFlushKernel.dirty.entries()];
@@ -1260,13 +1123,14 @@ function claimAck(kernel, payload) {
     const partialKernel = recordingKernel({ resolveSolo: resolver, now: () => now,
         maxInFlight: 8, maxAtomicPartySize: 9, emit: (type, payload) => partialMessages.push({ type, payload }) });
     const clanMembers = Array.from({ length: 9 }, (_, i) => state(500 + i, { party: { partyId: 'nine' } }));
-    clanMembers.forEach((s, i) => partialKernel.upsert({ state: s, context: { isPartyLeader: i === 0,
-        party: { partyId: 'nine', leaderId: 500, memberIds: clanMembers.map(m => m.characterId) }, partyMembers: clanMembers } }));
+    clanMembers.forEach(s => partialKernel.upsert({ state: s }));
+    partialKernel.partyPut('nine', { partyId: 'nine', leaderId: 500, memberIds: clanMembers.map(m => m.characterId) });
     for (let id = 600; id < 605; id++) {
+        const base = state(id);
         const pending = { ...oversizedProposal, characterId: id, enqueuedAt: now,
-            token: { ...oversizedProposal.token, characterId: id }, baseState: state(id), nextState: state(id), result: { events: [], debug: {} } };
-        partialKernel.upsert({ state: pending.baseState, context: {} });
-        partialKernel.inFlight.set(id, { state: pending.baseState, grant: pending.token });
+            proposalId: `${id}:${now}`, revision: 3, nextState: state(id), result: { events: [], debug: {} } };
+        partialKernel.upsert({ state: base });
+        partialKernel.inFlight.set(id, { state: base, startedAt: now });
         partialKernel.dirty.set(id, pending);
     }
     partialKernel.tick();
@@ -1275,7 +1139,7 @@ function claimAck(kernel, payload) {
     assert.strictEqual(drained.payload.capacityBlocked, true, 'main must receive the atomic capacity pressure');
     assert.strictEqual(partialKernel.inFlight.size, 5, 'slots remain owned until the commit acknowledgement');
     commitAck(partialKernel, { results: drained.payload.proposals.map(p => ({ ok: true, characterId: p.characterId,
-        state: state(p.characterId, { timing: { nextResolveAt: now + 60000 } }), context: {} })) });
+        state: state(p.characterId, { timing: { nextResolveAt: now + 60000 } }) })) });
     assert.strictEqual(partialKernel.dueCandidates(now + 1000, 8).length, 9, 'the complete clan party can run after the owners commit');
 
     const throttledPartyMessages = [];
@@ -1295,25 +1159,19 @@ function claimAck(kernel, payload) {
         leaderId: 40,
         memberIds: throttledPartyMembers.map((member) => member.characterId)
     };
-    throttledPartyKernel.upsert({ state: state(39), context: { spot: { id: 'spot' } } });
-    throttledPartyMembers.forEach((member, index) => throttledPartyKernel.upsert({
-        state: member,
-        context: index === 0 ? {
-            isPartyLeader: true,
-            party: throttledParty,
-            partyMembers: throttledPartyMembers,
-            spot: { id: 'spot' }
-        } : {}
-    }));
-    throttledPartyKernel.upsert({ state: state(100), context: { spot: { id: 'spot' } } });
+    throttledPartyKernel.upsert(standOn(throttledPartyKernel, { state: state(39) }, { id: 'spot' }));
+    throttledPartyMembers.forEach((member, index) => throttledPartyKernel.upsert(
+        index === 0 ? standOn(throttledPartyKernel, { state: member }, { id: 'spot' }) : { state: member }
+    ));
+    throttledPartyKernel.partyPut(throttledParty.partyId, throttledParty);
+    throttledPartyKernel.upsert(standOn(throttledPartyKernel, { state: state(100) }, { id: 'spot' }));
     throttledPartyKernel.tick();
-    const throttledClaim = throttledPartyMessages.find((entry) => entry.type === 'claim_request');
-    assert.deepStrictEqual(throttledClaim.payload.candidates.map((candidate) => candidate.characterId), [39],
+    assert.deepStrictEqual(lastSteps(throttledPartyKernel), [39],
         'a valid atomic party must drain earlier owners instead of letting newer solo work refill the window');
     assert.strictEqual(throttledPartyKernel.snapshot().partyCapacityDeferrals, 1);
-    assert(throttledPartyMembers.every((member) => !throttledPartyKernel.claiming.has(member.characterId)),
-        'a throttled atomic party must remain unclaimed until the ownership window recovers');
-    throttledPartyKernel.claiming.delete(39);
+    assert(throttledPartyMembers.every((member) => !throttledPartyKernel.inFlight.has(member.characterId)),
+        'a throttled atomic party must not step until the window recovers');
+    throttledPartyKernel.inFlight.delete(39);
     assert.deepStrictEqual(throttledPartyKernel.dueCandidates(now, 4).map(c => c.characterId), [40, 41, 42, 43, 44]);
 
     const atomicBurstMessages = [];
@@ -1326,19 +1184,13 @@ function claimAck(kernel, payload) {
         maxInFlight: 2,
         maxAtomicPartySize: 5
     });
-    throttledPartyMembers.forEach((member, index) => atomicBurstKernel.upsert({
-        state: member,
-        context: index === 0 ? {
-            isPartyLeader: true,
-            party: throttledParty,
-            partyMembers: throttledPartyMembers,
-            spot: { id: 'spot' }
-        } : {}
-    }));
+    throttledPartyMembers.forEach((member, index) => atomicBurstKernel.upsert(
+        index === 0 ? standOn(atomicBurstKernel, { state: member }, { id: 'spot' }) : { state: member }
+    ));
+    atomicBurstKernel.partyPut(throttledParty.partyId, throttledParty);
     atomicBurstKernel.tick();
-    const atomicBurstClaim = atomicBurstMessages.find((entry) => entry.type === 'claim_request');
     assert.deepStrictEqual(
-        atomicBurstClaim.payload.candidates.map((candidate) => candidate.characterId),
+        lastSteps(atomicBurstKernel),
         [40, 41, 42, 43, 44],
         'an empty throttled ownership window must admit one bounded atomic party'
     );
@@ -1362,19 +1214,13 @@ function claimAck(kernel, payload) {
         leaderId: 50,
         memberIds: oversizedPartyMembers.map((member) => member.characterId)
     };
-    oversizedPartyMembers.forEach((member, index) => boundedBurstKernel.upsert({
-        state: member,
-        context: index === 0 ? {
-            isPartyLeader: true,
-            party: oversizedParty,
-            partyMembers: oversizedPartyMembers,
-            spot: { id: 'spot' }
-        } : {}
-    }));
-    boundedBurstKernel.upsert({ state: state(100), context: { spot: { id: 'spot' } } });
+    oversizedPartyMembers.forEach((member, index) => boundedBurstKernel.upsert(
+        index === 0 ? standOn(boundedBurstKernel, { state: member }, { id: 'spot' }) : { state: member }
+    ));
+    boundedBurstKernel.partyPut(oversizedParty.partyId, oversizedParty);
+    boundedBurstKernel.upsert(standOn(boundedBurstKernel, { state: state(100) }, { id: 'spot' }));
     boundedBurstKernel.tick();
-    const boundedBurstClaim = boundedBurstMessages.find((entry) => entry.type === 'claim_request');
-    assert.deepStrictEqual(boundedBurstClaim.payload.candidates.map((candidate) => candidate.characterId), [100],
+    assert.deepStrictEqual(lastSteps(boundedBurstKernel), [100],
         'a party above the configured atomic bound must defer without blocking solo work');
     assert.strictEqual(boundedBurstKernel.snapshot().partyCapacityBursts, 0);
     assert.strictEqual(boundedBurstKernel.snapshot().partyCapacityDeferrals, 1);
@@ -1390,27 +1236,24 @@ function claimAck(kernel, payload) {
     });
     const capacityMembers = Array.from({ length: 5 }, (_, index) => state(40 + index, { party: { partyId: 'capacity-party' } }));
     const capacityParty = { partyId: 'capacity-party', leaderId: 40, memberIds: capacityMembers.map((member) => member.characterId) };
-    capacityMembers.forEach((member, index) => capacityKernel.upsert({
-        state: member,
-        context: index === 0 ? { isPartyLeader: true, party: capacityParty, partyMembers: capacityMembers, spot: { id: 'spot' } } : {}
-    }));
-    for (let id = 1000; id < 1062; id++) capacityKernel.claiming.add(id);
+    capacityMembers.forEach((member, index) => capacityKernel.upsert(
+        index === 0 ? standOn(capacityKernel, { state: member }, { id: 'spot' }) : { state: member }
+    ));
+    capacityKernel.partyPut(capacityParty.partyId, capacityParty);
+    for (let id = 1000; id < 1062; id++) capacityKernel.inFlight.set(id, { startedAt: now });
     capacityKernel.tick();
-    assert(!capacityMessages.some((entry) => entry.type === 'claim_request'), 'a party must wait when remaining capacity cannot admit every member');
-    assert(capacityMembers.every((member) => !capacityKernel.claiming.has(member.characterId)),
-        'capacity deferral must not mark unsent party members as claiming');
-    capacityKernel.claiming.clear();
+    assert.deepStrictEqual(lastSteps(capacityKernel), [], 'a party must wait when remaining capacity cannot admit every member');
+    assert(capacityMembers.every((member) => !capacityKernel.inFlight.has(member.characterId)),
+        'capacity deferral must not start unsent party members');
+    capacityKernel.inFlight.clear();
     now += 100;
     capacityKernel.tick();
-    assert.strictEqual(capacityMessages.find((entry) => entry.type === 'claim_request').payload.candidates.length, 5,
+    assert.strictEqual(lastSteps(capacityKernel).length, 5,
         'the next eligible tick must admit the entire party atomically');
 
     const fenceKernel = recordingKernel({ resolveSolo: resolver, emit: () => {}, now: () => now });
-    fenceKernel.upsert({ state: state(9), context: { spot: { id: 'spot' } } });
+    fenceKernel.upsert(standOn(fenceKernel, { state: state(9) }, { id: 'spot' }));
     fenceKernel.tick();
-    claimAck(fenceKernel, { grants: [{
-        ok: true, characterId: 9, ownerId: 'cold_simulation_owner', revision: 4, leaseId: 'fence-lease', leaseUntil: now + 30000
-    }] });
     await fenceKernel.resolveChain;
     const fenced = fenceKernel.fence(9);
     assert.strictEqual(fenced.characterId, 9);
@@ -1423,15 +1266,12 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => errorMessages.push({ type, payload }),
         now: () => now
     });
-    errorKernel.upsert({ state: state(30), context: { spot: { id: 'spot' } } });
+    errorKernel.upsert(standOn(errorKernel, { state: state(30) }, { id: 'spot' }));
     errorKernel.tick();
-    claimAck(errorKernel, { grants: [{
-        ok: true, characterId: 30, ownerId: 'cold_simulation_owner', revision: 4,
-        leaseId: 'error-lease', leaseUntil: now + 30000
-    }] });
     await errorKernel.resolveChain;
-    const release = errorMessages.find((entry) => entry.type === 'release_request');
-    assert.strictEqual(release.payload.releases[0].token.leaseId, 'error-lease', 'resolver errors must release the exact lease');
+    assert.deepStrictEqual(errorMessages.map(entry => entry.type), ['fault'], 'a resolver error sends no proposal');
+    assert.strictEqual(errorKernel.inFlight.size, 0, 'a resolver error ends the step');
+    assert.strictEqual(errorKernel.scheduleTokens.get(30).dueAt, now + 1000, 'a resolver error requeues the bot');
     assert.strictEqual(errorKernel.snapshot().errors, 1);
 
     // The bot's look at its board lines (group E) leaves the worker with its
@@ -1445,11 +1285,8 @@ function claimAck(kernel, payload) {
         emit: (type, payload) => marketMessages.push({ type, payload }),
         now: () => now
     });
-    marketKernel.upsert({ state: state(40), context: { spot: { id: 'spot', rewards: {} } } });
+    marketKernel.upsert(standOn(marketKernel, { state: state(40) }, { id: 'spot', rewards: {} }));
     marketKernel.tick();
-    claimAck(marketKernel, { grants: [{
-        ok: true, characterId: 40, ownerId: 'cold_simulation_owner', revision: 4, leaseId: 'market-lease', leaseUntil: now + 30000
-    }] });
     await marketKernel.resolveChain;
     marketKernel.flush(null, true);
     const marketProposal = marketMessages.find((entry) => entry.type === 'proposal_batch').payload.proposals[0];
@@ -1461,12 +1298,210 @@ function claimAck(kernel, payload) {
     marketKernel.lookSeen.set(40, new Map([[6, { deals: 3, at: now }]]));
     marketKernel.fence(40);
     assert.strictEqual(marketKernel.lookSeen.has(40), false, 'hot handoff deletes worker line observations');
-    marketKernel.upsert({ state: state(41), context: {} });
+    marketKernel.upsert({ state: state(41) });
     marketKernel.lookSeen.set(41, new Map([[7, { deals: 3, at: now }]]));
     marketKernel.remove(41);
     assert.strictEqual(marketKernel.lookSeen.has(41), false);
     await marketKernel.shutdown();
     assert.strictEqual(marketKernel.lookSeen.size, 0);
+
+    {
+        // A commit ack naming a review: the bot waits for the review command
+        // (no step starts), which carries the plan the proposal had and no
+        // state; its answer gives the bot back to its schedule. An ack naming
+        // nothing sends no command.
+        const at = 50000;
+        const reviewKernel = recordingKernel({ resolveSolo: () => null, now: () => at });
+        const plan = { sell: [], withdraw: [7], buyAds: [], travel: null };
+        const committed = {};
+        for (const id of [60, 61]) {
+            const base = state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
+            reviewKernel.upsert({ state: base });
+            reviewKernel.inFlight.set(id, { state: base, startedAt: at });
+            reviewKernel.dirty.set(id, { proposalId: `${id}:${at}`, characterId: id, revision: 3, priority: 'P1', enqueuedAt: at,
+                nextState: base, result: { events: [] }, economyPlan: plan });
+            committed[id] = state(id, { simulation: { ...base.simulation, revision: 5 }, timing: { lastResolvedAt: at, nextResolveAt: at } });
+        }
+        reviewKernel.flush(null, true);
+        // A state on the ack is main's (it changed what it committed): not own
+        // output, so a pending economy refresh runs on it.
+        const ownOutputs = [], nativeSet = reviewKernel.states.set.bind(reviewKernel.states);
+        reviewKernel.states.set = (id, entry, ownOutput) => { ownOutputs.push([id, ownOutput]); return nativeSet(id, entry); };
+        commitAck(reviewKernel, { results: [
+            { ok: true, characterId: 60, revision: 5, state: committed[60], review: ['plan'] },
+            { ok: true, characterId: 61, revision: 5, state: committed[61] }] });
+        assert.deepStrictEqual(ownOutputs, [[60, null], [61, null]], 'a state ack stores main\'s state');
+        const request = sentCommands.get(reviewKernel).get(60);
+        assert.strictEqual(request?.kind, 'review');
+        assert.deepStrictEqual(request.economyPlan, plan, 'the review carries the committed proposal plan');
+        assert.strictEqual(request.state, undefined, 'main reads its own committed state');
+        assert.strictEqual(sentCommands.get(reviewKernel).has(61), false, 'an ack naming nothing sends no review');
+        reviewKernel.tick();
+        assert.strictEqual(everStepped(reviewKernel, 60), false, 'no step starts while the review runs');
+        assert.strictEqual(everStepped(reviewKernel, 61), true);
+        // The ok review ran the plan this step sent: its state is own output.
+        ownOutputs.length = 0;
+        commandAck(reviewKernel, { characterId: 60, state: { ...committed[60] } });
+        assert.deepStrictEqual(ownOutputs, [[60, 'review']], 'an ok review of the plan sent stores own output');
+        reviewKernel.states.set = nativeSet;
+        reviewKernel.tick();
+        assert.strictEqual(everStepped(reviewKernel, 60), true, 'the answered review gives the bot back to its schedule');
+    }
+
+    {
+        // An ok ack with the commit's numbers and no state: the bot holds its
+        // own proposed state released to main with the row's clock and
+        // revisions, the same state main cached, and the review main named runs.
+        const at = 55000;
+        const numbersKernel = recordingKernel({ resolveSolo: () => null, now: () => at });
+        const base = state(62, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
+        const next = state(62, { activity: 'resting', timing: { lastResolvedAt: at, nextResolveAt: at + 9000 } });
+        numbersKernel.upsert({ state: base });
+        numbersKernel.inFlight.set(62, { state: base, startedAt: at });
+        numbersKernel.dirty.set(62, { proposalId: `62:${at}`, characterId: 62, revision: 3, priority: 'P1', enqueuedAt: at,
+            nextState: next, result: { events: [] } });
+        numbersKernel.flush(null, true);
+        const ack = { ok: true, characterId: 62, revision: 5, updatedAt: at + 1, inventoryRevision: 3, skillsRevision: 2,
+            hennaRevision: 1, review: ['training'] };
+        // The rebuilt state is the step's own output: its store says so, and
+        // the worker runs no economy refresh for it (own outputs are not inputs).
+        const ownOutputs = [], nativeSet = numbersKernel.states.set.bind(numbersKernel.states);
+        numbersKernel.states.set = (id, entry, ownOutput) => { ownOutputs.push([id, ownOutput]); return nativeSet(id, entry); };
+        commitAck(numbersKernel, { results: [ack] });
+        assert.deepStrictEqual(ownOutputs, [[62, 'commit']], 'a numbers ack stores the own commit');
+        numbersKernel.states.set = nativeSet;
+        const held = numbersKernel.states.get(62).state;
+        assert.deepStrictEqual(held, Protocol.committedState(next, ack));
+        assert.deepStrictEqual(held.simulation, { revision: 5 });
+        assert.deepStrictEqual([held.activity, held.timing, held.updatedAt, held.bagRevision, held.skillsRevision, held.hennaRevision],
+            ['resting', next.timing, at + 1, 3, 2, 1], 'the proposal and the ack numbers make the held state');
+        assert.strictEqual(numbersKernel.inFlight.has(62), false, 'the proposed state goes with the in-flight record');
+        assert.strictEqual(sentCommands.get(numbersKernel).get(62)?.kind, 'review', 'a numbers ack still sends the named review');
+        assert.strictEqual(Protocol.committedState(next, { ...ack, updatedAt: undefined }), null, 'a missing number builds nothing');
+        // An ok ack whose state cannot be rebuilt is no refusal: counted, the bot
+        // keeps its plan as sent and waits for its due.
+        const plan = { sell: [], withdraw: [8], buyAds: [], travel: null };
+        numbersKernel.upsert({ state: state(63, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } }) });
+        Object.assign(numbersKernel.states.get(63), { economyPlanHash: 4321 });
+        numbersKernel.inFlight.set(63, { state: numbersKernel.states.get(63).state, startedAt: at });
+        numbersKernel.dirty.set(63, { proposalId: `63:${at}`, characterId: 63, revision: 3, priority: 'P1',
+            enqueuedAt: at, nextState: next, result: { events: [] }, economyPlan: plan });
+        numbersKernel.flush(null, true);
+        commitAck(numbersKernel, { results: [{ ...ack, characterId: 63, updatedAt: undefined, review: ['plan'] }] });
+        assert.strictEqual(numbersKernel.ackUnbuilt, 1);
+        assert.strictEqual(numbersKernel.inFlight.has(63), false);
+        assert.strictEqual(numbersKernel.states.get(63).state.simulation.revision, 3, 'nothing is upserted');
+        assert.strictEqual(numbersKernel.states.get(63).economyPlanHash, 4321, 'the plan main named stays sent');
+        assert.strictEqual(sentCommands.get(numbersKernel).has(63), false, 'no review on an unbuilt state');
+    }
+
+    {
+        // A plan the step stamped as sent that no review runs (refused, skipped
+        // on a full window, its send failed, or not named after a forced
+        // cleanup) is forgotten as sent, so the refresh reproducing it sends it
+        // again; the bot's next state still asks for that refresh.
+        const at = 60000;
+        const plan = { sell: [], withdraw: [9], buyAds: [], travel: null };
+        let sendFails = false;
+        const planKernel = recordingKernel({ resolveSolo: () => null, now: () => at,
+            emit: type => !(sendFails && type === 'command_request') });
+        const commitWithPlan = (id, review, inFlightOnly = false) => {
+            const base = state(id, { timing: { lastResolvedAt: 1000, nextResolveAt: at + 60000 } });
+            planKernel.upsert({ state: base });
+            Object.assign(planKernel.states.get(id), { economyPending: 2, economyPlanHash: 1234 });
+            planKernel.inFlight.set(id, { state: base, startedAt: at });
+            planKernel.dirty.set(id, { proposalId: `${id}:${at}`, characterId: id, revision: 3, priority: 'P1', enqueuedAt: at,
+                nextState: base, result: { events: [] }, economyPlan: plan });
+            planKernel.flush(null, true);
+            if (inFlightOnly) return;
+            commitAck(planKernel, { results: [{ ok: true, characterId: id, revision: 5, review,
+                state: state(id, { simulation: { ...base.simulation, revision: 5 }, timing: { lastResolvedAt: at, nextResolveAt: at } }) }] });
+        };
+        const sent = id => planKernel.states.get(id).economyPlanHash;
+        commitWithPlan(70, ['plan']);
+        assert.strictEqual(sent(70), 1234, 'a review on its way keeps the plan as sent');
+        // A refused review ran no plan: its state is an input, not own output.
+        const ownOutputs = [], nativeSet = planKernel.states.set.bind(planKernel.states);
+        planKernel.states.set = (id, entry, ownOutput) => { ownOutputs.push([id, ownOutput]); return nativeSet(id, entry); };
+        commandAck(planKernel, { characterId: 70, ok: false, reason: 'stale_command', state: planKernel.states.get(70).state });
+        assert.deepStrictEqual(ownOutputs, [[70, null]], 'a refused review stores no own output');
+        planKernel.states.set = nativeSet;
+        assert.strictEqual(sent(70), null, 'a refused review forgets its plan as sent');
+        assert.strictEqual(planKernel.states.get(70).economyPending, 2, 'the next state still asks for a refresh');
+        commitWithPlan(71, ['buff']);
+        assert.strictEqual(sent(71), null, 'a plan main did not name is forgotten as sent');
+        commitWithPlan(75, undefined);
+        assert.strictEqual(sent(75), null, 'a plan of an ack naming no review is forgotten as sent');
+        sendFails = true;
+        commitWithPlan(72, ['plan']);
+        assert.strictEqual(sent(72), null, 'a review whose send failed forgets its plan as sent');
+        assert.strictEqual(planKernel.reviewsSkipped, 1, 'a review whose send failed counts as skipped');
+        assert.strictEqual(planKernel.commanding.has(72), false, 'a review whose send failed frees its slot');
+        sendFails = false;
+        planKernel.setMaxInFlight(1);
+        commitWithPlan(73, ['plan'], true);
+        commitWithPlan(74, ['plan']);
+        assert.strictEqual(sent(74), null, 'a review skipped on a full window forgets its plan as sent');
+        assert.strictEqual(planKernel.reviewsSkipped, 2);
+    }
+
+    // A party run with no member result (no spot): the whole roster commits
+    // the party row, fenced on the revision the run read, with the resolver's
+    // next due and a goal review; every member stays in flight until the ACK.
+    // Main publishes the row before the commit ACK, and the leader is due at
+    // that row's time. A refused commit (no new row) puts the leader no
+    // sooner than a second away, not at the row's past due.
+    const emptyMessages = [];
+    let emptyNow = now;
+    const emptyKernel = recordingKernel({
+        resolveSolo: resolver,
+        resolveParty: ({ timestamp }) => ({ memberResults: [], events: [], partyPatch: {}, nextResolveAt: timestamp + 60000,
+            debug: { reason: 'missing_party_members_or_spot' } }),
+        emit: (type, payload, msgId) => emptyMessages.push({ type, payload, msgId }),
+        now: () => emptyNow
+    });
+    const emptyMembers = [250, 251].map(id => state(id, { party: { partyId: 'empty-party', leaderId: 250 } }));
+    const emptyParty = { partyId: 'empty-party', leaderId: 250, memberIds: [250, 251], stats: {}, status: 'active',
+        nextResolveAt: emptyNow - 5000, updatedAt: emptyNow - 5000, revision: 4 };
+    emptyMembers.forEach(member => emptyKernel.upsert({ state: member }));
+    emptyKernel.partyPut(emptyParty.partyId, emptyParty);
+    const emptySteps = startedSteps.get(emptyKernel);
+    const emptyRound = async () => {
+        emptyMessages.length = 0;
+        const stepped = emptySteps.length;
+        emptyKernel.tick();
+        assert.strictEqual(emptySteps.length, stepped + 1);
+        assert.deepStrictEqual(lastSteps(emptyKernel), [250, 251]);
+        await emptyKernel.resolveChain;
+        return emptyMessages.find(entry => entry.type === 'proposal_batch').payload.proposals;
+    };
+    const emptyCommits = await emptyRound();
+    assert.deepStrictEqual(emptyCommits.map(proposal => proposal.characterId), [250, 251], 'the whole roster commits');
+    const emptyChange = emptyCommits[0].atomicGroup.partyChanges[0];
+    assert(emptyCommits.every(proposal => proposal.atomicGroup.id === emptyCommits[0].atomicGroup.id), 'one group');
+    assert.deepStrictEqual([emptyChange.partyId, emptyChange.expectedPartyRevision, emptyChange.nextResolveAt, emptyChange.spotId],
+        ['empty-party', 4, emptyNow + 60000, undefined], 'the row change is fenced on the run\'s revision');
+    const emptyLeaderCommit = emptyCommits.find(proposal => proposal.partyResolution);
+    assert.strictEqual(emptyLeaderCommit.characterId, 250);
+    assert.strictEqual(emptyLeaderCommit.partyResolution.reviewGoals, true, 'main reviews the party\'s goals');
+    assert(emptyKernel.busy(250) && emptyKernel.busy(251), 'every member stays in flight until the commit ACK');
+    emptyKernel.partyPut(emptyParty.partyId, { ...emptyParty, nextResolveAt: emptyNow + 60000, revision: 5 });
+    commitAck(emptyKernel, { results: emptyCommits.map(proposal => ({ ok: true, characterId: proposal.characterId,
+        state: { ...proposal.nextState, simulation: { revision: 5 } } })) });
+    assert.strictEqual(emptyKernel.busy(250), false);
+    assert.strictEqual(emptyKernel.scheduleTokens.get(250).dueAt, emptyNow + 60000, 'the leader is due at the row\'s next due');
+    emptyNow += 1000;
+    const steppedBeforeDue = emptySteps.length;
+    emptyKernel.tick();
+    assert.strictEqual(emptySteps.length, steppedBeforeDue, 'no step before the row\'s next due');
+    emptyNow += 60000;
+    const refusedCommits = await emptyRound();
+    commitAck(emptyKernel, { results: refusedCommits.map(proposal => ({ ok: false, characterId: proposal.characterId,
+        reason: 'party_group_aborted', detail: 'party_revision_stale',
+        state: { ...proposal.nextState, simulation: { revision: 6 } } })) });
+    assert.strictEqual(emptyKernel.busy(250), false);
+    assert(emptyKernel.scheduleTokens.get(250).dueAt >= emptyNow + 1000,
+        'a refused commit with no new row waits a second, not the row\'s past due');
 
     console.log('Cold worker protocol, deterministic kernel, scheduling, and fence checks passed');
 })().catch((error) => {

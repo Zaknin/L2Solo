@@ -40,16 +40,15 @@ async function form(sides, context, valid) {
                 objective: existing?.stats?.objective || { kind: 'shared_target', npcId: context.npcId, spotId: context.spotId },
                 hotLifecycle: { startedAt: existing?.stats?.hotLifecycle?.startedAt || context.at, reason: 'hot_competition' } } });
         prepared.row.updatedAt = Math.max(prepared.row.updatedAt, Number(existing?.updatedAt || 0) + 1);
-        prepared.snapshot.updatedAt = prepared.row.updatedAt;
         const assignments = states.map(s => Life.preparePartyAssignment({ ...s, activity: 'grouped', spotId: context.spotId },
-            partyId, Composition.roleForState(s), leaderId, null, context.spotId));
+            partyId, Composition.roleForState(s), leaderId, null));
         const result = await invoke('Database').commitBackgroundPartyMembership({ party: prepared.row, members: assignments,
-            expectedPhase: 'hot', expectedPartyUpdatedAt: existing?.updatedAt ?? null, canCommitHot: canCommit,
+            expectedPhase: 'hot', expectedPartyRevision: existing?.revision ?? null, canCommitHot: canCommit,
             event: { characterId: leaderId, eventType: existing ? 'party_recruit' : 'party',
                 summary: 'Hunters joined forces over a shared target', createdAt: context.at,
                 meta: { partyId, npcId: context.npcId, source: 'hot_competition' } } });
         if (!result.ok) return result;
-        Parties.acceptCommit(prepared);
+        Parties.acceptRow(result.partyRow);
         const assigned = Life.acceptPartyAssignments(assignments, result.lifeRows);
         // No await between durable membership and the complete live roster.
         sessions.forEach(s => {
@@ -58,7 +57,6 @@ async function form(sides, context, valid) {
             s.plan = 'hunting';
             s.hotCompetitionHold = null;
         });
-        invoke('GameServer/Bot/AI/BotPvpIndex').invalidate();
         refreshPartyMemberships(sessions, invoke);
         sessions.find(s => s.actor.fetchId() === leaderId).backgroundHuntTarget = context.mob;
         const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');

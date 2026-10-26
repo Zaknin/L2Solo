@@ -36,7 +36,7 @@ function main() {
     assert.strictEqual(BotBrain.isPartyCandidateRequest('I meant other bots'), true);
     assert.strictEqual(BotBrain.isPartyRequest('I meant other bots'), false);
     assert.strictEqual(BotBrain.isPartyCandidateRequest('who can join our group?'), true);
-    assert.strictEqual(BotBrain.isPartyCandidateRequest('кто может вступить в пати?'), true);
+    assert.strictEqual(BotBrain.isPartyCandidateRequest('\u043a\u0442\u043e \u043c\u043e\u0436\u0435\u0442 \u0432\u0441\u0442\u0443\u043f\u0438\u0442\u044c \u0432 \u043f\u0430\u0442\u0438?'), true);
     assert.strictEqual(BotBrain.isPartyRequest('can I join your party?'), true);
 
     const playerSession = { accountId: 'party_player', actor: actor(9101, 'PartyPlayer') };
@@ -50,8 +50,13 @@ function main() {
     };
     const solo = BotBrain.applyPartyPolicy(soloSession, decision(), { playerSession }, 'wanna party?');
     assert.strictEqual(solo.action, 'say');
-    assert.match(solo.reply, /cannot join right now/i);
-    assert.match(solo.reason, /^party_policy:/);
+    assert.match(solo.reply, /open to grouping right now/i, 'a solitary persona cannot veto an eligible player invite');
+    assert.notStrictEqual(solo.reply, decision().reply, 'current willingness must replace the model promise');
+    assert.strictEqual(solo.reason, 'party_policy:available');
+    const groupedSolo = BotBrain.applyPartyPolicy({ ...soloSession, hotBackgroundPartyId: 'solo-party' },
+        decision(), { playerSession }, 'wanna party?');
+    assert.match(groupedSolo.reply, /cannot join right now/i, 'existing membership still overrides the model promise');
+    assert.strictEqual(groupedSolo.reason, 'party_policy:already_grouped');
 
     const socialSession = {
         accountId: 'bot_social_party',
@@ -62,7 +67,8 @@ function main() {
         }
     };
     const social = BotBrain.applyPartyPolicy(socialSession, decision(), { playerSession }, 'join our group');
-    assert.strictEqual(social.reply, decision().reply, 'available party policy must preserve the model personality');
+    assert.match(social.reply, /open to grouping right now/, 'willingness is current, not a promise to accept a later invite');
+    assert.notStrictEqual(social.reply, decision().reply, 'an unvalidated model promise must not be delivered');
     assert.strictEqual(social.reason, 'party_policy:available');
 
     const autonomousPartyBot = { ...socialSession, hotBackgroundPartyId: 'hot-party-1' };
@@ -82,12 +88,16 @@ function main() {
     };
     const candidate = BotBrain.applyPartyPolicy(
         companionSession,
-        decision(),
+        { ...decision(), reply: 'I can check which other bots are available.' },
         { playerSession },
         'do you know anybody to join our party?'
     );
-    assert.strictEqual(candidate.reply, decision().reply, 'candidate discovery must remain an LLM reply');
+    assert.strictEqual(candidate.reply, 'I can check which other bots are available.', 'candidate discovery must remain an LLM reply');
     assert.notStrictEqual(candidate.reason, 'party_policy:already_grouped');
+    const volunteered = BotBrain.applyPartyPolicy(companionSession, { ...decision(), partyIntent: 'none' },
+        { playerSession }, 'do you know anybody to join our party?');
+    assert.strictEqual(volunteered.reason, 'party_policy:already_grouped',
+        'candidate discovery must not exempt an unrequested promise to join');
 
     const groupSession = { ...socialSession, partyCompanion: true, followPlayerSession: playerSession };
     const stopPulling = BotBrain.applyPartyPolicy(groupSession, decision(), { playerSession }, 'everyone stop pulling');

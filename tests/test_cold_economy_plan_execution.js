@@ -6,6 +6,9 @@ const Afk = invoke('GameServer/AfkTrade/AfkTradeService');
 const Market = invoke('GameServer/Bot/Economy/BotAfkMarketService');
 const Population = invoke('GameServer/Bot/Population/PopulationService');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
+const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
+const StateWire = require('../src/GameServer/Bot/Population/ColdStateWire');
+const { fnv1a32 } = require('../src/GameServer/Bot/Fnv1a');
 const id = 730061, restores = [];
 function stub(object, key, value) { const previous = object[key]; restores.push(() => object[key] = previous); object[key] = value; }
 (async () => {
@@ -30,47 +33,105 @@ function stub(object, key, value) { const previous = object[key]; restores.push(
         const warnings = [], messages = [];
         stub(utils, 'infoWarn', (...args) => warnings.push(require('node:util').format(...args.slice(1))));
         const originalReprice = Database.repriceBoardLines;
+        let boardMoves = true;
         stub(Database, 'repriceBoardLines', async (...args) => {
-            await Database.execute(['UPDATE afk_trade_shops SET revision=revision+1 WHERE id=?', [line.recordId]]);
+            if (boardMoves) await Database.execute(['UPDATE afk_trade_shops SET revision=revision+1 WHERE id=?', [line.recordId]]);
             return originalReprice.apply(Database, args);
         });
         stub(invoke('GameServer/Bot/Population/PopulationConfig'), 'developerDiagnostics', true);
         const coordinator = new ColdSimulationCoordinator();
         coordinator.worker = { postMessage: message => messages.push(message) }; coordinator.workerEpoch = 'plan:test';
-        coordinator.tableChannel.flush = () => {}; coordinator.contextIndex = () => ({}); coordinator.contextFor = () => ({});
+        coordinator.tableChannel.flush = () => {};
         coordinator.reviewCommittedEconomy = async value => value;
         stub(invoke('GameServer/Bot/Goals/GoalService'), 'review', async () => null);
         stub(Life, 'enqueueEquipmentGoalAdvanceForState', () => {});
         stub(invoke('GameServer/Bot/Population/BotLifeEvents'), 'recordMany', async () => {});
         stub(invoke('GameServer/Bot/Population/BotGlobalChat'), 'maybeAnnounce', () => {});
-        const proposal = { proposalId: 'plan:1', token: { characterId: id, ownerId: 'cold_simulation_owner',
-            revision: 0, leaseId: 'plan:lease', leaseUntil: Date.now() + 60000 },
+        const proposal = { revision: 0,
             nextState: state, result: { events: [] }, economyEdges: 1,
             economyPlan: { sell: [], withdraw: [line.lineId], buyAds: [], travel: null } };
         const result = { ok: true, characterId: id, nextState: state, proposal };
-        await coordinator.afterCommit(result);
-        await coordinator.handleCommitResults([result]);
-        assert.equal(messages.find(message => message.type === 'commit_ack').payload.results[0].ok, true,
-            'a stale post-commit board step cannot reject an accepted resolve');
-        assert.equal(coordinator.counters.afterCommitStepErrors.economyPlan, 1);
+        // The worker's side of a commit: it flushes the proposal, takes main's
+        // commit ack and sends the review command the ack names; main answers it.
+        const sent = [];
+        const kernel = new ColdSimulationKernel({ resolveSolo: () => null,
+            emit: (type, payload) => { sent.push({ type, payload }); return true; } });
+        const fromMain = (type, from) => StateWire.unpackPayload(type, messages.slice(from).find(message => message.type === type).payload);
+        let steps = 0;
+        const commit = async (fields = {}) => {
+            // Each commit is its own step: a distinct start, so a distinct proposal id.
+            const startedAt = Date.now() + steps++;
+            const flushed = { ...proposal, ...fields, proposalId: `${id}:${startedAt}`, characterId: id, priority: 'P1',
+                enqueuedAt: Date.now() };
+            kernel.upsert({ state: Life.cachedState(id) });
+            kernel.inFlight.set(id, { state: Life.cachedState(id), startedAt });
+            kernel.dirty.set(id, flushed);
+            kernel.flush(null, true);
+            const committed = { ...result, nextState: Life.cachedState(id),
+                proposal: sent.findLast(message => message.type === 'proposal_batch').payload.proposals[0] };
+            const from = messages.length, before = sent.length;
+            await coordinator.afterCommit(committed);
+            await coordinator.handleCommitResults([committed]);
+            const ack = fromMain('commit_ack', from);
+            kernel.onCommitAck(ack);
+            return { ack: ack.results[0],
+                review: sent.slice(before).find(message => message.type === 'command_request')?.payload.requests[0] || null };
+        };
+        const review = async request => {
+            const from = messages.length;
+            coordinator.handleCommandRequest({ msgId: `review:${from}`, payload: { requests: [request] } });
+            await coordinator.commandTail;
+            const answer = fromMain('command_ack', from).results[0];
+            kernel.completeCommand(answer);
+            return answer;
+        };
+        const onBoard = () => Afk.boardIndex().ownerLines(id).some(row => row.lineId === line.lineId);
+        const stale = await commit();
+        assert.equal(stale.ack.ok, true, 'a stale post-commit board step cannot reject an accepted resolve');
+        assert(stale.review, 'a commit with a plan is followed by its review command');
+        assert.equal((await review(stale.review)).ok, true, 'a failed plan step does not refuse the review');
         assert.equal(warnings.filter(line => line.includes('postcommit economyPlan failed')).length, 1);
         assert.equal((await Database.execute(['SELECT count FROM afk_trade_lines WHERE id=?', [line.lineId]]))[0].count, 10,
             'the changed record keeps its physical stock');
+        // The board takes the record as the moved writes left it.
+        boardMoves = false;
+        for (const row of await Database.fetchAfkTradeShops(id)) Afk.refreshRecord(row);
+        // A main write between the ack and the review moves the row: the review
+        // is refused and its plan does not run on the moved row.
+        const moved = await commit();
+        await Database.execute(['UPDATE bot_life_state SET simulationRevision=simulationRevision+1 WHERE characterId=?', [id]]);
+        Life.acceptLifecycleRow((await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [id]]))[0]);
+        // The step stamped the plan as sent (ColdSimulationWorker economyPlanHash).
+        const sentHash = fnv1a32(JSON.stringify(proposal.economyPlan));
+        Object.assign(kernel.states.get(id), { economyPending: 1, economyPlanHash: sentHash });
+        coordinator.ready = true;
+        const beforeRefused = messages.length;
+        const refused = await review(moved.review);
+        assert.equal(refused.ok, false);
+        assert.equal(refused.reason, 'stale_command');
+        assert.equal(onBoard(), true, 'a refused review withdraws nothing');
+        // The refused plan is no longer the one sent: the worker's refresh that
+        // reproduces it sends it again (ColdSimulationWorker publish), and main
+        // asks for that refresh after the ack that made the worker forget it.
+        assert.equal(kernel.states.get(id).economyPlanHash, null, 'the refused review forgets the plan as sent');
+        assert.equal(kernel.states.get(id).economyPending, 1, 'the next state still asks for a refresh');
+        const after = messages.slice(beforeRefused).map(message => message.type === 'snapshot_page'
+            ? (message.payload.economyOwnerId === id && message.payload.reconcile === true ? 'refresh' : 'page') : message.type);
+        assert(after.indexOf('refresh') > after.indexOf('command_ack') && after.indexOf('command_ack') >= 0,
+            'main asks for the refresh after the refused ack');
+        coordinator.ready = false;
+        // The next step proposes the same plan again and its review runs it.
+        const applied = await commit();
+        assert.equal((await review(applied.review)).ok, true);
+        assert.equal(onBoard(), false, 'the review command executes the committed plan');
         const heavy = coordinator.reviewCommittedEconomy;
         coordinator.reviewCommittedEconomy = () => { throw Error('ordinary_loot_main_pass'); };
-        await coordinator.afterCommit({ ...result, proposal: { ...proposal, economyPlan: undefined, economyEdges: 0 } });
-        assert.equal(coordinator.economyPlanCount, 1, 'ordinary commit performs no main economy pass');
+        assert.equal((await commit({ economyPlan: undefined, economyEdges: 0 })).review, null,
+            'an ordinary commit with nothing to review sends no review command');
         coordinator.reviewCommittedEconomy = heavy;
         assert.equal(Population.startLifecycleEconomyEvents, undefined);
         assert.equal(Population.runLifecycleEconomyEvent, undefined);
         assert.equal(Population.releaseWarehouseMaterials, undefined);
-        // The first commit can grant a new skill kit. Warm that build before
-        // measuring empty plans, excluding the earlier failed withdrawal too.
-        await coordinator.afterCommit({ ...result, proposal: { ...proposal,
-            economyPlan: { sell: [], withdraw: [], buyAds: [], travel: null } } });
-        coordinator.economyPlanTimes.length = 0;
-        for (let i = 0; i < 20; i++) await coordinator.afterCommit({ ...result, proposal: { ...proposal,
-            economyPlan: { sell: [], withdraw: [], buyAds: [], travel: null } } });
         state = await Life.upsertState({ ...(Life.cachedState(id) || state), stats: { ...state.stats,
             money: [10000, .0001, 100, 0, .001, 2000, 1867] } }, 'plan_funded_packet');
         const walletBefore = state.adena;
@@ -167,8 +228,6 @@ function stub(object, key, value) { const previous = object[key]; restores.push(
             { preparedState: actual, step: work => work() });
         assert.equal((await Database.fetchAfkTradeShops(id)).filter(row => row.kind === 'buy_ad').length, 0,
             'a freshly prepared complete-empty batch closes obsolete unaccepted ads');
-        const snapshots = coordinator.snapshot();
-        assert(snapshots.economyPlans.p95Ms <= 5, 'warm native empty-plan execution including writer guards fits 5 ms');
-        console.log(JSON.stringify({ economyPlans: snapshots.economyPlans, staleSteps: 1, ack: true }));
+        console.log('test_cold_economy_plan_execution: review command runs the committed plan; stale review refused; ack ok');
     } finally { for (const restore of restores.reverse()) restore(); await world.close(); }
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

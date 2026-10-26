@@ -39,11 +39,10 @@ const original = { gate: Routes.isSpotAllowedForState, profiles: Matchup.statePr
 let gates = 0, profiles = 0;
 try {
     Routes.isSpotAllowedForState = (_spot, _state, options) => {
-        gates++; assert.equal(options.mode, 'solo'); assert.equal(options.timestamp, timestamp);
-        assert.deepEqual(options.capacityStates, [state]); return true;
+        gates++; assert.equal(options.mode, 'solo'); assert.equal(options.timestamp, timestamp); return true;
     };
     Matchup.stateProfiles = (...args) => { profiles++; return original.profiles(...args); };
-    const routeAllowed = Planner.sourceRouteReader(state, { timestamp });
+    const routeAllowed = Planner.sourceRouteReader(state, { timestamp, spots: [spot] });
     assert(facts({ routeAllowed }).some(row => row.status === 'ready'), 'an allowed source remains available');
     facts({ routeAllowed });
     assert.equal(gates, 1, 'one spot gate per projection, not per material or NPC');
@@ -54,4 +53,54 @@ try {
     Routes.isSpotAllowedForState = () => false;
     assert.deepEqual(facts({ readyOnly: true }), [], 'a fresh decision discards the old allowed verdict');
 } finally { Routes.isSpotAllowedForState = original.gate; Matchup.stateProfiles = original.profiles; }
+
+// The bot's ground verdict kept with its held build (Planner.sourceGround,
+// handed back while no source section moved) still follows what moves no
+// section: a lower spot is ground for this bot only while its wish focus is
+// an economic hunt, and a spot exclusion refuses it only while the mark lasts.
+{
+    const nakondas = Data.npcs.find(npc => npc.selfId === 713);
+    const low = { id: '8_42', name: 'Nakondas field', minLevel: 42, maxLevel: 42, avgLevel: 42, capacity: 8, density: 6,
+        levelCounts: { 42: 6 }, tags: [], center: spot.center,
+        npcEntries: [{ selfId: nakondas.selfId, level: 42, count: 6 }], npcSelfIds: [nakondas.selfId] };
+    const spots = [spot, low];
+    const ground = Planner.sourceGround(spots);
+    const allowed = (bot, kept = ground) => Planner.sourceRouteReader(bot, { timestamp, ground: Planner.sourceGround(spots, kept) })(low);
+    const economic = { ...state, stats: { ...state.stats, wishFocus: ['power:101:7', 1, 50], stepCount: 10 } };
+    assert.equal(allowed(state), false, 'a spot 13 levels below the bot is no ground for an ordinary hunt');
+    assert.equal(allowed(economic), true, 'an economic-hunt focus admits it within the held build');
+    assert.equal(allowed(state), false, 'the ordinary focus refuses it again');
+    assert.equal(allowed(economic), true, 'fixture: allowed before the mark');
+    const marked = { ...economic, stats: { ...economic.stats, spotBackoffs: [{ spotId: low.id, untilStep: 12 }] } };
+    assert.equal(allowed(marked), false, 'a spot exclusion marked after the build refuses the spot');
+    assert.equal(allowed({ ...marked, stats: { ...marked.stats, stepCount: 12 } }), true,
+        'the expired mark leaves the spot allowed, with no section moved');
+    // Party-only ground: refused to the bot alone, admitted once it joins a
+    // party (a relations move, which no longer drops the kept verdict).
+    const partyGround = { ...low, id: '8_43', tags: ['party_required'], tagsAuthoritative: true };
+    const partySpots = [partyGround], kept = Planner.sourceGround(partySpots);
+    const onParty = bot => Planner.sourceRouteReader(bot, { timestamp, ground: Planner.sourceGround(partySpots, kept) })(partyGround);
+    assert.equal(onParty(economic), false, 'party-only ground is refused to the bot alone');
+    assert.equal(onParty({ ...economic, party: { partyId: 77 } }), true, 'the same ground is admitted in a party');
+    assert.equal(onParty(economic), false, 'and refused again after the party');
+}
+// The kept verdict also follows the bot's solo profiles, which move no
+// section: a summon beside it (its live cold summon) and its death (a dead
+// bot has no profiles, so no spot is refused for its kit).
+{
+    const spots = [spot], kept = Planner.sourceGround(spots);
+    const allowed = bot => Planner.sourceRouteReader(bot, { timestamp, ground: Planner.sourceGround(spots, kept) })(spot);
+    const summon = { active: true, npcId: 12077, skillId: 1111, hp: 5000, maxHp: 5000, pAtk: 3000, pDef: 2000,
+        accur: 200, critical: 10, atkSpd: 400, expiresAt: timestamp + 600000 };
+    const summoned = { ...state, stats: { ...state.stats, coldCombat: { ...state.stats.coldCombat, summon } } };
+    const dead = { ...state, vitals: { ...state.vitals, hp: 0 } };
+    assert.equal(allowed(state), false, 'the kit alone is refused on the spot');
+    assert.equal(allowed(state), false, 'and still refused while nothing changes');
+    assert.equal(allowed(summoned), true, 'a summon beside the bot admits the spot within the held build');
+    assert.equal(allowed(summoned), true, 'and keeps it admitted while it lives');
+    assert.equal(allowed({ ...summoned, stats: { ...summoned.stats, coldCombat: { ...summoned.stats.coldCombat,
+        summon: { ...summon, expiresAt: timestamp - 1 } } } }), false, 'an expired summon leaves the kit alone again');
+    assert.equal(allowed(dead), true, 'a dead bot has no profiles, so its kit refuses nothing');
+    assert.equal(allowed(state), false, 'alive again, the kit refuses it');
+}
 console.log('test_source_route_admission: ok');

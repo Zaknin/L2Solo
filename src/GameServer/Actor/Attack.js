@@ -21,7 +21,7 @@ class Attack {
     constructor() {
         this.timers = new Set();
         this.bowReloading = false;
-        this.bowRepeatTarget = null;
+        this.repeatTarget = null;
         this.resetQueuedEvent();
     }
 
@@ -73,7 +73,7 @@ class Attack {
         this.timers.forEach((timer) => clearTimeout(timer));
         this.timers.clear();
         this.bowReloading = false;
-        this.bowRepeatTarget = null;
+        this.repeatTarget = null;
     }
 
     abortCast(session, actor) {
@@ -104,6 +104,14 @@ class Attack {
         const actor = session.actor;
         const raidParty = invoke('GameServer/Clan/ClanRaidRoster').offensiveParty(session);
 
+        // A swing is already in flight: its end timer owns the next swing and
+        // takes the latest requested target. Repeated target clicks handled in
+        // one network chunk would otherwise start a second loop that a ground
+        // click cannot stop.
+        if (actor.state.fetchHits?.()) {
+            this.repeatTarget = creature;
+            return;
+        }
         if (this.blockedPvpDefense(session, actor, creature) || this.checkParticipants(actor, creature)) {
             return;
         }
@@ -113,7 +121,7 @@ class Attack {
         if (rangedAttack && this.bowReloading) {
             // Movement and other actions are legal after the arrow is released,
             // but another arrow must still wait for the weapon reuse phase.
-            this.bowRepeatTarget = creature;
+            this.repeatTarget = creature;
             return;
         }
         if (!AttackRange.isWithinRange(actor, creature, attackRange)
@@ -157,10 +165,8 @@ class Attack {
             : { drawMs: Formulas.calcMeleeAtkTime(attackSpeed) * 0.644,
                 cycleMs: Formulas.calcMeleeAtkTime(attackSpeed) };
         const movementGeneration = Number(session.moveRouteGeneration || 0);
-        if (rangedAttack) {
-            this.bowReloading = true;
-            this.bowRepeatTarget = null;
-        }
+        this.repeatTarget = null;
+        if (rangedAttack) this.bowReloading = true;
         const attackWeapon = WeaponSA.equipped(actor);
         let secondaryDamageMultiplier = 0.85;
         const hits = this.resolveMeleeTargets(actor, creature).map((target, index) => {
@@ -245,12 +251,10 @@ class Attack {
         }, timing.drawMs); // Until hit point
 
         this.queueTimer(() => {
-            const repeatTarget = rangedAttack ? this.bowRepeatTarget : null;
+            const repeatTarget = this.repeatTarget;
             const nextTarget = repeatTarget || creature;
-            if (rangedAttack) {
-                this.bowReloading = false;
-                this.bowRepeatTarget = null;
-            }
+            this.repeatTarget = null;
+            if (rangedAttack) this.bowReloading = false;
             if (this.blockedPvpDefense(session, actor, nextTarget) || this.checkParticipants(actor, nextTarget)) {
                 return;
             }
@@ -265,7 +269,7 @@ class Attack {
                 return;
             }
 
-            if (rangedAttack && repeatTarget) {
+            if (repeatTarget) {
                 this.meleeHit(session, nextTarget);
                 return;
             }
@@ -413,7 +417,12 @@ class Attack {
             return;
         }
 
+        const openingPayment = raidParty ? { hp: actor.fetchHp(), mp: actor.fetchMp() } : null;
         this.payRemoteCast(session, actor, skill, { magicSkill, launchLead, executionTargets, mpCost });
+        if (openingPayment) {
+            openingPayment.hp -= actor.fetchHp();
+            openingPayment.mp -= actor.fetchMp();
+        }
 
         const shotState = this.captureShotState(actor);
         if (!selfEffectOnly && executionTargets.length > 0 && RaidCurse.skillBlocked(session, actor, executionTargets, skill)) {
@@ -436,7 +445,7 @@ class Attack {
             invoke('GameServer/World/Generics/NpcDecay').decay(invoke('GameServer/World/World'), creature);
         }
         executionTargets.forEach((target) => this.applyRemoteCastEffect(session, actor, target, skill,
-            { corpseAreaCast, raidParty, shotState, magicSkill, selfEffectOnly, castWeapon }));
+            { corpseAreaCast, raidParty, shotState, magicSkill, selfEffectOnly, castWeapon, openingPayment }));
         this.finishRemoteCast(session, actor, skill, magicSkill);
     }
 
@@ -485,9 +494,9 @@ class Attack {
         return;
     }
 
-    applyRemoteCastEffect(session, actor, target, skill, { corpseAreaCast, raidParty, shotState, magicSkill, selfEffectOnly, castWeapon }) {
+    applyRemoteCastEffect(session, actor, target, skill, { corpseAreaCast, raidParty, shotState, magicSkill, selfEffectOnly, castWeapon, openingPayment }) {
         if ((skill.fetchTargetKind?.() === 'enemy' || corpseAreaCast)
-            && !invoke('GameServer/Clan/ClanRaidRoster').beforeOffensiveEffect(session, actor, target, raidParty)) return;
+            && !invoke('GameServer/Clan/ClanRaidRoster').beforeOffensiveEffect(session, actor, target, raidParty, openingPayment)) return;
         if (skill.fetchTargetKind?.() === 'enemy') invoke('GameServer/Bot/AI/BotMobCompetition').record(actor, target);
         this.restoreShotState(actor, shotState);
         const outcome = SkillEffects.execute(session, actor, target, skill, {
@@ -548,6 +557,11 @@ class Attack {
         delete actor.activeSkillChargeCount;
         this.clearLoadedShot(actor, magicSkill);
         actor.state.setCasts(false);
+        // Lisvus onMagicFinalizer starts/renews stance after an offensive
+        // cast completes, including a resisted spell, rather than at acceptance.
+        if (!actor.fetchKind && skill.fetchTargetKind?.() === 'enemy') {
+            invoke(path.actor).enterCombatState(session, actor);
+        }
         invoke('GameServer/Bot/AI/BotSupportPlanner').finishSupportCast(session, actor, skill);
 
         // Start replenish
@@ -1325,7 +1339,8 @@ class Attack {
             src.state.setHits (false);
             src.state.setCasts(false);
             if (src.session) {
-                invoke(path.actor).abortCombatState(src.session, src);
+                if (src.state.fetchDead()) invoke(path.actor).abortCombatState(src.session, src);
+                else src.automation.abortAll(src);
             }
             return true;
         }
@@ -1394,6 +1409,9 @@ class Attack {
 
             if (ArenaCombatRules.suppressConsequences(actor, creature)) {
                 invoke(path.actor).receivedHit(session, creature, hit, { source: actor });
+                if (!context.skill && hit > 0 && !actor.state.fetchDead?.()) {
+                    invoke(path.actor).enterCombatState(session, actor);
+                }
                 return;
             }
 
@@ -1407,6 +1425,11 @@ class Attack {
         }
 
         this.applyReflectedDamage(session, actor, creature, hit);
+        // A landed normal attack is the stance event. A skill renews stance
+        // in finishRemoteCast; a missed or cancelled swing does not renew it.
+        if (!actor.fetchKind && !context.skill && hit > 0 && !actor.state.fetchDead?.()) {
+            invoke(path.actor).enterCombatState(session, actor);
+        }
     }
 
     tryBreakCast(creature, damage, rng = Math.random) {

@@ -6,7 +6,7 @@ const Spots = invoke('GameServer/Bot/AI/SpotService');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 
 const original = {
-    random: Math.random, findCurrentSpot: Spots.findCurrentSpot,
+    random: Math.random, findCurrentSpot: Spots.findCurrentSpot, findById: Spots.findById,
     getCellData: Geo.getCellData, getHeight: Geo.getHeight,
     hasGeo: Geo.hasGeo, hasLineOfSight: Geo.hasLineOfSight
 };
@@ -45,6 +45,49 @@ try {
             assert(Geo.hasLineOfSight(anchor.locX, anchor.locY, anchor.locZ, p.locX, p.locY, p.locZ));
             assert(Geo.getCellData(p.locX, p.locY, p.locZ).nswe);
         }
+        invoke('GameServer/DataCache').init({ validate: false });
+        const dungeonRaid = Placement.resolve({ spotId: 'raid:10060',
+            loc: { locX: -59968, locY: 188724, locZ: -4512 } }, { preferAnchor: true });
+        assert(dungeonRaid, 'Kael raid profiles must resolve outside the ordinary hunting spot index');
+        const rally = dungeonRaid.loc;
+        assert(Geo.hasLineOfSight(-60428, 188264, -4512, rally.locX, rally.locY, rally.locZ),
+            'the real dungeon rally is connected to Kael');
+        const outdoorRaid = Placement.resolve({ spotId: 'raid:10357',
+            loc: { locX: -2991, locY: 112359, locZ: -2995 } }, { preferAnchor: true });
+        assert(outdoorRaid, 'Sukar historical spawn Z must ground onto its actual terrain');
+        assert(Geo.hasLineOfSight(-3451, 112819, -3448,
+            outdoorRaid.loc.locX, outdoorRaid.loc.locY, outdoorRaid.loc.locZ),
+            'the outdoor rally must be reachable from the actual boss ground');
+        // Exact automatic Repiro roster: its height-valid arrival lands on
+        // the cliff east of the boss, with partial NSWE and no boss path.
+        const repiro = invoke('GameServer/RaidBoss/RaidBossSourceCatalog').findById('raid:10099');
+        const roster = [2006161,2006162,2006168,2006407,2006791,2006856,2007116,2007436,2007686]
+            .map(characterId => ({ characterId, spotId: repiro.id }));
+        const arrivals = Spots.arrivalPointsForParty(roster, repiro);
+        const leader = roster.find(s => s.characterId === 2006407);
+        assert.deepStrictEqual(arrivals[leader.characterId], { locX: 65067, locY: 15938, locZ: -3256 });
+        assert(Geo.getCellData(65067,15938,-3256).nswe, 'the incident anchor passes the old surface-only check');
+        const bossFloor = { ...repiro.center, locZ: Geo.getHeight(64048,16048,-3536) };
+        assert(!Geo.hasLineOfSight(64048,16048,bossFloor.locZ,65067,15938,-3256));
+        let randomCalls = 0;
+        Math.random = () => { randomCalls++; return ((seed = (Math.imul(seed,1664525)+1013904223) >>> 0) / 4294967296); };
+        for (let round = 0; round < 16; round++) {
+            const rally = Placement.resolve({ ...leader, loc: arrivals[leader.characterId] },
+                { preferAnchor: true, placementRadius: 240 });
+            assert(rally, 'a height-valid but unusable cliff anchor must recover to a connected rally');
+            assert(Geo.hasLineOfSight(64048,16048,bossFloor.locZ,rally.loc.locX,rally.loc.locY,rally.loc.locZ));
+            for (const member of roster) {
+                const placed = Placement.resolve({ ...member, loc: rally.loc }, { placementRadius: 420 });
+                assert(placed, 'the whole nine must fit around the recovered leader');
+                assert(Spots.containsLocation(repiro, placed.loc));
+                const p = placed.loc;
+                for (const [dx,dy] of [[0,0],[16,0],[-16,0],[0,16],[0,-16]])
+                    assert(Geo.getCellData(p.locX+dx,p.locY+dy,p.locZ).nswe, 'each actor retains wall clearance');
+                assert(Geo.hasLineOfSight(rally.loc.locX,rally.loc.locY,rally.loc.locZ,p.locX,p.locY,p.locZ));
+            }
+        }
+        assert(randomCalls <= 16 * 9 * Config.activationPlacementAttempts * 2,
+            'recovery does not expand the random placement budget');
     }
 
     const flat = { locX: 0, locY: 0, locZ: 0 };
@@ -86,11 +129,40 @@ try {
     Geo.getCellData = () => ({ z: 0, nswe: 0 });
     assert.strictEqual(Placement.resolve({ loc: flat }, { keepStoreLocation: true }), null,
         'fixed stores must not bypass collision validation');
+    const rally = { locX: 650, locY: 0, locZ: 0 };
+    const blocked = { locX: 460, locY: 460, locZ: 0 };
+    const raid = { id: 'raid:10060', raidBoss: true, center: flat, arrivalPoints: [blocked, rally] };
+    Spots.findById = () => raid;
+    Geo.getCellData = (x, y) => ({ z: 0, nswe: x === blocked.locX && y === blocked.locY ? 0 : 15 });
+    Geo.hasLineOfSight = () => true;
+    assert.deepStrictEqual(Placement.resolve({ spotId: raid.id, loc: blocked }, { preferAnchor: true }).loc, rally,
+        'a generated raid arrival inside a dungeon wall recovers at a checked rally on the boss floor');
+    Geo.hasLineOfSight = (x, y, z, tx) => Math.abs(x - tx) <= 16;
+    assert.strictEqual(Placement.resolve({ spotId: raid.id, loc: blocked }), null,
+        'an isolated rally behind another wall cannot recover the raid placement');
+    Geo.hasLineOfSight = () => true;
+    Geo.getCellData = (x, y) => ({ z: x === 0 && y === 0 ? 400 : 0,
+        nswe: x === blocked.locX && y === blocked.locY ? 0 : 15 });
+    Geo.getHeight = (x, y) => x === 0 && y === 0 ? 400 : 0;
+    assert.strictEqual(Placement.resolve({ spotId: raid.id, loc: blocked }), null,
+        'raid recovery must not silently switch the boss floor');
+    Geo.getHeight = () => 0;
+    Geo.getCellData = (x,y) => ({ z: 0, nswe: x === blocked.locX + 16 && y === blocked.locY ? 0 : 15 });
+    Geo.hasLineOfSight = () => true;
+    Math.random = () => 0;
+    assert.deepStrictEqual(Placement.resolve({ spotId: raid.id, loc: blocked }, { preferAnchor: true }).loc, rally,
+        'a height-valid anchor with a blocked adjacent cell must also enter rally recovery');
+    Geo.getCellData = () => ({ z: 0, nswe: 15 });
+    Geo.hasLineOfSight = (x,y,z,tx,ty) => !(x === 0 && y === 0 && tx === blocked.locX && ty === blocked.locY);
+    assert.deepStrictEqual(Placement.resolve({ spotId: raid.id, loc: blocked }, { preferAnchor: true }).loc, rally,
+        'a clear but isolated anchor cannot publish actors across a wall from the raid');
+    Spots.findById = original.findById;
     assert.strictEqual(Placement.resolve({ loc: { ...flat, locZ: null } }), null);
     assert.strictEqual(Placement.resolve({}), null);
     console.log('Bot activation placement tests passed');
 } finally {
     Math.random = original.random;
     Spots.findCurrentSpot = original.findCurrentSpot;
+    Spots.findById = original.findById;
     for (const key of ['getCellData', 'getHeight', 'hasGeo', 'hasLineOfSight']) Geo[key] = original[key];
 }

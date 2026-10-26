@@ -49,6 +49,8 @@ function shutdown(signal) {
             const result = await invoke('GameServer/Social/InteractionMemoryRuntime').events.drain();
             if (!result.drained) utils.infoWarn('InteractionMemory', 'shutdown left %d unwritten episodes', result.pending);
         } catch (error) { utils.infoWarn('InteractionMemory', 'shutdown drain failed: %s', error.message); }
+        try { await invoke('GameServer/Recommendations/Runtime').stop(); }
+        catch (error) { utils.infoWarn('Recommendations', 'shutdown failed: %s', error.message); }
         try { await Database.close(); }
         catch (error) { utils.infoWarn('DB', 'graceful SQLite close failed: %s', error.message); }
     })().finally(() => process.exit(0));
@@ -102,6 +104,7 @@ Database.init(() => {
     }).then(() => ClanService.init()).then(async () => {
         GeodataEngine.init();
         await World.init();
+        await invoke('GameServer/Recommendations/Runtime').start();
         await invoke('GameServer/ClanHall/Runtime').start();
         const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
         await AfkTrade.init();

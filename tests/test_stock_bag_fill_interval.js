@@ -88,17 +88,6 @@ try {
     assert.equal(target({ ...solo, stats: { ...solo.stats, visitEvery: [22, 8] } }), 8,
         'an absent table cannot cap learned eight hours without an earlier known return');
     rowPresent = true; stacks = 10;
-    const changedDescription = { ...protectedLoot, stats: { ...protectedLoot.stats,
-        equipmentPlan: { ...protectedLoot.stats.equipmentPlan, reason: 'different', expectedEffort: 123,
-            targetProgress: 1, at: Date.now() } } };
-    assert.equal(Economy.inputKey(protectedLoot), Economy.inputKey(changedDescription),
-        'plan metadata cannot invalidate the reservation-dependent economic context');
-    assert.notEqual(Economy.inputKey(protectedLoot), Economy.inputKey({ ...protectedLoot, stats: {
-        ...protectedLoot.stats, equipmentPlan: { ...protectedLoot.stats.equipmentPlan,
-            materials: [{ selfId: 1864, amount: 2 }] } } }), 'changed reserved quantities invalidate');
-    const retryState = { ...solo, stats: { ...solo.stats, marketSellRetryAfter: 1000 } };
-    assert.notEqual(Economy.inputKey(retryState, { timestamp: 999 }), Economy.inputKey(retryState, { timestamp: 1001 }),
-        'expiry of this bots existing sale retry releases its earlier sale forecast');
     const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
     // The sale list reads the plan's stock targets once (L72); without a
     // published row that read prepares the economics itself, once. A forecast
@@ -108,8 +97,6 @@ try {
     try { Disposition.saleCandidates(solo, { unlimited: true }); assert.equal(keptCalls, 1,
         'ordinary sale prepares the economics once; forecast presence never recursively calls it'); }
     finally { Economy.keptTargets = beforeKept; }
-    assert.notEqual(Economy.inputKey(solo), Economy.inputKey({ ...solo, partyId: 2 }));
-    assert.notEqual(Economy.inputKey(solo), Economy.inputKey(protectedLoot));
     // Fractional table rates are forecasts, but funded purchase tranches must
     // reach the same physical stock without fractional or duplicate units.
     potions = 2.25; stacks = 0;

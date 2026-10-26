@@ -3,6 +3,7 @@
 // search/valuation/roll. Full need certificates stay in TradeIntent.project.
 const { personalOfferAllowed } = require('../Population/PartyAdmission');
 const { SELL, BUY } = require('../../AfkTrade/BoardIndex');
+const BotImprovementService = invoke('GameServer/Bot/Economy/BotImprovementService');
 const MAX_INSPECTED = 20;
 const positive = value => Number.isSafeInteger(value) && value > 0;
 function executable(side, line, state) {
@@ -11,7 +12,7 @@ function executable(side, line, state) {
     // that town; field answers continue through the physical meeting owner.
     return side === BUY && line.kind === 'shop' && line.custodyPolicy === 0
         && state?.activity === 'shopping' && state.currentRegion === line.town
-        && invoke('GameServer/Bot/Economy/BotImprovementService').inTown(state);
+        && BotImprovementService.inTown(state);
 }
 function encode(side, line, count, state) {
     const tuple = [side, Number(line.selfId), count, Number(line.recordId), Number(line.lineId),
@@ -20,7 +21,7 @@ function encode(side, line, count, state) {
 }
 function purchase(state, economy, board) {
     const leaf = economy?.network?.activity;
-    if (economy?.intentPending || economy?.routePending || leaf?.activity !== 'shopping'
+    if (economy?.intentPending || leaf?.activity !== 'shopping'
         || leaf.kind !== 'buy' || leaf.sourceType !== 'afk' || leaf.quoted !== true
         || leaf.executable !== true || !positive(leaf.itemId) || !positive(leaf.amount)
         || !positive(leaf.unitPrice) || !leaf.town || !board?.heads) return null;

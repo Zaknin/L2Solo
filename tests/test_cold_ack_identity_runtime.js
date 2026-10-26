@@ -11,6 +11,8 @@ const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const World = invoke('GameServer/World/World');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
+const { ColdSimulationKernel } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
+const EconomyCommit = require('../src/GameServer/Bot/Economy/EconomyCommit');
 const previous = { path: options.default.Database.path, history: options.default.Database.historyPath,
     knowledge: Config.knowledgeErrorsEnabled, world: World.user };
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l2solo-ack-runtime-'));
@@ -34,9 +36,10 @@ async function create() {
         timing: { nextResolveAt: Date.now() + 86400000 } }, 'ack_runtime_fixture');
     return id;
 }
-async function claim(id) {
-    const token = await Owner.claim(Life.cachedState(id), { allowLifecycle: true });
-    assert(token.ok); assert(Protocol.leaseRenewalToken(token)); return token;
+// The revision a step starts from: the commit's only fence.
+function stepRevision(id) {
+    const revision = Life.cachedState(id).simulation.revision;
+    assert(Number.isSafeInteger(revision)); return revision;
 }
 async function row(id) {
     return (await Database.execute(['SELECT * FROM bot_life_state WHERE characterId=?', [id]]))[0];
@@ -47,12 +50,21 @@ function take(type) {
     messages.forEach(message => assert(Protocol.validateEnvelope(message, 'main', { workerEpoch: coordinator.workerEpoch }).ok));
     return messages.flatMap(message => message.payload.results);
 }
-async function release(token) {
-    const request = Protocol.envelope('release_request', coordinator.workerEpoch,
-        { releases: [{ token, reason: 'ack_identity_fixture' }] });
-    assert(Protocol.validateEnvelope(request, 'worker', { workerEpoch: coordinator.workerEpoch }).ok);
-    await coordinator.onMessage(request, coordinator.worker, coordinator.workerEpoch);
-    return { request, results: take('release_ack') };
+// A commit of a fresh bot whose row holds `rowLeaf` (written as an economy
+// command writes it) and whose proposal carries `proposalLeaf`: the row keeps
+// its own leaf over the proposal's (EconomyCommit.preserveLeafSql).
+async function leafCommit(rowLeaf, proposalLeaf, proposalId) {
+    const id = await create(), revision = stepRevision(id), stepState = Life.cachedState(id), at = Date.now();
+    if (rowLeaf) await Database.execute(["UPDATE bot_life_state SET statsJson=json_set(COALESCE(statsJson,'{}'),'$.economyCommit',json(?)) WHERE characterId=?",
+        [JSON.stringify(rowLeaf), id]]);
+    const nextState = { ...stepState, activity: 'hunting', updatedAt: at,
+        timing: { ...stepState.timing, lastResolvedAt: at, nextResolveAt: at + 60000 },
+        stats: proposalLeaf ? { ...stepState.stats, economyCommit: proposalLeaf } : stepState.stats };
+    const proposal = { proposalId, revision, nextState, result: { events: [] }, enqueuedAt: at };
+    const [commit] = await Owner.commitBatch([{ revision, nextState, proposal, options: { allowLifecycle: true } }]);
+    assert(commit.ok); assert.equal(Life.cachedState(id), commit.cached);
+    assert.equal(commit.row.economyCommit, rowLeaf ? JSON.stringify(rowLeaf) : null, 'the row kept its own leaf');
+    return { ...commit, proposal, nextState };
 }
 (async () => {
     try {
@@ -70,73 +82,165 @@ async function release(token) {
         assert(coordinator.worker instanceof Worker);
         const worker = coordinator.worker, post = worker.postMessage.bind(worker);
         worker.postMessage = message => { sent.push(message); return post(message); };
-        const id = await create(), original = await claim(id);
+        const id = await create(), original = stepRevision(id);
         const handoff = await Owner.handoffToMain(Life.cachedState(id)); assert(handoff.ok);
-        const current = await claim(id), currentRow = await row(id);
-        assert.notEqual(original.leaseId, current.leaseId);
-        const stale = await Owner.commit(original, Life.cachedState(id), { allowLifecycle: true });
+        const current = stepRevision(id), currentRow = await row(id);
+        assert.notEqual(original, current, 'a handoff moves the revision');
+        const stale = (await Owner.commitBatch([{ revision: original, nextState: Life.cachedState(id), options: { allowLifecycle: true } }]))[0];
         assert.equal(stale.ok, false); assert.equal(stale.reason, 'stale_revision');
         assert.deepEqual(await row(id), currentRow);
-        const proposal = { proposalId: 'old-native-proposal', token: original };
+        const proposal = { proposalId: `${id}:1`, revision: original };
         await coordinator.handleCommitResults([{ ...stale, characterId: id, proposal }]);
         const [ack] = take('commit_ack');
         assert(ack); assert.deepEqual(await row(id), currentRow);
-        console.log('Actual ready Worker and stale native commit/current ownership conservation: PASS');
-        assert.deepEqual(ack.inputToken, Protocol.leaseRenewalToken(original), 'commit echoes original input token');
+        console.log('Actual ready Worker and stale native commit conserves the current row: PASS');
+        assert.equal(ack.ok, false); assert.equal(ack.reason, 'stale_revision');
         assert.equal(ack.proposalId, proposal.proposalId);
-        console.log('Main commit echoes old original identity independently of latest cached state: PASS');
+        assert.equal(ack.state.simulation.revision, current, 'the refusal carries the row main moved');
+        console.log('Main commit echoes the step identity and the moved state: PASS');
 
-        const oldRelease = await release(original);
-        assert.equal(oldRelease.results.length, 1);
-        assert.equal(oldRelease.results[0].ok, false);
-        assert.deepEqual(oldRelease.results[0].inputToken, Protocol.leaseRenewalToken(original));
-        assert.equal(oldRelease.results[0].releaseRequestId, oldRelease.request.msgId);
-        assert.deepEqual(await row(id), currentRow);
-        console.log('Native stale release echoes exact request identity and conserves fresh grant: PASS');
-
-        const committed = await Owner.commit(current, Life.cachedState(id), { allowLifecycle: true });
-        assert(committed.ok); assert.notEqual(committed.revision, current.revision);
-        const currentProposal = { proposalId: 'current-native-proposal', token: current };
+        const committed = (await Owner.commitBatch([{ revision: current, nextState: Life.cachedState(id), options: { allowLifecycle: true } }]))[0];
+        assert(committed.ok); assert.notEqual(committed.revision, current);
+        const currentProposal = { proposalId: `${id}:2`, revision: current };
         await coordinator.handleCommitResults([{ ...committed, characterId: id, proposal: currentProposal },
-            { ok: false, characterId: 999999, reason: 'malformed_original', proposal: { token: null, proposalId: 'malformed' } }]);
+            { ok: false, characterId: 999999, reason: 'malformed_original', proposal: { revision: null } }]);
         const currentAcks = take('commit_ack');
         assert.equal(currentAcks.length, 1);
-        assert.deepEqual(currentAcks[0].inputToken, Protocol.leaseRenewalToken(current));
         assert.equal(currentAcks[0].proposalId, currentProposal.proposalId);
         assert.equal(currentAcks[0].revision, committed.revision);
         assert.equal(currentAcks[0].state.simulation.revision, committed.revision);
         console.log('Successful native output revision stays separate and malformed sibling cannot poison ACK: PASS');
 
-        // Native commit retains its lease at a newer revision. The next
-        // request uses that current token, never the old original revision.
-        const releaseToken = { ok: true, characterId: id, ...Life.cachedState(id).simulation };
-        const activeRelease = await release(releaseToken);
-        assert.equal(activeRelease.results.length, 1); assert(activeRelease.results[0].ok);
-        assert.deepEqual(activeRelease.results[0].inputToken, Protocol.leaseRenewalToken(releaseToken));
-        assert.equal(activeRelease.results[0].releaseRequestId, activeRelease.request.msgId);
-        assert.notEqual(activeRelease.results[0].revision, releaseToken.revision);
-        assert.equal((await row(id)).simulationLeaseId, null);
-        console.log('Successful native release keeps original input/request and newer output authority: PASS');
+        // A commit whose afterCommit writes nothing: main's cache stays the
+        // commit's own entry, the ack carries the numbers and no state, and the
+        // worker's copy built from its proposal matches main's cache on the
+        // command checkpoint and the bag, kit and henna revisions.
+        const numbersId = await create(), stepState = Life.cachedState(numbersId);
+        const numbersRevision = stepRevision(numbersId), at = Date.now(), numbersProposalId = `${numbersId}:${at}`;
+        // The worker's bag as a step leaves it, not canonical: a bought sword
+        // counted before its physical copy exists and an emptied stack.
+        const proposedState = { ...stepState, activity: 'hunting', updatedAt: at,
+            timing: { ...stepState.timing, lastResolvedAt: at, nextResolveAt: at + 60000 },
+            inventory: { 1: { selfId: 1, name: 'Short Sword', amount: 2, stackable: false, equipped: false, slot: 0,
+                instances: [{ id: null, amount: 1, enchant: 0, equipped: false, slot: 0 }] },
+            1835: { selfId: 1835, name: 'Soulshot: No Grade', amount: 0, stackable: true } } };
+        const numbersKernel = new ColdSimulationKernel({ resolveSolo: () => null, emit: () => true });
+        numbersKernel.upsert({ state: stepState });
+        numbersKernel.inFlight.set(numbersId, { state: stepState, startedAt: at });
+        numbersKernel.dirty.set(numbersId, { proposalId: numbersProposalId, characterId: numbersId, revision: numbersRevision,
+            priority: 'P1', enqueuedAt: at, nextState: proposedState, result: { events: [] } });
+        numbersKernel.flush(null, true);
+        const numbersProposal = { proposalId: numbersProposalId, revision: numbersRevision, nextState: proposedState,
+            result: { events: [] }, enqueuedAt: at };
+        const [numbersCommit] = await Owner.commitBatch([{ revision: numbersRevision, nextState: proposedState,
+            proposal: numbersProposal, options: { allowLifecycle: true } }]);
+        assert(numbersCommit.ok);
+        assert.equal(Life.cachedState(numbersId), numbersCommit.cached, 'the commit names the cache entry it built');
+        await coordinator.afterCommit({ proposal: numbersProposal, revision: numbersRevision, nextState: proposedState }, numbersCommit);
+        assert.equal(Life.cachedState(numbersId), numbersCommit.cached, 'an afterCommit that writes nothing keeps the entry');
+        const committedResult = { ...numbersCommit, proposal: numbersProposal, nextState: proposedState };
+        const ackState = { ...coordinator.ackState };
+        await coordinator.handleCommitResults([committedResult]);
+        const [numbersAck] = take('commit_ack');
+        assert.equal(Object.hasOwn(numbersAck, 'state'), false, 'the ack carries no state');
+        assert.deepEqual(coordinator.ackState, { with: ackState.with, without: ackState.without + 1 });
+        numbersKernel.onCommitAck({ results: [numbersAck] });
+        const workerCopy = numbersKernel.states.get(numbersId).state, mainCopy = Life.cachedState(numbersId);
+        assert(Protocol.sameCommandCheckpoint(workerCopy, mainCopy), 'the worker copy passes main\'s command checkpoint');
+        assert.deepStrictEqual(workerCopy, mainCopy, 'the worker copy is main\'s cached state, its bag canonical');
+        console.log('A commit main did not change acks with numbers only and the worker rebuilds main\'s state: PASS');
 
-        // Hold delivery of real native release outcomes, then replace the
-        // actual Worker before either main handler resumes. Native recovery
-        // remains real; only Promise delivery is gated by the fixture.
-        const lateToken = await claim(await create()), nativeRelease = Database.releaseColdSimulationLeases;
+        // A bot after its first economy step: the row holds a leaf and the
+        // proposal carries the same one. The row kept nothing over it: numbers.
+        const leaf = EconomyCommit.completed(EconomyCommit.create(1, 0, {}), { success: true });
+        const otherLeaf = EconomyCommit.completed(EconomyCommit.create(1, 1, {}), { success: true });
+        const sameLeaf = await leafCommit(leaf, leaf, 'same-leaf-proposal');
+        assert.equal(sameLeaf.cached.stats, sameLeaf.nextState.stats, 'the same leaf keeps the proposal\'s stats');
+        const leafAckState = { ...coordinator.ackState };
+        await coordinator.handleCommitResults([sameLeaf]);
+        const [sameLeafAck] = take('commit_ack');
+        assert.equal(Object.hasOwn(sameLeafAck, 'state'), false, 'the same leaf acks without the state');
+        assert.equal(sameLeafAck.inventoryRevision, sameLeaf.cached.bagRevision);
+        assert.deepEqual(coordinator.ackState, { with: leafAckState.with, without: leafAckState.without + 1 });
+        console.log('A row and a proposal holding the same economy leaf ack with numbers only: PASS');
+
+        // Each condition failing carries the state: main committed another
+        // state, a write replaced the cache entry, the commit read the bag or
+        // the stats back from the row, or the row kept an economy leaf other
+        // than the proposal's (real commits: a different leaf, the row's leaf
+        // where the proposal has none, none where the proposal has one).
+        const fails = {
+            cleanup: { proposal: { ...numbersProposal, inventoryCleanupForced: true } },
+            resolvedOnMain: { proposal: { ...numbersProposal, nextState: undefined } },
+            cacheReplaced: { cached: { ...numbersCommit.cached } },
+            settled: { settled: true },
+            pkDrops: { pkDrops: [{ itemId: 1 }] },
+            partyPayment: { partyPayment: true },
+            rowReread: { row: { ...numbersCommit.row, statsJson: '{}' } },
+            economyLeaf: await leafCommit(leaf, otherLeaf, 'different-leaf-proposal'),
+            rowLeaf: await leafCommit(leaf, null, 'row-leaf-proposal'),
+            proposalLeaf: await leafCommit(null, leaf, 'proposal-leaf-proposal')
+        };
+        for (const [name, change] of Object.entries(fails)) {
+            await coordinator.handleCommitResults([{ ...committedResult, ...change }]);
+            const [ack] = take('commit_ack');
+            assert(ack.state, `${name}: the ack carries the state`);
+            assert.equal(Object.hasOwn(ack, 'inventoryRevision'), false, `${name}: no numbers`);
+        }
+        assert.equal(coordinator.ackState.with, ackState.with + Object.keys(fails).length);
+        console.log('Each failed numbers condition still carries the state: PASS');
+
+        // A main write to a far row while its worker step is out: the step's
+        // commit at its base revision is refused and the main write stays.
+        const raceId = await create(), raceBase = stepRevision(raceId), raceAt = Date.now();
+        const raceStep = { ...Life.cachedState(raceId), activity: 'hunting', updatedAt: raceAt,
+            timing: { ...Life.cachedState(raceId).timing, lastResolvedAt: raceAt, nextResolveAt: raceAt + 60000 } };
+        const raceProposal = { proposalId: `${raceId}:${raceAt}`, revision: raceBase, nextState: raceStep,
+            result: { events: [] }, enqueuedAt: raceAt };
+        const mainWrite = await Life.upsertState(Life.cachedState(raceId), 'main_write_during_step');
+        assert(mainWrite.simulation.revision > raceBase, 'a main write moves the far row');
+        assert.equal(mainWrite.simulation.revision, (await row(raceId)).simulationRevision, 'the cache takes the moved revision');
+        const [raceCommit] = await Owner.commitBatch([{ revision: raceBase, nextState: raceStep, proposal: raceProposal,
+            options: { allowLifecycle: true } }]);
+        assert.equal(raceCommit.ok, false); assert.equal(raceCommit.reason, 'stale_revision');
+        const raceRow = await row(raceId);
+        assert.equal(JSON.parse(raceRow.statsJson).lastReason, 'main_write_during_step', 'the main write survives');
+        assert.equal(raceRow.activity, 'resting');
+        console.log('A main write to a far row refuses the step begun before it: PASS');
+
+        // A proposal without a whole revision is refused before the queue.
+        sent.length = 0;
+        coordinator.handleProposalBatch({ payload: { proposals: [{ proposalId: `${raceId}:${raceAt + 1}`,
+            characterId: raceId, revision: 'x', priority: 'P1', enqueuedAt: raceAt, nextState: raceStep }] } });
+        await until(() => sent.some(message => message.type === 'commit_ack'), 'invalid revision ack');
+        const [invalidAck] = take('commit_ack');
+        assert.equal(invalidAck.ok, false); assert.equal(invalidAck.reason, 'invalid_revision');
+        assert.equal(invalidAck.proposalId, `${raceId}:${raceAt + 1}`);
+        assert.deepEqual(await row(raceId), raceRow, 'a refused proposal writes nothing');
+        console.log('A proposal without a revision is acked invalid_revision: PASS');
+
+        // Hold the real queue flush of the old Worker's step before its native
+        // prepare, then replace the actual Worker before the commit and its
+        // result reach main's handler. Only Promise delivery is gated.
+        const lateId = await create(), nativePrepare = coordinator.prepareProposal;
         let entered = 0, resume;
         const gate = new Promise(resolve => { resume = resolve; });
-        Database.releaseColdSimulationLeases = async (...args) => {
-            const results = await nativeRelease.apply(Database, args);
-            entered++; await gate; return results;
+        coordinator.prepareProposal = async (...args) => {
+            entered++; await gate; return nativePrepare.apply(coordinator, args);
         };
         try {
             sent.length = 0;
-            const oldEpoch = coordinator.workerEpoch;
-            const pendingCommit = coordinator.handleCommitResults([{ ok: false, characterId: lateToken.characterId,
-                reason: 'prepare_refused', proposal: { proposalId: 'old-source-proposal', token: lateToken } }]);
-            const lateRequest = Protocol.envelope('release_request', oldEpoch,
-                { releases: [{ token: lateToken, reason: 'old_source' }] });
-            const pendingRelease = coordinator.onMessage(lateRequest, worker, oldEpoch);
-            await until(() => entered === 2, 'two real native outcome delivery gates');
+            const oldEpoch = coordinator.workerEpoch, lateAt = Date.now();
+            const refused = () => Object.values(coordinator.refusals.commitRefused).reduce((sum, count) => sum + count, 0);
+            const refusedBefore = refused();
+            const lateState = { ...Life.cachedState(lateId), updatedAt: lateAt,
+                timing: { ...Life.cachedState(lateId).timing, lastResolvedAt: lateAt } };
+            const lateBatch = Protocol.envelope('proposal_batch', oldEpoch, { proposals: [{ proposalId: `${lateId}:${lateAt}`,
+                characterId: lateId, revision: stepRevision(lateId), priority: 'P0', enqueuedAt: lateAt,
+                nextState: lateState, result: { events: [] } }] });
+            assert(Protocol.validateEnvelope(lateBatch, 'worker', { workerEpoch: oldEpoch }).ok);
+            coordinator.onMessage(lateBatch, worker, oldEpoch);
+            await until(() => entered === 1, 'the real queue flush gate');
             await worker.terminate();
             await until(() => coordinator.worker === null, 'actual old Worker exit');
             clearTimeout(coordinator.restartTimer); coordinator.restartTimer = null;
@@ -145,13 +249,13 @@ async function release(token) {
             replacement.postMessage = message => { sent.push(message); return replacementPost(message); };
             await until(() => coordinator.ready && coordinator.snapshotsLoaded, 'actual replacement Worker bootstrap');
             assert.notEqual(replacement, worker); assert.notEqual(coordinator.workerEpoch, oldEpoch);
-            resume(); await Promise.all([pendingCommit, pendingRelease]);
+            resume(); await coordinator.queue.drain();
             assert.equal(sent.filter(message => message.type === 'commit_ack').length, 0);
-            assert.equal(sent.filter(message => message.type === 'release_ack').length, 0);
             sent.length = 0;
             replacement.postMessage = replacementPost;
-        } finally { resume(); Database.releaseColdSimulationLeases = nativeRelease; }
-        console.log('Actual Worker replacement during native outcome delivery suppresses both old-source ACKs: PASS');
+            assert.equal(refused(), refusedBefore + 1, 'the old step reached its commit result');
+        } finally { resume(); coordinator.prepareProposal = nativePrepare; }
+        console.log('Actual Worker replacement during a native commit suppresses the old-source ACK: PASS');
         worker.postMessage = post;
         console.log('Native main ACK identity runtime tests: PASS');
     } finally {

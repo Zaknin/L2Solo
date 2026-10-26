@@ -1,6 +1,10 @@
 'use strict';
-// Resolved at the first call (cycles); a require per call is a path lookup (L73).
-let SpotEconomics = null;
+const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
+const ColdKillRewards = invoke('GameServer/Bot/Population/ColdKillRewards');
+const ColdCombatProfile = invoke('GameServer/Bot/Population/ColdCombatProfile');
+const SpotValueTable = invoke('GameServer/Bot/AI/SpotValueTable');
+const BotHuntEfficiency = invoke('GameServer/Bot/AI/BotHuntEfficiency');
+const SpotEconomics = require('./SpotEconomics');
 
 // Only economic errands may deliberately hunt below the ordinary XP band.
 // Deep-blue drop/spoil penalties still apply in the native reward facts.
@@ -10,44 +14,53 @@ function economicHunt(state) {
         && /^(power:|resale:)/.test(String(state.stats?.wishFocus?.[0] || ''));
 }
 
-function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), price, required = false, mode,
-    maxChecks = 32 } = {}) {
+// The game table's spot list for one bot (ARCH-08-b): its table role (a
+// spoiler reads the spoiler list) and its own price beliefs. One object per
+// search serves the income route and the spot search: spoiler() and the
+// costs are read once, at their first use. ids(shots, level, minGap): spot
+// ids of the band level+minGap..level+8, best income first, ties to the spot
+// closest to level.
+function spotList(state, { price } = {}) {
+    let spoiler, costs = null;
+    const spoilerOf = () => spoiler !== undefined ? spoiler
+        : (spoiler = ColdKillRewards.spoilerFor(state, { skills: ColdCombatProfile.skillsFor(state) }) || null);
+    return { spoiler: spoilerOf, ids: (shots, level = state.level, minGap = -7) => SpotValueTable.rankedSpotIds(
+        spoilerOf() ? 'spoiler' : BotRoles.tableRoleFor(state), level,
+        costs ||= BotHuntEfficiency.consumablePrices(state, price), minGap, shots,
+        { spoilSkillLevel: spoilerOf()?.skillLevel || 0 }) };
+}
+
+// list: the search's spotList, when the caller reads it too.
+function select(state, { spots = [], timestamp = Date.now(), price, required = false, mode,
+    maxChecks = 32, list = null } = {}) {
     if (!spots.length || state.party?.partyId || ['party', 'duo'].includes(mode)
         || !invoke('GameServer/Bot/AI/PersonalGearProgression').adventurer(state)) return null;
-    const Roles = invoke('GameServer/Bot/AI/BotRoles');
-    const role = state.stats?.role || Roles.inferRole(state.stats?.classId || 0);
-    const spoiler = invoke('GameServer/Bot/Population/ColdKillRewards').spoilerFor(state,
-        { skills: invoke('GameServer/Bot/Population/ColdCombatProfile').skillsFor(state) });
+    const minGap = -15;
+    list ||= spotList(state, { price });
+    const spoiler = list.spoiler();
     if (!required && !economicHunt(state) && !spoiler) return null;
-    const Table = invoke('GameServer/Bot/AI/SpotValueTable');
-    const Hunt = invoke('GameServer/Bot/AI/BotHuntEfficiency');
     const Routes = invoke('GameServer/Bot/AI/LevelingRoutes');
     const Match = invoke('GameServer/Bot/AI/BotTargetMatchup');
     const Index = invoke('GameServer/Bot/AI/SpotIndex');
     const Risk = invoke('GameServer/Bot/Population/SpotRiskPolicy');
-    const Profiles = invoke('GameServer/Bot/Population/SpotProfiles');
-    const costs = Hunt.consumablePrices(state, price);
-    const tableRole = spoiler ? 'spoiler' : role === 'melee' || role === 'crafter' ? 'dps' : role === 'nuker' ? 'mage' : role;
-    const evaluate = (SpotEconomics ||= require('./SpotEconomics')).create(state, { timestamp, occupancy, price, moneyWeight: 1 });
+    const evaluate = SpotEconomics.create(state, { timestamp, price, moneyWeight: 1 });
     const excluded = Risk.excludedSpotIdsForStates([state], timestamp);
-    const options = { timestamp, mode: 'solo', occupancy, matchupProfiles: Match.stateProfiles(state, { timestamp }) };
+    const options = { timestamp, mode: 'solo', matchupProfiles: Match.stateProfiles(state, { timestamp }) };
     const survives = Match.soloSpotUpperBound(options.matchupProfiles);
     const origin = Index.spotById(spots, state.spotId)?.center || state.loc;
-    const ids = new Set([state.spotId, ...Hunt.sampledRows(state, timestamp).map(row => row.spotId)]);
-    const minGap = -15;
+    const ids = new Set([state.spotId, ...BotHuntEfficiency.sampledRows(state, timestamp).map(row => row.spotId)]);
     // Search-local: null rejects a spot; undefined awaits its first walk factor.
     const spotFactors = new Map();
     const candidates = shots => {
-        for (const row of Table.rankedIncome(tableRole, state.level, costs, minGap, shots,
-            { spoilSkillLevel: spoiler?.skillLevel || 0 })) ids.add(row.spotId);
+        // costs are the bot's own price beliefs: the id view, not the shared shortlist rows.
+        for (const spotId of list.ids(shots, state.level, minGap)) ids.add(spotId);
         return [...ids].map(id => Index.spotById(spots, id)).filter(spot => {
             if (!spot) return false;
             if (spotFactors.has(spot)) return spotFactors.get(spot) !== null;
             const allowed = !spot.raidBoss
                 && Number(spot.avgLevel || spot.minLevel || 1) - state.level >= minGap
                 && !excluded.has(String(spot.id)) && survives(spot)
-                && !Routes.localityPenaltyForSpot(spot, state, { level: state.level }, Routes.tagsForSpot(spot))
-                && Profiles.hasCapacityForStates(spot, [state], occupancy);
+                && !Routes.localityPenaltyForSpot(spot, state, { level: state.level }, Routes.tagsForSpot(spot));
             spotFactors.set(spot, allowed ? undefined : null);
             return allowed;
         })
@@ -71,10 +84,14 @@ function select(state, { spots = [], occupancy = {}, timestamp = Date.now(), pri
     const shortlist = [true, false].flatMap(candidates).sort((a, b) => b.score - a.score
         || Number(a.spot.avgLevel || 1) - Number(b.spot.avgLevel || 1)
         || String(a.spot.id).localeCompare(String(b.spot.id)));
+    // One profile and safety read for the whole shortlist (L131). The chosen
+    // route carries its solo profiles: the same build's source route reader
+    // (GearAcquisitionPlanner.sourceRouteReader) reads the same ones.
+    const allowed = Routes.spotAllowedReaderFor(state, options);
     for (const candidate of shortlist.slice(0, Math.max(1, maxChecks))) {
-        if (Routes.isSpotAllowedForState(candidate.spot, state, options)) return candidate;
+        if (allowed(candidate.spot)) { candidate.matchupProfiles = options.matchupProfiles; return candidate; }
     }
     return null;
 }
 
-module.exports = { select, economicHunt };
+module.exports = { select, economicHunt, spotList };

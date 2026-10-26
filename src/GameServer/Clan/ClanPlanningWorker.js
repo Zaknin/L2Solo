@@ -5,6 +5,8 @@ const OfferQuery = require('../Bot/Economy/OfferQuery');
 const TableMirror = require('../Bot/Population/TableMirror');
 const { BoardIndex } = require('../AfkTrade/BoardIndex');
 const { SpotCatalogReader } = require('./ClanSpotCatalog');
+const { heapRecord, observe } = require('../Bot/Population/WorkerHeapTelemetry');
+if (workerData?.developerDiagnostics) observe(); // major-GC window for the v8Heap record (WorkerHeapTelemetry)
 const spotCatalog = new SpotCatalogReader();
 
 // Only immutable catalogs and per-request snapshots enter this process.
@@ -22,10 +24,23 @@ let npcOffers = new Map();
 // Tables from the main thread's ColdTableChannel; pages are not answered.
 // The board's offers come from the 'board' table, indexed as it changes.
 const tables = new TableMirror();
-invoke('GameServer/Clan/ClanSupplyPolicy').useRowSource(id => tables.rows('clan_supplies').get(id));
-invoke('GameServer/Bot/Economy/PersonalWarehouseIndex').useRowSource(id => tables.rows('personal_warehouse').get(id));
+const ClanSupplies = invoke('GameServer/Clan/ClanSupplyPolicy');
+const PersonalWarehouse = invoke('GameServer/Bot/Economy/PersonalWarehouseIndex');
+const BotMarketPricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
+const ProgressionRates = invoke('GameServer/ProgressionRates');
+tables.watch('clan_supplies', { reset() {}, remove() {}, put: (_key, row) => ClanSupplies.prepareRow(row) });
+tables.watch('personal_warehouse', { reset() {}, remove() {}, put: (_key, row) => PersonalWarehouse.prepareRow(row) });
+ClanSupplies.useRowSource(id => tables.rows('clan_supplies').get(id), () => tables.ready('clan_supplies'));
+PersonalWarehouse.useRowSource(id => tables.rows('personal_warehouse').get(id), () => tables.ready('personal_warehouse'));
 const boardIndex = new BoardIndex();
 tables.watch('board', boardIndex.follower());
+// The channel sends every table to every worker; this one reads none of the
+// cold worker's tables (memory ~one row per bot, parties, goals, pressure,
+// raids, meetings, clan halls, recipes),
+// so it keeps no rows of them.
+for (const name of ['memory', 'parties', 'goals', 'pressure', 'raids', 'meetings', 'clan_halls', 'recipes']) {
+    tables.watch(name, { reset() {}, put() {}, remove() {} }, { retain: false });
+}
 const originalInvoke = global.invoke;
 const indexOffers = (rows = []) => {
     const index = new Map();
@@ -36,6 +51,30 @@ const indexOffers = (rows = []) => {
     }
     return index;
 };
+// The static planning context, once per worker and revision
+// (ClanPlanningCoordinator.ensureContext); each request names its revision.
+// Revisions only grow: an older one arriving late is not taken back.
+function useContext(next) {
+    if (next.revision < context.revision) return;
+    // Indexes first: a throw keeps the old revision with its own indexes.
+    const nextFixed = indexOffers(next.fixedOffers);
+    const nextNpc = indexOffers(next.npcOffers);
+    BotMarketPricing.useNpcOfferSnapshot([...(next.npcOffers || []), ...(next.npcPriceRows || [])]);
+    global.options.default.General = next.general;
+    global.options.default.Progression = next.progression;
+    if (next.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
+    else process.env.L2NODE_PROGRESSION_RATE = next.progressionRate;
+    ProgressionRates.reset();
+    fixedOffers = nextFixed;
+    npcOffers = nextNpc;
+    context = next;
+}
+// Static data: a request made under an older revision plans with the newer
+// one the worker holds (two plans in flight across a revision change).
+function restore(payload) {
+    if (!(context.revision >= payload.contextRevision)) throw new Error('stale clan planning context');
+    return spotCatalog.restore(payload);
+}
 const market = {
     get TOWN_NPC_SELLERS() { return context.towns || {}; },
     npcOffersAll: (id) => npcOffers.get(Number(id)) || [],
@@ -94,17 +133,12 @@ parentPort.on('message', (message) => {
             require('../Items/ItemAcquisitionCatalog').reset();
         } else if (message.type === 'spot_catalog') {
             spotCatalog.apply(message.page);
+        } else if (message.type === 'planning_context') {
+            useContext(message.context);
         } else if (message.type === 'end_planning_job') {
             if (raidJob?.key === message.jobKey) raidJob = null;
         } else if (message.type === 'prepare_raids') {
-            const payload = spotCatalog.restore(message.payload);
-            if (payload.context) {
-                context = payload.context;
-                global.options.default.General = context.general;
-                global.options.default.Progression = context.progression;
-                if (context.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-                else process.env.L2NODE_PROGRESSION_RATE = context.progressionRate;
-            }
+            const payload = restore(message.payload);
             if (payload.deadlineAt && Date.now() >= payload.deadlineAt) throw Error('clan planning deadline');
             if (raidJob?.key !== payload.jobKey) raidJob = { key: payload.jobKey, readiness: new Map() };
             raidJob.clan = payload.clan; raidJob.prospects = payload.prospects;
@@ -115,17 +149,7 @@ parentPort.on('message', (message) => {
             parentPort.postMessage({ id: message.id, result: raidJob.prepared });
             return;
         } else if (message.type === 'plan') {
-            const payload = spotCatalog.restore(message.payload);
-            context = payload.context;
-            global.options.default.General = context.general;
-            global.options.default.Progression = context.progression;
-            if (context.progressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-            else process.env.L2NODE_PROGRESSION_RATE = context.progressionRate;
-            fixedOffers = indexOffers(context.fixedOffers);
-            npcOffers = indexOffers(context.npcOffers);
-            invoke('GameServer/Bot/Economy/BotMarketPricing').useNpcOfferSnapshot([
-                ...(context.npcOffers || []), ...(context.npcPriceRows || [])
-            ]);
+            const payload = restore(message.payload);
             planner ||= require('./ClanEquipmentPlanner');
             const forbidden = Object.keys(require.cache).some((filename) =>
                 /[\\/]src[\\/]Database\.js$|[\\/]World[\\/]World\.js$|[\\/]Bot[\\/]BotManager\.js$/.test(filename));
@@ -136,7 +160,7 @@ parentPort.on('message', (message) => {
             const plan = options.economicMode ? require('./ClanRosterDemand').economicPlan(planner.planForMember, raidJob,
                 member, spots, warehouseRows, { ...options, throwOnError: true })
                 : planner.planForMember(member, spots, warehouseRows, { ...options, throwOnError: true });
-            parentPort.postMessage({ id: message.id, result: { plan, ...(workerData?.developerDiagnostics ? { durationMs: performance.now() - startedAt } : {}) } });
+            parentPort.postMessage({ id: message.id, result: { plan, ...(workerData?.developerDiagnostics ? { durationMs: performance.now() - startedAt, v8Heap: heapRecord() } : {}) } });
             return;
         } else {
             throw new Error('unknown clan worker message');

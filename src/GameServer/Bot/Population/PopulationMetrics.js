@@ -1,6 +1,8 @@
 const { DiagnosticMetricMap } = require('./DiagnosticMetricMap');
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
+const Diagnostics = invoke('GameServer/Bot/Economy/EconomyDiagnostics');
 const { monitorEventLoopDelay } = require('perf_hooks');
+const WorkerHeapTelemetry = require('./WorkerHeapTelemetry');
 
 function now() {
     return Date.now();
@@ -14,6 +16,15 @@ function emptyCounters() {
         combatActions: 0,
         skillUses: 0,
         heals: 0,
+        partyBuffCasts: 0,
+        // Cold solo fights started and the mobs they pulled (F20): mobs per pull.
+        coldPulls: 0,
+        coldPullMobs: 0,
+        // Cold solo area-skill hits that struck every mob of a pull (F20).
+        coldAreaPullHits: 0,
+        // E69: solo rounds the spot share cut short, and the fights it did not start.
+        coldShareBoundResolves: 0,
+        coldShareCutFights: 0,
         skippedResolves: 0,
         activations: 0,
         cooldowns: 0,
@@ -23,9 +34,7 @@ function emptyCounters() {
         dbFlushes: 0,
         schedulerRuns: 0,
         schedulerSkips: 0,
-        schedulerBudgetStops: 0,
         partyFormationBudgetStops: 0,
-        schedulerYields: 0,
         schedulerOverruns: 0,
         slowResolves: 0,
         backgroundDeferrals: 0,
@@ -36,16 +45,8 @@ function emptyCounters() {
         activationFloorGeoChecks: 0,
         activationFloorCacheHits: 0,
         activationFloorBudgetDeferred: 0,
-        coldOwnerSelected: 0,
-        coldOwnerClaimed: 0,
-        coldOwnerResolved: 0,
         coldOwnerCommitted: 0,
-        coldOwnerReleased: 0,
-        coldOwnerCasStale: 0,
         coldOwnerRejected: 0,
-        coldOwnerLeaseRecoveries: 0,
-        coldOwnerLeaseExpiries: 0,
-        coldOwnerTimeouts: 0,
         coldOwnerErrors: 0,
         coldOwnerLegacyDeferred: 0,
         coldOwnerDbBusy: 0,
@@ -59,15 +60,6 @@ function emptyCounters() {
         coldSafetyOrphanRepairs: 0,
         partySafetyRepairs: 0,
         legacyOwnershipConflicts: 0,
-        warehouseCleanupRuns: 0,
-        warehouseCleanupOwners: 0,
-        warehouseCleanupCompacted: 0,
-        warehouseCleanupRows: 0,
-        warehouseCleanupUnits: 0,
-        warehouseCleanupPayout: 0,
-        warehouseCleanupDeferrals: 0,
-        warehouseCleanupErrors: 0,
-        warehouseCleanupBudgetStops: 0,
         stateRetentionRuns: 0,
         stateRetentionRows: 0,
         stateRetentionDeferrals: 0,
@@ -92,18 +84,8 @@ function stats(values) {
     };
 }
 
-function revisionGapBucket(result = {}) {
-    const expected = Number(result.expectedRevision);
-    const actual = Number(result.actualRevision);
-    if (!Number.isFinite(expected) || !Number.isFinite(actual)) return 'unknown';
-    const gap = actual - expected;
-    if (gap < 0) return 'ahead';
-    if (gap === 0) return 'same';
-    if (gap === 1) return '+1';
-    if (gap <= 4) return '+2-4';
-    if (gap <= 16) return '+5-16';
-    return '+17';
-}
+// The cold worker limit reads the median of the last three 1 s readings (L118): two of three late, not one.
+const LAG_WINDOW = 3;
 
 const PopulationMetrics = {
     startedAt: null,
@@ -115,6 +97,8 @@ const PopulationMetrics = {
         samples: 0,
         slowSamples: 0
     },
+    // Last LAG_WINDOW readings, kept outside eventLoop: snapshot() spreads eventLoop into the status API.
+    lagHistory: [],
     schedulerState: {
         budgetMs: 0,
         mode: 'unknown',
@@ -126,7 +110,6 @@ const PopulationMetrics = {
     interval: {
         resolveDurationsMs: [],
         schedulerDurationsMs: [],
-        schedulerSliceDurationsMs: [],
         partyFormationDurationsMs: [],
         partyFormationStageDurationsMs: new DiagnosticMetricMap(),
         actorPathDurationsMs: [],
@@ -134,14 +117,9 @@ const PopulationMetrics = {
         activationFloorDurationsMs: [],
         activationFloorReasons: new DiagnosticMetricMap(),
         skippedResolveReasons: new DiagnosticMetricMap(),
-        coldOwnerClaimDurationsMs: [],
         coldOwnerCommitDurationsMs: [],
         coldOwnerLegacyReasons: new DiagnosticMetricMap(),
         coldOwnerRejectReasons: new DiagnosticMetricMap(),
-        coldOwnerStaleRevisionGaps: new DiagnosticMetricMap(),
-        coldOwnerStaleOwners: new DiagnosticMetricMap(),
-        warehouseCleanupDurationsMs: [],
-        warehouseCleanupDeferralReasons: new DiagnosticMetricMap(),
         stateRetentionDurationsMs: [],
         stateRetentionDeferralReasons: new DiagnosticMetricMap(),
         stateRetentionPolicyRows: new DiagnosticMetricMap()
@@ -149,6 +127,7 @@ const PopulationMetrics = {
     timer: null,
     coldSafetySource: null,
     delayHistogram: null,
+    heapObserver: null,
     delayWindowStartedAt: 0,
 
     init() {
@@ -194,11 +173,13 @@ const PopulationMetrics = {
 
     startEventLoopMonitor() {
         if (this.timer || Config.enabled === false) return;
+        this.lagHistory.length = 0;
 
         if (Config.developerDiagnostics) {
             this.delayHistogram = monitorEventLoopDelay({ resolution: 20 });
             this.delayHistogram.enable();
             this.delayWindowStartedAt = now();
+            this.heapObserver = WorkerHeapTelemetry.observe();
         }
 
         let expectedAt = now() + Config.eventLoopSampleMs;
@@ -207,6 +188,7 @@ const PopulationMetrics = {
             const lag = Math.max(0, measuredAt - expectedAt);
 
             this.eventLoop.lagMs = lag;
+            this.recordLagReading(lag);
             if (Config.developerDiagnostics) {
             this.eventLoop.maxLagMs = Math.max(this.eventLoop.maxLagMs, lag);
             this.eventLoop.samples += 1;
@@ -226,6 +208,8 @@ const PopulationMetrics = {
     stopEventLoopMonitor() {
         this.delayHistogram?.disable();
         this.delayHistogram = null;
+        this.heapObserver?.close();
+        this.heapObserver = null;
         if (!this.timer) return;
         clearInterval(this.timer);
         this.timer = null;
@@ -251,6 +235,20 @@ const PopulationMetrics = {
         this.counters.combatActions += Math.max(0, Number(debug.combatActions) || 0);
         this.counters.skillUses += Math.max(0, Number(debug.skillUses) || 0);
         this.counters.heals += Math.max(0, Number(debug.heals) || 0);
+        this.counters.partyBuffCasts += Math.max(0, Number(debug.partyBuffCasts) || 0);
+        this.counters.coldPulls += Math.max(0, Number(debug.pulls) || 0);
+        this.counters.coldPullMobs += Math.max(0, Number(debug.pullMobs) || 0);
+        this.counters.coldAreaPullHits += Math.max(0, Number(debug.areaPullHits) || 0);
+        const shareCut = Math.max(0, Number(debug.shareCut) || 0);
+        if (shareCut > 0) this.counters.coldShareBoundResolves += 1;
+        this.counters.coldShareCutFights += shareCut;
+        // The summary line and the status show none of these; the box and batch checks read developerDiagnostics counts.
+        for (const [reason, amount] of [['party_buff_casts', debug.partyBuffCasts], ['pulls', debug.pulls],
+            ['pull_mobs', debug.pullMobs], ['area_pull_hits', debug.areaPullHits], ['share_cut_fights', shareCut],
+            ['share_bound_resolves', shareCut > 0 ? 1 : 0]]) {
+            const n = Math.trunc(Number(amount) || 0);
+            if (n > 0) Diagnostics.count('cold', 'combat', reason, n);
+        }
     },
 
     recordSkippedResolve(reason = 'unknown') {
@@ -327,24 +325,9 @@ const PopulationMetrics = {
         }
     },
 
-    recordSchedulerYield(sliceMs) {
-        if (!Config.developerDiagnostics) return;
-        const value = Math.max(0, Number(sliceMs) || 0);
-        this.counters.schedulerYields += 1;
-        this.interval.schedulerSliceDurationsMs.push(value);
-        if (this.interval.schedulerSliceDurationsMs.length > Config.resolveSampleLimit) {
-            this.interval.schedulerSliceDurationsMs.shift();
-        }
-    },
-
     recordSchedulerSkip() {
         if (!Config.developerDiagnostics) return;
         this.counters.schedulerSkips += 1;
-    },
-
-    recordSchedulerBudgetStop() {
-        if (!Config.developerDiagnostics) return;
-        this.counters.schedulerBudgetStops += 1;
     },
 
     recordBackgroundDeferral() {
@@ -352,68 +335,19 @@ const PopulationMetrics = {
         this.counters.backgroundDeferrals += 1;
     },
 
-    recordColdOwnerSelected() {
-        if (!Config.developerDiagnostics) return;
-        this.counters.coldOwnerSelected += 1;
-    },
-
-    recordColdOwnerClaim(result = {}, durationMs = 0) {
-        if (!Config.developerDiagnostics) return;
-        this.interval.coldOwnerClaimDurationsMs.push(Math.max(0, Number(durationMs) || 0));
-        if (this.interval.coldOwnerClaimDurationsMs.length > Config.resolveSampleLimit) this.interval.coldOwnerClaimDurationsMs.shift();
-        if (result.ok) this.counters.coldOwnerClaimed += 1;
-        else this.recordColdOwnerRejected(result.reason, result);
-    },
-
-    recordColdOwnerResolved() {
-        if (!Config.developerDiagnostics) return;
-        this.counters.coldOwnerResolved += 1;
-    },
-
     recordColdOwnerCommit(result = {}, durationMs = 0) {
         if (!Config.developerDiagnostics) return;
         this.interval.coldOwnerCommitDurationsMs.push(Math.max(0, Number(durationMs) || 0));
         if (this.interval.coldOwnerCommitDurationsMs.length > Config.resolveSampleLimit) this.interval.coldOwnerCommitDurationsMs.shift();
         if (result.ok) this.counters.coldOwnerCommitted += 1;
-        else this.recordColdOwnerRejected(result.reason, result);
+        else this.recordColdOwnerRejected(result.reason);
     },
 
-    recordColdOwnerRelease(result = {}) {
-        if (!Config.developerDiagnostics) return;
-        if (result.ok) this.counters.coldOwnerReleased += 1;
-        else this.recordColdOwnerRejected(result.reason, result);
-    },
-
-    recordColdOwnerRejected(reason = 'unknown', result = {}) {
+    recordColdOwnerRejected(reason = 'unknown') {
         if (!Config.developerDiagnostics) return;
         const key = String(reason || 'unknown');
         this.counters.coldOwnerRejected += 1;
-        if (['stale_revision', 'cas_failed', 'owner_changed', 'lease_changed', 'lease_expired'].includes(key)) {
-            this.counters.coldOwnerCasStale += 1;
-            const gap = revisionGapBucket(result);
-            const owner = String(result.actualOwner || 'unknown');
-            this.interval.coldOwnerStaleRevisionGaps.set(
-                gap,
-                Number(this.interval.coldOwnerStaleRevisionGaps.get(gap) || 0) + 1
-            );
-            this.interval.coldOwnerStaleOwners.set(
-                owner,
-                Number(this.interval.coldOwnerStaleOwners.get(owner) || 0) + 1
-            );
-        }
         this.interval.coldOwnerRejectReasons.set(key, Number(this.interval.coldOwnerRejectReasons.get(key) || 0) + 1);
-    },
-
-    recordColdOwnerRecovery(count = 0, startup = false) {
-        if (!Config.developerDiagnostics) return;
-        const recovered = Math.max(0, Number(count) || 0);
-        this.counters.coldOwnerLeaseRecoveries += recovered;
-        if (!startup) this.counters.coldOwnerLeaseExpiries += recovered;
-    },
-
-    recordColdOwnerTimeout() {
-        if (!Config.developerDiagnostics) return;
-        this.counters.coldOwnerTimeouts += 1;
     },
 
     recordColdOwnerError(error = null) {
@@ -444,37 +378,6 @@ const PopulationMetrics = {
     recordLegacyOwnershipConflict() {
         if (!Config.developerDiagnostics) return;
         this.counters.legacyOwnershipConflicts += 1;
-    },
-
-    recordWarehouseCleanup(result = {}, durationMs = 0) {
-        if (!Config.developerDiagnostics) return;
-        this.counters.warehouseCleanupRuns += 1;
-        this.counters.warehouseCleanupOwners += Math.max(0, Number(result.ownersScanned || 0));
-        this.counters.warehouseCleanupCompacted += Math.max(0, Number(result.ownersCompacted || 0));
-        this.counters.warehouseCleanupRows += Math.max(0, Number(result.rowsRemoved || 0));
-        this.counters.warehouseCleanupUnits += Math.max(0, Number(result.units || 0));
-        this.counters.warehouseCleanupPayout += Math.max(0, Number(result.payout || 0));
-        this.counters.warehouseCleanupErrors += Math.max(0, Number(result.errors || 0));
-        if (result.budgetStopped) this.counters.warehouseCleanupBudgetStops += 1;
-        this.schedulerState = {
-            ...this.schedulerState,
-            warehouseCleanupCursor: Math.max(0, Number(result.cursor || 0)),
-            warehouseCleanupExhausted: !!result.exhausted
-        };
-        this.interval.warehouseCleanupDurationsMs.push(Math.max(0, Number(durationMs) || 0));
-        if (this.interval.warehouseCleanupDurationsMs.length > Config.resolveSampleLimit) {
-            this.interval.warehouseCleanupDurationsMs.shift();
-        }
-    },
-
-    recordWarehouseCleanupDeferral(reason = 'unknown') {
-        if (!Config.developerDiagnostics) return;
-        const key = String(reason || 'unknown');
-        this.counters.warehouseCleanupDeferrals += 1;
-        this.interval.warehouseCleanupDeferralReasons.set(
-            key,
-            Number(this.interval.warehouseCleanupDeferralReasons.get(key) || 0) + 1
-        );
     },
 
     recordStateRetention(result = {}, durationMs = 0, overBudget = false) {
@@ -595,6 +498,19 @@ const PopulationMetrics = {
         return Number(this.eventLoop.lagMs || 0);
     },
 
+    recordLagReading(lag) {
+        this.lagHistory.push(Math.max(0, Number(lag) || 0));
+        if (this.lagHistory.length > LAG_WINDOW) this.lagHistory.splice(0, this.lagHistory.length - LAG_WINDOW);
+    },
+
+    // Lag that most of the recent readings reach (the median of three; the lower of two with two readings):
+    // one late reading, a GC pause or a burst of queued callbacks, does not read as a loaded loop.
+    sustainedEventLoopLag() {
+        if (!this.lagHistory.length) return 0;
+        const sorted = [...this.lagHistory].sort((a, b) => a - b);
+        return sorted[Math.floor((sorted.length - 1) / 2)];
+    },
+
     snapshot() {
         if (!Config.developerDiagnostics) return { enabled: false };
         const elapsedMs = Math.max(1, now() - (this.startedAt || now()));
@@ -618,12 +534,10 @@ const PopulationMetrics = {
         this.lastSummaryCounters = { ...this.counters };
         const resolveStats = stats(this.interval.resolveDurationsMs);
         const schedulerStats = stats(this.interval.schedulerDurationsMs);
-        const schedulerSliceStats = stats(this.interval.schedulerSliceDurationsMs);
         const partyFormationStats = stats(this.interval.partyFormationDurationsMs);
         const actorPathStats = stats(this.interval.actorPathDurationsMs);
         const companionPathStats = stats(this.interval.companionPathDurationsMs);
         const activationFloorStats = stats(this.interval.activationFloorDurationsMs);
-        const coldOwnerClaimStats = stats(this.interval.coldOwnerClaimDurationsMs);
         const coldOwnerCommitStats = stats(this.interval.coldOwnerCommitDurationsMs);
         const partyFormationStages = Object.fromEntries(Array.from(this.interval.partyFormationStageDurationsMs.entries())
             .map(([stage, values]) => [stage, stats(values)]));
@@ -631,29 +545,19 @@ const PopulationMetrics = {
         const activationFloorReasons = Object.fromEntries(this.interval.activationFloorReasons.entries());
         const coldOwnerLegacyReasons = Object.fromEntries(this.interval.coldOwnerLegacyReasons.entries());
         const coldOwnerRejectReasons = Object.fromEntries(this.interval.coldOwnerRejectReasons.entries());
-        const coldOwnerStaleRevisionGaps = Object.fromEntries(this.interval.coldOwnerStaleRevisionGaps.entries());
-        const coldOwnerStaleOwners = Object.fromEntries(this.interval.coldOwnerStaleOwners.entries());
-        const warehouseCleanupStats = stats(this.interval.warehouseCleanupDurationsMs);
-        const warehouseCleanupDeferralReasons = Object.fromEntries(this.interval.warehouseCleanupDeferralReasons.entries());
         const stateRetentionStats = stats(this.interval.stateRetentionDurationsMs);
         const stateRetentionDeferralReasons = Object.fromEntries(this.interval.stateRetentionDeferralReasons.entries());
         const stateRetentionPolicyRows = Object.fromEntries(this.interval.stateRetentionPolicyRows.entries());
         this.interval.resolveDurationsMs = [];
         this.interval.schedulerDurationsMs = [];
-        this.interval.schedulerSliceDurationsMs = [];
         this.interval.partyFormationDurationsMs = [];
         this.interval.actorPathDurationsMs = [];
         this.interval.companionPathDurationsMs = [];
         this.interval.activationFloorDurationsMs = [];
-        this.interval.coldOwnerClaimDurationsMs = [];
         this.interval.coldOwnerCommitDurationsMs = [];
         this.interval.activationFloorReasons = new DiagnosticMetricMap();
         this.interval.coldOwnerLegacyReasons = new DiagnosticMetricMap();
         this.interval.coldOwnerRejectReasons = new DiagnosticMetricMap();
-        this.interval.coldOwnerStaleRevisionGaps = new DiagnosticMetricMap();
-        this.interval.coldOwnerStaleOwners = new DiagnosticMetricMap();
-        this.interval.warehouseCleanupDurationsMs = [];
-        this.interval.warehouseCleanupDeferralReasons = new DiagnosticMetricMap();
         this.interval.stateRetentionDurationsMs = [];
         this.interval.stateRetentionDeferralReasons = new DiagnosticMetricMap();
         this.interval.stateRetentionPolicyRows = new DiagnosticMetricMap();
@@ -667,7 +571,6 @@ const PopulationMetrics = {
             eventLoop: { ...this.eventLoop, delay },
             resolve: resolveStats,
             scheduler: { ...schedulerStats, ...this.schedulerState },
-            schedulerSlice: schedulerSliceStats,
             partyFormation: partyFormationStats,
             pathfinding: {
                 actor: actorPathStats,
@@ -678,18 +581,9 @@ const PopulationMetrics = {
                 reasons: activationFloorReasons
             },
             coldOwner: {
-                claim: coldOwnerClaimStats,
                 commit: coldOwnerCommitStats,
                 legacyReasons: coldOwnerLegacyReasons,
-                rejectReasons: coldOwnerRejectReasons,
-                staleRevisionGaps: coldOwnerStaleRevisionGaps,
-                staleOwners: coldOwnerStaleOwners
-            },
-            warehouseCleanup: {
-                ...warehouseCleanupStats,
-                cursor: this.schedulerState.warehouseCleanupCursor || 0,
-                exhausted: !!this.schedulerState.warehouseCleanupExhausted,
-                deferralReasons: warehouseCleanupDeferralReasons
+                rejectReasons: coldOwnerRejectReasons
             },
             stateRetention: {
                 ...stateRetentionStats,

@@ -1,339 +1,107 @@
-const assert = require('assert');
-
+const assert = require('node:assert/strict');
 require('./helpers/databaseIsolation');
 require('../src/Global');
-
-const BotAvailability = invoke('GameServer/Bot/AI/BotAvailability');
-const PartyDecision = invoke('GameServer/Bot/AI/PersonaPartyDecisionPolicy');
-const Roll = invoke('GameServer/Bot/AI/TendencyRoll');
-const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
-const InteractionMemory = invoke('GameServer/Social/InteractionMemoryRuntime');
-const originalAssess = InteractionMemory.assess;
-const ClanService = invoke('GameServer/Clan/ClanService');
-const originalFindClan = ClanService.findById;
-
-function actor(id, level, clanId = 0, options = {}) {
-    return {
-        fetchId: () => id,
-        fetchName: () => options.name || `Actor${id}`,
-        fetchLevel: () => level,
-        fetchClanId: () => clanId,
-        fetchLocX: () => Number(options.locX || 0),
-        fetchLocY: () => Number(options.locY || 0),
-        fetchLocZ: () => Number(options.locZ || 0),
-        isDead: () => !!options.dead
-    };
-}
-
-function session(fakeActor, extras = {}) {
-    return {
-        actor: fakeActor,
-        accountId: `session_${fakeActor.fetchId()}`,
-        ...extras
-    };
-}
-
-const originalGetSnapshot = BotSocialMemory.getSnapshot;
-const originalPeekSnapshot = BotSocialMemory.peekSnapshot;
-const originalRelationship = BotSocialMemory.relationship;
-
+const Availability = invoke('GameServer/Bot/AI/BotAvailability');
+const Social = invoke('GameServer/Bot/AI/BotSocialMemory');
+const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
+const Clans = invoke('GameServer/Clan/ClanService');
+const Income = invoke('GameServer/Bot/Population/PartyIncomeComparison');
+const Tendency = invoke('GameServer/Bot/AI/TendencyRoll');
+const originals = { get: Social.getSnapshot, peek: Social.peekSnapshot, assess: Memory.assess,
+    clan: Clans.findById, income: Income.compare, roll: Tendency.roll };
+const actor = (id, level = 60, clanId = 0, dead = false) => ({
+    fetchId: () => id, fetchName: () => `Actor${id}`, fetchLevel: () => level,
+    fetchClanId: () => clanId, isDead: () => dead,
+    fetchLocX: () => id === 2 ? 100000 : 0, fetchLocY: () => 0, fetchLocZ: () => 0
+});
+const player = { actor: actor(1) };
+const persona = { primaryDrive: 'wealth', traits: { sociability: 0, empathy: 0, commitment: 0 } };
+const state = { characterId: 2, name: 'Loner', level: 60, phase: 'cold', activity: 'hunting',
+    spotId: 'home', adena: 21000000, loc: { locX: 100000, locY: 0, locZ: 0 },
+    vitals: { hp: 100 }, persona,
+    stats: { classId: 23, wishFocus: ['power:2384:10', 0, 173420], money: [1000000, .000001, 175837] } };
+const hot = { actor: actor(2), accountId: 'bot_loner', plan: 'hunting', persona, coldLifeState: state };
+let memory = {}, relation = { ready: true, personal: null }, reads = 0, previews = 0;
+const both = (options = {}, h = hot, c = state) => [Availability.evaluate(player, h, options),
+    Availability.evaluateState(player, c, options)];
 try {
-    let clanMembers = [2000006, 2000024];
-    ClanService.findById = id => Number(id) === 6000001
-        ? { members: clanMembers.map(id => ({ id })) } : null;
-    InteractionMemory.assess = () => ({ ready: true, personal: null });
-    let memory = { trust: 0, familiarity: 0, recentlyAbandonedAt: null };
-    let snapshotReads = 0;
-    let previewReads = 0;
-    BotSocialMemory.getSnapshot = () => {
-        snapshotReads += 1;
-        return memory;
-    };
-    BotSocialMemory.peekSnapshot = () => {
-        previewReads += 1;
-        return memory;
-    };
-    BotSocialMemory.relationship = () => 'stranger';
+    Social.getSnapshot = () => { reads++; return memory; };
+    Social.peekSnapshot = () => { previews++; return memory; };
+    Memory.assess = () => relation;
+    Clans.findById = () => ({ members: [{ id: 2 }] });
+    Income.compare = () => { throw Error('player invitation must not forecast income'); };
+    Tendency.roll = () => { throw Error('player invitation must not roll persona tendencies'); };
 
-    const lowPlayer = session(actor(2000001, 20, 0));
-    const highBot = session(actor(2000002, 55, 0));
-    let result = BotAvailability.evaluate(lowPlayer, highBot);
-    assert.strictEqual(result.available, false);
-    assert.strictEqual(result.reason, 'level_gap_too_large', 'large level gap should normally block bot party invite');
-
-    const clanPlayer = session(actor(2000003, 20, 6000001));
-    const clanBot = session(actor(2000004, 55, 6000001));
-    result = BotAvailability.evaluate(clanPlayer, clanBot);
-    assert.strictEqual(result.available, true, 'same-clan hot bot should ignore party invite level gap');
-    assert.strictEqual(result.clanmate, true);
-    const autonomousClanBot = { ...clanBot, hotBackgroundPartyId: 'native-party' };
-    assert.strictEqual(BotAvailability.evaluate(clanPlayer, autonomousClanBot, { forceFriend: true }).reason, 'already_grouped',
-        'a player invite must not split an autonomous hot lifecycle roster');
-
-    const merchantClanBot = session(actor(2000005, 55, 6000001), { plan: 'merchant' });
-    result = BotAvailability.evaluate(clanPlayer, merchantClanBot);
-    assert.strictEqual(result.available, false, 'a fixed merchant must remain unavailable even if stale clan data links it to the player');
-    assert.strictEqual(result.reason, 'merchant_duty');
-
-    const farClanBot = session(actor(2000007, 55, 6000001, { locX: 100000 }));
-    result = BotAvailability.evaluate(clanPlayer, farClanBot);
-    assert.strictEqual(result.available, true, 'same-clan hot bot should ignore distance refusal');
-
-    const deadClanBot = session(actor(2000008, 55, 6000001, { dead: true }));
-    result = BotAvailability.evaluate(clanPlayer, deadClanBot);
-    assert.strictEqual(result.available, true, 'same-clan hot bot should ignore dead-state refusal');
-
-    const groupedClanBot = session(actor(2000009, 55, 6000001), {
-        partyCompanion: true,
-        followPlayerSession: session(actor(2000010, 55))
-    });
-    result = BotAvailability.evaluate(clanPlayer, groupedClanBot);
-    assert.strictEqual(result.available, true, 'same-clan hot bot should ignore already-grouped refusal');
-
-    memory = { trust: -10, familiarity: 0, recentlyAbandonedAt: Date.now() };
-    result = BotAvailability.evaluate(clanPlayer, clanBot);
-    assert.strictEqual(result.available, true, 'same-clan hot bot should ignore social refusal reasons');
-    memory = { trust: 0, familiarity: 0, recentlyAbandonedAt: null };
-
-    result = BotAvailability.evaluateState(clanPlayer, {
-        characterId: 2000006,
-        name: 'ColdClanBot',
-        level: 55,
-        activity: 'merchant',
-        loc: { locX: 100000, locY: 0, locZ: 0 },
-        vitals: { hp: 0 },
-        stats: { clanId: 6000001 }
-    });
-    assert.strictEqual(result.available, true, 'same-clan cold bot state should ignore party invite refusal reasons');
-
-    for (const activity of ['traveling', 'pk_hunting']) {
-        const clanState = {
-            characterId: 2000024,
-            name: 'BusyClanBot',
-            level: 55,
-            activity,
-            loc: { locX: 100000, locY: 0, locZ: 0 },
-            vitals: { hp: 100 },
-            stats: { clanId: 6000001 }
-        };
-        result = BotAvailability.evaluateState(clanPlayer, clanState);
-        assert.strictEqual(result.clanmate, true);
-        assert.strictEqual(result.available, true, `a clan invitation must interrupt ${activity}`);
-        result = BotAvailability.evaluateState(clanPlayer, { ...clanState, staticService: true });
-        assert.strictEqual(result.reason, 'merchant_duty', 'clan priority must still exclude fixed services');
-        clanMembers = [];
-        result = BotAvailability.evaluateState(clanPlayer, { ...clanState, stats: { clanId: 6000002 } });
-        assert.strictEqual(result.available, false, 'another clan must not gain the clan summon override');
-        clanMembers = [2000006, 2000024];
-    }
-
-    const farColdBot = {
-        characterId: 2000011,
-        name: 'FarColdBot',
-        level: 20,
-        activity: 'hunting',
-        loc: { locX: 100000, locY: 0, locZ: 0 },
-        vitals: { hp: 100, maxHp: 100 },
-        stats: {},
-        persona: { primaryDrive: 'social', traits: { sociability: 0.80, empathy: 0.80, commitment: 0.70 } }
-    };
-    result = BotAvailability.evaluateState(lowPlayer, farColdBot);
-    const farColdDecision = PartyDecision.evaluate(farColdBot, memory, { peer: lowPlayer });
-    assert.strictEqual(result.available, farColdDecision.accept, 'distance must preserve the native persona decision');
-    assert.strictEqual(result.reason, farColdDecision.reason);
-    const nearColdResult = BotAvailability.evaluateState(lowPlayer, { ...farColdBot, loc: { locX: 0, locY: 0, locZ: 0 } });
-    assert.strictEqual(nearColdResult.available, result.available, 'moving this exact actor into invite range must not change admission');
-    assert.deepStrictEqual(nearColdResult.partyDecision, result.partyDecision, 'distance is a diagnostic, never part of the tendency seed');
-    assert.strictEqual(Math.round(result.distance), 100000, 'availability should still expose distance for diagnostics');
-
-    result = BotAvailability.evaluateState(lowPlayer, { ...farColdBot, activity: 'traveling' });
-    assert.strictEqual(result.available, false, 'a cold bot that activation rejects in transit must not expose a working invite action');
-    assert.strictEqual(result.reason, 'in_transit');
-    result = BotAvailability.evaluateState(lowPlayer, { ...farColdBot, activity: 'traveling' }, { forceFriend: true });
-    assert.strictEqual(result.available, true, 'a const friend summon must interrupt background travel');
-    result = BotAvailability.evaluateState(lowPlayer, { ...farColdBot, activity: 'pk_hunting' });
-    assert.strictEqual(result.available, false, 'a cold PK encounter bot must retain its existing activation gate in the catalog');
-    assert.strictEqual(result.reason, 'pk_encounter_only');
-    result = BotAvailability.evaluateState(lowPlayer, { ...farColdBot, activity: 'pk_hunting' }, { forceFriend: true });
-    assert.strictEqual(result.available, true, 'a const friend summon must outrank a background PK hunt');
-
-    const socialBot = session(actor(2000012, 20), {
-        persona: { primaryDrive: 'social', traits: { sociability: 0.80, empathy: 0.80, commitment: 0.70 } }
-    });
-    result = BotAvailability.evaluate(lowPlayer, socialBot);
-    assert.strictEqual(result.available, true, 'a social persona should remain available after hard invite checks pass');
-
-    const soloBot = session(actor(2000013, 20), {
-        persona: { primaryDrive: 'wealth', traits: { sociability: 0.30, empathy: 0.35, commitment: 0.45 } }
-    });
-    result = BotAvailability.evaluate(lowPlayer, soloBot);
-    const soloDecision = PartyDecision.evaluate(soloBot, memory, { peer: lowPlayer });
-    assert.strictEqual(result.available, soloDecision.accept, 'a reserved persona retains its seeded right to accept or decline');
-    assert.strictEqual(result.reason, soloDecision.reason);
-    assert(soloDecision.probability < PartyDecision.evaluate(socialBot, memory, { peer: lowPlayer }).probability,
-        'the original reserved traits must still produce a lower party tendency than the original social traits');
-    result = BotAvailability.evaluate(lowPlayer, soloBot, { forceFriend: true });
-    assert.strictEqual(result.available, true, 'a const friend invite must override persona solo preference');
-
-    // Social refusals: trust -6 or lower, or an abandonment in the last five minutes.
-    const at = 2000000000000;
-    const refusal = (nextMemory, options = {}) => {
-        memory = nextMemory;
-        return [BotAvailability.evaluate(lowPlayer, socialBot, { timestamp: at, ...options }),
-            BotAvailability.evaluateState(lowPlayer, farColdBot, { timestamp: at, ...options })]
-            .map((entry) => [entry.reason, entry.reasonText]);
-    };
-    // One reason name for trust -6 or lower, as in party takeover and the shared relation.
-    const lowTrust = [['relationship_hostile', 'we still have a conflict to settle'],
-        ['relationship_hostile', 'we still have a conflict to settle']];
-    const abandoned = [['recently_abandoned', 'recently abandoned'], ['recently_abandoned', 'recently abandoned']];
-    // The social hard gate is open. The final answer still belongs to the
-    // authored party tendency, rather than the retired score >= 45 shortcut.
-    const open = [socialBot, farColdBot].map(subject => {
-        const decision = PartyDecision.evaluate(subject, { trust: 0, familiarity: 0, recentlyAbandonedAt: null }, { peer: lowPlayer });
-        return [decision.reason, decision.reasonText];
-    });
-    assert.deepStrictEqual(refusal({ trust: -6, familiarity: 0, recentlyAbandonedAt: null }), lowTrust);
-    assert.deepStrictEqual(refusal({ trust: -6, familiarity: 0, recentlyAbandonedAt: at - 1000 }), lowTrust,
-        'distrust is named before an abandonment');
-    assert.deepStrictEqual(refusal({ trust: -5, familiarity: 0, recentlyAbandonedAt: null }), open);
-    assert.deepStrictEqual(refusal({ trust: 0, familiarity: 0, recentlyAbandonedAt: at - 5 * 60 * 1000 + 1 }), abandoned);
-    assert.deepStrictEqual(refusal({ trust: 0, familiarity: 0, recentlyAbandonedAt: at - 5 * 60 * 1000 }), open);
-    assert.deepStrictEqual(refusal({ trust: -6, familiarity: 0, recentlyAbandonedAt: at }, { forceFriend: true }),
-        [['available', 'available'], ['available', 'available']],
-        'a const friend summon ignores social refusals');
-    memory = { trust: 0, familiarity: 0, recentlyAbandonedAt: null };
-
-    // Keep the original actor ID and bounded distinct invitation events. The
-    // hot/cold adapter must propagate both positive and negative native rolls.
-    let admits = 0, declines = 0;
-    const hotColdTwin = session(actor(farColdBot.characterId, farColdBot.level, 0, { locX: 100000 }), { persona: farColdBot.persona });
     for (let inviteAttempts = 0; inviteAttempts < 64; inviteAttempts++) {
-        memory = { trust: 0, familiarity: 0, recentlyAbandonedAt: null, inviteAttempts };
-        const hot = BotAvailability.evaluate(lowPlayer, hotColdTwin);
-        const cold = BotAvailability.evaluateState(lowPlayer, farColdBot);
-        const roll = Roll.roll('party_invite', farColdBot.characterId, lowPlayer.actor.fetchId(), inviteAttempts);
-        const social = 0.80 - 0.5 + 0.80 * 0.25 + 0.70 * 0.15;
-        const probability = Math.max(0.02, Math.min(0.98, 0.5 + social / (2 * (1 + Math.abs(social)))));
-        assert.strictEqual(hot.partyDecision.roll, roll);
-        assert.strictEqual(cold.partyDecision.roll, roll);
-        assert.strictEqual(hot.partyDecision.probability, probability);
-        assert.strictEqual(cold.partyDecision.probability, probability);
-        assert.strictEqual(hot.available, roll < probability);
-        assert.strictEqual(cold.available, hot.available, 'hot/cold answer parity for the same actor and invitation event');
-        assert.strictEqual(cold.reason, hot.reason);
-        if (cold.available) admits++; else declines++;
+        memory = { trust: 0, familiarity: 0, inviteAttempts };
+        assert(both().every(r => r.available), 'a rich, unfamiliar loner accepts every eligible player invite');
     }
-    assert(admits > 0 && declines > 0, 'both authored tendency outcomes must remain reachable after hard gates pass');
-    memory = { trust: 0, familiarity: 0, recentlyAbandonedAt: null };
+    for (const activity of ['hunting', 'resting', 'shopping', 'merchant', 'crafting', 'traveling', 'pk_hunting', 'dead']) {
+        const cold = { ...state, activity, vitals: { hp: activity === 'dead' ? 0 : 100 } };
+        const live = { ...hot, plan: activity, actor: actor(2, 60, 0, activity === 'dead') };
+        assert(both({}, live, cold).every(r => r.available), `${activity} is not a player-party refusal`);
+    }
+    player.actor = actor(1, 60, 0, true);
+    assert(both().every(r => r.available), 'a dead player may invite companions');
+    player.actor = actor(1);
+    assert.equal(both()[0].distance, 100000, 'distance remains diagnostic');
 
-    const farLowFriend = session(actor(2000015, 55, 0, { locX: 100000 }), {
-        persona: { primaryDrive: 'wealth', traits: { sociability: 0.30, empathy: 0.35, commitment: 0.45 } }
-    });
-    result = BotAvailability.evaluate(lowPlayer, farLowFriend, { forceFriend: true });
-    assert.strictEqual(result.available, true, 'a const friend invite must override level and persona soft gates');
+    for (const offset of [-13, -12, 12, 13]) {
+        const results = both({}, { ...hot, actor: actor(2, 60 + offset) }, { ...state, level: 60 + offset });
+        assert(results.every(r => r.reason === (Math.abs(offset) > 12 ? 'level_gap_too_large' : 'available')));
+    }
+    for (const options of [{}, { forceFriend: true }]) {
+        for (const trust of [-6, -5, 0]) {
+            memory = { trust, familiarity: 0, recentlyAbandonedAt: Date.now() };
+            assert(both(options).every(r => r.reason === (trust <= -6 ? 'relationship_hostile' : 'available')),
+                'recent departure alone never vetoes an invite, while real distrust does');
+        }
+        relation = { ready: true, personal: { trust: 0, hostility: 10 } };
+        assert(both(options).every(r => r.reason === 'relationship_hostile'));
+        relation = { ready: true, personal: null }; memory = {};
+        assert(both(options, { ...hot, actor: actor(2, 73) }, { ...state, level: 73 })
+            .every(r => r.reason === 'level_gap_too_large'), 'friend flags cannot bypass the level boundary');
+    }
+    for (const grouped of [{ hotBackgroundPartyId: 'party' }, { hotCompetitionCommit: {} },
+        { partyCompanion: true, followPlayerSession: player },
+        { coldLifeState: { ...state, party: { partyId: 'party' } } }]) {
+        assert.equal(Availability.evaluate(player, { ...hot, ...grouped }).reason, 'already_grouped');
+    }
+    for (const grouped of [{ party: { partyId: 'party' } }, { partyId: 'party' },
+        { stats: { ...state.stats, backgroundPartyId: 'party' } },
+        { stats: { ...state.stats, playerPartyTakeover: { playerId: 3 } } }]) {
+        assert.equal(Availability.evaluateState(player, { ...state, ...grouped }).reason, 'already_grouped');
+    }
+    player.actor = actor(1, 60, 77); hot.actor = actor(2, 60, 77);
+    memory = { trust: -10 };
+    assert(both().every(r => r.clanmate && r.reason === 'relationship_hostile'), 'clanmates use the same relationship rule');
+    memory = {}; hot.actor = actor(2, 73, 77);
+    assert.equal(Availability.evaluate(player, hot).reason, 'level_gap_too_large');
+    hot.actor = actor(2); player.actor = actor(1);
+    relation = { ready: false };
+    assert(both().every(r => r.reason === 'relationship_unloaded'), 'previews wait for actual remembered relationships');
+    relation = { ready: true, personal: null };
 
-    const farSocialBot = session(actor(2000014, 20, 0, { locX: 100000 }), {
-        persona: { primaryDrive: 'social', traits: { sociability: 0.80, empathy: 0.80, commitment: 0.70 } }
-    });
-    result = BotAvailability.evaluate(lowPlayer, farSocialBot);
-    assert.strictEqual(result.available, true, 'distance should not block a hot bot because companion catch-up handles arrival');
-    assert.strictEqual(Math.round(result.distance), 100000, 'hot-bot distance should remain available for diagnostics');
-    assert.deepStrictEqual(BotAvailability.listForPlayer(lowPlayer, [farSocialBot]).map((entry) => entry.session), [farSocialBot],
-        '.botparty candidate discovery should keep an available distant hot bot');
-
-    const ownCompanion = session(actor(2000019, 20), {
-        partyCompanion: true,
-        followPlayerSession: lowPlayer
-    });
-    const otherPlayer = session(actor(2000020, 20));
-    const otherCompanion = session(actor(2000021, 20), {
-        partyCompanion: true,
-        followPlayerSession: otherPlayer
-    });
-    const partyCandidates = BotAvailability.listForPlayer(lowPlayer, [ownCompanion, otherCompanion]);
-    assert.deepStrictEqual(partyCandidates.map((entry) => entry.session), [otherCompanion],
-        '.botparty should hide companions already attached to the requesting player');
-    assert.strictEqual(partyCandidates[0].availability.reason, 'already_grouped',
-        'a companion attached to another player should remain visible with its unavailable reason');
-
-    const staticCraftState = {
-        characterId: 2000016,
-        name: 'PublicCrafter',
-        level: 70,
-        activity: 'crafting',
-        loc: { locX: 0, locY: 0, locZ: 0 },
-        vitals: { hp: 100, maxHp: 100 },
-        stats: { craftStationId: 'giran_weapons', craftShop: { town: 'Giran' } }
-    };
-    result = BotAvailability.evaluateState(lowPlayer, staticCraftState, { forceFriend: true });
-    assert.strictEqual(result.available, false, 'const friend overrides must never recruit a public craft service');
-    assert.strictEqual(result.reason, 'merchant_duty');
-
-    const staticMerchant = session(actor(2000017, 20), { plan: 'merchant' });
-    result = BotAvailability.evaluate(lowPlayer, staticMerchant, { forceFriend: true });
-    assert.strictEqual(result.available, false, 'const friend overrides must never recruit a fixed merchant');
-    assert.strictEqual(result.reason, 'merchant_duty');
-
-    const configuredMerchant = session(actor(2000018, 1, 0, { name: 'IslandMats' }), {
-        plan: 'merchant',
-        coldLifeState: { stats: { classId: 53 } }
-    });
-    result = BotAvailability.evaluate(lowPlayer, configuredMerchant, { forceFriend: true });
-    assert.strictEqual(result.reason, 'merchant_duty', 'configured liquidity stores must remain static even with a stale life-state snapshot');
-    assert.deepStrictEqual(BotAvailability.listForPlayer(lowPlayer, [configuredMerchant]), [], 'static services must not appear in party candidate lists');
-
-    const dynamicMerchant = session(actor(2000022, 22, 0, { name: 'DynamicSeller' }), {
-        plan: 'merchant',
-        coldLifeState: { characterId: 2000022, name: 'DynamicSeller', stats: { classId: 54 } }
-    });
-    const coldAdventure = {
-        characterId: 2000023,
-        name: 'ColdAdventure',
-        level: 24,
-        activity: 'hunting',
-        loc: { locX: 50000, locY: 0, locZ: 0 },
-        vitals: { hp: 100, maxHp: 100 },
-        stats: { classId: 8 }
-    };
-    const duplicateHotState = {
-        ...farColdBot,
-        characterId: farSocialBot.actor.fetchId(),
-        name: farSocialBot.actor.fetchName()
-    };
-    const ownCompanionState = {
-        ...farColdBot,
-        characterId: ownCompanion.actor.fetchId(),
-        name: ownCompanion.actor.fetchName()
-    };
-    const snapshotReadsBeforeCatalog = snapshotReads;
-    const catalog = BotAvailability.catalogForPlayer(
-        lowPlayer,
-        [farSocialBot, ownCompanion, dynamicMerchant, configuredMerchant],
-        [duplicateHotState, ownCompanionState, coldAdventure, staticCraftState]
-    );
-    assert.deepStrictEqual(
-        catalog.map((candidate) => candidate.name).sort(),
-        ['Actor2000014', 'ColdAdventure', 'DynamicSeller'],
-        'the global party catalog should merge hot and cold bots, deduplicate snapshots, hide own companions and exclude static services'
-    );
-    assert.strictEqual(catalog.find((candidate) => candidate.name === 'Actor2000014').phase, 'hot', 'a live session should win over its cold snapshot');
-    assert.strictEqual(catalog.find((candidate) => candidate.name === 'ColdAdventure').phase, 'cold', 'background adventurers should remain discoverable');
-    assert.strictEqual(snapshotReads, snapshotReadsBeforeCatalog,
-        'building catalog metadata must not fan out social-memory reads across the whole population');
-    result = BotAvailability.evaluate(lowPlayer, farSocialBot, { loadMemory: false });
-    assert.strictEqual(result.available, true);
-    assert.strictEqual(snapshotReads, snapshotReadsBeforeCatalog,
-        'catalog availability previews must not trigger asynchronous per-bot memory loads');
-    assert.strictEqual(previewReads, 1, 'catalog availability should still use an already cached social snapshot when present');
-    result = BotAvailability.evaluate(lowPlayer, dynamicMerchant);
-    assert.strictEqual(result.reason, 'merchant_duty', 'temporary merchants should stay visible while page-level availability explains why they cannot join yet');
-
-    console.log('Bot availability checks passed');
+    const craft = { ...state, stats: { craftStationId: 'public', craftShop: { town: 'Giran' } } };
+    const fixed = { ...hot, staticService: true };
+    assert.equal(Availability.evaluateState(player, craft).reason, 'merchant_duty');
+    assert.equal(Availability.evaluate(player, fixed, { forceFriend: true }).reason, 'merchant_duty');
+    const merchant = { ...hot, actor: actor(6), plan: 'merchant', coldLifeState: { ...state, characterId: 6 } };
+    assert.equal(Availability.evaluate(player, merchant).reason, 'available', 'an ordinary temporary seller can close its store and join');
+    const own = { actor: actor(3), partyCompanion: true, followPlayerSession: player };
+    const other = { actor: actor(4), partyCompanion: true, followPlayerSession: {} };
+    const list = Availability.listForPlayer(player, [hot, own, other, fixed]);
+    assert.deepEqual(list.map(row => row.session), [hot, other]);
+    assert.equal(list[1].availability.reason, 'already_grouped');
+    const before = reads;
+    const catalog = Availability.catalogForPlayer(player, [hot, own, merchant, fixed],
+        [state, { ...state, characterId: 3, name: 'Own' }, { ...state, characterId: 5, name: 'Cold' }, craft]);
+    assert.deepEqual(catalog.map(c => c.name).sort(), ['Actor2', 'Actor6', 'Cold']);
+    assert.equal(reads, before, 'catalog discovery must not fan out relationship reads');
+    Availability.evaluate(player, hot, { loadMemory: false });
+    assert.equal(reads, before); assert.equal(previews, 1);
+    console.log('Player party availability: only relationships, levels and membership; hot/cold, activities, services and catalog passed');
 } finally {
-    ClanService.findById = originalFindClan;
-    InteractionMemory.assess = originalAssess;
-    BotSocialMemory.getSnapshot = originalGetSnapshot;
-    BotSocialMemory.peekSnapshot = originalPeekSnapshot;
-    BotSocialMemory.relationship = originalRelationship;
+    Social.getSnapshot = originals.get; Social.peekSnapshot = originals.peek; Memory.assess = originals.assess;
+    Clans.findById = originals.clan; Income.compare = originals.income; Tendency.roll = originals.roll;
 }

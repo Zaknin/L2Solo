@@ -2,7 +2,7 @@ const assert = require('assert');
 
 require('../src/Global');
 
-// A hunting trip starts from the route the coordinator chose (beginHuntingTrip)
+// A hunting trip starts from the bot's route (BotRoute, beginHuntingTrip)
 // or from a spot main chose itself (PopulationService). For the same bot and
 // destination both must write the same trip.
 
@@ -53,7 +53,7 @@ function hunter(characterId, stats = {}) {
     };
 }
 
-// The route the coordinator (routeFor) writes for a solo trip to newSpot.
+// The route BotRoute.record writes for a solo trip to newSpot.
 function soloRoute(plan, backoff = null) {
     return {
         needed: true, mode: 'solo', currentSpotId: oldSpot.id, spotId: newSpot.id, regionName: newSpot.name,
@@ -127,12 +127,9 @@ function partyChecks() {
         regionName: newSpot.name, travelMs: 25000, reason: 'party_spot_replan',
         ...(backoff ? { cause: 'death_pressure', spotBackoff: backoff } : {}),
         to: destination, destinations: { [member.characterId]: destination } });
-    for (const backoff of [null, { spotId: oldSpot.id, reason: 'death_pressure', startedAt: at, until: at + 3600000 }]) {
-        const fromMain = PopulationService.beginPartySpotTravel(member, newSpot, at,
-            { destination, ...(backoff ? { spotBackoff: backoff } : {}) });
+    for (const backoff of [null, { spotId: oldSpot.id, reason: 'death_pressure', startedAt: at, steps: 60 }]) {
         const fromKernel = beginHuntingTrip(member, partyRoute(backoff), at);
-        assert.deepStrictEqual(fromMain, fromKernel, `party trips${backoff ? ' under pressure' : ''}: one state`);
-        assert.deepStrictEqual(fromMain.stats.spotRisk, member.stats.spotRisk,
+        assert.deepStrictEqual(fromKernel.stats.spotRisk, member.stats.spotRisk,
             'a party trip leaves the member\'s solo risk alone');
     }
 }

@@ -1,4 +1,5 @@
 const AssemblyRecovery = require('./PartyAssemblyRecovery');
+const ClanEquipment = require('./ClanEquipmentPartyPolicy');
 const MINUTE = 60000;
 const clamp = n => Math.max(0, Math.min(1, Number(n) || 0));
 const Rewards = require('../../Actor/PartyRewardMath');
@@ -41,11 +42,14 @@ function assess(party, members, timestamp, options = {}) {
         && members.length < Math.max(2, Number(party.stats.objective.minPartySize) || 3);
     const raidObjective = party.stats?.objective?.sourceKind === 'raid'
         || party.stats?.objective?.raidBoss === true;
+    const raidCommitted = party.stats?.objective?.opportunisticRaid === true;
     const raidRosterIncomplete = raidObjective
-        && !require('../../Clan/ClanRaidPolicy').composition(members).ready;
+        && !(party.stats?.objective?.opportunisticRaid
+            ? require('./OpportunisticRaidPolicy').composition(members)
+            : require('../../Clan/ClanRaidPolicy').composition(members)).ready;
     const assemblyRecovered = assemblyExpired && !understaffed && !raidRosterIncomplete
         && require('./PartyHuntingAssembly').ready(party, members, { id: party.spotId });
-    const abandonedRaid = require('./ClanEquipmentPartyPolicy').abandonedRaid(party);
+    const abandonedRaid = ClanEquipment.abandonedRaid(party);
     const target = Number(party.stats?.objective?.npcId || party.stats?.acquisitionGoal?.next?.npcId || 0);
     const concerns = {}, decisions = [], experience = {};
     const eligible = new Set(Rewards.validMemberIndexes(members.map(m => Number(m.level || 1))));
@@ -88,18 +92,18 @@ function assess(party, members, timestamp, options = {}) {
         let reason = null;
         if (!paused) {
             if (hostile) reason = 'party_relationship_conflict';
-            else if (active && !sameTarget && !sharedClan && !helping
+            else if (!raidCommitted && active && !sameTarget && !sharedClan && !helping
                 && (!profitable || plan.requiresParty || plan.partyNeed === 'required')) reason = 'party_goals_diverged';
         }
-        if (options.requiresWeaponBridge?.(member)) reason = 'weapon_bridge';
+        if (!raidCommitted && options.requiresWeaponBridge?.(member)) reason = 'weapon_bridge';
         const equipmentBridgeReason = options.equipmentBridgeReason?.(member);
-        if (equipmentBridgeReason) reason = equipmentBridgeReason;
+        if (!raidCommitted && equipmentBridgeReason) reason = equipmentBridgeReason;
         // Recovery alone proves nothing, but it must not hide repeated failed
         // fights already observed over the member's patience window.
         if (!marketPaused && noExperience) reason = 'party_no_experience';
         else if (!marketPaused && !reason && stalled) reason = 'party_no_progress';
         if (!paused && assemblyExpired && !assemblyRecovered) reason = AssemblyRecovery.REASON;
-        if (!require('./ClanEquipmentPartyPolicy').allowed(member, party.stats?.objective, timestamp)) {
+        if (!ClanEquipment.allowed(member, party.stats?.objective)) {
             reason = 'clan_party_unsafe';
         }
         if (abandonedRaid) reason = 'raid_failed';

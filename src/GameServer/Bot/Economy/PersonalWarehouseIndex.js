@@ -1,10 +1,24 @@
 'use strict';
 const { isMainThread } = require('node:worker_threads');
+const { createHash } = require('node:crypto');
+const CONTENT_IDENTITY = Symbol('warehouse_content_identity');
+const EMPTY_IDENTITY = createHash('sha256').update('[]').digest('hex');
 let ItemTemplateIndex = null;
 const records = new Map(), pending = new Set();
 let source = id => records.get(id), initialized = false, draining = false, revision = 0;
 let ready = null;
+let sourceReady = () => initialized;
 const LIMIT = 64;
+function prepareRow(row) {
+    const valid = Array.isArray(row) && row.length === 3 && Number.isSafeInteger(row[0]) && row[0] > 0
+        && Array.isArray(row[2]) && row[2].length <= LIMIT && row[2].every(value => Array.isArray(value)
+            && value.length === 3 && Number.isSafeInteger(value[0]) && value[0] > 0
+            && Number.isFinite(value[1]) && value[1] > 0 && Number.isSafeInteger(value[2]) && value[2] >= 0);
+    if (!valid) { if (row && typeof row === 'object') delete row[CONTENT_IDENTITY]; return row; }
+    if (!Object.hasOwn(row, CONTENT_IDENTITY)) Object.defineProperty(row, CONTENT_IDENTITY,
+        { configurable: true, value: createHash('sha256').update(JSON.stringify(row[2])).digest('hex') });
+    return row;
+}
 function publish(id, rows) {
     const quantities = new Map();
     for (const item of rows) {
@@ -14,7 +28,7 @@ function publish(id, rows) {
     }
     const values = [...quantities.values()].filter(row => row[1] > 0).slice(0, LIMIT);
     if (JSON.stringify(records.get(id)?.[2] || []) === JSON.stringify(values)) return;
-    const row = [id, ++revision, values];
+    const row = prepareRow([id, ++revision, values]);
     records.set(id, row);
     require('../Population/ColdTableChannel').shared.changed('personal_warehouse', row);
 }
@@ -51,6 +65,8 @@ async function initialize() {
     }
     for (const [id, items] of byOwner) publish(id, items);
     initialized = true;
+    // lazy: worker only the main warehouse projection publishes readiness.
+    require('../Population/ColdTableChannel').shared.flush();
     void drain();
 }
 function inventory(state) {
@@ -70,9 +86,15 @@ function inventory(state) {
     return result;
 }
 if (isMainThread) require('../Population/ColdTableChannel').shared.register('personal_warehouse', {
-    key: row => row[0], allRows: () => records.values(), eventDriven: true
+    key: row => row[0], allRows: () => records.values(), eventDriven: true, ready: () => initialized
 });
-module.exports = { init, inventory, LIMIT,
+module.exports = { init, inventory, LIMIT, prepareRow,
+    ready() { return sourceReady() === true; },
+    contentIdentity(state) {
+        if (sourceReady() !== true) return null;
+        const row = source(Number(state?.characterId));
+        return row ? row[CONTENT_IDENTITY] ?? null : EMPTY_IDENTITY;
+    },
     saleState(state) {
         const stored = inventory(state), bag = { ...state.inventory };
         for (const [id, item] of Object.entries(stored)) {
@@ -85,4 +107,7 @@ module.exports = { init, inventory, LIMIT,
     },
     version(state) { return Number(source(Number(state?.characterId))?.[1] || 0); },
     changed(id) { if (isMainThread) { pending.add(Number(id)); if (initialized) setImmediate(drain); } },
-    useRowSource(reader) { source = reader || (id => records.get(id)); } };
+    useRowSource(reader, isReady) {
+        source = reader || (id => records.get(id));
+        sourceReady = reader ? (isReady || (() => false)) : () => initialized;
+    } };

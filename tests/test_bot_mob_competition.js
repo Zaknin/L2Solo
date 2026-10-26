@@ -162,7 +162,7 @@ try {
         }
         const Participation = invoke('GameServer/Bot/AI/BotConflictParticipation');
         const ParticipationPolicy = require('../src/GameServer/Social/ConflictParticipationPolicy');
-        const { seeded } = require('../src/GameServer/Bot/Population/ColdCompetitionMonitor');
+        const { seeded } = require('../src/GameServer/Bot/AI/TendencyRoll');
         const supportTraits = { assertiveness: 1, empathy: 0, commitment: 1, sociability: 1, caution: 0 };
         const bystanderTraits = { assertiveness: 1, empathy: 0, commitment: 0, sociability: 0, caution: 1 };
         const group = (size, level = 40) => {

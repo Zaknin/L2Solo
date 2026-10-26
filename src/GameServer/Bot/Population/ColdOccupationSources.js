@@ -11,6 +11,7 @@ const Production = require('../Economy/ProductionPolicy');
 const { personalOfferAllowed } = require('./PartyAdmission');
 const Price = require('../Economy/PriceDecision');
 const OfferQuery = require('../Economy/OfferQuery');
+const ShotSalePolicy = require('../Economy/ShotSalePolicy');
 const { QUOTE_DEPTH } = Price;
 const EMPTY = Object.freeze([]);
 let fixedBuy, npcOfferView, mpRates, townByName, townOrdinal, gearByRank;
@@ -47,13 +48,14 @@ function* reservations(state) {
     const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
     const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
     const plan = Disposition.equipmentInputPlan(state);
+    const planInputs = {};
     for (const [id, amount] of Object.entries(Disposition.retainedEquipmentAmounts(state))) {
         reserved[id] = Math.max(Number(reserved[id] || 0), amount); yield 'ingredient';
     }
     const role = Planner.roleFor(state), classId = Number(state.stats?.classId || state.classId || 0);
     const allowed = Disposition.gradeIndex(Planner.gradeForLevel(state.level));
     if (plan?.strategy === 'luxury_exchange' && plan.status === 'active')
-        for (const row of plan.materials || []) reserved[row.selfId] = Math.max(Number(reserved[row.selfId] || 0), Number(row.amount));
+        for (const row of plan.materials || []) planInputs[row.selfId] = Math.max(Number(planInputs[row.selfId] || 0), Number(row.amount));
     const equipped = new Map(), staged = new Map();
     for (const key in state.inventory || {}) {
         const item = state.inventory[key], template = ItemIndex.find(Data.items, Number(item.selfId));
@@ -79,7 +81,7 @@ function* reservations(state) {
     }
     if (plan?.combine && ['active', 'component_ready', 'ready_to_craft', 'blocked'].includes(plan.status)) {
         for (const row of plan.combine.requirements || []) {
-            reserved[row.selfId] = Math.max(Number(reserved[row.selfId] || 0), Number(row.amount || 0)); yield 'ingredient';
+            planInputs[row.selfId] = Math.max(Number(planInputs[row.selfId] || 0), Number(row.amount || 0)); yield 'ingredient';
         }
     }
     if (['active', 'component_ready', 'ready_to_craft'].includes(plan?.status) && plan.strategy === 'craft') {
@@ -93,7 +95,7 @@ function* reservations(state) {
             if (node.at >= node.rows.length) { stack.pop(); yield 'edge'; continue; }
             const row = node.rows[node.at++], id = Number(row.selfId), required = Number(row.amount) * node.multiplier;
             if (id && !node.seen.has(id)) {
-                reserved[id] = Number(reserved[id] || 0) + required;
+                planInputs[id] = Number(planInputs[id] || 0) + required;
                 const missing = Math.max(0, required - Number(state.inventory?.[id]?.amount ?? row.owned ?? 0));
                 const recipe = missing > 0 ? Recipes.resolveByProductId(id) : null;
                 if (recipe && node.depth < 5) stack.push({ rows: recipe.materials || [], at: 0,
@@ -103,6 +105,10 @@ function* reservations(state) {
             yield 'edge';
         }
     }
+    if (plan?.status === 'active') for (const row of plan.crystalPreparation?.materials || [])
+        planInputs[row.selfId] = Math.max(Number(planInputs[row.selfId] || 0), Number(row.amount));
+    for (const [id, amount] of Object.entries(Disposition.capDeferredInputs(state.stats?.equipmentPlan, planInputs)))
+        reserved[id] = Math.max(Number(reserved[id] || 0), amount);
     const target = Number(plan?.target?.selfId || 0);
     if (target && Number(state.inventory?.[target]?.amount) > 0 && !state.inventory[target].equipped) reserved[target] = 1;
     return reserved;
@@ -243,7 +249,7 @@ function* prepare(state, { board, timestamp, read = () => {}, readScope = () => 
             yield 'exit';
         }
         const own = ownStock.get(Number(recipe.productId));
-        result.push(...yield* require('../Economy/ShotSalePolicy').exits(state, recipe, { board, timestamp,
+        result.push(...yield* ShotSalePolicy.exits(state, recipe, { board, timestamp,
             trip, prepareTrip: ensureTrip, npcOffersFor, read,
             reserve: Number(stock?.itemId) === Number(recipe.productId)
                 ? Math.max(0, Number(stock.target || 0) - Number(state.inventory?.[recipe.productId]?.amount || 0)
@@ -253,15 +259,29 @@ function* prepare(state, { board, timestamp, read = () => {}, readScope = () => 
                     && line.custodyPolicy !== 1 && line.selfId === Number(recipe.productId)).reduce((sum, line) => sum + line.count, 0) }));
         return result;
     };
+    // One town table per item and NPC admission for this request: a craft
+    // search prices the same input for batches 1..64 and across recipes.
+    // A board change of a read item invalidates the request (planner
+    // validation), so a table never outlives the board it was read from.
+    const purchaseTables = new Map();
     const preparePurchase = function* (owner, id, amount, query = {}) {
         read(id);
-        // Static NPC stock is the only unlimited ingredient source admitted here.
-        const npcOffers = query.npc === true && Production.allowsNpcShot(id) ? npcOffersFor(id) : EMPTY;
-        const towns = new Set(npcOffers.map(offer => offer.town));
-        for (const line of (board?.list(id, 1) || []).slice(0, QUOTE_DEPTH)) towns.add(line.town);
-        for (const town of towns) { if (townOrdinal.has(town)) yield* ensureTrip(town); yield 'quote'; }
-        const best = OfferQuery.cheapestTown(board, id, { amount, quoteDepth: QUOTE_DEPTH, excludeOwner: owner.characterId,
-            accept: line => !Number(line.enchant || 0) && personalOfferAllowed(line, owner), npcOffers, cost: trip });
+        const npc = query.npc === true && Production.allowsNpcShot(id);
+        const tableKey = `${Number(owner.characterId)}:${Number(id)}:${npc ? 1 : 0}`;
+        let table = purchaseTables.get(tableKey);
+        if (!table) {
+            // Static NPC stock is the only unlimited ingredient source admitted here.
+            const npcOffers = npc ? npcOffersFor(id) : EMPTY;
+            const towns = new Set(npcOffers.map(offer => offer.town));
+            for (const line of (board?.list(id, 1) || []).slice(0, QUOTE_DEPTH)) towns.add(line.town);
+            for (const town of towns) { if (townOrdinal.has(town)) yield* ensureTrip(town); yield 'quote'; }
+            // sampleWhole (E303, diagnostics only): the whole-list rerun prices only towns whose trip is warmed above, so
+            // in the worker `cap:quotes:lost` is a lower bound of the plans the cap drops.
+            table = OfferQuery.townTable(board, id, { quoteDepth: QUOTE_DEPTH, excludeOwner: owner.characterId,
+                accept: line => !Number(line.enchant || 0) && personalOfferAllowed(line, owner), npcOffers, cost: trip, sampleWhole: true });
+            purchaseTables.set(tableKey, table);
+        }
+        const best = OfferQuery.cheapestIn(table, amount);
         yield 'candidate';
         return best ? { ...best, tripDetails: trip.details(best.town), repeatable: best.npc === amount, routeKey: best.town } : null;
     };

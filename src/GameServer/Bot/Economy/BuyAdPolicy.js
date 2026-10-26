@@ -1,7 +1,8 @@
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const PurchaseFunding = invoke('GameServer/Bot/Economy/PurchaseFunding');
-const { isNativeSource } = require('./TradeIntent');
+const { isNativeSource, purchaseWorth } = require('./TradeIntent');
+const Diagnostics = require('./EconomyDiagnostics');
 const BoardRules = require('../../AfkTrade/BoardRules');
 const nativeGoal = goal => isNativeSource(goal?.plan?.sourceType);
 
@@ -31,7 +32,7 @@ function retainedLines(state, lines, owned, town) {
     for (const line of lines) {
         const previous = owned.find(row => ['buy_ad', 'shop'].includes(row.kind) && row.storeType === 3 && row.town === town
             && Number(row.selfId) === Number(line.selfId) && Number(row.enchant || 0) === Number(line.enchant || 0));
-        const price = previous && (!Number.isFinite(line.purchaseCap) || Number(previous.price) <= line.purchaseCap)
+        const price = previous && withinCap(previous.price, line.purchaseCap)
             ? Number(previous.price) : Number(line.price);
         const available = Math.min(line.intent ? Infinity : money, PurchaseFunding.spendable(state, 0,
             { ...(line.intent ? { r: line.intent.valueRate } : { itemId: line.selfId }), survivalCost: line.survivalCost }));
@@ -86,7 +87,7 @@ function bidFor(state, goal, { money = Infinity, ...options } = {}) {
         ...options, tripCost: options.economy?.trip || options.tripCost
     });
     let worth = goal.intent?.key && ctx.economy.moneyPrice > 0
-        ? goal.intent.valueHours / Math.max(1, goal.intent.amount) / ctx.economy.moneyPrice
+        ? purchaseWorth(goal.intent, ctx.economy.moneyPrice)
         : ctx.economy.worth(selfId) ?? requestedPrice;
     if (!(worth > 0)) {
         const belief = PriceBelief.prior(selfId, ctx);
@@ -109,7 +110,7 @@ function bidFor(state, goal, { money = Infinity, ...options } = {}) {
         rank: template.etc?.rank || 'none',
         price,
         count,
-        purchaseCap: chosen.purchaseCap,
+        purchaseCap: Math.min(cap, chosen.purchaseCap ?? Infinity),
         survivalCost: kit,
         pricing: chosen.pricing
     };
@@ -122,8 +123,16 @@ function linesFor(state, goal, { money = Infinity, watchList, ...options } = {})
     if (!nativeGoal(goal) && !watchList?.some(row => row.key) && goal?.target?.itemId
         && !goals.some(row => row.target.itemId === goal.target.itemId)) goals.unshift(goal);
     const wallet = Number(state.adena || 0);
-    const owned = options.board?.ownerLines?.(Number(state.characterId)) || [];
+    // E303: the buy ads cap (shop lines + buy ads) is cut here; the later slices (ColdEconomyPlan.buyBatch, BotAfkMarketService) see at most that.
     const limit = BoardRules.BOT_SHOP_LINES + BoardRules.BOT_RECORDS.buy_ad;
+    if (Diagnostics.active()) {
+        Diagnostics.count('cap', 'buy_ads', 'check');
+        if (goals.length > limit) {
+            Diagnostics.count('cap', 'buy_ads', 'cut');
+            Diagnostics.count('cap', 'buy_ads', 'dropped', goals.length - limit);
+        }
+    }
+    const owned = options.board?.ownerLines?.(Number(state.characterId)) || [];
     const candidates = goals.slice(0, limit);
     const townFor = options.townFor || (items => invoke('GameServer/Bot/Economy/MarketTownPolicy').targetTownForItems(state, items));
     let town = townFor(candidates.map(candidate => ({ selfId: Number(candidate.target.itemId) })));
@@ -151,4 +160,9 @@ function linesFor(state, goal, { money = Infinity, watchList, ...options } = {})
     return [];
 }
 
-module.exports = { survivalCost, goalMoney, bidFor, linesFor, retainedLines };
+// A held bid price stays while within the prepared purchase cap (no cap = any).
+function withinCap(price, cap) {
+    return !Number.isFinite(cap) || Number(price) <= cap;
+}
+
+module.exports = { survivalCost, goalMoney, bidFor, linesFor, retainedLines, withinCap };

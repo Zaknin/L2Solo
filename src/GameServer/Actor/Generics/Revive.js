@@ -1,4 +1,5 @@
 const ServerResponse = invoke('GameServer/Network/Response');
+const BotLifeState = invoke('GameServer/Bot/Population/BotLifeState');
 
 function finishRevive(session, actor, helper) {
     const wasDead = actor.state.fetchDead?.() === true;
@@ -24,6 +25,8 @@ function finishRevive(session, actor, helper) {
         session.hotRaidCasualtyRole = undefined;
     }
     if (session?.accountId?.startsWith?.('bot_') && session.arenaEphemeral !== true) {
+        // Every revival passes here (own restart, skill, scroll, companion), alive by now.
+        BotLifeState.notifyNearFacts(session, 'revive');
         Promise.resolve(invoke('GameServer/Bot/AI/BotEventJournal').record({
             botId: actor.fetchId(),
             eventType: 'revive',

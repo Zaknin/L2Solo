@@ -78,7 +78,7 @@ async function run() {
     result = await Takeover.evaluate(player(20), party, members);
     assert.strictEqual(result.reason, 'relationship_hostile', 'one hostile member should veto a non-clan request');
 
-    // Social refusals of one member: trust -6 or lower, or an abandonment in the last five minutes.
+    // A recent departure alone is not a hostile relationship.
     const refusalFor = async (memory) => {
         BotAvailability.evaluateState = (_player, candidate) => ({ relationshipReason: null,
             memory: candidate.characterId === 2 ? memory : { trust: 0, recentlyAbandonedAt: null } });
@@ -88,7 +88,7 @@ async function run() {
     assert.strictEqual(await refusalFor({ trust: -6, recentlyAbandonedAt: null }), 'relationship_hostile');
     assert.strictEqual(await refusalFor({ trust: -6, recentlyAbandonedAt: Date.now() }), 'relationship_hostile');
     assert.strictEqual(await refusalFor({ trust: -5, recentlyAbandonedAt: null }), 'ok');
-    assert.strictEqual(await refusalFor({ trust: 0, recentlyAbandonedAt: Date.now() - 5 * 60 * 1000 + 2000 }), 'recently_abandoned');
+    assert.strictEqual(await refusalFor({ trust: 0, recentlyAbandonedAt: Date.now() - 5 * 60 * 1000 + 2000 }), 'ok');
     assert.strictEqual(await refusalFor({ trust: 0, recentlyAbandonedAt: Date.now() - 5 * 60 * 1000 - 1 }), 'ok');
 
     ClanService.findById = id => Number(id) === 77
@@ -125,7 +125,7 @@ async function run() {
     result = await Takeover.evaluate(player(20), party, members);
     assert.strictEqual(result.reason, 'invalid_party_roster', 'nine bots cannot fit beside a player in a C4 party');
 
-    party = { partyId: 'party-test', memberIds: [1, 2], status: 'hot', stats: {}, updatedAt: 500 };
+    party = { partyId: 'party-test', memberIds: [1, 2], status: 'hot', stats: {}, updatedAt: 500, revision: 3 };
     members = [state(1, 20, party.partyId, { phase: 'hot', simulation: { revision: 4 }, updatedAt: 400 }),
         state(2, 20, party.partyId, { phase: 'hot', simulation: { revision: 7 }, updatedAt: 450 })];
     const sessions = members.map((member) => ({ actor: { fetchId: () => member.characterId } }));
@@ -153,7 +153,7 @@ async function run() {
     sessions.forEach((session) => { session.hotBackgroundPartyId = party.partyId; });
     result = await Takeover.request({ playerSession: player(20), target: sessions[0], source: 'test_chat' });
     assert(result.ok && result.applied, 'a hot compatible roster should transfer to the player');
-    assert.strictEqual(commitRequest.expectedUpdatedAt, 500);
+    assert.strictEqual(commitRequest.expectedPartyRevision, 3);
     assert.deepStrictEqual(commitRequest.members.map((member) => member.expectedRevision), [4, 7]);
     assert.strictEqual(attached.roster.length, 2);
     assert.strictEqual(attached.options.expectedBackgroundPartyId, party.partyId);

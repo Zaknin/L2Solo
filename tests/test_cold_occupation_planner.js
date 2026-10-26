@@ -1,8 +1,11 @@
 'use strict';
 const assert = require('node:assert/strict');
+// The card's echo check reads the economy's sections (invoke-loaded modules).
+require('../src/Global');
 require('../src/GameServer/Bot/Population/PopulationConfig').developerDiagnostics = true;
 const { ColdOccupationPlanner } = require('../src/GameServer/Bot/Population/ColdOccupationPlanner');
-const { compact, capture, ColdEconomyDecisions, stateKey } = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
+const { compact, capture, ColdEconomyDecisions, stateEcho } = require('../src/GameServer/Bot/Population/ColdEconomyDecision');
+const Sections = require('../src/GameServer/Bot/Economy/DecisionSections');
 
 const posted = [], tokens = new Map(), callbacks = [], working = [];
 const planner = new ColdOccupationPlanner({ schedule: callback => callbacks.push(callback), now: () => 0,
@@ -41,6 +44,15 @@ assert(planner.slots.size <= 64);
 assert.equal(planner.workingContexts, 0, 'completed scalar cards do not disable the economic review cache');
 assert.equal(working.at(-1), 0);
 assert(working.every(count => count >= 0 && count <= 64), 'the graph reservation remains bounded through eviction and restarts');
+// A replaced source table rechecks the done slots: only a slot whose read token moved restarts.
+const before = planner.stats.invalidations, doneSlots = [...planner.slots.values()].filter(entry => entry.reads?.size && !entry.dirty);
+planner.recheckSources();
+assert.equal(planner.stats.invalidations, before, 'a replaced table with the same tokens restarts nothing');
+const movedId = doneSlots[0].id;
+tokens.set(movedId, (tokens.get(movedId) || 0) + 7);
+planner.recheckSources();
+assert.equal(planner.stats.invalidations, before + 1, 'only the slot that read the moved item restarts');
+assert(planner.slots.get(movedId).dirty && doneSlots.slice(1).every(entry => !entry.dirty));
 planner.stop(); assert.equal(planner.slots.size, 0); assert.equal(planner.dependencies.size, 0);
 
 // Query snapshots are temporary owners, unlike the kernel's native state.
@@ -99,7 +111,7 @@ const validating = new ColdOccupationPlanner({ schedule: () => {}, now: () => 0,
 validating.request(1, {}, { awaitResult: false }); validating.portion();
 scopeVersion++; validating.unit(validating.slots.get(1));
 assert.equal(validating.slots.get(1).dirty, true, 'scope token is checked before publishing');
-validating.resetSources(); validating.stop(); assert.equal(validating.scopeDependencies.size, 0);
+validating.stop(); assert.equal(validating.scopeDependencies.size, 0);
 
 // A board row change on item A rechecks A's readers and the category's
 // meeting representative, not every item read in the category.
@@ -130,9 +142,13 @@ for (const workshop of [{ known: false }, { known: true, recipeId: 0, productId:
     else { assert.equal(decision.workshop.incomePerHour, workshop.incomePerHour); assert.equal(decision.workshop.cycleHours, workshop.cycleHours); }
     const decisions = new ColdEconomyDecisions(); decisions.accept(7, decision);
     assert.equal(decisions.workshopFor(state).known, workshop.known);
-    assert.equal(decisions.workshopFor({ ...state, adena: 0 }).known, false, 'wallet changes invalidate captured occupation');
-    assert.equal(decisions.workshopFor({ ...state, vitals: { mp: 0 } }).known, false, 'MP changes invalidate captured occupation');
-    decisions.staleWorkshop(7, { key: stateKey(state), updatedAt: state.updatedAt });
+    // The card belongs to its decision: a later publication, a raised
+    // section (a wallet move raises money) or another decision drops it.
+    assert.equal(decisions.workshopFor({ ...state, updatedAt: state.updatedAt + 1 }).known, false, 'a later publication invalidates captured occupation');
+    assert.equal(decisions.workshopFor({ ...state, adena: 0, stats: { ...state.stats, wishDirty: Sections.sectionMask(['money']) } }).known, false,
+        'a raised money section invalidates captured occupation');
+    assert.equal(decisions.workshopFor({ ...state, stats: { ...state.stats, decisionSeq: 1 } }).known, false, 'another decision invalidates captured occupation');
+    decisions.staleWorkshop(7, { echo: stateEcho(state), updatedAt: state.updatedAt });
     assert.equal(decisions.workshopFor(state).known, false, 'used-source retirement preserves explicit unknown');
 }
 console.log('PASS pinned FIFO contexts, exact resumable progress, used-source restarts, 32-unit portions and binary workshop NaN');

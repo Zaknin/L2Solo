@@ -106,6 +106,16 @@ async function run() {
     }
     assert.strictEqual(invoke('GameServer/Bot/Population/ColdSimulationKernel').lifecycleKind(cold), 'command');
     assert.strictEqual(invoke('GameServer/Bot/Population/ColdSimulationOwner').eligibility(cold).ok, false);
+    // The plain answer is kept per bag object: a new bag is read again, so a
+    // sealed item added or removed shows on the next read.
+    const Kernel = invoke('GameServer/Bot/Population/ColdSimulationKernel');
+    const plain = {736:{selfId:736,amount:1}};
+    assert.strictEqual(Catalog.sealedHeld(plain), null);
+    assert.strictEqual(Catalog.sealedHeld(plain), null);
+    assert.strictEqual(Catalog.sealedHeld({...plain,6674:{selfId:6674,amount:1}})?.selfId, 6674);
+    assert.strictEqual(Catalog.sealedHeld({...plain,6674:{selfId:6674,amount:0}}), null);
+    assert.strictEqual(Kernel.lifecycleKind({...cold,inventory:plain}), 'resolver', 'the sealed item is gone');
+    assert.strictEqual(Kernel.lifecycleKind({...cold,inventory:{...plain,6674:{selfId:6674,amount:1}}}), 'command', 'and back');
     assert.strictEqual(Bot.beginTravel({...cold,party:{partyId:'test'}},1000),null);
     assert.strictEqual(Bot.beginTravel({...cold,activity:'shopping'},1000),null,'a shopping bot finishes its market steps first');
     for (const flag of ['supplyErrand','partyMarketReturn','pvpEncounter']) {

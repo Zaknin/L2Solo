@@ -7,8 +7,6 @@ const Identity = invoke('GameServer/Bot/AI/BotServiceIdentity');
 const running = new Map();
 const itemCursors = new Map();
 const memberCursors = new Map();
-let clanCursor = 0;
-let nextScanAt = 0;
 
 function liveRows(actor) {
     return actor.backpack.fetchItems().map((item) => ({
@@ -84,7 +82,7 @@ async function resolve(clanId, options) {
         || Number(a.id <= cursor) - Number(b.id <= cursor) || a.id - b.id).slice(0, 32);
     if (!stock.length) return { exchanged: 0 };
     const members = await Database.execute([`SELECT c.id, c.classId, c.level, c.name,
-        l.phase, l.activity, l.partyId, l.simulationOwner, l.statsJson
+        l.phase, l.activity, l.partyId, l.statsJson, l.mindJson
         FROM characters c JOIN bot_life_state l ON l.characterId = c.id
         WHERE c.clanId = ? ORDER BY c.id`, [clanId]], 'clan-gear:members');
     const manager = invoke('GameServer/Bot/BotManager');
@@ -103,7 +101,7 @@ async function resolve(clanId, options) {
             memberCursors.set(clanId, { itemId: item.id, memberId: member.id });
             const session = manager.findSessionById(Number(member.id));
             if (!['hot', 'cold'].includes(member.phase)) continue;
-            if (Identity.isStaticService({ ...member, stats: Goals.memberJson(Number(member.id), 'stats', member.statsJson) })) continue;
+            if (Identity.isStaticService({ ...member, stats: Goals.memberStats(Number(member.id), member.statsJson, member.mindJson) })) continue;
             const inventory = member.phase === 'hot' && session?.actor?.backpack
                 ? liveRows(session.actor) : await Database.fetchItems(member.id, 'clan_warehouse_equipment');
             inspected += 1;
@@ -152,16 +150,4 @@ function resolveClan(clanId, options = {}) {
     return work;
 }
 
-async function resolveBatch(deadlineAt) {
-    if (!Database.isReady() || Date.now() < nextScanAt || Date.now() >= deadlineAt) return;
-    nextScanAt = Date.now() + 5000;
-    const clans = await Database.execute([`SELECT DISTINCT clanId FROM clan_warehouse_items
-        WHERE clanId > ? AND amount > reservedAmount AND (kind LIKE 'Weapon.%' OR kind LIKE 'Armor.%')
-        ORDER BY clanId LIMIT 1`, [clanCursor]], 'clan-gear:candidates');
-    if (!clans.length) { clanCursor = 0; return; }
-    if (Date.now() >= deadlineAt) return;
-    clanCursor = Number(clans[0].clanId);
-    return resolveClan(clanCursor, { deadlineAt });
-}
-
-module.exports = { resolveClan, resolveBatch, available, publish };
+module.exports = { resolveClan, available, publish };

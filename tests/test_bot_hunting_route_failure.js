@@ -1,13 +1,14 @@
 const assert = require('assert');
 require('../src/Global');
 invoke('GameServer/DataCache').init();
-// Navigation fixtures have no economy datapack; town wishes do not own these route checks.
-invoke('GameServer/Bot/Economy/EconomyContext').forActor = (_actor, session) => ({
+// The near body holds a decision without wishes (DecisionEvents.held): these
+// fixtures have no economy datapack.
+invoke('GameServer/Bot/AI/DecisionEvents').held = session => session.heldEconomy ||= {
     // A real context always carries its stock reader; these bots use no shots.
     stock: () => ({ itemId: 0, usePerHour: 0 }),
     network: { activity: null }, statsPacket: { decisionSeq: session.coldLifeState?.stats?.decisionSeq || 0,
         activityLeaf: 0, money: [1, 1, 0, 0] }
-});
+};
 const Hunting = invoke('GameServer/Bot/AI/States/HuntingState');
 const Spots = invoke('GameServer/Bot/AI/SpotService');
 const Decision = invoke('GameServer/Bot/AI/BotDecisionService');
@@ -196,6 +197,34 @@ try {
         Economy.stateForActor = savedPurchase.state;
         Events.held = savedPurchase.held;
         TownTravel.request = savedPurchase.travel;
+    }
+
+    // A solo hunter with expired newbie buffs whose guide trip was abandoned
+    // waits for the retry time instead of walking the same route next tick.
+    const Buffs = invoke('GameServer/Bot/AI/BotBuffs');
+    const guideAt = offset => ({ ...ai,
+        getClosestNewbieGuide: () => ({ locX: start.locX + offset, locY: start.locY, locZ: start.locZ }) });
+    const buffTrip = (retryAt, BotAI) => {
+        const f = fixture(true);
+        f.session.spotRelocation = undefined;
+        f.session.townRoutePlan = null;
+        f.session.newbieGuideRetryAt = retryAt;
+        f.bot.automation = { abortAll() {} };
+        Hunting.tick(f.session, f.bot, {}, BotAI);
+        return f.session.plan;
+    };
+    Buffs.needsNewbieRefresh = () => true;
+    try {
+        assert.strictEqual(buffTrip(Date.now() + 60000, guideAt(2000)), 'hunting',
+            'expired buffs do not restart a guide trip before its retry time');
+        assert.strictEqual(buffTrip(Date.now() - 1, guideAt(2000)), 'getting_buffed',
+            'expired buffs send the hunter to the guide once the retry time passed');
+        assert.strictEqual(buffTrip(undefined, guideAt(7600)), 'hunting',
+            'expired buffs do not send a hunter to a guide beyond its town radius');
+        assert.strictEqual(buffTrip(undefined, guideAt(7400)), 'getting_buffed',
+            'expired buffs send a hunter to a guide within its town radius');
+    } finally {
+        Buffs.needsNewbieRefresh = () => false;
     }
 
     console.log('Bot hunting route failure checks passed');

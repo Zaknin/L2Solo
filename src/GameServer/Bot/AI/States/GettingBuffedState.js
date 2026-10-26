@@ -99,7 +99,7 @@ function finishVisit(session, bot, Generics) {
     return true;
 }
 
-function abandonUnreachableVisit(session, bot, BotAI) {
+function abandonUnreachableVisit(session, bot, BotAI, reason = 'newbie_guide_route_unreachable') {
     const resume = session.resumeAfterBuff;
     const following = resume?.plan === 'following' && resume.followPlayerSession?.actor?.fetchIsOnline?.();
     session.plan = following ? 'following' : (session.preBuffPlan || 'hunting');
@@ -118,7 +118,7 @@ function abandonUnreachableVisit(session, bot, BotAI) {
     session.roleDecision = {
         ...(session.roleDecision || {}),
         action: 'refresh_buffs',
-        reason: 'newbie_guide_route_unreachable',
+        reason,
         at: Date.now()
     };
     TownNpcApproach.reset(session);
@@ -128,26 +128,40 @@ function abandonUnreachableVisit(session, bot, BotAI) {
     TownChatter.say(session, BotAI, 'newbie-guide-unreachable', Speech.lines('town.newbie-guide-unreachable'), { priority: 'coordination' });
 }
 
+// The guide of this trip, chosen once at its start and kept on the trip's
+// resume record (every trip entry writes a fresh one): null = no guide trip.
+function chosenGuide(session, bot, BotAI) {
+    const resume = session.resumeAfterBuff ??= {};
+    if (resume.newbieGuide === undefined) resume.newbieGuide = HotTownRebuff.tripGuide(session, bot, BotAI);
+    return resume.newbieGuide;
+}
+
 module.exports = {
     tick(session, bot, Generics, BotAI) {
         const resume = session.resumeAfterBuff;
         if (Number(resume?.readyAt || 0) > Date.now()) return;
 
-        const shouldVisitGuide = resume?.conditionalNewbieBuff !== true || BotBuffs.needsNewbieRefresh(bot, 0);
+        const guide = chosenGuide(session, bot, BotAI);
+        const shouldVisitGuide = !!guide && (resume?.conditionalNewbieBuff !== true || BotBuffs.needsNewbieRefresh(bot, 0));
         if (!shouldVisitGuide) {
             finishVisit(session, bot, Generics);
             return;
         }
+        // A guide beyond its town radius has no town path, so its route failures
+        // are not counted: a route that leaves that radius ends the trip as unreachable.
+        if (!HotTownRebuff.guideInReach(bot, guide)) {
+            abandonUnreachableVisit(session, bot, BotAI, 'newbie_guide_route_left_town');
+            return;
+        }
 
-        const closestGuide = BotAI.getClosestNewbieGuide(bot.fetchLocX(), bot.fetchLocY());
         const guideTarget = {
-            locX: closestGuide.locX,
-            locY: closestGuide.locY,
-            locZ: closestGuide.locZ,
-            npcSelfId: closestGuide.npcSelfId,
-            name: closestGuide.name ? `${closestGuide.name} Newbie Guide` : 'Newbie Guide',
-            town: closestGuide.name,
-            head: closestGuide.head
+            locX: guide.locX,
+            locY: guide.locY,
+            locZ: guide.locZ,
+            npcSelfId: guide.npcSelfId,
+            name: guide.name ? `${guide.name} Newbie Guide` : 'Newbie Guide',
+            town: guide.name,
+            head: guide.head
         };
         const guideApproach = TownNpcApproach.planOpen(session, bot, guideTarget, 'newbie_guide');
         if (guideApproach?.waiting) return;

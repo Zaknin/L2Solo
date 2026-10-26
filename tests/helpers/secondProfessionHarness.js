@@ -1,5 +1,6 @@
 // Full C4 walkthroughs drive real handlers, inventory and SQLite persistence.
 const assert = require('node:assert/strict');
+const { useGeneral } = require('./progressionRate');
 const { createWorld, enableQuestSpawns, withRandom, Service, Database, DataCache } = require('./c4QuestHarness');
 const H = invoke('GameServer/Quest/SecondProfessionQuest');
 const Actor = invoke('GameServer/Actor/Actor');
@@ -74,8 +75,8 @@ async function pilgrim(c, { book = false, keep = false } = {}) {
     if (book) {
         await c.reopen();
         const rate = options.default.General.questAdenaRate;
-        options.default.General.questAdenaRate = 50;
-        try { await c.click(215, 'refund', 7650); } finally { options.default.General.questAdenaRate = rate; }
+        useGeneral({ questAdenaRate: 50 });
+        try { await c.click(215, 'refund', 7650); } finally { useGeneral({ questAdenaRate: rate }); }
         assert.equal(await c.amount(57), 100000, 'refund equals the payment at any reward rate');
         assert.equal(await c.event(215, 'refund', 7650), false);
         assert.equal(await c.amount(57), 100000);

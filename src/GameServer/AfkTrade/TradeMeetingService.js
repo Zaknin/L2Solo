@@ -2,11 +2,25 @@
 const { randomUUID } = require('node:crypto');
 const { MAX_COMMITMENTS } = require('./TradeMeeting');
 const { partyTradeAllowed } = require('../Bot/Population/PartyAdmission');
+const EconomyCommit = require('../Bot/Economy/EconomyCommit');
+const TableChannel = require('../Bot/Population/ColdTableChannel').shared;
 const staged = new Map();
 const preparedActors = new Map(); // actor -> staged token; one preparation per actor.
 const enrolled = new Map(); // At most eight numeric references per actor; no custody/terms.
 const playerWaiters = new Map(); // Derived numeric references, retired with native commitments.
 const travelNotices = new Map(); // One private acknowledgement per enrolled bot/player commitment.
+// The 'meetings' table: one row per bot the player waits for at a meeting point.
+// The cold worker reschedules the bot when its row comes or goes.
+TableChannel.register('meetings', { key: row => row.characterId,
+    allRows: () => [...playerWaiters.keys()].map(characterId => ({ characterId })), eventDriven: true });
+function publishWaiting(actor) {
+    TableChannel.changed('meetings', playerWaiters.get(actor)?.size
+        ? { characterId: actor } : { key: actor, removed: true });
+}
+function clearWaiters() {
+    for (const actor of playerWaiters.keys()) TableChannel.changed('meetings', { key: actor, removed: true });
+    playerWaiters.clear();
+}
 function notifyPlayerTravel(row) {
     if (row.state !== 'accepted') return;
     for (const [id, other, suffix] of [[row.actorA, row.actorB, 'A'], [row.actorB, row.actorA, 'B']]) {
@@ -54,9 +68,7 @@ function trackPlayerWaiting(row) {
             refs?.delete(row.id);
             if (!refs?.size) playerWaiters.delete(actor);
         }
-        if (previous !== !!playerWaiters.get(actor)?.size) {
-            coordinator()?.notifyState?.(life().cachedState(actor), { reason: 'player_meeting_wait', critical: true });
-        }
+        if (previous !== !!playerWaiters.get(actor)?.size) publishWaiting(actor);
     }
 }
 function enroll(actor, id) {
@@ -72,7 +84,7 @@ function unenroll(actor, id) {
     const waiting = playerWaiters.get(actor);
     if (waiting?.delete(id) && !waiting.size) {
         playerWaiters.delete(actor);
-        coordinator()?.notifyState?.(life().cachedState(actor), { reason: 'player_meeting_wait', critical: true });
+        publishWaiting(actor);
     }
 }
 const queue = new Set();
@@ -203,6 +215,10 @@ function stage(request) {
 function hasPreparation(characterId) {
     return preparedActors.has(Number(characterId));
 }
+// The preparation token this actor is in, or null.
+function preparationOf(characterId) {
+    return preparedActors.get(Number(characterId)) || null;
+}
 function canJoinParty(characterId, state = life().cachedState(characterId), session = sessionFor(characterId)) {
     const current = life()?.cachedState?.(characterId) || state;
     return partyTradeAllowed('party', current, session, hasPreparation(characterId), !!enrolled.get(Number(characterId))?.size);
@@ -325,13 +341,16 @@ async function prepareTrade(characterId, store, itemId, amount, options = {}) {
     // Preserve the caller's decision authority across asynchronous native reads.
     // Freshly reading a participant must not turn a stale decision into consent.
     const sourceState = options.coldState || life().cachedState(characterId);
+    const Errands = require('../Bot/Population/CombinedErrandPolicy');
+    const errand = record.storeType === 1 && Errands.pending(sourceState).find(row =>
+        Number(row.selfId) === Number(itemId) && row.town === record.town);
+    const goal = record.storeType === 1 && invoke('GameServer/Bot/Goals/GoalState').snapshot(buyer)?.current;
+    const purchaseGoal = Number(goal?.target?.itemId) === Number(itemId) ? goal : null;
     const callerAuthority = options.economyCommand?.authority || (sourceState
-        ? require('../Bot/Economy/EconomyCommit').authority(sourceState) : null);
+        ? EconomyCommit.authority(sourceState) : null);
     if (callerAuthority) {
         const own = sides[actors.indexOf(characterId)];
-        if (own.phase !== callerAuthority.phase || own.revision !== callerAuthority.revision
-            || own.ownerId !== callerAuthority.ownerId || own.leaseId !== callerAuthority.leaseId
-            || own.hotAt !== callerAuthority.hotAt) throw Error('trade_meeting_authority_changed');
+        if (!EconomyCommit.sameAuthority(own, callerAuthority)) throw Error('trade_meeting_authority_changed');
     }
     const buyerSide = actors.indexOf(buyer), sellerSide = 1 - buyerSide;
     const sources = []; let remainder = amount;
@@ -377,32 +396,64 @@ async function prepareTrade(characterId, store, itemId, amount, options = {}) {
             enchant: line.enchant || 0, count, price: line.price, needAdId: 0, needAdRevision: 0, adId: record.id, adRevision: record.revision, certificate: null })) };
     stage(request);
     const entry = staged.get(token);
-    entry.ready = prepareActors(token).catch(error => {
+    entry.ready = prepareActors(token).catch(async error => {
         discard(token);
         // Only the payer's worker refuses a need; on a buy ad the payer is its
         // owner, so the need behind the ad changed. The refusal alone left the
         // ad on the board for every later seller (E198 (2)).
-        if (error.message === 'trade_meeting_need_changed' && record.storeType === 3) buyAdNeedChanged(record);
+        if (error.message === 'trade_meeting_need_changed' && record.storeType === 3) await buyAdNeedChanged(record, line);
+        else if (error.message === 'trade_meeting_need_changed') await purchaseNeedChanged(buyer, errand, purchaseGoal);
         throw error;
     });
     entry.ready.catch(() => {}); // UI confirmation or the bot continuation owns the outcome.
     return quote;
 }
-// The owner plans the same need once more: a cold worker's new card
-// republishes or closes the ad through executePlan, a hot owner's board
-// review looks again. One request per ad revision: a republished ad has a
-// new revision; an unchanged plan does not repeat on every later refusal.
+// Stop advertising the exact quote its payer just refused, then let the
+// owner publish its fresh quantities/value. A later revision survives this
+// cleanup; sibling shop lines and both physical wallets are preserved.
 const refusedAds = new Map();
-function buyAdNeedChanged(record) {
-    if (refusedAds.get(record.id) === record.revision) return;
-    refusedAds.delete(record.id); refusedAds.set(record.id, record.revision);
+async function purchaseNeedChanged(ownerId, errand, goal) {
+    try {
+        await db().withMutationAdmission(() => {
+            if (life().cachedState(ownerId)?.phase !== 'cold') throw Error('stale_market_review');
+        }, async () => {
+            const saved = errand && await life().retireMarketErrand(ownerId, errand);
+            await invoke('GameServer/Bot/Goals/GoalState').abandonAccepted(ownerId, goal);
+            if (saved && errand.purpose === 'clan') await invoke('GameServer/Clan/ClanPurchaseCredit')
+                .returnUnspent(ownerId, errand, 0);
+        });
+    } catch (error) { utils.infoWarn('AfkTrade', 'refused purchase of %d refresh: %s', ownerId, error.message); }
+    coordinator()?.requestEconomyRefresh?.(ownerId);
+}
+
+async function buyAdNeedChanged(record, line) {
+    const key = `${record.id}:${line.id}`;
+    if (refusedAds.get(key) === record.revision) return;
+    refusedAds.delete(key); refusedAds.set(key, record.revision);
     if (refusedAds.size > 1024) refusedAds.delete(refusedAds.keys().next().value);
+    try {
+        // This is the payer's later refusal, not a continuation of the
+        // initiating seller's command. Its async admission may have expired.
+        // Admit only this unchanged conditional BUY quote; SQL repeats the
+        // owner, revision and pricing checks at the write boundary.
+        await db().withMutationAdmission(() => {
+            const quote = afk().boardIndex().records.get(Number(record.id))?.find(row => row.lineId === line.id);
+            if (!quote || quote.ownerId !== record.ownerId || quote.revision !== record.revision
+                || quote.custodyPolicy !== 1 || quote.storeType !== 3) throw Error('afk_trade_shop_changed');
+        }, () => afk().repriceBotLines(record.ownerId, [], { withdrawals: [{ recordId: record.id,
+            lineId: line.id, expectedRevision: record.revision, previousPricing: line.pricing || null }] }));
+    } catch (error) {
+        utils.infoWarn('AfkTrade', 'refused buy quote %d refresh: %s', record.id, error.message);
+    }
     const phase = life().cachedState(record.ownerId)?.phase;
-    if (phase === 'cold') coordinator()?.requestEconomyRefresh?.(record.ownerId);
+    let asked = true;
+    if (phase === 'cold') asked = coordinator()?.requestEconomyRefresh?.(record.ownerId) === true;
     else if (phase === 'hot') {
-        coordinator()?.requestEconomyLook?.(record.ownerId);
+        asked = coordinator()?.requestEconomyLook?.(record.ownerId) === true;
         invoke('GameServer/Bot/Economy/HotBoardReviewService').ownerChanged(record.ownerId, 'line');
     }
+    // A request the worker dropped (not ready yet) is asked again on the next refusal.
+    if (!asked) refusedAds.delete(key);
 }
 async function cancel(characterId) {
     const rows = db().fetchTradeMeetingsForOwner ? await db().fetchTradeMeetingsForOwner(Number(characterId))
@@ -413,6 +464,22 @@ async function cancel(characterId) {
     }
     return { ok: true, cancelled: rows.length > 0 };
 }
+// A player invitation replaces personal trading. Retire both an unaccepted
+// preparation and accepted custody through the native refund/receipt path
+// before party ownership changes; autonomous formation still waits for trades.
+async function prepareForPlayerParty(characterId) {
+    const preparation = preparationOf(characterId);
+    if (preparation) discard(preparation);
+    const rows = await db().fetchTradeMeetingsForOwner(Number(characterId));
+    for (const row of rows) {
+        const result = await db().cancelTradeMeeting(row.id, 'player_party_invite');
+        acceptRows(result);
+        await finishMeeting(result.meeting);
+    }
+    // A terminal receipt can still be enrolled while its event queue waits.
+    await processOwner(Number(characterId));
+    return canJoinParty(characterId);
+}
 async function trade(characterId, store, itemId, amount, options) {
     const prepared = await prepareTrade(characterId, store, itemId, amount, options);
     if (!prepared.preparationId) return prepared;
@@ -420,7 +487,8 @@ async function trade(characterId, store, itemId, amount, options) {
     // Release it before either independent worker preparation replies.
     const token = prepared.preparationId, entry = staged.get(token);
     entry.ready.then(() => accept(token, characterId)).catch(error => {
-        utils.infoWarn('AfkTrade', 'meeting preparation %s: %s', token, error.message);
+        utils.infoWarn('AfkTrade', 'meeting preparation %s: %s (actor=%d record=%d item=%d count=%d)',
+            token, error.message, characterId, store.shopId, itemId, amount);
     });
     return { pending: true, preparationId: token, token, outcome: 'preparing', purchased: false, sold: false, state: life().cachedState(characterId) };
 }
@@ -441,7 +509,7 @@ function reset() {
     for (const token of [...staged.keys()]) discard(token);
     for (const [token, listeners] of [...resultListeners])
         notifyResult(token, [...listeners].map(listener => listener.actorId), null);
-    staged.clear(); preparedActors.clear(); refusedAds.clear(); pages = 0; transportPages = 0; transportBytes = 0; enrolled.clear(); playerWaiters.clear(); travelNotices.clear(); queue.clear();
+    staged.clear(); preparedActors.clear(); refusedAds.clear(); pages = 0; transportPages = 0; transportBytes = 0; enrolled.clear(); clearWaiters(); travelNotices.clear(); queue.clear();
 }
 function wake(id) {
     if (!enrolled.has(Number(id))) return;
@@ -451,19 +519,22 @@ function wake(id) {
 async function processOwner(id) {
     for (const meetingId of [...(enrolled.get(id) || [])].slice(0, MAX_COMMITMENTS)) await processMeeting(id, meetingId);
 }
+async function finishMeeting(row) {
+    await syncActors(row);
+    await afk().settleOwners([row.actorA, row.actorB]);
+    await refreshMeetingRecords(row);
+    for (const actor of [row.actorA, row.actorB]) await db().acknowledgeTradeMeeting(row.id, actor);
+    notifyResult(row.token, [row.actorA, row.actorB], {
+        pending: false, token: row.token, meetingId: row.id, outcome: row.state });
+    unenroll(row.actorA, row.id); unenroll(row.actorB, row.id);
+}
 async function processMeeting(id, meetingId) {
     const row = await db().fetchTradeMeeting(meetingId);
     if (!enrolled.has(id)) return;
     if (!row) { unenroll(id, meetingId); return; }
     trackPlayerWaiting(row);
     if (row.state !== 'accepted') {
-        await syncActors(row);
-        await afk().settleOwners([row.actorA, row.actorB]);
-        await refreshMeetingRecords(row);
-        for (const actor of [row.actorA, row.actorB]) await db().acknowledgeTradeMeeting(row.id, actor);
-        notifyResult(row.token, [row.actorA, row.actorB], {
-            pending: false, token: row.token, meetingId: row.id, outcome: row.state });
-        unenroll(row.actorA, row.id); unenroll(row.actorB, row.id);
+        await finishMeeting(row);
         return;
     }
     const state = life().cachedState(id), session = sessionFor(id);
@@ -558,14 +629,14 @@ async function drain() {
     } finally { draining = false; if (queue.size) { draining = true; setImmediate(drain); } }
 }
 async function init() {
-    unsubscribeLife?.(); unsubscribeMarketLife?.(); unsubscribePlayer?.(); unsubscribeBoard?.(); enrolled.clear(); playerWaiters.clear(); travelNotices.clear(); queue.clear();
+    unsubscribeLife?.(); unsubscribeMarketLife?.(); unsubscribePlayer?.(); unsubscribeBoard?.(); enrolled.clear(); clearWaiters(); travelNotices.clear(); queue.clear();
     unsubscribeLife = life().subscribeChanges(change => {
         const id = Number(typeof change === 'number' ? change : change.characterId);
         // Only bounded unaccepted preparations are replaceable. The durable
         // accepted meeting survives ordinary economic revisions and ad edits.
         for (const [key, entry] of staged) if (entry.actors.includes(id)) {
             const side = entry.actors.indexOf(id), state = life().cachedState(id);
-            if (!state || require('../Bot/Economy/EconomyCommit').authority(state).revision !== entry.revisions[side]) discard(key);
+            if (!state || EconomyCommit.authority(state).revision !== entry.revisions[side]) discard(key);
         }
         wake(id);
     });
@@ -597,7 +668,6 @@ async function init() {
         await new Promise(resolve => setImmediate(resolve));
     }
 }
-module.exports = { stage, discard, hasPreparation, canJoinParty, accept, cancel, receipt, waitForResult, prepareTrade, trade, wake, init, reset, presenceChanged,
-    isPlayerWaiting: id => !!playerWaiters.get(Number(id))?.size,
+module.exports = { stage, discard, hasPreparation, preparationOf, canJoinParty, prepareForPlayerParty, accept, cancel, receipt, waitForResult, prepareTrade, trade, wake, init, reset, presenceChanged,
     adjustTransportPages,
     counters: () => ({ preparations: staged.size, pages: pages + transportPages, bytes: transportBytes + [...staged.values()].reduce((total, row) => total + row.bytes, 0), queued: queue.size, participants: enrolled.size }) };

@@ -1,10 +1,12 @@
 'use strict';
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 require('./helpers/databaseIsolation');
 const fixture = require('./helpers/isolatedSocialDatabase')('wish-static-shots');
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 fixture.assertConfigured(options.default);
-process.env.L2NODE_PROGRESSION_RATE = 'x50';
+useRate('x50');
 const fs = require('node:fs'), path = require('node:path'), { Worker } = require('node:worker_threads');
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Config = invoke('GameServer/Bot/Population/PopulationConfig');
@@ -99,7 +101,7 @@ async function workerQuote() {
         const loaded = new Module(workerData.workerPath, module);
         loaded.filename = workerData.workerPath; loaded.paths = Module._nodeModulePaths(path.dirname(workerData.workerPath));
         loaded._compile(fs.readFileSync(workerData.workerPath, 'utf8') + workerData.observer, workerData.workerPath);
-    `, { eval: true, workerData: { workerEpoch: 'static-shot-supply',
+    `, { eval: true, workerData: { workerEpoch: 'static-shot-supply', sharedGeodata: Geodata.sharedDescriptor(),
         observer, workerPath: path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js') } });
     try {
         return await new Promise((resolve, reject) => {

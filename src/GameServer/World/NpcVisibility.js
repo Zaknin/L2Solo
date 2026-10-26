@@ -1,4 +1,5 @@
 const ServerResponse = invoke('GameServer/Network/Response');
+const NpcObjectIndex = require('./NpcObjectIndex');
 
 const NPC_INFO_OPCODE = 0x16;
 const DELETE_OBJECT_OPCODE = 0x12;
@@ -22,6 +23,26 @@ function trackNpcPacket(session, packet) {
     else if (packet[0] === DELETE_OBJECT_OPCODE) {
         session.knownNpcIds?.delete(id);
     }
+}
+
+function sendNpcMotionAfterInfo(session, packet) {
+    if (packet?.[0] !== NPC_INFO_OPCODE || packet.length < 25
+        || typeof session?.dataSendToMe !== 'function') return false;
+    const npc = NpcObjectIndex.find(invoke('GameServer/World/World'), objectId(packet));
+    const move = npc?.automation?.moveInterpolation;
+    if (!move || move.actor !== npc || npc.state?.fetchTowards?.() !== 'wander'
+        || npc.state.fetchDead() || npc.state.fetchCombats()
+        || Date.now() - move.startedAt >= move.duration) return false;
+
+    // NpcInfo creates/refreshes the client object but carries no destination.
+    // Resume the existing walk only for this recipient, after its snapshot
+    // was written. Use that exact snapshot origin, not the original start or
+    // a newer interpolation position. No new route, geo query or timer.
+    session.dataSendToMe(ServerResponse.moveToLocation(npc.fetchId(), {
+        from: { locX: packet.readInt32LE(13), locY: packet.readInt32LE(17), locZ: packet.readInt32LE(21) },
+        to: move.to
+    }));
+    return true;
 }
 
 function npcRemovalRecipients(world, sourceSession, npcId) {
@@ -61,5 +82,6 @@ function deleteKnownNpc(world, sourceSession, npcId, response = ServerResponse) 
 module.exports = {
     deleteKnownNpc,
     npcRemovalRecipients,
-    trackNpcPacket
+    trackNpcPacket,
+    sendNpcMotionAfterInfo
 };

@@ -46,10 +46,13 @@ async function main() {
     const originalStatesForParties = LifeState.cachedStatesForParties;
     const originalReleaseDissolvedPartyMembers = LifeState.releaseDissolvedPartyMembers;
     const originalActiveParties = PartyState.active;
+    // The clan read goes through the party index; here it filters the mocked active().
+    const originalActiveByClan = PartyState.activeByObjectiveClan;
+    PartyState.activeByObjectiveClan = clanId => PartyState.active()
+        .filter(party => Number(party?.stats?.objective?.clanId) === Number(clanId));
     const originalSetPartyStatus = PartyState.setStatus;
     const originalCreateOrUpdate = PartyState.createOrUpdate;
     const originalSpotEnsure = SpotProfiles.ensure;
-    const originalCurrentOccupancy = SpotProfiles.currentOccupancy;
 
     let plannerCalls = 0;
     let savedParty = null;
@@ -113,8 +116,6 @@ async function main() {
             'an async equipment plan must recheck the raid lock before applying its stale result'
         );
         PartyState.active = () => [raidParty];
-        assert.strictEqual(PopulationService.partySessionExpired(raidParty, Date.now()), false,
-            'a started raid must not expire through ordinary party rotation');
         assert.strictEqual(ClanEquipmentPartyPolicy.needsReview(raidParty, [{ level: 99, stats: {} }], Date.now()), false,
             'ordinary route eligibility must not dismantle a raid after preparation or combat starts');
         assert.strictEqual(ClanEquipmentPartyPolicy.needsReview({
@@ -128,7 +129,7 @@ async function main() {
         'an overlevel member must be removed even after raid preparation starts because Raid Curse disables combat');
         assert.strictEqual(ClanEquipmentPartyPolicy.needsReview(raidParty, [{
             level: 99,
-            stats: { clanHuntBackoffs: [{ spotId: 'raid:10029', until: Date.now() + 60000 }] }
+            stats: { clanHuntBackoffs: [{ spotId: 'raid:10029', untilStep: 60 }] }
         }], Date.now()), false, 'ordinary hunt backoff must not dismantle a raid already in progress');
         const abandonedLegacyRaid = {
             ...raidParty,
@@ -173,7 +174,9 @@ async function main() {
         assert.strictEqual(ClanEquipmentPartyPolicy.recordOutcome(
             { stats: { deaths: 0 } }, raidOutcome, raidParty.stats.objective, Date.now()
         ), raidOutcome, 'raid deaths must not create ordinary hunting-ground backoff');
-        assert.deepStrictEqual(await PopulationService.refreshBackgroundPartyRequirements([raidParty]), [],
+        PopulationService.partyRequirementRefreshDue.clear();
+        PopulationService.markPartyRequirementsDue(raidParty, null);
+        assert.strictEqual(PopulationService.partyRequirementRefreshDue.has(String(raidParty.partyId)), false,
             'ordinary equipment requirement refresh must not rewrite a started raid objective');
         PartyState.active = () => [{
             ...raidParty,
@@ -203,7 +206,7 @@ async function main() {
             phase: 'cold',
             inventory: {},
             stats: { equipmentPlan: clanPlan }
-        }, [], [], { occupancy: { 'clan-spot': { reservedCount: 20, capacity: 2 } }, capacityUnits: 9 });
+        }, [], []);
         assert.strictEqual(reroutedClanGoal.target.selfId, clanPlan.target.selfId,
             'clan planning must keep the goal item while another source for it is available');
         assert.strictEqual(reroutedClanGoal.next.spotId, 'alternate-clan-spot',
@@ -219,7 +222,7 @@ async function main() {
             phase: 'cold',
             inventory: {},
             stats: { equipmentPlan: clanPlan }
-        }, [], [], { occupancy: { 'clan-spot': { reservedCount: 20, capacity: 2 } }, capacityUnits: 9 });
+        }, [], []);
         assert.strictEqual(replacementForUnavailableGoal.target.selfId, 9202,
             'a clan equipment goal with no available source must select the next attainable equipment target');
         assert.strictEqual(plannerCalls, 1,
@@ -245,11 +248,11 @@ async function main() {
             phase: 'cold',
             inventory: {},
             stats: { equipmentPlan: marketClanPlan }
-        }, [], [], { occupancy: { 'clan-spot': { reservedCount: 20, capacity: 2 } }, capacityUnits: 9 });
+        }, [], []);
         assert.deepStrictEqual(preservedMarketGoal.market, marketClanPlan.market,
-            'market clan goals must not be rotated because farming spots are full');
+            'a funded market clan goal must be kept');
         assert.strictEqual(plannerCalls, 0,
-            'market clan goals must remain outside farm capacity planning');
+            'a kept market clan goal must not run target planning');
         GearAcquisitionPlanner.marketPlanForTarget = () => null;
         const unavailableMarketGoal = ClanEquipmentService.planForMember({
             characterId: 1001, name: 'ClanMember', level: 35, adena: 100000,
@@ -262,8 +265,9 @@ async function main() {
         GearAcquisitionPlanner.marketPlanForTarget = originalMarketPlanForTarget;
 
         const refreshParty = { partyId: 'bgp-clan-lock', status: 'active', leaderId: 1001, memberIds: [1001],
-            spotId: 'clan-spot', stats: { lastRequirementRefreshAt: 0, objective: { priority: 'required' } } };
-        assert.deepStrictEqual(await PopulationService.refreshBackgroundPartyRequirements([refreshParty]), ['bgp-clan-lock']);
+            spotId: 'clan-spot', stats: { objective: { priority: 'required' } } };
+        PopulationService.markPartyRequirementsDue(refreshParty, null);
+        assert(PopulationService.partyRequirementRefreshDue.has('bgp-clan-lock'), 'a new party is due for its member plans');
         const refreshed = await PopulationService.applyWorkerPartyRequirements(refreshParty, { memberPlans: [], requirementRefreshedAt: Date.now() });
         assert.deepStrictEqual(refreshed, [], 'a locked plan needs no party refresh write');
 
@@ -462,7 +466,13 @@ async function main() {
             { partyId: 'same-clean', spotId: 'test-spot', memberIds: [1001, 1002], stats: { objective: { clanGoalKey: clanPlan.clanGoal.goalKey, objectiveKey: 'direct_drop:test-spot:701', npcId: 701 } } },
             { partyId: 'same-wrong-route', spotId: 'old-spot', memberIds: [1001, 1002], stats: { objective: { clanGoalKey: clanPlan.clanGoal.goalKey, objectiveKey: 'direct_drop:old-spot:700', npcId: 700 } } },
             { partyId: 'same-mixed', spotId: 'test-spot', memberIds: [1001, 9999], stats: { objective: { clanGoalKey: clanPlan.clanGoal.goalKey, objectiveKey: 'direct_drop:test-spot:701', npcId: 701 } } },
-            { partyId: 'wrong-goal', memberIds: [1002, 1003], stats: { objective: { clanGoalKey: 'clan-equipment:78:1002:9202:7' } } }
+            { partyId: 'wrong-goal', memberIds: [1002, 1003], stats: { objective: { clanGoalKey: 'clan-equipment:78:1002:9202:7' } } },
+            // A mixed-clan expedition has no clanGoalKey. Protect its agreed
+            // roster from formation onward, including travel before combat.
+            { partyId: 'opportunistic-travelling', status: 'active', memberIds: [1001, 1002],
+                stats: { objective: { sourceKind: 'raid', opportunisticRaid: true }, travel: { arrivalAt: 12345 } } },
+            { partyId: 'opportunistic-failed', status: 'active', memberIds: [1001, 1002],
+                stats: { objective: { sourceKind: 'raid', opportunisticRaid: true }, raidEncounter: { status: 'failed' } } }
         ];
         PartyState.setStatus = async (partyId, status) => {
             dissolved.push({ partyId, status });
@@ -474,51 +484,10 @@ async function main() {
             { goalKey: clanPlan.clanGoal.goalKey },
             { spotId: 'test-spot', objectiveKey: 'direct_drop:test-spot:701', npcId: 701 }
         );
-        assert.deepStrictEqual(dissolved.map((entry) => entry.partyId), ['same-wrong-route', 'same-mixed', 'wrong-goal']);
-        assert.deepStrictEqual(reformed, { parties: 3, releasedMembers: 6 },
+        assert.deepStrictEqual(dissolved.map((entry) => entry.partyId),
+            ['same-wrong-route', 'same-mixed', 'wrong-goal', 'opportunistic-failed']);
+        assert.deepStrictEqual(reformed, { parties: 4, releasedMembers: 8 },
             'a clan equipment review must dissolve wrong-route, mixed, or foreign parties before rebuilding its roster');
-
-        const sharedOccupancy = {
-            'shared-clan-spot': {
-                count: 0,
-                reservedCount: 0,
-                capacity: 10,
-                retained: new Set(),
-                reservedKeys: new Set(),
-                reservationKeys: new Set(),
-                retainedReservationKeys: new Set()
-            }
-        };
-        SpotProfiles.currentOccupancy = () => sharedOccupancy;
-        const stalePlanning = {
-            spots: [{ id: 'shared-clan-spot', capacity: 10 }],
-            occupancy: {}
-        };
-        const selectedSpot = stalePlanning.spots[0];
-        const firstReservation = ClanEquipmentService.reserveGoalCapacity(
-            stalePlanning,
-            { id: 77 },
-            [1001, 1002, 1003, 1004, 1005],
-            selectedSpot
-        );
-        const secondReservation = ClanEquipmentService.reserveGoalCapacity(
-            stalePlanning,
-            { id: 78 },
-            [2001, 2002, 2003, 2004, 2005],
-            selectedSpot
-        );
-        const overbookedReservation = ClanEquipmentService.reserveGoalCapacity(
-            stalePlanning,
-            { id: 79 },
-            [3001, 3002, 3003, 3004, 3005],
-            selectedSpot
-        );
-        assert.strictEqual(firstReservation.reserved, true);
-        assert.strictEqual(secondReservation.reserved, true);
-        assert.strictEqual(overbookedReservation.reserved, false,
-            'sequential clan reviews must share live reservations instead of overbooking stale planning snapshots');
-        assert.strictEqual(sharedOccupancy['shared-clan-spot'].reservedCount, 10,
-            'rejected clan reservations must not grow shared spot occupancy beyond capacity');
 
         console.log('Clan equipment plan lock checks passed');
     } finally {
@@ -529,10 +498,10 @@ async function main() {
         LifeState.cachedStatesForParties = originalStatesForParties;
         LifeState.releaseDissolvedPartyMembers = originalReleaseDissolvedPartyMembers;
         PartyState.active = originalActiveParties;
+        PartyState.activeByObjectiveClan = originalActiveByClan;
         PartyState.setStatus = originalSetPartyStatus;
         PartyState.createOrUpdate = originalCreateOrUpdate;
         SpotProfiles.ensure = originalSpotEnsure;
-        SpotProfiles.currentOccupancy = originalCurrentOccupancy;
     }
 }
 

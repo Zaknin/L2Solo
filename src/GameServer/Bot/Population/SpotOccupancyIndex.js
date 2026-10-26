@@ -4,9 +4,9 @@ const CharacterLocationIndex = require('../../World/CharacterLocationIndex');
 const providers = new WeakMap();
 
 // Who stands on each spot and who is heading there, kept up to date at every
-// state write. SpotProfiles.indexedOccupancy turns it into the same snapshot
-// occupancySnapshot builds from a full state list, rebuilding only the spots
-// whose members changed instead of walking the whole population every second.
+// state write. Read only at a spot: the room check at arrival, the kill share,
+// the buff offer, and the status line's per-spot count. No place is held for a
+// bot ahead of its arrival.
 
 function stateKey(state = {}) {
     return String(state.characterId || state.name || state.stats?.generatedIndex || '');
@@ -16,33 +16,6 @@ function occupiedSpotId(state = {}) {
     if (state.activity === 'traveling' && state.stats?.travel?.spotId) return state.stats.travel.spotId;
     if (['merchant', 'shopping', 'crafting', 'traveling'].includes(state.activity)) return null;
     return state.spotId || null;
-}
-
-function farmIntentCandidate(state = {}) {
-    if (['merchant', 'shopping', 'crafting', 'dead'].includes(state.activity)) return null;
-    if ((state.party?.partyId || state.partyId) && state.stats?.backgroundPartySpotId)
-        return state.stats.backgroundPartySpotId;
-    const clanObjective = state.stats?.clanPartyObjective;
-    const request = state.stats?.partyRequest;
-    const plan = state.stats?.equipmentPlan;
-    if (clanObjective?.spotId && ['open', 'deferred'].includes(String(clanObjective.status || ''))) {
-        return clanObjective.spotId;
-    }
-    if (request?.spotId && ['open', 'deferred'].includes(String(request.status || ''))) return request.spotId;
-    if (plan?.status === 'active' && ['direct_drop', 'craft'].includes(plan.strategy) && plan.next?.spotId) {
-        return plan.next.spotId;
-    }
-    return null;
-}
-
-function capacityBackedOff(state, spotId, timestamp) {
-    return (state.stats?.capacityBackoffs || []).some(entry => String(entry.spotId) === String(spotId)
-        && Number(entry.until) > timestamp);
-}
-
-function farmIntentSpotId(state = {}, timestamp = Date.now()) {
-    const spotId = farmIntentCandidate(state);
-    return spotId && !capacityBackedOff(state, spotId, timestamp) ? spotId : null;
 }
 
 function addMember(membersBySpot, spotId, key) {
@@ -67,20 +40,15 @@ class SpotOccupancyIndex {
         Object.defineProperty(this, 'locationIndex', { value: index, enumerable: true });
         this.places = new Map();
         this.physical = new Map();
-        this.reserved = new Map();
-        // Only keys are retained here; expiry reads their original current
-        // record, independently of its spatial eligibility.
-        this.backedOff = new Set();
-        this.dirty = new Set();
     }
 
-    update(state, timestamp = Date.now(), options = {}) {
+    update(state, options = {}) {
         const key = stateKey(state); // Keep null's inherited error before writes.
         const { index, ownsSources } = providers.get(this);
         if (ownsSources) {
             if (state === undefined) {
                 this.remove(key);
-                this.places.set(key, { record: null, spotId: null, intentSpotId: null,
+                this.places.set(key, { record: null, spotId: null,
                     get state() { return undefined; } });
                 return;
             }
@@ -88,34 +56,26 @@ class SpotOccupancyIndex {
             // Do not read phase/location that the planning policy never used.
             const record = { id: key, source: state, phase: 'hot' };
             index.setSource(key, 'state', record, { indexed: false });
-            this.updateRecord(record, timestamp);
+            this.updateRecord(record);
             return;
         }
         const id = Object.prototype.hasOwnProperty.call(options, 'sourceId')
             ? options.sourceId : Number(state?.characterId || 0);
         const record = index.getSource(id, 'state');
         if (!record || !Object.is(record.source, state)) return false;
-        return this.updateRecord(record, timestamp);
+        return this.updateRecord(record);
     }
 
-    updateRecord(record, timestamp = Date.now()) {
+    updateRecord(record) {
         const { index } = providers.get(this);
         if (!record || index.getSource(record.id, 'state') !== record) return false;
         const state = record.source;
         const key = stateKey(state);
         const spotId = occupiedSpotId(state);
-        const candidate = farmIntentCandidate(state);
-        const backedOff = !!candidate && capacityBackedOff(state, candidate, timestamp);
-        const intentSpotId = backedOff ? null : candidate;
         this.removePlace(key);
-        this.places.set(key, { record, spotId, intentSpotId,
+        this.places.set(key, { record, spotId,
             get state() { return record.source; } });
-        if (backedOff) this.backedOff.add(key);
         addMember(this.physical, spotId, key);
-        addMember(this.reserved, spotId, key);
-        addMember(this.reserved, intentSpotId, key);
-        if (spotId) this.dirty.add(spotId);
-        if (intentSpotId) this.dirty.add(intentSpotId);
         return true;
     }
 
@@ -123,12 +83,7 @@ class SpotOccupancyIndex {
         const place = this.places.get(key);
         if (!place) return;
         removeMember(this.physical, place.spotId, key);
-        removeMember(this.reserved, place.spotId, key);
-        removeMember(this.reserved, place.intentSpotId, key);
-        if (place.spotId) this.dirty.add(place.spotId);
-        if (place.intentSpotId) this.dirty.add(place.intentSpotId);
         this.places.delete(key);
-        this.backedOff.delete(key);
         return place;
     }
 
@@ -151,7 +106,7 @@ class SpotOccupancyIndex {
     }
 
     *members(spotId, kind) {
-        if (kind !== 'physical' && kind !== 'reserved') throw new TypeError('invalid_occupancy_membership');
+        if (kind !== 'physical') throw new TypeError('invalid_occupancy_membership');
         const { index } = providers.get(this);
         for (const key of this[kind].get(spotId) || []) {
             const record = this.places.get(key)?.record;
@@ -159,29 +114,28 @@ class SpotOccupancyIndex {
         }
     }
 
-    // Expired intents refresh through record.id, which may be an opaque
-    // original Cache key rather than the state's characterId.
-    refreshBackoffs(timestamp) {
-        const { index } = providers.get(this);
-        for (const key of [...this.backedOff]) {
-            const record = this.places.get(key)?.record;
-            if (record && index.getSource(record.id, 'state') === record
-                && farmIntentSpotId(record.source, timestamp)) this.updateRecord(record, timestamp);
+    // How many bots the index has on a spot ('physical'): standingOnly leaves
+    // out the bots still on their way there (indexed at their destination),
+    // excludeKeys the given state keys.
+    physicalCount(spotId, { excludeKeys = null, standingOnly = false } = {}) {
+        let count = 0;
+        for (const [key, state] of this.members(spotId, 'physical')) {
+            if (!(standingOnly && state?.activity === 'traveling') && !excludeKeys?.has(key)) count++;
         }
+        return count;
     }
 
-    size() { return { owners: this.places.size, physical: this.physical.size, reserved: this.reserved.size,
-        backedOff: this.backedOff.size }; }
+    // The spots with at least one bot indexed there (the status line's walk).
+    spotIds() { return this.physical.keys(); }
+
+    size() { return { owners: this.places.size, physical: this.physical.size }; }
 
     clear() {
-        for (const spotId of [...this.physical.keys(), ...this.reserved.keys()]) this.dirty.add(spotId);
         this.places.clear();
         this.physical.clear();
-        this.reserved.clear();
-        this.backedOff.clear();
         const { index, ownsSources } = providers.get(this);
         if (ownsSources) index.clearSourceView('state');
     }
 }
 
-module.exports = { SpotOccupancyIndex, stateKey, occupiedSpotId, farmIntentSpotId };
+module.exports = { SpotOccupancyIndex, stateKey, occupiedSpotId };

@@ -18,18 +18,16 @@ console.log('Actual Registry clock positive control: pass');
         assert.strictEqual(typeof Protocol.safetyCheckpoint, 'function');
         const flush = () => new Promise(resolve => setImmediate(resolve));
         const states = new Map();
-        const projections = new Map();
         const rows = [];
         for (let characterId = 1; characterId <= 140; characterId++) {
             const state = { characterId, phase: 'cold', activity: 'resting', updatedAt: 100, stats: {}, inventory: {},
-                simulation: { ownerId: 'legacy_main', revision: 1, leaseId: null, leaseUntil: 0 },
+                simulation: { revision: 1 },
                 timing: { activityStartedAt: 10, nextResolveAt: now + 10000000, lastResolvedAt: 50, lastHotAt: 0 } };
             states.set(characterId, state);
-            projections.set(characterId, { state, context: { generated: true } });
             rows.push(Protocol.safetyCheckpoint(state));
         }
         const worker = { worker: {}, epoch: 'sweep-worker', ready: true };
-        const pages = [], requests = [], contexts = [], completes = [];
+        const pages = [], requests = [], projected = [], completes = [];
         const excluded = new Set(), missing = new Set(), boardMissing = new Set();
         let allowed = true, running = true, heldReply = null, hold = false, rejectRead = false;
         const metrics = { state: 0, board: 0 };
@@ -46,7 +44,8 @@ console.log('Actual Registry clock positive control: pass');
             },
             cachedState: id => states.get(id),
             cold: { current: () => worker, excluded: id => excluded.has(id), canRepair: () => true, poll() {}, cancel() {},
-                projection(id) { contexts.push(id); return { entry: projections.get(id) }; },
+                // A fresh row over the cached state per call, as the coordinator projects it.
+                projection(id) { projected.push(id); return { entry: { state: states.get(id) } }; },
                 async request(kind, selected, current) {
                     assert.strictEqual(current.worker, worker.worker);
                     requests.push({ kind, selected });
@@ -81,7 +80,7 @@ console.log('Actual Registry clock positive control: pass');
         allowed = true;
         for (let pulse = 0; pulse < 20; pulse++) await tick();
         assert.deepStrictEqual(pages.map(page => page.length), [64, 64, 12]);
-        assert.deepStrictEqual(contexts, [130, 130, 130], 'only proven missing owner projection plus pre/post native-read checks');
+        assert.deepStrictEqual(projected, [130, 130, 130], 'only proven missing owner projection plus pre/post native-read checks');
         assert.deepStrictEqual(metrics, { state: 1, board: 0 }, 'counter coverage creates no board repair');
         assert(requests.every(request => request.selected.length <= 64));
         assert.strictEqual(sweep.snapshot().completedCycles, 1);

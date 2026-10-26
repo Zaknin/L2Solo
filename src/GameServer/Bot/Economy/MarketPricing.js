@@ -12,13 +12,15 @@ const Profit = require('./CraftProfitPolicy');
 const BidPurchaseAlternative = require('./BidPurchaseAlternative');
 const { npcOwnsPurchase } = require('./TradeIntent');
 const { MAX_INSPECTED } = require('./ReadyTradeChoice');
+const ColdEconomyDecision = require('../Population/ColdEconomyDecision');
+const BoardLook = require('./BoardLook');
 
 // A bot as a trader: its persona's parameters, its hour and its money, its
 // trips, and what its thread knows of the board. deps: { board, persona,
 // npcOffersFor(selfId), findSpot(spotId), timestamp }.
 function traderContext(state, deps = {}) {
     const timestamp = Number(deps.timestamp || Date.now());
-    const economy = deps.economy || require('../Population/ColdEconomyDecision').economyFor(state, { ...deps, timestamp });
+    const economy = deps.economy || ColdEconomyDecision.economyFor(state, { ...deps, timestamp });
     const hour = economy.hourAdena;
     const adena = Math.max(0, Number(state?.adena ?? state?.inventory?.[57]?.amount ?? 0));
     const origin = deps.findSpot ? OfferOrder.farmingOrigin(state, deps.findSpot) : null;
@@ -30,7 +32,7 @@ function traderContext(state, deps = {}) {
     // The bot's own trip to a town: none to the town it is shopping in.
     const here = state?.activity === 'shopping' ? state.currentRegion || null : null;
     const demandFor = (id, enchant, town, askingPrice) => {
-        const demand = !enchant ? require('./ShotTradeDemand').forecast(id, town, timestamp) : null;
+        const demand = !enchant ? require('./MarketTradeDemand').forecast(id, town, timestamp) : null;
         if (!demand || !(askingPrice > 0)) return demand;
         const board = deps.board || economy.board;
         const belief = PriceBelief.prior(id, { board, characterId: Number(state.characterId),
@@ -176,10 +178,12 @@ function marketFor(selfId, ctx, { town = null, units = 1, enchant = 0 } = {}) {
 
 // A conditional stock quote declares a price, never guaranteed income.
 // Creation and review use the same evidence when finite demand is unknown.
-function stockQuotePrice(belief, market, allowed) {
+// Grade crystals have no bot NPC exit: when that alternative would win,
+// their belief can still price a waiting offer without forecasting a sale.
+function stockQuotePrice(belief, market, allowed, marketOnly = false) {
     const price = Math.round(Math.exp(belief.mu));
-    return allowed && !market.known && !market.truncated && !market.demand
-        && Number.isSafeInteger(price) && price > market.buyback ? price : null;
+    return allowed && (marketOnly || !market.known && !market.truncated && !market.demand)
+        && Number.isSafeInteger(price) && price > (marketOnly ? 0 : market.buyback) ? price : null;
 }
 
 // Publication and every completed review checkpoint exactly this line's
@@ -207,6 +211,7 @@ function lineState(selfId, ctx, { price, storeType = SELL, worth = 0, fills = 0,
 // tendency roll. `gain` is the board's Adena over the NPC for slot selection;
 // answering a bid returns its physical line/count, including partial demand.
 function disposition(item, ctx, { town = null, room = 1, stockQuote = false, standingPrice = 0, rollKey }) {
+    const marketOnly = invoke('GameServer/Bot/Economy/ItemDisposition').isGradeCrystal(item);
     const units = Math.max(1, Number(item.count) || 1);
     const priced = priceForSale(item.selfId, ctx, { town, units, enchant: item.enchant || 0,
         current: standingPrice, rollKey: [...rollKey, 'ask'] });
@@ -218,7 +223,7 @@ function disposition(item, ctx, { town = null, room = 1, stockQuote = false, sta
     // The listing owner enables this option before choosing its storefront
     // or board advertisement. Production still needs a supported outcome.
     const quotePrice = stockQuotePrice(belief, market,
-        stockQuote && room > 0 && ctx.ownStock?.known !== false);
+        stockQuote && room > 0 && ctx.ownStock?.known !== false, marketOnly && ask.npc);
     const quote = quotePrice !== null;
     if (quote) {
         ask = { ...ask, price: standingPrice || quotePrice, npc: false, money: NaN, value: NaN, stockQuote: true };
@@ -235,7 +240,7 @@ function disposition(item, ctx, { town = null, room = 1, stockQuote = false, sta
         if (result.known) options.push({ action, value: result.valueHours });
     };
     const loss = (price, count) => Math.max(0, reference - price) * count * ctx.trader.caution * moneyPrice;
-    add('npc', { receipts: market.buyback * units, riskHours: loss(market.buyback, units) });
+    if (!marketOnly) add('npc', { receipts: market.buyback * units, riskHours: loss(market.buyback, units) });
     if (room > 0) add('keep', { monetaryResidual: units * (useful > 0 ? useful : market.buyback) });
     if (quote) add('list', { monetaryResidual: units * (useful > 0 ? useful : market.buyback) });
     if (gain > 0 && ask.known) {
@@ -355,9 +360,11 @@ function look(state, lines, ctx) {
         }
         else {
             chosen = PriceDecision.chooseAsk(belief, market, ctx.trader, rollKey, line.price);
-            if (!chosen.known) {
+            const marketOnly = invoke('GameServer/Bot/Economy/ItemDisposition').isGradeCrystal(line);
+            if (!chosen.known || marketOnly && chosen.npc) {
                 const quote = stockQuotePrice(belief, market,
-                    line.custodyPolicy === 1 && ctx.ownStock?.known !== false);
+                    (line.custodyPolicy === 1 || marketOnly) && ctx.ownStock?.known !== false,
+                    marketOnly && chosen.npc);
                 if (quote === null) continue;
                 chosen = { ...chosen, price: quote, npc: false };
             }
@@ -372,7 +379,7 @@ function look(state, lines, ctx) {
 }
 
 function lookOwn(state, lines, ctx, lookSeen) {
-    return require('./BoardLook').review(state, lines, ctx, lookSeen);
+    return BoardLook.review(state, lines, ctx, lookSeen);
 }
 
 module.exports = { beliefFor, traderContext, priceForSale, lineState, bestAnswer, disposition, bid, look, lookOwn };

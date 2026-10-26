@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate, useGeneral } = require('./helpers/progressionRate');
 
 require('../src/Global');
 
@@ -17,7 +18,7 @@ assert.strictEqual(ExperienceReward.resolveLevel(DataCache.experience[78] - 1, o
 const level80Packet = new SendPacket(0x04).writeD(4200000000n).fetchBuffer(false);
 assert.strictEqual(level80Packet.readUInt32LE(1), 4200000000, 'C4 packets must serialize the level-80 experience threshold as an unsigned D value');
 
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 let profile = ProgressionRates.profile();
 assert.strictEqual(profile.preset, 'x10');
 assert.strictEqual(profile.exp, Number(options.default.General.expRate) * 10);
@@ -34,7 +35,7 @@ const originalQuestDropRate = options.default.General.questDropRate;
 try {
     options.default.General.questDropRate = 25;
     for (const preset of ['x1', 'x10', 'x50']) {
-        process.env.L2NODE_PROGRESSION_RATE = preset;
+        useRate(preset);
         assert.strictEqual(ProgressionRates.profile().questDrop, 1);
         assert.strictEqual(QuestService.questDropAmount(1, 30, 0), 1);
         assert.strictEqual(QuestService.questDropAmount(3, 30, 0), 3, 'preserve authored multi-item drops');
@@ -42,7 +43,7 @@ try {
         assert.strictEqual(QuestService.questDropAmount(1, 30, 30), 0);
     }
 } finally {
-    process.env.L2NODE_PROGRESSION_RATE = 'x10';
+    useRate('x10');
     if (originalQuestDropRate === undefined) delete options.default.General.questDropRate;
     else options.default.General.questDropRate = originalQuestDropRate;
 }
@@ -90,7 +91,7 @@ const highContributor = ProgressionRates.deepBlueRule({ npcLevel: 20, killerLeve
 assert.strictEqual(highContributor.levelGap, 10);
 assert.strictEqual(highContributor.penaltyPercent, 18);
 
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 const deepBlueAdena = ProgressionRates.rewardGroupRoll(adenaGroup, 'drop', { npcLevel: 20, killerLevel: 29 }, () => 0.2);
 assert.strictEqual(deepBlueAdena.rule.active, true);
 assert.strictEqual(deepBlueAdena.amountMultiplier, 7);
@@ -106,22 +107,33 @@ assert.strictEqual(summonOwner.highestLevel, 40);
 assert.strictEqual(summonOwner.active, true);
 
 const originalDropChanceRate = options.default.General.dropChanceRate;
-options.default.General.dropChanceRate = 0;
+useGeneral({ dropChanceRate: 0 });
 profile = ProgressionRates.profile();
 assert.strictEqual(profile.drop, 0);
 const disabledDrop = ProgressionRates.rollGroup(100, profile.drop, () => 0);
 assert.strictEqual(disabledDrop.hit, false);
-options.default.General.dropChanceRate = originalDropChanceRate;
+useGeneral({ dropChanceRate: originalDropChanceRate });
 
-process.env.L2NODE_PROGRESSION_RATE = 'x50';
+useRate('x50');
 profile = ProgressionRates.profile();
 assert.strictEqual(profile.preset, 'x50');
 assert.strictEqual(profile.exp, Number(options.default.General.expRate) * 50);
 
-if (originalRate === undefined) {
-    delete process.env.L2NODE_PROGRESSION_RATE;
-} else {
-    process.env.L2NODE_PROGRESSION_RATE = originalRate;
+// Rates are a restart input: whoever changes the variable at runtime (the clan
+// planning worker, the generator scripts) calls reset() and reads the new preset.
+process.env.L2NODE_PROGRESSION_RATE = 'x1';
+ProgressionRates.reset();
+assert.strictEqual(ProgressionRates.profile().preset, 'x1');
+assert.strictEqual(ProgressionRates.profile().multiplier, 1);
+
+useRate(originalRate);
+
+// L129: the single-killer penalty equals the rule's for every gap and malformed level.
+for (const npcLevel of [0, -3, 'x', 1, 20, 20.5, 80]) {
+    for (const killerLevel of [undefined, 0, -1, 'x', 1, 20, 28, 29, 30, 40, 29.5, 99]) {
+        assert.strictEqual(ProgressionRates.deepBluePenaltyPercent(npcLevel, killerLevel),
+            ProgressionRates.deepBlueRule({ npcLevel, killerLevel }).penaltyPercent);
+    }
 }
 
 console.log('progression rates ok');

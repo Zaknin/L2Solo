@@ -1,3 +1,5 @@
+'use strict';
+
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Npc       = invoke('GameServer/Npc/Npc');
 const DataCache = invoke('GameServer/DataCache');
@@ -36,6 +38,7 @@ function notifyNearby(world, npc, response = ServerResponse) {
 function createNpc(world, npc, coords, spawnDefinition = null) {
     const instance = new Npc(world.npc.nextId++, { ...utils.crushOb(npc), ...coords });
     instance.spawnDefinition = spawnDefinition;
+    instance.spawnOrigin = { locX: coords.locX, locY: coords.locY, locZ: coords.locZ };
     if (npc.template?.raidBoss === true) instance.raidInstanceId = `${Date.now()}:${instance.fetchId()}`;
     NpcAggro.armSpawnGrace(instance);
     world.npc.spawns.push(instance);
@@ -242,45 +245,48 @@ function spawnNpcs() {
     // C4's old shared duel spawns would duplicate a player's personal opponent.
     const exclusive = new Set(invoke('GameServer/Quest/QuestService').quests()
         .flatMap(quest => quest.exclusiveSpawns || []));
+    // Datapack rows are frozen by DataCache.init and never written by an
+    // instance (createNpc flattens a fresh copy), so every definition borrows
+    // them. Only the wrapper is per instance: DayNightSpawnManager and
+    // RaidBossMinionManager key on its identity.
+    const templates = new Set();
+    let definitions = 0;
     DataCache.npcSpawns.forEach((item) => {
         const bounds = item.bounds;
 
         item.spawns.forEach((spawn) => {
             if (exclusive.has(Number(spawn.selfId))) return;
-            DataCache.fetchNpcFromSelfId(spawn.selfId, (npc) => {
-                const definition = { npc, spawn: structuredClone(spawn), bounds: structuredClone(bounds) };
+            const npc = DataCache.npcRow(spawn.selfId);
+            if (!npc) return;
+            templates.add(npc);
+            const definition = { npc, spawn, bounds };
 
-                for (let i = 0; i < spawn.total; i++) {
-                    if (utils.size(spawn.coords) > 0) { // Explicit location
-                        spawn.coords.forEach((info) => {
-                            const fixedDefinition = {
-                                ...definition,
-                                spawn: { ...definition.spawn, coords: [structuredClone(info)] }
-                            };
-                            if (isPeriodic(fixedDefinition.spawn)) this.npc.periodDefinitions.push(fixedDefinition);
-                            if (isPeriodActive(fixedDefinition.spawn, this.npc.periodMode)) {
-                                spawnDefinition(this, fixedDefinition, {
-                                    locX: info.locX, locY: info.locY, locZ: info.locZ,
-                                    head: npc.template.kind === 'Monster' && info.head === 0 ? utils.randomNumber(65536) : info.head,
-                                });
-                            }
-                        });
-                    }
-                    else { // Random location within bounds
-                        const randomDefinition = {
-                            ...definition,
-                            spawn: structuredClone(definition.spawn),
-                            bounds: structuredClone(definition.bounds)
-                        };
-                        if (isPeriodic(randomDefinition.spawn)) this.npc.periodDefinitions.push(randomDefinition);
-                        spawnNpc(this, randomDefinition);
-                    }
+            for (let i = 0; i < spawn.total; i++) {
+                if (utils.size(spawn.coords) > 0) { // Explicit location
+                    spawn.coords.forEach((info) => {
+                        const fixedDefinition = { ...definition, spawn: { ...spawn, coords: [info] } };
+                        definitions++;
+                        if (isPeriodic(spawn)) this.npc.periodDefinitions.push(fixedDefinition);
+                        if (isPeriodActive(spawn, this.npc.periodMode)) {
+                            spawnDefinition(this, fixedDefinition, {
+                                locX: info.locX, locY: info.locY, locZ: info.locZ,
+                                head: npc.template.kind === 'Monster' && info.head === 0 ? utils.randomNumber(65536) : info.head,
+                            });
+                        }
+                    });
                 }
-            });
+                else { // Random location within bounds
+                    const randomDefinition = { ...definition };
+                    definitions++;
+                    if (isPeriodic(spawn)) this.npc.periodDefinitions.push(randomDefinition);
+                    spawnNpc(this, randomDefinition);
+                }
+            }
         });
     });
 
-    utils.infoSuccess('Spawns', '%d Npcs & Monsters', utils.size(this.npc.spawns));
+    utils.infoSuccess('Spawns', '%d Npcs & Monsters (%d definitions, %d shared templates)',
+        utils.size(this.npc.spawns), definitions, templates.size);
 }
 
 module.exports = spawnNpcs;

@@ -1,7 +1,12 @@
 const Database = invoke('Database');
+const { fnv1a32 } = require('../Fnv1a');
+const TableChannel = require('../Population/ColdTableChannel').shared;
 
 const TABLE = 'bot_goal_state';
 const cache = new Map();
+// Snapshot -> content revision. Snapshots are replaced, never mutated, so a
+// revision is computed once per snapshot, on its first ask.
+const revisions = new WeakMap();
 let initialized = false;
 let initPromise = null;
 
@@ -80,6 +85,24 @@ function save(snapshot) {
     ]);
 }
 
+// The 'goals' table (ColdTableChannel, key: bot id): { characterId,
+// nextReviewAt, revision } of each cached goal, published by its one writer
+// (store). The worker's economy decision reads the revision from it.
+function tableRow(snapshot) {
+    return { characterId: snapshot.characterId, nextReviewAt: Number(snapshot.current?.nextReviewAt || 0),
+        revision: GoalState.revision(snapshot.characterId) };
+}
+
+function store(snapshot) {
+    cache.set(snapshot.characterId, snapshot);
+    TableChannel.changed('goals', tableRow(snapshot));
+}
+
+TableChannel.register('goals', {
+    key: row => row.characterId,
+    allRows: () => Array.from(cache.values(), tableRow)
+});
+
 const GoalState = {
     init() {
         if (initialized) return Promise.resolve(true);
@@ -101,9 +124,24 @@ const GoalState = {
         return cache.get(Number(characterId)) || null;
     },
 
+    // The goal's content without its review clock: equal while a 60 s review
+    // keeps the same goal, so a reader can tell a due review from a new goal.
+    // 0 = no goal. A 32-bit digest: stable across restarts, not a save field.
+    revision(characterId) {
+        const snapshot = cache.get(Number(characterId));
+        if (!snapshot?.current) return 0;
+        let revision = revisions.get(snapshot);
+        if (revision === undefined) {
+            const content = { ...snapshot.current, createdAt: 0, reviewedAt: 0, nextReviewAt: 0 };
+            revision = fnv1a32(JSON.stringify(content)) || 1;
+            revisions.set(snapshot, revision);
+        }
+        return revision;
+    },
+
     prime(characterId, goalJson, updatedAt = now()) {
         const snapshot = normalize({ characterId, goalJson, updatedAt });
-        if (snapshot) cache.set(snapshot.characterId, snapshot);
+        if (snapshot) store(snapshot);
         return snapshot;
     },
 
@@ -120,7 +158,7 @@ const GoalState = {
                 [id]
             ]).then((rows) => {
                 const snapshot = normalize(rows?.[0]);
-                if (snapshot) cache.set(id, snapshot);
+                if (snapshot) store(snapshot);
                 return snapshot;
             });
         }).catch((err) => {
@@ -138,36 +176,12 @@ const GoalState = {
         return this.init().then((ready) => {
             if (!ready) return null;
             return save(snapshot).then(() => {
-                cache.set(id, snapshot);
+                store(snapshot);
                 return snapshot;
             });
         }).catch((err) => {
             utils.infoWarn('BotGoals', 'failed to save goal state for %d: %s', id, err.message);
             return null;
-        });
-    },
-
-    setBatch(entries = []) {
-        const snapshots = (entries || []).map((entry) => {
-            const characterId = Number(entry?.characterId || 0);
-            const current = normalizeGoal(entry?.goal);
-            if (!characterId || !current) return null;
-            return { characterId, current, updatedAt: now(), inputHash: entry.inputHash };
-        }).filter(Boolean);
-        if (!snapshots.length) return Promise.resolve([]);
-        return this.init().then((ready) => {
-            if (!ready) return [];
-            return Database.upsertBotGoalStates(snapshots.map((snapshot) => ({
-                characterId: snapshot.characterId,
-                goalJson: safeJson(snapshot.current),
-                updatedAt: snapshot.updatedAt
-            }))).then(() => {
-                snapshots.forEach((snapshot) => cache.set(snapshot.characterId, snapshot));
-                return snapshots;
-            });
-        }).catch((err) => {
-            utils.infoWarn('BotGoals', 'failed to save %d goal states: %s', snapshots.length, err.message);
-            return [];
         });
     },
 
@@ -180,6 +194,22 @@ const GoalState = {
             status: STATUSES.has(status) ? status : 'abandoned',
             reviewedAt: now(),
             nextReviewAt: now()
+        });
+    },
+
+    abandonAccepted(characterId, expectedGoal) {
+        const id = Number(characterId), existing = this.snapshot(id);
+        if (!expectedGoal || !existing?.current || existing.current.status !== 'active'
+            || safeJson(existing.current) !== safeJson(expectedGoal)) return Promise.resolve(null);
+        const timestamp = now(), current = normalizeGoal({ ...existing.current, status: 'abandoned',
+            reviewedAt: timestamp, nextReviewAt: timestamp });
+        const snapshot = { ...existing, current, updatedAt: timestamp, inputHash: undefined };
+        return Database.execute([`UPDATE ${TABLE} SET goalJson = ?, updatedAt = ?
+            WHERE characterId = ? AND updatedAt = ? AND goalJson = ?`,
+        [safeJson(current), timestamp, id, existing.updatedAt, safeJson(existing.current)]], 'bot-goals:purchase-refused').then(result => {
+            if (Number(result?.affectedRows) !== 1) return null;
+            if (cache.get(id) === existing) store(snapshot);
+            return snapshot;
         });
     },
 
@@ -198,12 +228,13 @@ const GoalState = {
             [safeJson(current), timestamp, id, existing.updatedAt, safeJson(existing.current)]
         ], 'bot-goals:purchase-progress').then(result => {
             if (Number(result?.affectedRows) !== 1) return null;
-            if (cache.get(id) === existing) cache.set(id, snapshot);
+            if (cache.get(id) === existing) store(snapshot);
             return snapshot;
         });
     },
 
     reset() {
+        for (const id of cache.keys()) TableChannel.changed('goals', { key: id, removed: true });
         cache.clear();
         initialized = false;
         initPromise = null;

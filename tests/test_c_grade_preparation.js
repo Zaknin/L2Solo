@@ -31,8 +31,8 @@ function bot(classId = 54, level = 33) {
     state.stats.coldCombat = Profile.legacySnapshot(state, Profile.skillRecordsFromTree(classId, level), timestamp);
     return state;
 }
-function review(state, board = new BoardIndex(), extra = {}) {
-    Economy.reset(); Profile.forgetBuild(state.characterId);
+function review(state, board = new BoardIndex(), extra = {}, forget = true) {
+    Economy.reset(); if (forget) Profile.forgetBuild(state.characterId);
     return Economy.forState(state, { spots: [], board, timestamp, npcOffersFor: () => [],
         routeRows: Array.from({ length: require('../src/GameServer/Bot/Economy/EconomicTrip').towns.length },
             () => [true, 0, 0]), workshop: { known: true, recipeId: 0, incomePerHour: 0 }, ...extra });
@@ -55,6 +55,15 @@ for (const classId of [0, 10, 18, 25, 38, 49, 50, 53, 54, 56]) {
 if (isMainThread) invoke('GameServer/Clan/ClanSupplyPolicy').publish({ id: 1, level: 1, state: {} });
 else invoke('GameServer/Clan/ClanSupplyPolicy').useRowSource(id => id === 1 ? [1, 1, [], 1] : undefined);
 assert.equal(Progression.preparation({ ...source, clanId: 1 }), null, 'clan early C preparation keeps its existing owner');
+// The native gate reads the same ceiling as the wish that chose a prepared C
+// target, so a retained wish_focus plan does not refuse the advisory forever.
+const cWish = { status: 'deferred', strategy: 'none', reason: 'wish_focus', next: null, target: { selfId: 883, slot: 4 } };
+assert.equal(Planner.acquisitionTargetAllowed(source, cWish), true, 'early C preparation admits its C target');
+assert.equal(Planner.replanContextFor(source, cWish, timestamp).invalidSource, null);
+const gapped = structuredClone(source);
+delete gapped.inventory[Object.values(gapped.inventory).find(row => row.equippedSlots.some(slot => [7, 14].includes(slot))).selfId];
+assert.equal(Planner.replanContextFor(gapped, cWish, timestamp).invalidSource?.reason, 'c_kit_incomplete', 'a D gap still holds C back');
+assert.equal(Planner.acquisitionTargetAllowed({ ...source, clanId: 1 }, cWish), false, 'clan custody keeps the plain ceiling');
 for (const classId of [0, 10, 18, 25, 38, 46, 49, 50, 53, 54, 56]) {
     for (const level of [40, 47, 51, 52, 60, 61, 78]) {
         const adult = bot(classId, level), member = { ...adult, clanId: 1 };
@@ -198,6 +207,7 @@ const ctx = review(source, board);
 assert(ctx.projection.roots.some(key => /^power:/.test(key)
     && Data.items.find(item => item.selfId === Number(key.split(':')[1]))?.etc.rank === 'c'),
     'native wishes compare C sources before 40 after completing D');
+Profile.forgetBuild(source.characterId);
 const missing = structuredClone(source);
 delete missing.inventory[Object.values(missing.inventory).find(row => row.equippedSlots.includes(12)).selfId];
 assert(!review(missing, board).projection.roots.some(key => /^power:/.test(key)
@@ -317,7 +327,7 @@ const clanTrip = Improvement.acquisitionTravel({ ...outside, clanId: 1 }, readyC
 assert.equal(clanTrip.stats.travel.townName, 'Giran', 'the clan member can reach its own C exchange station');
 assert(clanTrip.adena < outside.adena);
 assert.equal(Improvement.acquisitionTravel({ ...outside, level: 33, clanId: 1 }, readyCrystals.network.activity, timestamp), null);
-assert.equal(invoke('GameServer/Bot/Population/ColdSimulationCoordinator').routeFor(outside, null, null, [], {}), null,
+assert.equal(require('../src/GameServer/Bot/Population/BotRoute').route(outside, null, null, [], { spots: [], timestamp }), null,
     'a ready NPC operation suppresses the competing hunting route');
 const npcInput = review(stocked, new BoardIndex(), { npcOffersFor: id => id === spareId
     ? [{ selfId: id, price: 1, sourceType: 'npc', town: 'Giran', available: true }] : [] });

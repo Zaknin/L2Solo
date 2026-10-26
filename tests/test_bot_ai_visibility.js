@@ -97,7 +97,8 @@ const hitBotActor = {
 const hitBotSession = {
     accountId: 'bot_hit_wakeup',
     aiActive: true,
-    actor: hitBotActor
+    actor: hitBotActor,
+    dataSendToMeAndOthers() {}
 };
 hitBotActor.session = hitBotSession;
 

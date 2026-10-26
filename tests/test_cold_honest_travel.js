@@ -172,8 +172,9 @@ try {
         assert.ok(answer.distance < 300, `the distance is from its place on the road: ${answer.distance}`);
         assert.strictEqual(ColdTrip.travellerAnswers(social), true, 'the activation lets it leave its trip');
         Config.coldHonestTravel = false;
-        assert.strictEqual(BotAvailability.evaluateState(player, social, { loadMemory: false, timestamp: at }).reason, 'in_transit',
-            'switch off: the author\'s in-transit refusal');
+        const legacyAnswer = BotAvailability.evaluateState(player, social, { loadMemory: false, timestamp: at });
+        assert.strictEqual(legacyAnswer.reason, 'available', 'travel never vetoes a player invite, including with legacy trip times');
+        assert.strictEqual(legacyAnswer.available, true);
         assert.strictEqual(ColdTrip.travellerAnswers(social), false);
     } finally {
         InteractionMemory.assess = realAssess;

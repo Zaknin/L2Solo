@@ -1,5 +1,8 @@
 'use strict';
 
+const WalkBack = require('./WalkBack');
+const PkDropPolicy = require('../../PkDropPolicy');
+
 const positive = value => Math.max(0, Number(value) || 0);
 const trait = (persona, key) => Math.max(0, Math.min(1, Number(persona?.traits?.[key] ?? 0.5)));
 
@@ -106,10 +109,14 @@ function stageHours(state, expPerHour, persona) {
     const remaining = Math.max(0, Number(Data.experience[end - 1]) - positive(state.stats?.exp ?? state.exp));
     return expPerHour > 0 ? remaining / expPerHour : 0;
 }
+function decisionHorizon(state, context) {
+    return Number.isFinite(context.horizonHours) ? context.horizonHours
+        : stageHours(state, context.hunt.expPerHour, context.persona);
+}
 function deathHours(state, { expPerHour = 0, walkBackHours, returnHours, lostGearHours = 0, spotId } = {}) {
     const Death = invoke('GameServer/Progression/DeathExperience');
     const loss = Death.calculateLoss({ ...state, exp: state.stats?.exp ?? state.exp ?? 0 });
-    const downtime = walkBackHours ?? returnHours ?? require('./WalkBack').hours(spotId || state.spotId, state);
+    const downtime = walkBackHours ?? returnHours ?? WalkBack.hours(spotId || state.spotId, state);
     return (expPerHour > 0 ? loss.expLost / expPerHour : 0) + 90 / 3600 + positive(downtime) + positive(lostGearHours);
 }
 function karmaHours(state, { expPerHour = 0, lostGearHours = 0, exposureHours = 0, deathsPerHour = 0 } = {}) {
@@ -119,7 +126,7 @@ function karmaHours(state, { expPerHour = 0, lostGearHours = 0, exposureHours = 
     return wash + positive(lostGearHours) * positive(deathsPerHour) * Math.max(wash, positive(exposureHours));
 }
 function pkDropValue(state, priceOf) {
-    return require('../../PkDropPolicy').expectedValue(state.physicalInventory
+    return PkDropPolicy.expectedValue(state.physicalInventory
         ? { ...state, inventory: state.physicalInventory } : state, priceOf);
 }
 function resale(price, { trend = 0, hours = 0, understanding = 0.3, assertiveness = 0.5,
@@ -139,5 +146,5 @@ function progressStats(state, { timestamp = Date.now(), startedAt = 0, kills = 0
         frustration: Math.max(0, frustration - positive(kills) / Math.max(1, positive(stats.lifelongKills) + positive(kills))),
         lifelongKills: positive(stats.lifelongKills) + (knowledgeEnabled ? positive(kills) : 0) };
 }
-module.exports = { riskWeight, stageHours, deathHours, karmaHours, pkDropValue, resale, progressStats, trait,
+module.exports = { riskWeight, stageHours, decisionHorizon, deathHours, karmaHours, pkDropValue, resale, progressStats, trait,
     opportunity, acquisition, createOpportunity, addOutcome, finishOpportunity, OUTCOME_LIMIT, fundingDelay, readyBenefit };

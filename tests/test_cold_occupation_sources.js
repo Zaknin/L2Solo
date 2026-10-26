@@ -1,5 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 require('../src/Global');
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Sources = require('../src/GameServer/Bot/Population/ColdOccupationSources');
@@ -20,13 +21,12 @@ const startupOffers = Sources.npcOffersFor(1785), sharedView = Catalogue.npcTown
 assert.strictEqual(startupOffers, sharedView.offersFor(1785), 'cold reader borrows the shared item/town stock');
 const originalRate = process.env.L2NODE_PROGRESSION_RATE;
 try {
-    process.env.L2NODE_PROGRESSION_RATE = 'x50';
+    useRate('x50');
     assert.notStrictEqual(Catalogue.npcTownOffers(), sharedView, 'a current shared query can read a revised rate');
     assert.strictEqual(Sources.npcOffersFor(1785), startupOffers,
         'the cold occupation contract retains its original startup-time prices');
 } finally {
-    if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = originalRate;
+    useRate(originalRate);
 }
 assert(Object.isFrozen(Towns.regionIndex.zones[0].points[0]));
 for (const loc of [Towns.towns.giran_town, Towns.towns.floran_village,
@@ -167,5 +167,41 @@ assert(gearSources.some(row => row.offer?.recordId === 706), 'backed gear remain
 sourceOwner = { characterId: 701 };
 const releasedPurchase = drain(admittedSources.options.preparePurchase(owner, 1864, 1, { npc: false })).value;
 assert.equal(releasedPurchase.lines[0].line.recordId, 701, 'leaving the party opens the same unchanged public quote');
+// OfferQuery.cheapestIn memoizes per (table, amount): a flip of the live party admission drops the memo, and a
+// memoized null answers a repeat without the town loop.
+{
+    const OfferQuery = require('../src/GameServer/Bot/Economy/OfferQuery');
+    const buyer = { characterId: 800 };
+    const priceTable = () => OfferQuery.townTable(admissionBoard, 1864, { quoteDepth: 5, excludeOwner: 800,
+        accept: line => Admission.personalOfferAllowed(line, buyer) });
+    const recordsOf = best => best.lines.map(entry => entry.line.recordId);
+    sourceOwner = { characterId: 701 };
+    const flipping = priceTable();
+    const open = OfferQuery.cheapestIn(flipping, 5);
+    assert.deepEqual(recordsOf(open), [701], 'the free conditional ask wins while its owner is unpartied');
+    assert.equal(OfferQuery.cheapestIn(flipping, 5), open, 'an unchanged admission answers from the memo');
+    assert.equal(flipping.byAmount.get(5), open);
+    sourceOwner = { characterId: 701, party: { partyId: 'busy-party' } };
+    const closed = OfferQuery.cheapestIn(flipping, 5);
+    assert.notEqual(closed, open, 'a flipped admission is repriced, not served from the memo');
+    assert.deepEqual(recordsOf(closed), [702], 'the party personal ask is no longer a source');
+    assert.deepEqual(closed, OfferQuery.cheapestIn(priceTable(), 5), 'equal to a fresh table under the same admission');
+    OfferQuery.cheapestIn(flipping, 6);
+    assert.equal(flipping.byAmount.size, 2);
+    sourceOwner = { characterId: 701 };
+    assert.deepEqual(recordsOf(OfferQuery.cheapestIn(flipping, 6)), [701]);
+    assert.equal(flipping.byAmount.size, 1, 'the flip cleared the memo, only the amount asked since is held');
+    assert(!flipping.byAmount.has(5));
+    // A memoized null: nothing fills under maxPrice 0; the second call does not walk the rows again.
+    const nothing = OfferQuery.townTable(admissionBoard, 1864, { quoteDepth: 5, maxPrice: 0 });
+    const rows = nothing.rows;
+    let walks = 0;
+    Object.defineProperty(nothing, 'rows', { get() { walks++; return rows; } });
+    assert.equal(OfferQuery.cheapestIn(nothing, 5), null);
+    assert.equal(nothing.byAmount.get(5), null, 'the null is memoized');
+    assert.equal(walks, 1);
+    assert.equal(OfferQuery.cheapestIn(nothing, 5), null);
+    assert.equal(walks, 1, 'the second call does not run the town loop');
+}
 Admission.configureTradeAdmission(id => invoke('GameServer/Bot/Population/BotLifeState').cachedState(Number(id)),
     id => invoke('GameServer/World/World').registeredActorById(Number(id))?.session);

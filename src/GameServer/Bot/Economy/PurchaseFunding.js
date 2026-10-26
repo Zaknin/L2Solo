@@ -7,19 +7,25 @@ let moneyPacketMissing = 0;
 function budget(state = {}, escrow = 0) {
     return nonnegative(state.adena ?? state.inventory?.[57]?.amount) + nonnegative(escrow);
 }
-function operatingReserve(state = {}) { return require('./EconomyContext').survivalReserve(state); }
+// EconomyContext and WishNetwork load this module at their top: each is
+// required once, at its first call, and held.
+let EconomyContext, WishNetwork;
+function operatingReserve(state = {}) {
+    // lazy: cycle EconomyContext requires PurchaseFunding at load.
+    return (EconomyContext ||= require('./EconomyContext')).survivalReserve(state);
+}
 function shortfall(state = {}, price = 0, reserve = 0, escrow = 0) {
     return Math.max(0, nonnegative(price) + nonnegative(reserve) - budget(state, escrow));
 }
 function surplus(state = {}, price = 0, reserve = 0) {
     return Math.max(0, budget(state) - nonnegative(price) - nonnegative(reserve));
 }
-function moneyReached(state) {
+function moneyReached(state, escrow = 0) {
     const packet = state?.stats?.money;
     if (!Array.isArray(packet) || packet.length < 4 || !(Number(packet[3]) > 0)) return false;
     let fundedPrice = 0;
     for (let i = 5; i < packet.length; i += 3) fundedPrice = Math.max(fundedPrice, Number(packet[i]) || 0);
-    return budget(state) - nonnegative(packet[2]) >= fundedPrice + Number(packet[3]);
+    return budget(state, escrow) - nonnegative(packet[2]) >= fundedPrice + Number(packet[3]);
 }
 function budgetFor(packet, wallet, escrow, r, capture = null) {
     let prior = 0;
@@ -77,6 +83,8 @@ function clanCredit(state, own = null) {
     return held;
 }
 function spendable(state = {}, escrow = 0, options = {}, captureOutput = null) {
+    const raid = require('../Population/RaidSupplyPolicy').purchaseBudget(state, options);
+    if (raid !== null) return raid;
     // A purchase that carries a clanPart (native terms) is its clan errand's own.
     const own = options.ownClanErrand || (options.free === true && options.clanPart !== undefined && options.itemId
         ? { selfId: options.itemId } : null);
@@ -148,6 +156,7 @@ function forOpportunity(state, opportunity, escrow = 0) {
 }
 function nativeTerms(options = {}, itemId = 0) {
     const terms = { itemId: Math.max(0, Number(itemId) || 0) };
+    if (typeof options.raidPreparationId === 'string') terms.raidPreparationId = options.raidPreparationId;
     if (Number.isFinite(Number(options.r)) || options.r === Infinity) terms.r = Number(options.r);
     if (options.valueHours !== undefined && Number.isFinite(Number(options.valueHours))) terms.valueHours = Math.max(0, Number(options.valueHours));
     if (options.survivalCost !== undefined && Number.isFinite(Number(options.survivalCost))) terms.survivalCost = Math.max(0, Number(options.survivalCost));
@@ -186,7 +195,8 @@ function packetRowWishes(funded) {
     return funded.length <= PACKET_ROWS ? funded : funded.slice(0, PACKET_ROWS - 1);
 }
 function packetFor(network, hour, reserve) {
-    const { fundable, cashCharge } = require('./WishNetwork');
+    // lazy: cycle WishNetwork requires PurchaseFunding at load.
+    const { fundable, cashCharge } = WishNetwork ||= require('./WishNetwork');
     const packet = [Math.round(hour), significant(network.moneyPrice), Math.round(reserve), Math.round(network.gap ? cashCharge(network.gap) : 0)];
     let cumulative = 0, count = 0;
     for (const wish of network.queue) {

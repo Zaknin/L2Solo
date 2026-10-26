@@ -1,7 +1,8 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const world = require('./fixtures/native_stock_world')();
 const previousRate = process.env.L2NODE_PROGRESSION_RATE;
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 
 require('../src/Global');
 
@@ -57,8 +58,7 @@ const originals = {
 const originalFormationState = {
     resolving: PopulationService.resolving,
     partyFormationRunning: PopulationService.partyFormationRunning,
-    partyFormationPending: PopulationService.partyFormationPending,
-    nextPartyRequestCleanupAt: PopulationService.nextPartyRequestCleanupAt
+    partyFormationPending: PopulationService.partyFormationPending
 };
 
 async function run() {
@@ -140,7 +140,6 @@ async function run() {
     LifeState.cachedStatesForParties = () => Promise.resolve(new Map());
     PopulationService.resolving = false;
     PopulationService.partyFormationRunning = false;
-    PopulationService.nextPartyRequestCleanupAt = Infinity;
     await PopulationService.formBackgroundParties();
     assert.strictEqual(projectionCalls, 1, 'party formation must discover the complete lightweight candidate projection once');
 
@@ -204,9 +203,18 @@ async function run() {
     // Native physical preparation ends here; the original ownership checks
     // below use mocked assignments, not persisted cold-life membership rows.
     await Database.close();
-    ColdSimulationCoordinator.requestPartyGoals = async (party, selected, options) => ({ ok: true,
-        sources: require('../src/GameServer/Bot/Population/PartyGoalCalculation').sources(selected),
-        joint: require('../src/GameServer/Bot/Population/PartyGoalPolicy').recruitment(party, selected, { timestamp: options.timestamp }) });
+    // A far party (cold leader): the pass records the pending join for the
+    // leader's step and joins nobody itself.
+    const originalFind = PartyState.find;
+    PartyState.find = () => ({ ...party, status: 'active' });
+    const pendingPass = await PopulationService.recruitBackgroundMembers(candidates);
+    PartyState.find = originalFind;
+    assert.deepStrictEqual([...pendingPass], [3, 4], 'a far party claims its recruits for this pass');
+    assert.deepStrictEqual(saved.stats.pendingRecruits, { ids: [3, 4] }, 'a far party records the pending join');
+    assert.deepStrictEqual(saved.memberIds, [1, 2]);
+    assert.deepStrictEqual(assigned, [], 'a far party joins nobody before its leader\'s check');
+    // A party near the player (hot leader): the check runs here and joins.
+    members[0] = { ...members[0], phase: 'hot' };
     const recruited = await PopulationService.recruitBackgroundMembers(candidates);
     assert.deepStrictEqual([...recruited], [3, 4]);
     assert.deepStrictEqual(assigned.map((entry) => entry.state.characterId), [3, 4]);
@@ -241,7 +249,7 @@ async function run() {
     const sharedMembers = new Map(sharedParties.map((sharedParty) => [
         sharedParty.partyId,
         sharedParty.memberIds.map((characterId, index) => ({
-            ...nativeRows[index], characterId,
+            ...nativeRows[index], characterId, phase: 'hot',
             name: `Member${characterId}`,
         }))
     ]));
@@ -333,71 +341,22 @@ async function run() {
         'clan-route',
         'a stale personal request must not hide the durable clan party objective'
     );
-    assert.strictEqual(
-        PopulationService.partyTargetNpcId({ stats: { objective: { strategy: 'craft', npcId: 701 } } }, { stats: {} }),
-        701,
-        'craft acquisition objectives must forward their material NPC to party combat'
-    );
 
     const electiveParty = { partyId: 'bgp_elective', leaderId: 11, memberIds: [11, 12], spotId: 'cruma', startedAt: 1 };
     const requiredParty = { partyId: 'bgp_required', leaderId: 21, memberIds: [21, 22], spotId: 'dion', startedAt: 2 };
-    const reclaimed = [];
-    const dissolvedReleases = [];
     const socialParty = { ...electiveParty, partyId: 'bgp_social', stats: { capacityPool: 'social' } };
     PartyState.active = () => [electiveParty, requiredParty, socialParty];
-    PartyState.setStatus = (partyId, status) => {
-        reclaimed.push({ partyId, status });
-        return Promise.resolve({ partyId, status });
-    };
-    LifeState.releaseDissolvedPartyMembers = (partyId, reason) => {
-        dissolvedReleases.push({ partyId, reason });
-        return Promise.resolve(2);
-    };
-    LifeState.partyRequirementCounts = () => Promise.resolve([
-        { partyId: 'bgp_elective', requiredMembers: 0 },
-        { partyId: 'bgp_required', requiredMembers: 2 }
-    ]);
     Config.maxBackgroundParties = 2;
     Config.partyFormationBatchSize = 2;
     assert.strictEqual(PopulationService.partyCapacityLimit(), 2, 'without a backlog the base party capacity must remain unchanged');
     assert.strictEqual(PopulationService.partyCapacityLimit(), 2, 'all requests share one capacity ceiling');
-    const released = await PopulationService.reviewBackgroundPartyDemand([
-        { characterId: 31 }, { characterId: 32 }, { characterId: 33 }, { characterId: 34 }
-    ]);
-    assert.deepStrictEqual(released, [], 'waiting candidates cannot evict an existing party');
-    assert.deepStrictEqual(reclaimed, []);
-    assert.deepStrictEqual(dissolvedReleases, []);
-
-    reclaimed.length = 0;
-    dissolvedReleases.length = 0;
-    const ordinaryRequiredA = { ...requiredParty, partyId: 'bgp_required_a', startedAt: 1, stats: { objective: { priority: 'required' } } };
-    const ordinaryRequiredB = { ...requiredParty, partyId: 'bgp_required_b', startedAt: 2, stats: { objective: { priority: 'required' } } };
-    PartyState.active = () => [ordinaryRequiredA, ordinaryRequiredB];
-    LifeState.partyRequirementCounts = () => Promise.resolve([
-        { partyId: 'bgp_required_a', requiredMembers: 2 },
-        { partyId: 'bgp_required_b', requiredMembers: 2 }
-    ]);
-    const clanWaiters = Array.from({ length: 5 }, (_, index) => ({
-        characterId: 40 + index,
-        stats: {
-            clanPartyObjective: {
-                status: 'open', priority: 'required', clanId: 77, clanOperation: 'equipment',
-                clanGoalKey: 'clan-equipment:77:40:88:7', objectiveKey: 'clan-route'
-            }
-        }
-    }));
-    const clanReleased = await PopulationService.reviewBackgroundPartyDemand(clanWaiters);
-    assert.deepStrictEqual(clanReleased, [], 'clan demand cannot evict another viable party');
 
     const activationOrder = [];
     ColdSimulationOwner.handoffToMain = async (state) => {
         activationOrder.push(`handoff:${state.characterId}`);
         return {
             ok: true,
-            ownerId: ColdSimulationOwner.LEGACY_OWNER_ID,
-            revision: Number(state.simulation?.revision || 0),
-            leaseId: null,
-            leaseUntil: 0
+            revision: Number(state.simulation?.revision || 0)
         };
     };
     const groupedState = {
@@ -432,18 +391,21 @@ async function run() {
     };
 
     Geo.getCellData = (x, y, z) => ({ z, nswe: 0 });
-    const unsafe = await HotActivation.activate(groupedState, 'party_invite', { keepStoreLocation: true });
+    const groupedInvite = await HotActivation.activate(groupedState, 'party_invite', { keepStoreLocation: true });
+    assert.strictEqual(groupedInvite.reason, 'already_grouped', 'a player invite must never dissolve an existing roster');
+    assert.deepStrictEqual(activationOrder, []);
+    const unsafe = await HotActivation.activate(groupedState, 'manual', { keepStoreLocation: true, interruptBackgroundActivity: true });
     assert.strictEqual(unsafe.reason, 'no_safe_activation_placement');
     assert.deepStrictEqual(activationOrder, [], 'unsafe placement must not hand off ownership, dissolve the party or spawn');
     Geo.getCellData = (x, y, z) => ({ z, nswe: 15 });
-    const activated = await HotActivation.activate(groupedState, 'party_invite', { keepStoreLocation: true });
+    const activated = await HotActivation.activate(groupedState, 'manual', { keepStoreLocation: true, interruptBackgroundActivity: true });
     assert.strictEqual(activated.ok, true, 'an explicitly requested grouped bot should still materialize');
     assert.deepStrictEqual(
         activationOrder,
         [
             'handoff:91001',
             'status:bgp_activation_probe:dissolved',
-            'release:bgp_activation_probe:hot_activation_party_invite',
+            'release:bgp_activation_probe:hot_activation_manual',
             'spawn:solo'
         ],
         'background party cleanup must finish before a member spawns from the released solo snapshot'
@@ -499,14 +461,14 @@ async function run() {
                 fetchId: () => 92000,
                 fetchName: () => 'ClanLeader',
                 fetchClanId: () => 77,
-                fetchLevel: () => 20,
+                fetchLevel: () => 55,
                 fetchLocX: () => 1000,
                 fetchLocY: () => 2000,
                 fetchLocZ: () => -3000
             },
             dataSendToMe() {}
         };
-        BotSocialMemory.getSnapshot = () => ({ trust: -10, familiarity: 0, recentlyAbandonedAt: Date.now() });
+        BotSocialMemory.getSnapshot = () => ({ trust: 0, familiarity: 0, recentlyAbandonedAt: Date.now() });
         BotSocialMemory.recordEvent = () => Promise.resolve();
         BotManager.botTell = () => {};
 
@@ -577,7 +539,7 @@ async function run() {
     };
     LifeState.releaseDissolvedPartyMembers = async () => 0;
     LifeState.cachedState = (characterId) => characterId === blockedState.characterId ? blockedState : null;
-    const blockedActivation = await HotActivation.activate(blockedState, 'party_invite', { keepStoreLocation: true });
+    const blockedActivation = await HotActivation.activate(blockedState, 'manual', { keepStoreLocation: true, interruptBackgroundActivity: true });
     assert.strictEqual(blockedActivation.ok, false, 'a member must not spawn while its persisted party link is still present');
     assert.strictEqual(blockedActivation.reason, 'activation_prepare_failed');
     assert(!activationOrder.some((entry) => entry.startsWith('spawn:')), 'failed party cleanup must stop hot activation before spawning');
@@ -638,8 +600,7 @@ run().catch((err) => {
     process.exitCode = 1;
 }).finally(async () => {
     SpotService.spots = originalCatalog.spots; Spots.cache = originalCatalog.profiles;
-    if (previousRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = previousRate;
+    useRate(previousRate);
     Object.assign(Geo, originalGeo);
     PartyState.active = originals.active;
     PartyState.counts = originals.counts;

@@ -1,3 +1,4 @@
+const { isDeepStrictEqual } = require('node:util');
 const StarterItemCatalog = invoke('GameServer/Knowledge/StarterItemCatalog');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Database = invoke('Database');
@@ -144,8 +145,7 @@ function targetSpot(level, index, base = {}) {
     const allSpots = SpotProfiles.ensure();
     const profiles = allSpots
         .filter((spot) => spot.minLevel <= level + 3 && spot.maxLevel >= level - 3);
-    const occupancy = SpotProfiles.currentOccupancy(allSpots);
-    const guided = LevelingRoutes.rankedSpots(profiles, state, { mode: 'solo', occupancy });
+    const guided = LevelingRoutes.rankedSpots(profiles, state, { mode: 'solo' });
     if (guided.length > 0) {
         const bestScore = guided[0].score;
         const shortlist = guided
@@ -219,7 +219,7 @@ function migratePopulationNames(states = []) {
         const isBot = /^bot_(pop|scale|craft)_/i.test(String(state.accountName || ''))
             || Boolean(state.stats?.generatedCold)
             || Number(state.stats?.generatedIndex) >= 10000;
-        const needsUpdate = Number(state.stats?.nameGeneratorVersion || 0) < NAME_GENERATOR_VERSION;
+        const needsUpdate = Number(state.nameGeneratorVersion || 0) < NAME_GENERATOR_VERSION;
         return isBot && needsUpdate;
     });
 
@@ -237,7 +237,7 @@ function migratePopulationNames(states = []) {
 function migratePopulationAppearances(states = []) {
     const candidates = states.filter((state) => (
         Boolean(state.stats?.generatedCold) || Number(state.stats?.generatedIndex) >= 10000
-    ) && Number(state.stats?.appearanceVersion || 0) < APPEARANCE_VERSION
+    ) && Number(state.appearanceVersion || 0) < APPEARANCE_VERSION
       && Number.isFinite(Number(state.stats?.generatedIndex)));
 
     return cooperativeEach(candidates, (state) => {
@@ -429,12 +429,13 @@ function stateFor(character, index, seedMeta = {}) {
     }, index);
     const vitals = seedMeta.vitals || vitalsFor(classInfo(base.classId), level);
     const now = Date.now();
-    const shotPlan = ShotStock.planFor({ classId, rank: 'none' });
 
     const initial = {
         characterId: Number(character.id),
         accountName: character.username || usernameFor(index),
         name: character.name || nameFor(index, base),
+        nameGeneratorVersion: NAME_GENERATOR_VERSION,
+        appearanceVersion: APPEARANCE_VERSION,
         level,
         exp: ProgressionCap.clampTotalExperience(Number(character.exp || expForLevel(level))),
         sp: Number(character.sp || Math.round(level * level * 3)),
@@ -464,9 +465,6 @@ function stateFor(character, index, seedMeta = {}) {
             classProgressionClassId: classId,
             generatedCold: true,
             generatedIndex: index,
-            nameGeneratorVersion: NAME_GENERATOR_VERSION,
-            appearanceVersion: APPEARANCE_VERSION,
-            sex: Number(character.sex ?? base.sex),
             levelBand: levelProfile.band,
             populationWave: seedMeta.populationWave || null,
             starterRegion: seedMeta.starterRegion || null
@@ -476,12 +474,9 @@ function stateFor(character, index, seedMeta = {}) {
                 selfId: 57,
                 name: 'Adena',
                 amount: Number(character.adena || Math.round(level * 85))
-            },
-            [shotPlan.selfId]: {
-                selfId: shotPlan.selfId,
-                name: shotPlan.name,
-                amount: ShotStock.DEFAULT_TARGET_AMOUNT
             }
+            // Shots come from the items table (refreshInventory): the seed
+            // names nothing the bot does not physically hold.
         }
     };
     if (!base.serviceCrafter) return initial;
@@ -612,13 +607,23 @@ const GeneratedColdSeeder = {
                         || existingState?.activity !== 'crafting'
                         || existingState?.currentRegion !== 'Giran';
                     return CraftShopService.ensureRecipes(state.characterId, craftShop)
-                        .then(() => (shouldSeedState || needsStationRefresh || needsServiceProfile
-                            ? LifeState.upsertState({
-                                ...state,
-                                loc: state.phase === 'cold' ? { ...craftShop.loc } : state.loc,
-                                stats: { ...(state.stats || {}), craftStationId: craftShop.stationId, craftShop }
-                            }, 'generated_craft_service')
-                            : state))
+                        // A cold crafter never resolves, so nothing else drops a
+                        // summary entry it holds no item row for: the seed pass
+                        // rebuilds its bag from the rows when the two disagree.
+                        // A hot one's bag belongs to its session.
+                        .then(() => (state.phase === 'cold' ? Database.fetchItems(state.characterId, 'generated_craft_service') : null))
+                        .then((items) => {
+                            const held = items ? LifeState.inventoryStateFromItems(state, items) : state;
+                            const needsBagRefresh = held !== state && !isDeepStrictEqual(
+                                LifeState.normalizeInventoryStackability(held.inventory),
+                                LifeState.normalizeInventoryStackability(state.inventory));
+                            if (!(shouldSeedState || needsStationRefresh || needsServiceProfile || needsBagRefresh)) return state;
+                            return LifeState.upsertState({
+                                ...held,
+                                loc: held.phase === 'cold' ? { ...craftShop.loc } : held.loc,
+                                stats: { ...(held.stats || {}), craftStationId: craftShop.stationId, craftShop }
+                            }, 'generated_craft_service');
+                        })
                         // The station publishes its workshop to bots (E212);
                         // review writes only when its entries change.
                         .then((saved) => (saved?.phase === 'cold' && LifeState.cachedState(saved.characterId)

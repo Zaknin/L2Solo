@@ -1,4 +1,5 @@
 const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
+const Diagnostics = require('../Bot/Economy/EconomyDiagnostics');
 const ItemTemplateIndex = require('../Item/ItemTemplateIndex');
 const DataCache = invoke('GameServer/DataCache');
 const NpcVisibility = invoke('GameServer/World/NpcVisibility');
@@ -13,10 +14,21 @@ const groupsByBoss = new Map();
 const minionTemplates = new Map();
 // The last ordinary leader of each spawn definition, to replace its group.
 const leaderBySpawnDefinition = new WeakMap();
-const MINION_MAINTENANCE_INTERVAL_MS = 5000;
 // C4/Lisvus Config.RAID_MINION_RESPAWN_TIME defaults to five minutes.
 const MINION_RESPAWN_DELAY_MS = 300000;
+// Raid groups short of minions, group -> boss: a minion leaving the world adds
+// its group (a death, and RaidEntityIndex announces every removal, with or
+// without a death) and the alarm visits only these.
+const refillDue = new Map();
+// One timer on the nearest respawnAt of refillDue, for the world start() bound.
+const alarm = { world: null, timer: null, at: 0 };
 const telemetry = {
+    // Fills that spawned at least one minion.
+    refills: 0,
+    // Groups the tick looked at; the tick must not touch the other groups.
+    groupVisits: 0,
+    // Groups first marked short by a removal no death announced.
+    removalFeeds: 0,
     engagements: 0,
     minionsAlerted: 0,
     lastEngagementAt: 0,
@@ -54,6 +66,10 @@ function isRaidBoss(boss) {
     return boss?.fetchIsRaidBoss?.() === true;
 }
 
+function bossAlive(boss) {
+    return boss.state?.fetchDead?.() !== true && boss.isDead?.() !== true;
+}
+
 function liveNpc(world, npc) {
     return RaidEntityIndex.has(world, npc);
 }
@@ -76,7 +92,7 @@ function minionCoords(boss) {
 
 function spawnMinion(world, boss, group) {
     const template = templateFor(group.minionId);
-    if (!template || boss.state?.fetchDead?.() === true) return null;
+    if (!template || !bossAlive(boss)) return null;
 
     const SpawnNpcs = invoke('GameServer/World/Generics/SpawnNpcs');
     // The boss ids mark raid entities for raid rules and bot safety; an
@@ -121,7 +137,7 @@ function attachBoss(world, boss) {
 }
 
 function onBossAttacked(world, boss, attacker, sourceSession) {
-    if (!boss || !attacker || boss.state?.fetchDead?.() === true || attacker.isDead?.() === true) return 0;
+    if (!boss || !attacker || !bossAlive(boss) || attacker.isDead?.() === true) return 0;
     const state = boss.minionState || attachBoss(world, boss);
     if (!state) return 0;
 
@@ -177,12 +193,7 @@ function onMinionAttacked(world, minion, attacker, sourceSession) {
     if (!minion || !attacker || minion.state?.fetchDead?.() === true || attacker.isDead?.() === true) return 0;
 
     const boss = bossForMinion(world, minion);
-    if (
-        !boss ||
-        boss.state?.fetchDead?.() === true ||
-        boss.isDead?.() === true ||
-        boss.state?.fetchCombats?.() === true
-    ) return 0;
+    if (!boss || !bossAlive(boss) || boss.state?.fetchCombats?.() === true) return 0;
 
     const session = sourceSession || {
         dataSendToMeAndOthers() {},
@@ -193,13 +204,31 @@ function onMinionAttacked(world, minion, attacker, sourceSession) {
     return onBossAttacked(world, boss, attacker, session);
 }
 
-function onMinionDeath(world, minion) {
-    const boss = RaidEntityIndex.bossFor(world, minion);
-    const group = minion?.minionGroup;
+// A group that lost a minion waits one respawn delay from the first loss.
+function markShort(boss, group) {
     if (!boss?.minionState || !group) return false;
     if (!group.respawnAt) group.respawnAt = Date.now() + MINION_RESPAWN_DELAY_MS;
+    refillDue.set(group, boss);
+    armRefill();
     return true;
 }
+
+function onMinionDeath(world, minion) {
+    return markShort(RaidEntityIndex.bossFor(world, minion), minion?.minionGroup);
+}
+
+// Every removal of a live raid minion (despawn, cleanup) passes
+// RaidEntityIndex.remove: the group is short whether or not a death announced
+// it. A corpse swept from the spawn list without that call (SpoilSweep) had its
+// death announce the group already. A boss that dropped its state (its death,
+// a leader's replacement) takes no refill.
+RaidEntityIndex.onMinionRemoved((minion, boss) => {
+    const group = minion.minionGroup;
+    const announced = refillDue.has(group);
+    if (markShort(boss, group) && !announced) {
+        DiagnosticConfig.developerDiagnostics && (telemetry.removalFeeds += 1);
+    }
+});
 
 function cleanupMinion(world, minion, sourceSession) {
     if (!liveNpc(world, minion)) return false;
@@ -218,6 +247,8 @@ function cleanupMinion(world, minion, sourceSession) {
 function removeMinions(world, boss, sourceSession) {
     const state = boss?.minionState;
     if (!state) return 0;
+    // Detached first: the removals below must not mark the groups short.
+    boss.minionState = null;
     let removed = 0;
     state.groups.forEach((group) => {
         group.members.forEach((minion) => {
@@ -225,7 +256,6 @@ function removeMinions(world, boss, sourceSession) {
         });
         group.members = [];
     });
-    boss.minionState = null;
     return removed;
 }
 
@@ -234,42 +264,86 @@ function stats() {
     return { ...telemetry };
 }
 
-function maintain(world, now = Date.now()) {
-    if (!world?.npc?.spawns) return 0;
-    let spawned = 0;
-    RaidEntityIndex.bosses(world).forEach((boss) => {
-        if (boss.state?.fetchDead?.() === true || boss.isDead?.() === true) return;
-        const state = boss.minionState || attachBoss(world, boss);
-        state?.groups?.forEach((group) => {
-            const alive = aliveMinions(world, group).length;
-            if (alive >= group.desired) {
-                group.respawnAt = 0;
-                return;
-            }
-            if (!group.respawnAt) group.respawnAt = now + MINION_RESPAWN_DELAY_MS;
-            if (now >= group.respawnAt) {
-                const before = group.members.length;
-                fillGroup(world, boss, group);
-                spawned += Math.max(0, group.members.length - before);
-                group.respawnAt = 0;
-            }
-        });
-    });
+// One group of a live boss: refill it when its respawn time came. Returns the
+// minions spawned; leaves the group in refillDue while it waits.
+function maintainGroup(world, boss, group, now) {
+    const alive = aliveMinions(world, group).length;
+    if (alive >= group.desired) {
+        group.respawnAt = 0;
+        refillDue.delete(group);
+        return 0;
+    }
+    if (!group.respawnAt) group.respawnAt = now + MINION_RESPAWN_DELAY_MS;
+    if (now < group.respawnAt) return 0;
+    const before = group.members.length;
+    fillGroup(world, boss, group);
+    group.respawnAt = 0;
+    // A spawn that failed keeps the group due and starts its next wait.
+    if (aliveMinions(world, group).length >= group.desired) refillDue.delete(group);
+    else group.respawnAt = now + MINION_RESPAWN_DELAY_MS;
+    const spawned = Math.max(0, group.members.length - before);
+    DiagnosticConfig.developerDiagnostics && spawned > 0 && (telemetry.refills += 1);
     return spawned;
 }
 
+function maintain(world, now = Date.now()) {
+    if (!world?.npc?.spawns) return 0;
+    let spawned = 0;
+    for (const [group, boss] of refillDue) {
+        // A boss that died, left the world or lost the group drops it: its
+        // death removed the minions, and its return attaches a fresh group.
+        if (!bossAlive(boss) || !liveNpc(world, boss) || boss.minionState?.groups?.includes(group) !== true) {
+            refillDue.delete(group);
+            continue;
+        }
+        DiagnosticConfig.developerDiagnostics && (telemetry.groupVisits += 1);
+        spawned += maintainGroup(world, boss, group, now);
+    }
+    armRefill();
+    return spawned;
+}
+
+// Sleeps until the nearest respawnAt of a short group. Called wherever that
+// can move: a group marked short, the end of a refill pass, start. A short
+// group is a refill wait, so no group short means no timer.
+function armRefill() {
+    if (!alarm.world) return;
+    let dueAt = Infinity;
+    for (const group of refillDue.keys()) dueAt = Math.min(dueAt, group.respawnAt || 0);
+    if (dueAt === Infinity) {
+        clearTimeout(alarm.timer);
+        alarm.timer = null;
+        alarm.at = 0;
+        return;
+    }
+    if (alarm.timer && alarm.at <= dueAt) return;
+    clearTimeout(alarm.timer);
+    alarm.at = dueAt;
+    alarm.timer = setTimeout(onRefillAlarm, Math.max(1, dueAt - Date.now()));
+    alarm.timer.unref?.();
+}
+
+function onRefillAlarm() {
+    alarm.timer = null;
+    alarm.at = 0;
+    const spawned = maintain(alarm.world);
+    DiagnosticConfig.developerDiagnostics && Diagnostics.count('raid_minions', spawned > 0 ? 'wake' : 'empty', 'refill');
+}
+
 function start(world) {
-    stop(world);
+    stop(alarm.world);
     if (!world?.npc) return null;
-    world.npc.raidBossMinionTicker = setInterval(() => maintain(world), MINION_MAINTENANCE_INTERVAL_MS);
-    world.npc.raidBossMinionTicker.unref?.();
-    return world.npc.raidBossMinionTicker;
+    alarm.world = world;
+    armRefill();
+    return alarm;
 }
 
 function stop(world) {
-    if (!world?.npc?.raidBossMinionTicker) return;
-    clearInterval(world.npc.raidBossMinionTicker);
-    world.npc.raidBossMinionTicker = undefined;
+    if (!world || alarm.world !== world) return;
+    clearTimeout(alarm.timer);
+    alarm.world = null;
+    alarm.timer = null;
+    alarm.at = 0;
 }
 
 module.exports = {

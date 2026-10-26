@@ -386,8 +386,9 @@ function botClanRaidCombatPlan(ownerSession, target) {
     if (!state || Number(state.bossId || 0) !== Number(raid.bossId || 0)) {
         state = { bossId: raid.bossId, focusMinionId: null };
     }
-    const hardControlled = (npc) => EffectStore.impairments(npc).disabled === true;
-    let focusMinion = minions.find((npc) => (
+    const Priority = require('./RaidMinionPriority');
+    const hardControlled = Priority.sleeping;
+    let focusMinion = minions.find(npc => Priority.heals(npc) && !hardControlled(npc)) || minions.find((npc) => (
         Number(objectId(npc)) === Number(state.focusMinionId || 0) && !hardControlled(npc)
     ));
     if (!focusMinion) focusMinion = minions.find((npc) => !hardControlled(npc))

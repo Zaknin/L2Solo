@@ -1,6 +1,7 @@
 // A marked equipment roster is a committed owner identity, not a head count.
 // Combat math and composition remain owned by ClanRaidPolicy.
 const Demand = require('./ClanRosterDemand');
+const ReviewEvents = require('./ClanReviewEvents');
 // Invocation authority, never persisted or cached per actor/party.
 const nativeImpact = Symbol('native-raid-offensive-impact');
 const isNativeImpact = value => value === nativeImpact;
@@ -15,7 +16,7 @@ function identity(marker) {
 const same = (left, right) => JSON.stringify(identity(left)) === JSON.stringify(identity(right));
 function inputFingerprint(member) {
     return Demand.memberFingerprint({ characterId: id(member), classId: Number(member.classId ?? member.stats?.classId ?? 0),
-        level: Number(member.level), clanId: 0, phase: 'cold', simulationOwner: 'legacy_main',
+        level: Number(member.level), clanId: 0, phase: 'cold',
         inventory: member.inventory || {}, stats: { coldCombat: member.stats?.coldCombat, hennas: member.stats?.hennas } });
 }
 const markerFor = party => party?.stats?.objective?.fullRoster || null;
@@ -49,7 +50,7 @@ function offensiveParty(session) {
         && invoke('GameServer/Bot/Population/BackgroundPartyState').find(session.hotBackgroundPartyId);
     return markerFor(party) ? party : null;
 }
-function beforeOffensiveEffect(session, actor, target, dispatchedParty = null) {
+function beforeOffensiveEffect(session, actor, target, dispatchedParty = null, paidCost = null) {
     if (!session?.hotBackgroundPartyId) return !dispatchedParty;
     const party = invoke('GameServer/Bot/Population/BackgroundPartyState').find(session.hotBackgroundPartyId);
     if (dispatchedParty && (!party || party.status !== 'hot' || party.partyId !== dispatchedParty.partyId
@@ -61,13 +62,13 @@ function beforeOffensiveEffect(session, actor, target, dispatchedParty = null) {
     if (Number(boss?.fetchSelfId?.()) !== marker.npcId
         || invoke('GameServer/RaidBoss/RaidEncounterScope').instanceId(boss) !== marker.raidInstanceId) return false;
     if (held(party)) return marker.memberIds.includes(Number(actor?.fetchId?.()));
-    return invoke('GameServer/Bot/Population/HotPartyLifecycle').openMarkedRaidAtImpact(party, session, actor, target, boss, nativeImpact);
+    return invoke('GameServer/Bot/Population/HotPartyLifecycle').openMarkedRaidAtImpact(party, session, actor, target, boss, nativeImpact, paidCost);
 }
 function assessmentMembers(members) {
-    // The native planner accepts main-owned cold states. Execution callers
-    // have already proved their actual hot/leased-party ownership separately.
+    // The native planner accepts cold states. Execution callers have already
+    // proved their actual hot or party state separately.
     return members.map(member => ({ ...member, classId: Number(member.classId ?? member.stats?.classId ?? 0),
-        phase: 'cold', simulationOwner: 'legacy_main', partyId: member.partyId || member.party?.partyId }));
+        phase: 'cold', partyId: member.partyId || member.party?.partyId }));
 }
 function selectMembers(members, objective, options = {}) {
     const marker = objective?.fullRoster;
@@ -90,17 +91,24 @@ function admission(party, members, spot, options = {}) {
         || spot.raidWorldAvailable === false) return fail('raid_roster_source_changed');
     const owner = options.owner;
     if (!owner || owner.mode !== 'autonomous' || !same(owner.marker, marker)) return fail('raid_roster_owner_changed');
+    if (owner.raidBlocked) return fail('raid_failure_blocked');
+    // A clan departure ends the roster (owner change cancels the party); the rest is transient.
     if (members.some(member => {
         const current = owner.members?.find(row => row[0] === id(member));
-        return !current || current[2] !== marker.clanId || current[1] !== Number(member.classId ?? member.stats?.classId ?? 0)
-            || Number(member.clanId ?? member.stats?.clanId) !== marker.clanId
+        return !current || current[2] !== marker.clanId || Number(member.clanId ?? member.stats?.clanId) !== marker.clanId;
+    })) return fail('raid_roster_owner_changed');
+    if (members.some(member => {
+        const current = owner.members.find(row => row[0] === id(member));
+        return current[1] !== Number(member.classId ?? member.stats?.classId ?? 0)
             || current[3] !== Number(member.level) || current[4]
             || String(member.partyId || member.party?.partyId || '') !== String(party.partyId)
             || member.phase !== (options.phase || 'cold')
-            || !['legacy_main', 'cold_simulation_owner'].includes(String(member.simulationOwner || member.simulation?.ownerId || 'legacy_main'))
             || !(Number(member.vitals?.hp ?? member.hp) > 0) || member.stats?.travel || member.stats?.tradeMeeting
             || member.stats?.playerPartyTakeover;
     })) return fail('raid_roster_member_changed');
+    if (options.phase === 'hot' && members.some(member => !invoke('GameServer/Bot/AI/RestPolicy').raidReady(member))) {
+        return fail('raid_resources_not_ready');
+    }
     if (!options.arrived) return fail('party_assembling');
     const assessment = options.assessment || require('./ClanRaidPolicy').assessment({ members: assessmentMembers(members) }, spot,
         { assignedMemberIds: marker.memberIds }, { desiredMembers: 9, requireCapabilities: true, preferredMemberIds: marker.memberIds });
@@ -113,11 +121,20 @@ async function cancelUnopened(party, reason) {
     const Parties = invoke('GameServer/Bot/Population/BackgroundPartyState');
     const current = Parties.find(party?.partyId);
     if (!current || current.status !== 'active' || held(current) || !same(markerFor(current), markerFor(party))
-        || Number(current.updatedAt) !== Number(party.updatedAt)) return false;
+        || Number(current.revision) !== Number(party.revision)) return false;
     const saved = await Parties.createOrUpdate({ ...current, status: 'dissolved', nextResolveAt: null,
         stats: { ...current.stats, partyBreakReason: reason, dissolvedAt: Date.now() } });
     if (!saved) return false;
     await invoke('GameServer/Bot/Population/BotLifeState').releaseDissolvedPartyMembers(party.partyId, reason);
+    wakeCancelled(current, reason);
     return true;
 }
-module.exports = { markerFor, identity, same, valid, exact, admitted, held, nativeHotStarted, offensiveParty, beforeOffensiveEffect, isNativeImpact, inputFingerprint, assessmentMembers, selectMembers, admission, cancelUnopened };
+// A marked party dissolved for one of these reasons leaves its clan goal executing:
+// wake its review for a new attempt. Callers wake only after the dissolve is saved.
+const CANCEL_REASONS = Object.freeze(['raid_roster_owner_changed', 'raid_roster_source_changed', 'raid_roster_not_opened', 'raid_failure_blocked']);
+function wakeCancelled(party, reason = party?.stats?.partyBreakReason) {
+    const marker = markerFor(party);
+    if (!marker || !CANCEL_REASONS.includes(reason)) return false;
+    return ReviewEvents.changed(marker.clanId, 'raid_cancelled');
+}
+module.exports = { markerFor, identity, same, valid, exact, admitted, held, nativeHotStarted, offensiveParty, beforeOffensiveEffect, isNativeImpact, inputFingerprint, assessmentMembers, selectMembers, admission, cancelUnopened, CANCEL_REASONS, wakeCancelled };

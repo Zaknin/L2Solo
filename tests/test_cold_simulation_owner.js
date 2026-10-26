@@ -31,7 +31,7 @@ function state(characterId, revision, activity = 'hunting') {
         party: { partyId: null },
         stats: {},
         inventory: {},
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision, leaseId: null, leaseUntil: 0 },
+        simulation: { revision },
         updatedAt: 1000
     };
 }
@@ -53,8 +53,9 @@ function state(characterId, revision, activity = 'hunting') {
     ]);
 
     const columns = await Database.execute(['PRAGMA table_info(bot_life_state)', []]);
-    for (const column of ['simulationOwner', 'simulationRevision', 'simulationLeaseId', 'simulationLeaseUntil']) {
-        assert(columns.some((entry) => entry.name === column), `migration must add ${column}`);
+    assert(columns.some((entry) => entry.name === 'simulationRevision'), 'migration must add simulationRevision');
+    for (const column of ['simulationOwner', 'simulationLeaseId', 'simulationLeaseUntil']) {
+        assert(!columns.some((entry) => entry.name === column), `migration 72 must drop ${column}`);
     }
     const migrations = await Database.execute(['SELECT version FROM schema_migrations WHERE version = 10', []]);
     assert.strictEqual(migrations.length, 1, 'ownership schema migration must be recorded exactly once');
@@ -79,82 +80,58 @@ function state(characterId, revision, activity = 'hunting') {
         equipmentPlan: { status: 'deferred', strategy: 'none' } } }).ok,
     'an abandoned craft return point is not an active crafting service');
 
+    // The load (its startup repair save) lands before the counted writes.
+    await BotLifeState.init();
     const initialState = state(characterId, 0);
     BotLifeState.acceptSimulationOwnership(characterId, initialState.simulation, initialState);
-    const staleLifecycleState = {
+    const beforeWrites = Number((await Database.execute([
+        'SELECT simulationRevision FROM bot_life_state WHERE characterId = ?', [characterId]]))[0].simulationRevision);
+    const queuedBeforeMigration = BotLifeState.upsertState({
         ...initialState,
-        stats: { generatedCold: true, generatedIndex: 700, lifecycleProbe: 'stale' }
-    };
-    const queuedBeforeMigration = BotLifeState.upsertState(staleLifecycleState, 'appearance_race_before');
+        stats: { generatedCold: true, generatedIndex: 700 }
+    }, 'appearance_race_before');
     const queuedMigration = BotLifeState.acceptAppearanceMetadata(characterId, 1, 2);
     const queuedNameMigration = BotLifeState.acceptNameMetadata(characterId, 'NewOwnerNick', 3);
-    const queuedAfterMigration = BotLifeState.upsertState({
-        ...staleLifecycleState,
-        stats: { ...staleLifecycleState.stats, lifecycleProbe: 'after' }
-    }, 'appearance_race_after');
-    const [, migratedLifecycle, savedAfterMigration] = await Promise.all([
+    const [queuedSave, migratedLifecycle, renamed] = await Promise.all([
         queuedBeforeMigration,
         queuedMigration,
-        queuedAfterMigration,
         queuedNameMigration
     ]);
-    assert.strictEqual(migratedLifecycle.stats.appearanceVersion, 2,
+    assert(queuedSave, 'the save queued before the migrations lands');
+    assert.strictEqual(migratedLifecycle.appearanceVersion, 2,
         'appearance migration must run in the per-character lifecycle write chain');
-    assert.strictEqual(savedAfterMigration.stats.appearanceVersion, 2,
-        'a stale queued lifecycle state must not erase newer appearance metadata');
-    assert.strictEqual(savedAfterMigration.stats.sex, 1,
-        'a stale queued lifecycle state must retain the sex paired with the newer appearance version');
-    assert.strictEqual(savedAfterMigration.name, 'NewOwnerNick', 'delayed lifecycle saves retain the migrated name');
-    assert.strictEqual(savedAfterMigration.stats.nameGeneratorVersion, 3);
-    assert.strictEqual(savedAfterMigration.stats.lifecycleProbe, 'after',
-        'appearance protection must preserve unrelated lifecycle changes');
-    const lifecycleStats = JSON.parse((await Database.execute([
-        'SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId]
-    ]))[0].statsJson);
-    assert.strictEqual(lifecycleStats.appearanceVersion, 2,
-        'serialized lifecycle persistence must keep the migrated appearance version durable');
-    assert.strictEqual(lifecycleStats.sex, 1,
-        'serialized lifecycle persistence must keep the migrated sex durable');
-    assert.strictEqual(lifecycleStats.lifecycleProbe, 'after',
-        'serialized lifecycle persistence must commit unrelated state from the later write');
+    assert.strictEqual(renamed.name, 'NewOwnerNick');
+    assert.strictEqual(renamed.nameGeneratorVersion, 3);
+    const versioned = (await Database.execute([
+        'SELECT characterName, nameGeneratorVersion, appearanceVersion FROM bot_life_state WHERE characterId = ?',
+        [characterId]
+    ]))[0];
+    assert.deepStrictEqual([versioned.characterName, Number(versioned.nameGeneratorVersion), Number(versioned.appearanceVersion)],
+        ['NewOwnerNick', 3, 2], 'the name and look versions live in their own columns');
 
-    const first = await Owner.claim(initialState, { timestamp: 1000, leaseMs: 5000, leaseId: 'lease-a' });
-    assert.strictEqual(first.ok, true, 'simple cold state must be claimable');
-    assert.strictEqual(first.revision, 1, 'claim must advance the persisted revision');
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.OWNER_ID, 'claim must update cached ownership');
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, first.revision, 'claim must update the cached revision');
-    const competing = await Owner.claim({
-        ...state(characterId, 1),
-        simulation: { ownerId: Owner.OWNER_ID, revision: 1, leaseId: 'lease-a', leaseUntil: 6000 }
-    }, { timestamp: 1500, leaseMs: 5000, leaseId: 'lease-b' });
-    assert.strictEqual(competing.reason, 'lease_active', 'an active lease must reject a competing claim');
-
-    const invalidPatch = await Database.commitColdSimulationLease({
+    // The queued save, the generated look and the name write each moved the
+    // far row's revision once, and the cache carries the written number.
+    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, beforeWrites + 3,
+        'each main write to a far row moves its revision once');
+    const [invalidPatch] = await Database.commitAndReleaseColdSimulationLeases([{
         characterId,
-        expectedRevision: first.revision,
-        ownerId: Owner.OWNER_ID,
-        leaseId: first.leaseId,
+        expectedRevision: beforeWrites + 3,
         timestamp: 1800,
-        leaseUntil: 6800,
         patch: { arbitraryColumn: 1 }
-    });
+    }]);
     assert.strictEqual(invalidPatch.reason, 'invalid_patch', 'gateway must reject fields outside the explicit bridge protocol');
 
-    const renewed = await Owner.renewActiveLeases([first], { now: () => 2000, leaseMs: 5000, canRenew: () => true });
-    assert.strictEqual(renewed.length, 1, 'active cold ownership must be renewable before its lease expires');
-    assert.strictEqual(renewed[0].ok, true);
-    assert.strictEqual(renewed[0].leaseUntil, 7000, 'renewal must extend the lease from the renewal timestamp');
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.leaseUntil, 7000,
-        'renewal must update the main ownership cache for later persistence');
-
     const migratedAppearance = await BotLifeState.acceptAppearanceMetadata(characterId, 1, 2);
-    assert.strictEqual(migratedAppearance.stats.appearanceVersion, 2,
-        'appearance metadata must patch atomically while the cold worker owns the lifecycle row');
-    assert.strictEqual(BotLifeState.cachedState(characterId).stats.appearanceVersion, 2,
+    assert.strictEqual(migratedAppearance.appearanceVersion, 2,
+        'appearance metadata must patch atomically');
+    assert.strictEqual(BotLifeState.cachedState(characterId).appearanceVersion, 2,
         'appearance migration must patch the active lifecycle cache without replacing other state');
 
+    // The worker proposes on the state it stepped from: its name and look ride along.
     const resting = {
-        ...state(characterId, first.revision, 'resting'),
+        ...state(characterId, 0, 'resting'),
+        name: BotLifeState.cachedState(characterId).name,
+        appearanceVersion: BotLifeState.cachedState(characterId).appearanceVersion,
         stats: { restUntil: 9000 },
         inventory: {
             57: { selfId: 57, name: 'Adena', amount: 500 },
@@ -163,10 +140,17 @@ function state(characterId, revision, activity = 'hunting') {
         timing: { activityStartedAt: 2000, nextResolveAt: 9000, lastResolvedAt: 2000, lastHotAt: null },
         updatedAt: 2000
     };
-    const committed = await Owner.commit(first, resting, { timestamp: 2000, leaseMs: 5000 });
+    const commitOn = (revision, nextState, timestamp) => Owner.commitBatch([{ revision, nextState }], { timestamp })
+        .then(([result]) => result);
+    // The look write during the step moved the row: the proposal built before
+    // it is refused and the step is redone on the row.
+    assert.strictEqual((await commitOn(0, resting, 2000)).reason, 'stale_revision',
+        'a proposal built before a main write is refused');
+    const step = BotLifeState.cachedState(characterId).simulation.revision;
+    const committed = await commitOn(step, resting, 2000);
     assert.strictEqual(committed.ok, true, 'owner proposal must commit through the main database gateway');
-    assert.strictEqual(committed.revision, 2, 'conditional commit must advance the revision');
-    assert.strictEqual(committed.row.activity, 'resting');
+    assert.strictEqual(committed.revision, step + 1, 'conditional commit must advance the revision');
+    assert.strictEqual(Number(committed.row.simulationRevision), committed.revision, 'the commit hands back the revision it wrote');
     assert.strictEqual(BotLifeState.cachedState(characterId).activity, 'resting', 'commit must reflect the accepted state in cache');
     assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, committed.revision, 'commit must reflect its revision in cache');
     assert.strictEqual(BotLifeState.cachedState(characterId).inventory['9999'], undefined,
@@ -176,69 +160,32 @@ function state(characterId, revision, activity = 'hunting') {
     ]))[0].inventorySummary);
     assert.strictEqual(committedInventory['9999'], undefined,
         'cold-owner persistence must not write a zero-amount inventory entry');
-    const committedStats = JSON.parse((await Database.execute([
-        'SELECT statsJson FROM bot_life_state WHERE characterId = ?', [characterId]
-    ]))[0].statsJson);
-    assert.strictEqual(committedStats.nameGeneratorVersion, 3, 'worker patches must preserve the name migration version');
+    const committedRow = (await Database.execute([
+        'SELECT statsJson, characterName, nameGeneratorVersion, appearanceVersion FROM bot_life_state WHERE characterId = ?', [characterId]
+    ]))[0];
+    // The commit patch carries no name or look version: the columns keep what their writers set.
+    assert.deepStrictEqual([committedRow.characterName, Number(committedRow.nameGeneratorVersion), Number(committedRow.appearanceVersion)],
+        ['NewOwnerNick', 3, 2], 'a commit leaves the name and its versions to their writers');
     assert.strictEqual(BotLifeState.cachedState(characterId).name, 'NewOwnerNick');
-    assert.strictEqual(committedStats.appearanceVersion, 2,
-        'a stale cold snapshot must not erase a newer appearance migration version');
-    assert.strictEqual(committedStats.sex, 1,
-        'a stale cold snapshot must preserve the sex paired with the newer appearance version');
-    assert.strictEqual(committedStats.restUntil, 9000,
-        'appearance preservation must retain the cold worker\'s unrelated stats changes');
-    assert.strictEqual(BotLifeState.cachedState(characterId).stats.appearanceVersion, 2,
-        'the main cache must reflect the protected stats returned by the database gateway');
+    assert.strictEqual(JSON.parse(committedRow.statsJson).restUntil, 9000, 'the commit writes the worker\'s stats');
+    assert.strictEqual(BotLifeState.cachedState(characterId).appearanceVersion, 2,
+        'the main cache keeps the look version over a commit');
     const committedCharacter = (await Database.fetchCharacters('owner_probe'))[0];
     assert.strictEqual(committedCharacter.name, 'NewOwnerNick');
     assert.strictEqual(Number(committedCharacter.sex), 1,
         'the same migration transaction must update the physical character appearance');
 
-    const staleCommit = await Owner.commit(first, { ...resting, activity: 'hunting' }, { timestamp: 2100, leaseMs: 5000 });
-    assert.strictEqual(staleCommit.reason, 'stale_revision', 'an old claim must never overwrite a newer revision');
-    const partitionFailure = await Owner.commit(committed, { ...resting, activity: 'crafting', stats: { craftShop: {} } }, { timestamp: 2200 });
+
+    const staleCommit = await commitOn(step, { ...resting, activity: 'hunting' }, 2100);
+    assert.strictEqual(staleCommit.reason, 'stale_revision', 'an old step must never overwrite a newer revision');
+    const partitionFailure = await commitOn(committed.revision, { ...resting, activity: 'crafting', stats: { craftShop: {} } }, 2200);
     assert.strictEqual(partitionFailure.reason, 'partition_rejected', 'owner cannot cross into a legacy-main activity');
-    const staleRelease = await Owner.release(first, { timestamp: 2300 });
-    assert.strictEqual(staleRelease.reason, 'stale_revision', 'release is CAS-protected too');
 
-    const released = await Owner.release(committed, { timestamp: 2400 });
-    assert.strictEqual(released.ok, true);
-    assert.strictEqual(released.ownerId, Owner.LEGACY_OWNER_ID);
-    assert.strictEqual(released.revision, 3);
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.LEGACY_OWNER_ID, 'release must return cached ownership to main');
-
-    const secondState = {
-        ...resting,
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: released.revision, leaseId: null, leaseUntil: 0 }
-    };
-    const second = await Owner.claim(secondState, { timestamp: 3000, leaseMs: 5000, leaseId: 'lease-c' });
-    assert.strictEqual(second.ok, true);
-    const handoff = await Owner.handoffToMain({
-        ...secondState,
-        simulation: { ownerId: Owner.OWNER_ID, revision: second.revision, leaseId: second.leaseId, leaseUntil: second.leaseUntil }
-    });
-    assert.strictEqual(handoff.reason, 'hot_handoff', 'hot activation must revoke the cold claim before spawning');
-    const postHandoffCommit = await Owner.commit(second, resting, { timestamp: 3200 });
+    const handoff = await Owner.handoffToMain(BotLifeState.cachedState(characterId), { timestamp: 3000 });
+    assert.strictEqual(handoff.reason, 'hot_handoff');
+    assert.strictEqual(handoff.revision, committed.revision + 1, 'a hot activation moves the revision before spawning');
+    const postHandoffCommit = await commitOn(committed.revision, resting, 3200);
     assert.strictEqual(postHandoffCommit.reason, 'stale_revision', 'handoff must fence a late cold commit');
-
-    const thirdState = {
-        ...resting,
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: handoff.revision, leaseId: null, leaseUntil: 0 }
-    };
-    const third = await Owner.claim(thirdState, { timestamp: 4000, leaseMs: 1000, leaseId: 'lease-d' });
-    assert.strictEqual(third.ok, true);
-    assert.strictEqual((await Owner.recoverExpiredLeases(4500)).affectedRows, 0, 'live lease must survive recovery');
-    assert.strictEqual((await Owner.recoverExpiredLeases(5001)).affectedRows, 1, 'expired owner must recover to legacy_main');
-    const recovered = (await Database.execute([
-        'SELECT simulationOwner, simulationRevision, simulationLeaseId, simulationLeaseUntil FROM bot_life_state WHERE characterId = ?',
-        [characterId]
-    ]))[0];
-    assert.strictEqual(recovered.simulationOwner, Owner.LEGACY_OWNER_ID);
-    assert.strictEqual(recovered.simulationRevision, third.revision + 1);
-    assert.strictEqual(recovered.simulationLeaseId, null);
-    assert.strictEqual(recovered.simulationLeaseUntil, 0);
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.ownerId, Owner.LEGACY_OWNER_ID, 'recovery must return cached ownership to main');
-    assert.strictEqual(BotLifeState.cachedState(characterId).simulation.revision, recovered.simulationRevision, 'recovery must reflect its revision in cache');
 
     await Database.execute([
         `UPDATE bot_life_state
@@ -247,94 +194,71 @@ function state(characterId, revision, activity = 'hunting') {
          WHERE characterId = ?`,
         [JSON.stringify({ 57: { selfId: 57, name: 'Adena', amount: 100 } }), characterId]
     ]);
-    await Database.execute(['DELETE FROM items WHERE characterId = ? AND selfId = 57', [characterId]]);
-    await Database.execute([
-        "INSERT INTO items (selfId, name, amount, equipped, slot, characterId) VALUES (57, 'Adena', 100, 0, 0, ?)",
-        [characterId]
-    ]);
-    const storedGear = [];
-    for (const enchant of [3, 2, 0]) {
-        const inserted = await Database.execute([
-            "INSERT INTO warehouse_items (selfId, name, amount, enchant, characterId) VALUES (94, 'Bec de Corbin', 1, ?, ?)",
-            [enchant, characterId]
-        ]);
-        storedGear.push({ id: Number(inserted.insertId), selfId: 94, amount: 1, enchant, npcPrice: 50 });
-    }
-    const compacted = await Database.liquidateWarehouseGear(characterId, [storedGear[2]], { source: 'test_cleanup' });
-    assert.strictEqual(compacted.ok, true, 'legacy-main cold owners may compact a selected warehouse object atomically');
-    assert.strictEqual(compacted.rowsRemoved, 1);
-    assert.strictEqual(compacted.units, 1);
-    assert.strictEqual(compacted.payout, 50);
-    assert.strictEqual(Number(compacted.state.adena), 150);
-    assert.strictEqual(JSON.parse(compacted.state.inventorySummary)['57'].amount, 150);
-    assert.strictEqual(JSON.parse(compacted.state.statsJson).lastWarehouseCompaction.source, 'test_cleanup');
-    assert.deepStrictEqual((await Database.fetchWarehouseItems(characterId))
-        .filter((item) => Number(item.selfId) === 94)
-        .map((item) => Number(item.enchant)).sort((a, b) => b - a), [3, 2],
-    'the explicit low-enchant surplus row must be removed while the two keepers survive');
-    assert.strictEqual(Number((await Database.fetchItems(characterId)).find((item) => Number(item.selfId) === 57).amount), 150,
-        'physical Adena must commit in the same transaction as warehouse removal and life-state payout');
-    await assert.rejects(
-        Database.liquidateWarehouseGear(characterId, [{ ...storedGear[0], enchant: 99 }], { source: 'stale_test' }),
-        /warehouse gear changed/,
-        'a stale object snapshot must roll the whole cleanup transaction back'
-    );
-    assert.strictEqual(Number((await Database.fetchItems(characterId)).find((item) => Number(item.selfId) === 57).amount), 150,
-        'failed cleanup must not credit Adena');
-    assert((await Database.fetchWarehouseItems(characterId)).some((item) => Number(item.id) === storedGear[0].id),
-        'failed cleanup must not remove the selected warehouse object');
-
-    const warehouseClaim = await Owner.claim({
-        ...resting,
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: recovered.simulationRevision, leaseId: null, leaseUntil: 0 }
-    }, { timestamp: 6000, leaseMs: 5000, leaseId: 'lease-warehouse' });
-    assert.strictEqual(warehouseClaim.ok, true, 'passive stored items must not starve the owner-capable lifecycle partition');
-    const leasedCleanup = await Database.liquidateWarehouseGear(characterId, [storedGear[0]], { source: 'must_not_run' });
-    assert.strictEqual(leasedCleanup.reason, 'owner_changed', 'warehouse cleanup must defer while the cold worker owns the lifecycle row');
-    const warehouseReleased = await Owner.release(warehouseClaim, { timestamp: 6100 });
-    assert.strictEqual(warehouseReleased.ok, true);
-
-    await Database.execute([
-        'UPDATE bot_life_state SET statsJson = ? WHERE characterId = ?',
-        [JSON.stringify({ warehouseWorkflow: { kind: 'release' } }), characterId]
-    ]);
-    const activeWarehouseClaim = await Database.claimColdSimulationLease({
-        characterId,
-        expectedRevision: warehouseReleased.revision,
-        ownerId: Owner.OWNER_ID,
-        leaseId: 'lease-active-warehouse',
-        timestamp: 6200,
-        leaseUntil: 11200
-    });
-    assert.strictEqual(activeWarehouseClaim.reason, 'warehouse_state', 'an active warehouse workflow must remain legacy-main');
-
-    await Database.execute(['UPDATE bot_life_state SET statsJson = ? WHERE characterId = ?',
-        [JSON.stringify({ craftReturn: { loc: { locX: 1, locY: 2 } } }), characterId]]);
-    const inventoryRace = await Owner.claim({ ...resting,
-        simulation: { ownerId: Owner.LEGACY_OWNER_ID, revision: warehouseReleased.revision }
-    }, { timestamp: 6300, leaseMs: 5000, leaseId: 'inventory-race' });
-    assert(inventoryRace.ok);
+    // A clan inventory write moves the row under a step: the step's commit is
+    // refused and the row keeps the new inventory.
+    const [beforeRace] = await Database.execute(['SELECT simulationRevision FROM bot_life_state WHERE characterId = ?', [characterId]]);
+    const raceRevision = Number(beforeRace.simulationRevision);
     const inventoryAfterClanWrite = JSON.stringify({ '1869': { selfId: 1869, amount: 42 } });
     await Database.execute([`UPDATE bot_life_state SET simulationRevision = simulationRevision + 1,
         inventorySummary = ?, statsJson = ? WHERE characterId = ?`,
-    [inventoryAfterClanWrite, JSON.stringify({ clanInventoryRevision: inventoryRace.revision + 1 }), characterId]]);
-    const rejectedCommit = await Owner.commit(inventoryRace, resting, { timestamp: 6400 });
+    [inventoryAfterClanWrite, JSON.stringify({ clanInventoryRevision: raceRevision + 1 }), characterId]]);
+    const rejectedCommit = await commitOn(raceRevision, resting, 6400);
     assert.strictEqual(rejectedCommit.reason, 'stale_revision');
-    assert.strictEqual((await Owner.releaseBatch([inventoryRace], { timestamp: 6400 }))[0].reason, 'stale_revision',
-        'ordinary release retains revision fencing');
-    const releasedRace = (await Owner.releaseBatch([inventoryRace], { timestamp: 6400, releaseInvalidated: true }))[0];
-    assert(releasedRace.ok, 'a rejected operation must release its own unchanged lease after a clan inventory write');
     const [afterRace] = await Database.execute(['SELECT * FROM bot_life_state WHERE characterId = ?', [characterId]]);
-    assert.strictEqual(afterRace.inventorySummary, inventoryAfterClanWrite, 'release must preserve new inventory');
-    assert.strictEqual(JSON.parse(afterRace.statsJson).clanInventoryRevision, inventoryRace.revision + 1);
-    assert.strictEqual(afterRace.simulationLeaseId, null);
-    assert.strictEqual(afterRace.simulationOwner, Owner.LEGACY_OWNER_ID);
-    const freshClaim = await Owner.claim({ ...resting, simulation: { revision: releasedRace.revision } },
-        { timestamp: 6500, leaseMs: 5000, leaseId: 'after-inventory-race' });
-    assert(freshClaim.ok, 'the bot can resume simulation after releasing the abandoned lease');
-    assert(!(await Owner.releaseBatch([inventoryRace], { timestamp: 6600, releaseInvalidated: true }))[0].ok,
-        'a late rejection must not release a newer lease');
-    assert((await Owner.release(freshClaim, { timestamp: 6600 })).ok);
+    assert.strictEqual(afterRace.inventorySummary, inventoryAfterClanWrite, 'a refused commit preserves the new inventory');
+    assert.strictEqual(JSON.parse(afterRace.statsJson).clanInventoryRevision, raceRevision + 1);
+
+    // A lifecycle job may retain a snapshot while the generated name/look
+    // migrations run. Its later ordinary save must keep their newer metadata
+    // in SQLite, its returned snapshot and the lifecycle cache.
+    const metadataId = Number((await Database.createCharacter('owner_probe', {
+        name: 'MetadataOld', race: 0, classId: 0, maxHp: 100, maxMp: 50,
+        sex: 0, face: 0, hair: 0, hairColor: 0, locX: 10, locY: 20, locZ: -30
+    })).insertId);
+    const metadataBefore = await BotLifeState.upsertState({
+        ...state(metadataId, 0), name: 'MetadataOld', nameGeneratorVersion: 1, appearanceVersion: 1
+    }, 'metadata_race_fixture');
+    assert(metadataBefore);
+    const appearanceWrite = BotLifeState.acceptAppearanceMetadata(metadataId, 1, 3);
+    const nameWrite = BotLifeState.acceptNameMetadata(metadataId, 'MetadataNew', 4);
+    const lateMetadataSave = BotLifeState.upsertState({
+        ...metadataBefore, activity: 'resting', stats: { restUntil: 12000 }
+    }, 'stale_metadata_snapshot');
+    const [, , metadataSaved] = await Promise.all([appearanceWrite, nameWrite, lateMetadataSave]);
+    assert(metadataSaved, 'a stale metadata snapshot can still save unrelated lifecycle changes');
+    const metadata = snapshot => [snapshot.name, snapshot.nameGeneratorVersion, snapshot.appearanceVersion];
+    assert.deepStrictEqual(metadata(metadataSaved), ['MetadataNew', 4, 3],
+        'the returned save must not roll back a migrated name or appearance version');
+    assert.deepStrictEqual(metadata(BotLifeState.cachedState(metadataId)), ['MetadataNew', 4, 3],
+        'the lifecycle cache must keep the latest metadata after a stale save');
+    const [metadataRow] = await Database.execute([
+        'SELECT characterName, nameGeneratorVersion, appearanceVersion, simulationRevision FROM bot_life_state WHERE characterId = ?',
+        [metadataId]
+    ]);
+    assert.deepStrictEqual([metadataRow.characterName, metadataRow.nameGeneratorVersion, metadataRow.appearanceVersion],
+        ['MetadataNew', 4, 3], 'the durable row must keep the latest metadata');
+    assert.strictEqual(metadataSaved.activity, 'resting');
+    assert.strictEqual(metadataSaved.stats.restUntil, 12000, 'the unrelated lifecycle update must land');
+    assert.strictEqual(Number(metadataRow.simulationRevision), metadataBefore.simulation.revision + 3,
+        'both migrations and the accepted lifecycle save advance the revision once');
+    assert.deepStrictEqual(metadata(metadataBefore), ['MetadataOld', 1, 1],
+        'preserving current metadata must not mutate the caller\'s old snapshot');
+    const [physicalMetadata] = await Database.execute(['SELECT name, sex FROM characters WHERE id = ?', [metadataId]]);
+    assert.deepStrictEqual([physicalMetadata.name, physicalMetadata.sex], ['MetadataNew', 1],
+        'the life row must agree with the migrated physical character');
+
+    const sameVersionSave = await BotLifeState.upsertState({
+        ...metadataSaved, name: 'StaleActorName', appearanceVersion: undefined
+    }, 'same_version_stale_name');
+    assert(sameVersionSave);
+    assert.deepStrictEqual(metadata(sameVersionSave), ['MetadataNew', 4, 3],
+        'a stale actor name with the same version and an omitted look version cannot undo metadata');
+    await BotLifeState.acceptNameMetadata(metadataId, 'MetadataNewest', 5);
+    await BotLifeState.acceptAppearanceMetadata(metadataId, 0, 4);
+    const newerMetadataSave = await BotLifeState.upsertState(sameVersionSave, 'metadata_migrated_again');
+    assert(newerMetadataSave);
+    assert.deepStrictEqual(metadata(newerMetadataSave), ['MetadataNewest', 5, 4],
+        'subsequent migrations must still advance and survive later saves');
 
     // Developer diagnostics: an item read counts under its call-site tag.
     await Database.fetchItems(characterId, 'owner_probe');
@@ -342,7 +266,7 @@ function state(characterId, revision, activity = 'hunting') {
 
     const dbStats = Database.stats();
     assert.strictEqual(path.resolve(dbStats.path), path.resolve(databasePath), 'all owner operations must use the one configured SQLite gateway');
-    console.log('Cold simulation owner claim, CAS, handoff, and recovery checks passed');
+    console.log('Cold simulation owner revision fence and handoff checks passed');
 })().catch((error) => {
     console.error(error);
     process.exitCode = 1;

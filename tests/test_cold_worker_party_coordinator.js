@@ -10,7 +10,6 @@ const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const PartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
-const Owner = invoke('GameServer/Bot/Population/ColdSimulationOwner');
 const Metrics = invoke('GameServer/Bot/Population/PopulationMetrics');
 const { ColdSimulationCoordinator } = require('../src/GameServer/Bot/Population/ColdSimulationCoordinator');
 const databasePath = path.join(process.cwd(), 'tmp', 'test-cold-worker-party-coordinator.sqlite');
@@ -52,6 +51,13 @@ async function createMember(index, spot, dueAt) {
             // This fixture exercises combat transport, not an unarmed bot's
             // legitimate departure to buy its first usable weapon.
             JSON.stringify({ 1: { selfId: 1, amount: 1, equipped: true, equippedCount: 1, equippedSlots: [7], slot: 7 } }), dueAt]
+    ]);
+    // The physical row the summary names: a commit whose step does not move
+    // the bag leaves the items table as it is, and a main write that rebuilds
+    // the summary from it (cold training) must find the weapon there.
+    await Database.execute([
+        `INSERT INTO items (selfId, name, amount, enchant, equipped, slot, characterId) VALUES (1, 'Short Sword', 1, 0, 1, 7, ?)`,
+        [Number(character.id)]
     ]);
     return Number(character.id);
 }
@@ -117,6 +123,11 @@ let coordinator = null;
     ]);
     assert.strictEqual(await PartyState.init(), true);
     assert.strictEqual(await LifeState.init(), true);
+    // Progress is read against the rows the boot loaded: the boot shift moved
+    // the fixture's timers by the pause since their last write.
+    const loadedResolvedAt = new Map(memberIds.map(id => [id, Number(LifeState.cachedState(id).timing.lastResolvedAt)]));
+    const loadedPartyDue = Number(PartyState.find('worker-party').nextResolveAt);
+    const advanced = row => Number(row.lastResolvedAt) > loadedResolvedAt.get(Number(row.characterId));
 
     coordinator = new ColdSimulationCoordinator();
     let mainCommands = 0;
@@ -139,11 +150,10 @@ let coordinator = null;
     let rows = [];
     while (Date.now() < deadline) {
         rows = await Database.execute([
-            `SELECT characterId, exp, lastResolvedAt, simulationOwner, simulationRevision,
-                    simulationLeaseId, simulationLeaseUntil
+            `SELECT characterId, exp, lastResolvedAt, simulationRevision
              FROM bot_life_state WHERE partyId = 'worker-party' ORDER BY characterId`, []
         ]);
-        if (rows.length === 2 && rows.every((row) => Number(row.simulationRevision) >= 2 && Number(row.lastResolvedAt) > dueAt)) break;
+        if (rows.length === 2 && rows.every((row) => Number(row.simulationRevision) >= 2 && advanced(row))) break;
         await wait(100);
     }
     const [partyRow] = await Database.execute([
@@ -161,7 +171,7 @@ let coordinator = null;
         [...requiredIds].sort((a, b) => a - b),
         'worker proposal must contain the compatible unassigned required requests'
     );
-    const goalMembers = await LifeState.statesByIds(requiredIds, { ownerId: 'legacy_main', unassigned: true });
+    const goalMembers = await LifeState.statesByIds(requiredIds, { unassigned: true });
     const goalParty = { partyId: 'worker-first-goal', memberIds: goalMembers.map(member => member.characterId),
         leaderId: goalMembers[0].characterId, stats: { objective: { sourceKind: 'raid', spotId: spot.id } } };
     const goalResult = await coordinator.requestPartyGoals(goalParty, goalMembers);
@@ -174,17 +184,18 @@ let coordinator = null;
     const CraftShop = invoke('GameServer/Bot/Economy/CraftShopService');
     const Workshop = require('../src/GameServer/Bot/Economy/CraftWorkshopService');
     const Codec = require('../src/GameServer/Bot/Economy/RecipeBookCodec');
-    const recipe = Object.values(invoke('GameServer/Items/C4RecipeItems').loadRecipeItems()).find(row => row.type === 'dwarven');
-    const originalService = CraftShop.isServiceCrafter, originalBook = Workshop.bookFor;
+    const originalService = CraftShop.isServiceCrafter;
     const originalPost = coordinator.post;
-    let book = Codec.pack([]), sentKnowledge;
+    let sentKnowledge;
     CraftShop.isServiceCrafter = () => true;
-    Workshop.bookFor = () => book;
+    // Main's recipe cache holds each member's book (none learned yet).
+    await Promise.all(goalMembers.map(member => Workshop.knownFor(member.characterId)));
     coordinator.post = function(type, payload, ...args) {
         const sent = originalPost.call(this, type, payload, ...args);
         if (type === 'party_goal_request') {
             sentKnowledge = payload.recipeKnowledge;
-            book = Codec.pack([recipe.recipeId]);
+            // A learning while the reply is awaited drops main's cached book.
+            Workshop.recipesChanged(goalMembers[0].characterId);
         }
         return sent;
     };
@@ -194,7 +205,7 @@ let coordinator = null;
         assert.equal(changedKnowledge.reason, 'party_goal_source_changed', 'knowledge learned while awaiting reply rejects stale goals');
         assert.equal(coordinator.partyGoalRequests, 0);
     } finally {
-        CraftShop.isServiceCrafter = originalService; Workshop.bookFor = originalBook; coordinator.post = originalPost;
+        CraftShop.isServiceCrafter = originalService; coordinator.post = originalPost;
     }
     const largeMembers = await LifeState.statesForParty('worker-party');
     assert(require('../src/GameServer/Bot/Population/ColdSimulationProtocol').byteLength({ members: largeMembers }) > 256 * 1024,
@@ -211,10 +222,8 @@ let coordinator = null;
     const preserved = await Database.execute([`SELECT statsJson FROM bot_life_state WHERE partyId = 'worker-party'`, []]);
     assert(preserved.every(row => JSON.parse(row.statsJson).transportFixture.length === 140000),
         'sparse transport must preserve unchanged durable state for every party member');
-    assert(rows.every((row) => Number(row.lastResolvedAt) > dueAt));
-    assert(rows.every((row) => row.simulationOwner === Owner.LEGACY_OWNER_ID
-        && row.simulationLeaseId === null && Number(row.simulationLeaseUntil) === 0));
-    assert(Number(partyRow.nextResolveAt) > dueAt, 'leader commit must durably advance the party schedule');
+    assert(rows.every(advanced));
+    assert(Number(partyRow.nextResolveAt) > loadedPartyDue, 'leader commit must durably advance the party schedule');
     assert(Number(JSON.parse(partyRow.statsJson).fightsResolved || 0) >= 1);
     const memories = (await Database.loadInteractionMemories(memberIds)).map(snapshot => ({ ownerId: snapshot.ownerId, snapshotJson: JSON.stringify(snapshot) }));
     assert.strictEqual(memories.length, 2, 'real worker wins must commit mutual hunt memory');
@@ -234,14 +243,12 @@ let coordinator = null;
 
     await coordinator.stop();
     const cachedState = LifeState.cachedState;
-    const claimed = { characterId: 99, simulation: { ownerId: 'worker', revision: 4, leaseId: 'lease' }, stats: { keep: 1 } };
+    const claimed = { characterId: 99, simulation: { revision: 4 }, stats: { keep: 1 } };
     LifeState.cachedState = () => claimed;
     try {
         const delta = require('../src/GameServer/Bot/Population/ColdStateDelta').create(claimed, { ...claimed, hp: 25 });
-        assert.strictEqual(await coordinator.prepareProposal({ characterId: 99, token: { ownerId: 'worker', revision: 3, leaseId: 'lease' }, nextStateDelta: delta }), null,
+        assert.strictEqual(await coordinator.prepareProposal({ characterId: 99, revision: 3, nextStateDelta: delta }), null,
             'a sparse result must never be applied to a newer revision');
-        assert.strictEqual(await coordinator.prepareProposal({ characterId: 99, token: { ownerId: 'worker', revision: 4, leaseId: 'different' }, nextStateDelta: delta }), null,
-            'a sparse result must never be applied to another lease');
     } finally { LifeState.cachedState = cachedState; }
     console.log('Cold worker party compute and durable batch-CAS integration checks passed');
 })().catch((error) => {
