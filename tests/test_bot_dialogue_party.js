@@ -4,7 +4,6 @@ const Party = invoke('GameServer/Bot/AI/BotDialogueParty');
 const Brain = invoke('GameServer/Bot/AI/BotBrain');
 const Remote = invoke('GameServer/Bot/AI/BotRemoteChat');
 const Availability = invoke('GameServer/Bot/AI/BotAvailability');
-const PersonaPolicy = invoke('GameServer/Bot/AI/PersonaPartyDecisionPolicy');
 const Social = invoke('GameServer/Bot/AI/BotSocialMemory');
 const Memory = invoke('GameServer/Social/InteractionMemoryRuntime');
 const MemoryPolicy = invoke('GameServer/Social/InteractionMemoryPolicy');
@@ -53,7 +52,7 @@ async function main() {
     const state = { characterId: 72002, name: 'SEMMANA', level: 52, activity: 'hunting',
         loc: { locX: 0, locY: 0, locZ: 0 }, vitals: { hp: 100, maxHp: 100 }, inventory: {}, stats: {} };
     Memory.accept(MemoryPolicy.empty(state.characterId));
-    const saved = { ai: options.default.AI, router: options.default.OpenRouter, policy: PersonaPolicy.evaluate,
+    const saved = { ai: options.default.AI, router: options.default.OpenRouter, snapshot: Social.getSnapshot, peek: Social.peekSnapshot,
         load: Social.load, record: Social.recordEvent, summarize: Summarizer.summarize,
         recent: Events.recentForBot, root: Tracing.withRootObservation,
         observation: Tracing.withObservation, cached: LifeState.cachedState,
@@ -68,36 +67,32 @@ async function main() {
         Social.recordEvent = async () => null;
         Summarizer.summarize = async () => ({ ok: false, reason: 'isolated_party_fixture' });
         Social.load = async () => { loaded = true; return Social.peekSnapshot(player, state); };
-        PersonaPolicy.evaluate = () => {
-            assert(loaded, 'membership evaluation must follow the awaited relationship load');
-            return { accept, reason: accept ? 'available' : 'prefers_solo',
-                reasonText: accept ? 'available' : 'prefers a solo run for now' };
-        };
+        Social.getSnapshot = Social.peekSnapshot = () => ({ trust: accept ? 0 : -10, familiarity: 0 });
         Events.recentForBot = async () => [];
         Tracing.withRootObservation = (_name, _input, _meta, work) => work(null);
         Tracing.withObservation = (_name, _input, _meta, work) => work(null);
         LifeState.cachedState = id => id === state.characterId ? latest : saved.cached(id);
         Gateway.setTransport(async () => {
             calls++;
-            if (changeDuringInference) latest = { ...state, vitals: { hp: 0, maxHp: 100 } };
+            if (changeDuringInference) latest = { ...state, party: { partyId: 'new-party' } };
             return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({
                 action, partyIntent, reply: modelSpeech, reason: 'model_promise', confidence: 1
             }) } }] }) };
         });
         const refused = await Remote.replyForState(player, state, "I'm not, I'm trying to understand if we can party");
-        assert.equal(refused.reason, 'party_policy:prefers_solo');
+        assert.equal(refused.reason, 'party_policy:relationship_hostile');
         assert.match(refused.reply, /cannot join right now/);
         assert(!refused.reply.includes("I'll join"));
         for (const text of ['Can we form a party?', 'Are you up for a party?', 'Would tagging along make sense?']) {
-            assert.equal((await Remote.replyForState(player, state, text)).reason, 'party_policy:prefers_solo', text);
+            assert.equal((await Remote.replyForState(player, state, text)).reason, 'party_policy:relationship_hostile', text);
         }
         for (const text of ['Can you join my party with the other players?', 'I need someone to party with. Can you join me?']) {
             partyIntent = 'membership';
-            assert.equal((await Remote.replyForState(player, state, text)).reason, 'party_policy:prefers_solo', text);
+            assert.equal((await Remote.replyForState(player, state, text)).reason, 'party_policy:relationship_hostile', text);
         }
         modelSpeech = 'You can invite HealerOne; I can check which other players are available.';
         assert.equal((await Remote.replyForState(player, state, 'Who can join our party?')).reason,
-            'party_policy:prefers_solo', 'semantic membership intent cannot bypass policy just because candidates are mentioned');
+            'party_policy:relationship_hostile', 'semantic membership intent cannot bypass policy just because candidates are mentioned');
         partyIntent = 'none';
         for (const text of ['Can you join my clan?', 'How do I invite you to my clan?',
             'I am already in a party, can you join my clan?', 'I am in a party and can you join my clan?',
@@ -119,7 +114,7 @@ async function main() {
             'Can you join my clan? Would having you in our party make sense too?',
             'Could you join my clan? Are we a good match for a party?']) {
             assert.equal((await Remote.replyForState(player, state, text)).reason,
-                'party_policy:prefers_solo', 'semantic membership intent takes precedence over unrelated clan context');
+                'party_policy:relationship_hostile', 'semantic membership intent takes precedence over unrelated clan context');
         }
         partyIntent = 'none'; modelSpeech = "Absolutely, I'll join your party!";
         for (const [text, speech] of [
@@ -157,19 +152,18 @@ async function main() {
         partyIntent = 'none';
         action = 'say';
         changeDuringInference = true;
-        const died = await Remote.replyForState(player, state, 'can we party?');
-        assert.equal(died.reason, 'party_policy:bot_dead', 'delivery must recheck the current state, not the original snapshot');
-        assert.match(died.reply, /died/);
-        assert.equal(Availability.evaluateState(player, latest).reason, 'bot_dead', 'zero HP is not one HP');
+        const grouped = await Remote.replyForState(player, state, 'can we party?');
+        assert.equal(grouped.reason, 'party_policy:already_grouped', 'delivery must recheck the current state, not the original snapshot');
+        assert.equal(Availability.evaluateState(player, { ...state, vitals: { hp: 0 } }).available, true, 'death does not veto a player invitation');
         assert.equal(Availability.evaluateState(player, { ...state, party: { partyId: 'native-party' } }).reason, 'already_grouped');
         const hot = { actor: actor(state.characterId, 'HotBot') };
         accept = false;
         const hotReply = Brain.applyPartyPolicy(hot, { action: 'say', reply: "I'll join", confidence: 1 },
             { playerSession: player }, 'maybe we can group');
-        assert.equal(hotReply.reason, 'party_policy:prefers_solo');
+        assert.equal(hotReply.reason, 'party_policy:relationship_hostile');
         const indirect = Brain.applyPartyPolicy(hot, { action: 'say', partyIntent: 'membership', reply: 'Sounds good!', confidence: 1 },
             { playerSession: player }, 'Would having you with us make sense?');
-        assert.equal(indirect.reason, 'party_policy:prefers_solo', 'the hot path must honor semantic membership intent too');
+        assert.equal(indirect.reason, 'party_policy:relationship_hostile', 'the hot path must honor semantic membership intent too');
         const mixed = Brain.applyPartyPolicy(hot, { action: 'follow_player', partyIntent: 'membership', reply: modelSpeech },
             { playerSession: player }, 'Come here so I can invite you to my party.');
         assert.equal(mixed.action, 'follow_player', 'a single-bot approach must not become a whole-party regroup');
@@ -180,7 +174,7 @@ async function main() {
         console.log('Dialogue party consistency regressions passed');
     } finally {
         options.default.AI = saved.ai; options.default.OpenRouter = saved.router;
-        PersonaPolicy.evaluate = saved.policy; Social.load = saved.load; Events.recentForBot = saved.recent;
+        Social.getSnapshot = saved.snapshot; Social.peekSnapshot = saved.peek; Social.load = saved.load; Events.recentForBot = saved.recent;
         Social.recordEvent = saved.record; Summarizer.summarize = saved.summarize;
         Tracing.withRootObservation = saved.root; Tracing.withObservation = saved.observation;
         LifeState.cachedState = saved.cached; Gateway.resetTransport(); Budget.reset(); Memory.forget(state.characterId);

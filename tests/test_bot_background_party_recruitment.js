@@ -390,18 +390,21 @@ async function run() {
     };
 
     Geo.getCellData = (x, y, z) => ({ z, nswe: 0 });
-    const unsafe = await HotActivation.activate(groupedState, 'party_invite', { keepStoreLocation: true });
+    const groupedInvite = await HotActivation.activate(groupedState, 'party_invite', { keepStoreLocation: true });
+    assert.strictEqual(groupedInvite.reason, 'already_grouped', 'a player invite must never dissolve an existing roster');
+    assert.deepStrictEqual(activationOrder, []);
+    const unsafe = await HotActivation.activate(groupedState, 'manual', { keepStoreLocation: true, interruptBackgroundActivity: true });
     assert.strictEqual(unsafe.reason, 'no_safe_activation_placement');
     assert.deepStrictEqual(activationOrder, [], 'unsafe placement must not hand off ownership, dissolve the party or spawn');
     Geo.getCellData = (x, y, z) => ({ z, nswe: 15 });
-    const activated = await HotActivation.activate(groupedState, 'party_invite', { keepStoreLocation: true });
+    const activated = await HotActivation.activate(groupedState, 'manual', { keepStoreLocation: true, interruptBackgroundActivity: true });
     assert.strictEqual(activated.ok, true, 'an explicitly requested grouped bot should still materialize');
     assert.deepStrictEqual(
         activationOrder,
         [
             'handoff:91001',
             'status:bgp_activation_probe:dissolved',
-            'release:bgp_activation_probe:hot_activation_party_invite',
+            'release:bgp_activation_probe:hot_activation_manual',
             'spawn:solo'
         ],
         'background party cleanup must finish before a member spawns from the released solo snapshot'
@@ -457,14 +460,14 @@ async function run() {
                 fetchId: () => 92000,
                 fetchName: () => 'ClanLeader',
                 fetchClanId: () => 77,
-                fetchLevel: () => 20,
+                fetchLevel: () => 55,
                 fetchLocX: () => 1000,
                 fetchLocY: () => 2000,
                 fetchLocZ: () => -3000
             },
             dataSendToMe() {}
         };
-        BotSocialMemory.getSnapshot = () => ({ trust: -10, familiarity: 0, recentlyAbandonedAt: Date.now() });
+        BotSocialMemory.getSnapshot = () => ({ trust: 0, familiarity: 0, recentlyAbandonedAt: Date.now() });
         BotSocialMemory.recordEvent = () => Promise.resolve();
         BotManager.botTell = () => {};
 
@@ -535,7 +538,7 @@ async function run() {
     };
     LifeState.releaseDissolvedPartyMembers = async () => 0;
     LifeState.cachedState = (characterId) => characterId === blockedState.characterId ? blockedState : null;
-    const blockedActivation = await HotActivation.activate(blockedState, 'party_invite', { keepStoreLocation: true });
+    const blockedActivation = await HotActivation.activate(blockedState, 'manual', { keepStoreLocation: true, interruptBackgroundActivity: true });
     assert.strictEqual(blockedActivation.ok, false, 'a member must not spawn while its persisted party link is still present');
     assert.strictEqual(blockedActivation.reason, 'activation_prepare_failed');
     assert(!activationOrder.some((entry) => entry.startsWith('spawn:')), 'failed party cleanup must stop hot activation before spawning');

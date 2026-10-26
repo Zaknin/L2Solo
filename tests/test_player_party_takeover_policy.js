@@ -78,7 +78,7 @@ async function run() {
     result = await Takeover.evaluate(player(20), party, members);
     assert.strictEqual(result.reason, 'relationship_hostile', 'one hostile member should veto a non-clan request');
 
-    // Social refusals of one member: trust -6 or lower, or an abandonment in the last five minutes.
+    // A recent departure alone is not a hostile relationship.
     const refusalFor = async (memory) => {
         BotAvailability.evaluateState = (_player, candidate) => ({ relationshipReason: null,
             memory: candidate.characterId === 2 ? memory : { trust: 0, recentlyAbandonedAt: null } });
@@ -88,7 +88,7 @@ async function run() {
     assert.strictEqual(await refusalFor({ trust: -6, recentlyAbandonedAt: null }), 'relationship_hostile');
     assert.strictEqual(await refusalFor({ trust: -6, recentlyAbandonedAt: Date.now() }), 'relationship_hostile');
     assert.strictEqual(await refusalFor({ trust: -5, recentlyAbandonedAt: null }), 'ok');
-    assert.strictEqual(await refusalFor({ trust: 0, recentlyAbandonedAt: Date.now() - 5 * 60 * 1000 + 2000 }), 'recently_abandoned');
+    assert.strictEqual(await refusalFor({ trust: 0, recentlyAbandonedAt: Date.now() - 5 * 60 * 1000 + 2000 }), 'ok');
     assert.strictEqual(await refusalFor({ trust: 0, recentlyAbandonedAt: Date.now() - 5 * 60 * 1000 - 1 }), 'ok');
 
     ClanService.findById = id => Number(id) === 77

@@ -461,6 +461,22 @@ async function cancel(characterId) {
     }
     return { ok: true, cancelled: rows.length > 0 };
 }
+// A player invitation replaces personal trading. Retire both an unaccepted
+// preparation and accepted custody through the native refund/receipt path
+// before party ownership changes; autonomous formation still waits for trades.
+async function prepareForPlayerParty(characterId) {
+    const preparation = preparationOf(characterId);
+    if (preparation) discard(preparation);
+    const rows = await db().fetchTradeMeetingsForOwner(Number(characterId));
+    for (const row of rows) {
+        const result = await db().cancelTradeMeeting(row.id, 'player_party_invite');
+        acceptRows(result);
+        await finishMeeting(result.meeting);
+    }
+    // A terminal receipt can still be enrolled while its event queue waits.
+    await processOwner(Number(characterId));
+    return canJoinParty(characterId);
+}
 async function trade(characterId, store, itemId, amount, options) {
     const prepared = await prepareTrade(characterId, store, itemId, amount, options);
     if (!prepared.preparationId) return prepared;
@@ -500,19 +516,22 @@ function wake(id) {
 async function processOwner(id) {
     for (const meetingId of [...(enrolled.get(id) || [])].slice(0, MAX_COMMITMENTS)) await processMeeting(id, meetingId);
 }
+async function finishMeeting(row) {
+    await syncActors(row);
+    await afk().settleOwners([row.actorA, row.actorB]);
+    await refreshMeetingRecords(row);
+    for (const actor of [row.actorA, row.actorB]) await db().acknowledgeTradeMeeting(row.id, actor);
+    notifyResult(row.token, [row.actorA, row.actorB], {
+        pending: false, token: row.token, meetingId: row.id, outcome: row.state });
+    unenroll(row.actorA, row.id); unenroll(row.actorB, row.id);
+}
 async function processMeeting(id, meetingId) {
     const row = await db().fetchTradeMeeting(meetingId);
     if (!enrolled.has(id)) return;
     if (!row) { unenroll(id, meetingId); return; }
     trackPlayerWaiting(row);
     if (row.state !== 'accepted') {
-        await syncActors(row);
-        await afk().settleOwners([row.actorA, row.actorB]);
-        await refreshMeetingRecords(row);
-        for (const actor of [row.actorA, row.actorB]) await db().acknowledgeTradeMeeting(row.id, actor);
-        notifyResult(row.token, [row.actorA, row.actorB], {
-            pending: false, token: row.token, meetingId: row.id, outcome: row.state });
-        unenroll(row.actorA, row.id); unenroll(row.actorB, row.id);
+        await finishMeeting(row);
         return;
     }
     const state = life().cachedState(id), session = sessionFor(id);
@@ -646,6 +665,6 @@ async function init() {
         await new Promise(resolve => setImmediate(resolve));
     }
 }
-module.exports = { stage, discard, hasPreparation, preparationOf, canJoinParty, accept, cancel, receipt, waitForResult, prepareTrade, trade, wake, init, reset, presenceChanged,
+module.exports = { stage, discard, hasPreparation, preparationOf, canJoinParty, prepareForPlayerParty, accept, cancel, receipt, waitForResult, prepareTrade, trade, wake, init, reset, presenceChanged,
     adjustTransportPages,
     counters: () => ({ preparations: staged.size, pages: pages + transportPages, bytes: transportBytes + [...staged.values()].reduce((total, row) => total + row.bytes, 0), queued: queue.size, participants: enrolled.size }) };

@@ -338,6 +338,7 @@ const tests = [
     'tests/test_bot_trade_database.js',
     'tests/test_bot_availability.js',
     'tests/test_remote_party_invite_decision.js',
+    'tests/test_player_party_trade_interruption.js',
     'tests/test_clan_invite_priority.js',
     'tests/test_clan_recruitment_relations.js',
     'tests/test_bot_party_menu.js',
