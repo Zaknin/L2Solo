@@ -9,6 +9,7 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 const { Worker } = require('node:worker_threads');
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
@@ -122,7 +123,7 @@ function bot(characterId, extra = {}) {
     invoke('GameServer/DataCache').init();
     const epoch = 'native:room-at-arrival', messages = [];
     let fault;
-    const worker = new Worker(wrapper, { eval: true, workerData: { workerEpoch: epoch,
+    const worker = new Worker(wrapper, { eval: true, workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: epoch,
         workerPath: root + '/src/GameServer/Bot/Population/ColdSimulationWorker.js', observer } });
     try {
         worker.on('message', message => messages.push(message));

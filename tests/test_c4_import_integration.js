@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { useGeneral } = require('./helpers/progressionRate');
 const { createWorld, Service, Database, DataCache } = require('./helpers/c4QuestHarness');
 const Actor = invoke('GameServer/Actor/Actor');
 
@@ -92,9 +93,9 @@ async function bountyUsesServerRates(world) {
         for (let i = 0; i < 70; i++) await world.kill(session, 316);
     } finally { Math.random = random; }
     const previous = options.default.General.questAdenaRate;
-    options.default.General.questAdenaRate = 2;
+    useGeneral({ questAdenaRate: 2 });
     try { await world.event(session, 275, 'reward', 7567); }
-    finally { options.default.General.questAdenaRate = previous; }
+    finally { useGeneral({ questAdenaRate: previous }); }
     assert.equal(await world.amount(9003, 57), 8400, 'imported bounty honors quest adena rates');
 }
 

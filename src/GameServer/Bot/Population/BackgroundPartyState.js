@@ -242,7 +242,7 @@ function normalize(row) {
 // The bots' downtime (BotLifeState.bootPause, L136) moves the active parties'
 // due times too: the party row is the leader's scheduling authority. Before
 // loadActive, so the cache reads the moved row (its updatedAt moves by the same
-// delta for the next boot's measure).
+// delta, so the party commit fence still matches the row).
 function shiftDueTimesByDowntime() {
     return BotLifeState.bootPause().then(({ startedAt, downtimeMs }) => {
         if (!(downtimeMs > 0)) return 0;

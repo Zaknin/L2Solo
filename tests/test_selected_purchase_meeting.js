@@ -1,8 +1,9 @@
 'use strict';
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 require('./helpers/databaseIsolation');
 process.env.L2NODE_CONFIG_FILE = 'config/default.ini';
-process.env.L2NODE_PROGRESSION_RATE = 'x50';
+useRate('x50');
 delete process.env.L2NODE_SHARED_CONFIG_FILE;
 require('../src/Global');
 invoke('GameServer/DataCache').init();

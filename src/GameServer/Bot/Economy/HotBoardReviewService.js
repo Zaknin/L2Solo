@@ -96,6 +96,7 @@ class HotBoardReviewService {
         if (session.tradeMeetingPresence) require('../../AfkTrade/TradeMeetingService').wake(session.actor.fetchId());
         if (!this.running) return false;
         const id = Number(session.actor?.fetchId?.());
+        // lazy: cycle ColdSimulationCoordinator loads this service
         invoke('GameServer/Bot/Population/ColdSimulationCoordinator').requestEconomyLook(id);
         this.ownerChanged(id, 'natural');
         return true;

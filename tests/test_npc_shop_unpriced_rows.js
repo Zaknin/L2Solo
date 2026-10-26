@@ -1,7 +1,8 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 
 const previousRate = process.env.L2NODE_PROGRESSION_RATE;
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 
 require('../src/Global');
 
@@ -53,8 +54,7 @@ try {
     // unpriced row is bought at its scaled price, not at the raw base price.
     assert.strictEqual(StaticMerchantPricing.cheapestPurchase(LEATHER_HELMET), scaled(LEATHER_HELMET));
 } finally {
-    if (previousRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = previousRate;
+    useRate(previousRate);
 }
 
 console.log('NPC shop unpriced row checks passed');

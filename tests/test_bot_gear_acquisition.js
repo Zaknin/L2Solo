@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 
 require('./helpers/databaseIsolation');
 const isolated = require('./helpers/isolatedSocialDatabase')('gear-acquisition-goals');
@@ -228,20 +229,19 @@ const caveMaidenSpot = {
     npcEntries: [{ selfId: 134, name: 'Cave Maiden', count: 4 }]
 };
 const caveMaidenSpots = [caveMaidenSpot];
-process.env.L2NODE_PROGRESSION_RATE = 'x1';
+useRate('x1');
 const steelSourceAtX1 = GearAcquisitionPlanner.sourceForItem(1880, caveMaidenSpots, { level: 52 })[0];
-process.env.L2NODE_PROGRESSION_RATE = 'x50';
+useRate('x50');
 const steelSourceAtX50 = GearAcquisitionPlanner.sourceForItem(1880, caveMaidenSpots, { level: 52 })[0];
 assert(Math.abs(steelSourceAtX50.expectedYield - 0.59402553) < 0.000001, 'high-rate material plans must include balanced selection and item-specific amount overflow');
 assert.strictEqual(Math.ceil(220 / steelSourceAtX50.expectedYield), 371, '220 Steel from Cave Maiden at x50 must use the native balanced yield');
 assert(steelSourceAtX50.expectedYield > steelSourceAtX1.expectedYield, 'source cache keys must preserve progression-rate changes for the same atlas');
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 const madnessBeast = DataCache.npcRewards.find((reward) => Number(reward.selfId) === 10378);
 const madnessEwd = GearAcquisitionPlanner.itemDropYield(madnessBeast, 955);
 assert(Math.abs(madnessEwd.chance - 0.3573994) < 0.000001, 'source planning must use the x10 balanced EWD selection chance');
 assert(Math.abs(madnessEwd.expectedYield - 1.3689649) < 0.000001, 'source planning must combine balanced selection with item-specific EWD overflow');
-if (previousProgressionRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-else process.env.L2NODE_PROGRESSION_RATE = previousProgressionRate;
+useRate(previousProgressionRate);
 
 const originalNpcEntries = NpcShopBuyLists.allEntries;
 try {

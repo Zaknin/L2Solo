@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('fs');
 const path = require('path');
 
@@ -13,7 +14,7 @@ const near = (actual, expected, message) => assert(Math.abs(actual - expected) <
 // Spot S (level 18, the spot allows 250 kills per hour) and T (allows 48): dps rows with and without
 // shots measured at gap 6, a spoiler row, and the dps curve of the spots' band.
 Table.useFile(path.join(__dirname, 'fixtures', 'spot_table.json'));
-process.env.L2NODE_PROGRESSION_RATE = 'x1';
+useRate('x1');
 
 const ref = Table.value('S', 'dps', 24, true);
 near(ref.kills, 200, 'at the reference level the row\'s kills');
@@ -45,16 +46,16 @@ assert.strictEqual(Table.referenceLevel('S', 'spoiler'), 24, 'the level the row 
 assert.strictEqual(Table.spotLevel('T'), 18);
 
 // Combat rates remain independent of native reward availability.
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 const x10 = Table.value('S', 'dps', 24, true);
 near(x10.kills, ref.kills, 'the rate does not change the fights');
 near(x10.exp, ref.exp * 10, 'exp x rate');
 near(x10.sp, ref.sp * 10, 'SP x rate');
 assert.strictEqual(x10.rewardSource, 'unavailable');
-process.env.L2NODE_PROGRESSION_RATE = 'x50';
+useRate('x50');
 near(Table.value('S', 'dps', 24, true).loot, ref.loot * 50 * 0.6, 'and at x50');
 near(Table.value('T', 'dps', 24, true).loot, 0, 'rates cannot create missing native loot facts');
-process.env.L2NODE_PROGRESSION_RATE = 'x1';
+useRate('x1');
 
 // New tables report distinct bag slots per hour, with the drop response and
 // without multiplying distinct kinds by the drop amount rate.
@@ -67,16 +68,16 @@ try {
     fs.writeFileSync(file, JSON.stringify(fixture));
     Table.useFile(file);
     near(Table.value('S', 'dps', 24).stacks, 4, '200 kills x .02 new slots per kill');
-    process.env.L2NODE_PROGRESSION_RATE = 'x10';
+    useRate('x10');
     near(Table.value('S', 'dps', 24).stacks, 4 * .8, 'distinct slots use the drop response, not the drop amount');
-    process.env.L2NODE_PROGRESSION_RATE = 'x50';
+    useRate('x50');
     near(Table.value('S', 'dps', 24).stacks, 4 * .6, 'the high-rate response also preserves distinct kinds');
     fixture.rows[0][0][fixture.rowFields.indexOf('stacks')] = null;
     fs.writeFileSync(file, JSON.stringify(fixture));
     Table.useFile(file);
     assert.strictEqual(Table.value('S', 'dps', 24).stacks, null, 'an absent regenerated measurement remains unknown');
 } finally {
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     Table.useFile();
     fs.rmSync(scratch, { recursive: true, force: true });
 }
@@ -107,10 +108,10 @@ assert(Table.value('7_34', 'dps', 50).exp > Table.value('-15_42', 'dps', 8).exp 
 assert.strictEqual(Table.value('7_34', 'dps', 30), null, 'no solo hunt far below the spot\'s level');
 // Seven Signs catacombs are not solo hunting grounds in the author's rules.
 assert(raw.roles.every((role) => Table.value('8_23:catacomb_of_the_heretics', role, 50) === null), 'catacombs: no solo row');
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 const keltirX10 = Table.value('-15_42', 'dps', 5, true);
 near(keltirX10.exp, keltir.exp * 10, 'the committed table scales exp with the rate');
-process.env.L2NODE_PROGRESSION_RATE = 'x1';
+useRate('x1');
 
 
 // The value memo drops its oldest row at the cap, in insertion order, and a clear restarts the order at the

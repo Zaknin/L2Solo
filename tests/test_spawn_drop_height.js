@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 require('../src/Global');
 
 const Data = invoke('GameServer/DataCache');
@@ -75,10 +76,9 @@ try {
     ] }));
     const originalPreset = process.env.L2NODE_PROGRESSION_RATE;
     restores.push(() => {
-        if (originalPreset === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-        else process.env.L2NODE_PROGRESSION_RATE = originalPreset;
+        useRate(originalPreset);
     });
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     const npc = { fetchSelfId: () => 558, fetchLevel: () => 43,
         fetchLocX: () => 59814, fetchLocY: () => 25253, fetchLocZ: () => -3818 };
     for (let index = 0; index < 10; index++) Rewards.call(world, session, npc);
@@ -109,7 +109,9 @@ try {
     assert.strictEqual(world.items.spawns.at(-1).fetchLocZ(), -4400,
         'loot resolves the corpse floor, including the six-unit actor offset');
 
-    replace(Geo, 'getRegionBuffer', () => null);
+    // Remove the synthetic data; the empty directory has no fallback region file.
+    replace(Geo, 'regions', {});
+    replace(Geo, `index_${regionKey}`, undefined);
     const fallback = SpawnNpcs.spawnNpc(world, definition); created.push(fallback);
     assert.strictEqual(fallback.fetchLocZ(), -3818, 'missing geodata retains the authored territory height');
     Rewards.call(world, session, { ...npc, fetchLocZ: () => -4394 });

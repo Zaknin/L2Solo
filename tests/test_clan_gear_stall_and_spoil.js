@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 
 require('../src/Global');
 invoke('GameServer/DataCache').init();
@@ -70,9 +71,9 @@ async function main() {
         assert.deepStrictEqual(spoilLoot.map((item) => item.selfId), [99101],
             'a planner-visible spoil route must have a matching cold reward execution path');
 
-        process.env.L2NODE_PROGRESSION_RATE = 'x1';
+        useRate('x1');
         const retailSignature = GearPlanner.rateProfileSignature();
-        process.env.L2NODE_PROGRESSION_RATE = 'x50';
+        useRate('x50');
         assert.notStrictEqual(GearPlanner.rateProfileSignature(), retailSignature,
             'persisted acquisition estimates must be invalidated when the active rate profile changes');
         assert.strictEqual(GearPlanner.withinExpectedKillLimit(plan(99101, 1500), 1500), true);
@@ -206,8 +207,7 @@ async function main() {
         GearPlanner.bestSourceForPlan = originalBestSourceForPlan;
         Simulation.autonomousClanProjection = originalProjection;
         CandidateService.reset();
-        if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-        else process.env.L2NODE_PROGRESSION_RATE = originalRate;
+        useRate(originalRate);
     }
 }
 

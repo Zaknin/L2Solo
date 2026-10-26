@@ -61,6 +61,9 @@ const DEFAULTS = {
     // A full 1,700-bot world with warm economic caches exceeds 256 MiB
     // after major GC. Leave headroom for transient planning/clone allocations.
     coldWorkerHeapMb: 512,
+    // Diagnostics: the cold worker writes one heap snapshot per server boot as its heap nears
+    // coldWorkerHeapMb (into tmp/heap/ of the server root). Off by default; restart to apply.
+    coldWorkerHeapSnapshot: false,
     // Protect the player-facing loop immediately and keep it protected for a
     // short window after disconnect/relog. SimPlayer/BotSession instances do
     // not contribute to this signal.
@@ -262,6 +265,7 @@ const ENV_KEYS = {
     coldWorkerQueueMaxEntries: 'BOT_POPULATION_COLD_WORKER_QUEUE_ENTRIES',
     coldWorkerQueueMaxBytes: 'BOT_POPULATION_COLD_WORKER_QUEUE_BYTES',
     coldWorkerHeapMb: 'BOT_POPULATION_COLD_WORKER_HEAP_MB',
+    coldWorkerHeapSnapshot: 'BOT_POPULATION_COLD_WORKER_HEAP_SNAPSHOT',
     playerProtectionGraceMs: 'BOT_POPULATION_PLAYER_PROTECTION_GRACE_MS',
     schedulerLagThrottleMs: 'BOT_POPULATION_SCHEDULER_LAG_THROTTLE_MS',
     schedulerLagAbortMs: 'BOT_POPULATION_SCHEDULER_LAG_ABORT_MS',

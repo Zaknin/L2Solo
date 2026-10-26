@@ -13,6 +13,11 @@ const OfferQuery = require('./OfferQuery');
 const TownVisitInterval = require('./TownVisitInterval');
 const NpcRestock = require('./NpcRestockPlan');
 const { personalOfferAllowed } = require('../Population/PartyAdmission');
+const ColdEconomyDecision = require('../Population/ColdEconomyDecision');
+const EconomicTrip = require('./EconomicTrip');
+const EconomicValuation = require('./EconomicValuation');
+const PriceDecision = require('./PriceDecision');
+const ProductionPolicy = require('./ProductionPolicy');
 
 function purchaseObservation(state, selfId, requested, budget, phase, reason, extra) {
     if (!Diagnostics.active()) return;
@@ -133,8 +138,7 @@ function buyOffer(state, offer, options = {}) {
             // Native commit includes the buyer's experience exactly once.
             const buyer = done.state || state;
             const units = Number(trade.amount ?? trade.units ?? 0), spent = Number(trade.totalPrice ?? trade.spent ?? 0);
-            const diagnostics = require('./EconomyDiagnostics');
-            if (diagnostics.enabled(state.characterId)) diagnostics.push(trade.replayed ? { owner: state.characterId,
+            if (Diagnostics.enabled(state.characterId)) Diagnostics.push(trade.replayed ? { owner: state.characterId,
                 phase: 'purchase_receipt', reason: 'replayed', actual: 0, spent: 0, receiptUnits: units, receiptSpent: spent,
                 commandId: trade.economyCommand?.[0], sequence: trade.economyCommand?.[2],
                 nativeId: Number(trade.eventId ?? trade.nativeId) } : { owner: state.characterId,
@@ -229,7 +233,7 @@ function arrivalStep(state, goal) {
     if (!decision) return { unitPrice, amount: ordered };
     const leaf = decision.activity;
     if (leaf?.activity !== 'shopping' || Number(leaf.itemId || leaf.object?.itemId || leaf.object) !== itemId) return null;
-    const amount = Math.min(ordered, require('../Population/ColdEconomyDecision').remainingToOrder(leaf, state, state, itemId));
+    const amount = Math.min(ordered, ColdEconomyDecision.remainingToOrder(leaf, state, state, itemId));
     return amount > 0 ? { unitPrice, amount } : null;
 }
 
@@ -332,7 +336,7 @@ function planPurchase(state, selfId, amount, options = {}) {
         plan = OfferQuery.cheapestTown(AfkTrade.boardIndex(), selfId, {
             amount, money, moneyForTown, maxPrice, towns, excludeOwner: state?.characterId, accept,
             npcOffers: npc ? staticOffers(selfId) : [], cost: cost || tripFrom(state, timestamp),
-            quoteDepth: options.quoteDepth ? require('./PriceDecision').QUOTE_DEPTH : 0
+            quoteDepth: options.quoteDepth ? PriceDecision.QUOTE_DEPTH : 0
         });
         // An errand retains its finite quote depth, including a legal NPC
         // remainder. Arrival must not turn that selected source into a
@@ -359,9 +363,9 @@ function worthwhileTravel(state, plan, options = {}) {
     if (!plan || !(plan.units > 0)) return false;
     if (options.purpose === 'raid_supply' && require('../Population/RaidSupplyPolicy').held(state)?.id === options.raidPreparationId) return true;
     if (options.purpose === 'clan') return true;
-    const context = options.economy || require('../Population/ColdEconomyDecision').economyFor(state);
+    const context = options.economy || ColdEconomyDecision.economyFor(state);
     const route = context.trip?.details ? context.trip.details(plan.town)
-        : require('./EconomicTrip').read(state, plan.town, {
+        : EconomicTrip.read(state, plan.town, {
             origin: OfferOrder.farmingOrigin(state, id => invoke('GameServer/Bot/AI/SpotService').findById(id)) });
     if (!route?.known) return false;
     if (route.hours === 0 && route.fees === 0) return true;
@@ -385,7 +389,7 @@ function worthwhileTravel(state, plan, options = {}) {
                     return known;
                 }
             };
-    const result = require('./EconomicValuation').acquisition(valuation, plan, route);
+    const result = EconomicValuation.acquisition(valuation, plan, route);
     return result.known && result.valueHours > 0;
 }
 const deniedTrips = new WeakMap();
@@ -395,7 +399,7 @@ function canTravelForPurchase(state, request, options = {}) {
     if (request?.purpose === 'clan') return true;
     const id = Number(request?.selfId), amount = Number(request?.amount);
     if (!(id > 0) || !(amount > 0)) return false;
-    const economy = options.economy || require('../Population/ColdEconomyDecision').economyFor(state);
+    const economy = options.economy || ColdEconomyDecision.economyFor(state);
     const board = invoke('GameServer/AfkTrade/AfkTradeService').boardIndex();
     // One refusal lives only with its held prepared plan (perf C1: each view
     // of one plan shares it). Public quote
@@ -407,8 +411,8 @@ function canTravelForPurchase(state, request, options = {}) {
     if (options.economy && (economy.inputKey || economy.inputHash) && board?.itemRevision && !options.cost) {
         const rates = invoke('GameServer/ProgressionRates').profile();
         const token = JSON.stringify([request, Number(state.adena), state.stats?.money,
-            require('./EconomicTrip').key(state), board.itemRevision(id), rates.multiplier, rates.adena,
-            require('./ProductionPolicy').shotsDisabled()]);
+            EconomicTrip.key(state), board.itemRevision(id), rates.multiplier, rates.adena,
+            ProductionPolicy.shotsDisabled()]);
         if (token.length <= 2048) key = token;
         const previous = key && deniedTrips.get(economy.plan || economy);
         if (previous?.key === key && previous.owners.every(([ownerId, allowed]) =>
@@ -773,8 +777,7 @@ const ColdMarketService = {
             return Promise.resolve({ state, purchased: false, reason: 'purchase_quantity_unknown' });
         }
         const acceptedGoal = GoalState.snapshot(state.characterId)?.current;
-        const diagnostics = require('./EconomyDiagnostics');
-        const diagnosticGoalRevision = diagnostics.enabled(state.characterId) ? GoalState.snapshot(state.characterId)?.updatedAt : null;
+        const diagnosticGoalRevision = Diagnostics.enabled(state.characterId) ? GoalState.snapshot(state.characterId)?.updatedAt : null;
         // The caller usually passes the accepted goal object itself: no copy to compare.
         if (acceptedGoal && acceptedGoal !== goal && JSON.stringify(acceptedGoal) !== JSON.stringify(goal)) {
             return Promise.resolve({ state, purchased: false, reason: 'stale_purchase_goal' });
@@ -836,7 +839,7 @@ const ColdMarketService = {
             const snapshot = GoalState.snapshot(state.characterId);
             return buyHere(state, plan, { goal: { expectedGoal: goal, updatedAt: snapshot?.updatedAt } }).then(async bought => {
                 const progress = bought.progressApplied || (bought.units > 0 ? await GoalState.applyPurchase(state.characterId, goal, bought.units) : null);
-                if (diagnosticGoalRevision !== null) diagnostics.push({ owner: state.characterId,
+                if (diagnosticGoalRevision !== null) Diagnostics.push({ owner: state.characterId,
                     revision: Number(bought.state?.simulation?.revision), goalRevision: diagnosticGoalRevision,
                     trigger: 'purchase_goal', phase: 'purchase_commit', reason: bought.units >= Number(goal.target.amount) ? 'filled' : bought.units > 0 ? 'partial' : 'no_fill',
                     item: Number(goal.target.itemId), need: Number(goal.target.amount), actual: bought.units,
@@ -866,7 +869,7 @@ const ColdMarketService = {
                 return bought.blocked ? finishBlockedPurchase(state, goal, bought.reason) : retryAfterFailedPurchase(state, goal, bought.reason);
             }
             return (bought.progressApplied ? Promise.resolve() : GoalState.applyPurchase(state.characterId, goal, Number(bought.units || 0))).then(() => {
-                if (diagnosticGoalRevision !== null) diagnostics.push({ owner: state.characterId,
+                if (diagnosticGoalRevision !== null) Diagnostics.push({ owner: state.characterId,
                     goalRevision: diagnosticGoalRevision, trigger: 'purchase_goal', phase: 'purchase_commit', reason: 'filled',
                     item: Number(goal.target.itemId), need: 1, actual: Number(bought.units || 0), remaining: 0,
                     spent: bought.spent, town: state.currentRegion, source: offer.sourceType,

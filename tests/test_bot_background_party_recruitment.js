@@ -1,7 +1,8 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const world = require('./fixtures/native_stock_world')();
 const previousRate = process.env.L2NODE_PROGRESSION_RATE;
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 
 require('../src/Global');
 
@@ -599,8 +600,7 @@ run().catch((err) => {
     process.exitCode = 1;
 }).finally(async () => {
     SpotService.spots = originalCatalog.spots; Spots.cache = originalCatalog.profiles;
-    if (previousRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = previousRate;
+    useRate(previousRate);
     Object.assign(Geo, originalGeo);
     PartyState.active = originals.active;
     PartyState.counts = originals.counts;

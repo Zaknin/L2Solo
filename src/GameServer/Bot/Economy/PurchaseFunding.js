@@ -7,7 +7,13 @@ let moneyPacketMissing = 0;
 function budget(state = {}, escrow = 0) {
     return nonnegative(state.adena ?? state.inventory?.[57]?.amount) + nonnegative(escrow);
 }
-function operatingReserve(state = {}) { return require('./EconomyContext').survivalReserve(state); }
+// EconomyContext and WishNetwork load this module at their top: each is
+// required once, at its first call, and held.
+let EconomyContext, WishNetwork;
+function operatingReserve(state = {}) {
+    // lazy: cycle EconomyContext requires PurchaseFunding at load.
+    return (EconomyContext ||= require('./EconomyContext')).survivalReserve(state);
+}
 function shortfall(state = {}, price = 0, reserve = 0, escrow = 0) {
     return Math.max(0, nonnegative(price) + nonnegative(reserve) - budget(state, escrow));
 }
@@ -189,7 +195,8 @@ function packetRowWishes(funded) {
     return funded.length <= PACKET_ROWS ? funded : funded.slice(0, PACKET_ROWS - 1);
 }
 function packetFor(network, hour, reserve) {
-    const { fundable, cashCharge } = require('./WishNetwork');
+    // lazy: cycle WishNetwork requires PurchaseFunding at load.
+    const { fundable, cashCharge } = WishNetwork ||= require('./WishNetwork');
     const packet = [Math.round(hour), significant(network.moneyPrice), Math.round(reserve), Math.round(network.gap ? cashCharge(network.gap) : 0)];
     let cumulative = 0, count = 0;
     for (const wish of network.queue) {

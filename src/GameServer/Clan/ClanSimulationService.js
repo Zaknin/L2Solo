@@ -59,7 +59,7 @@ function recordReasons(codes = []) {
 function socialRelations(characterId, now = Date.now()) {
     const view = invoke('GameServer/Social/InteractionMemoryRuntime').views.get(characterId);
     if (!view?.ready) return {};
-    return Object.fromEntries(view.characterIds.map((id) => [id, view.relation('character', id, now)]));
+    return Object.fromEntries(Array.from(view.characterIds, (id) => [id, view.relation('character', id, now)]));
 }
 
 function normalizeCandidate(row = {}) {

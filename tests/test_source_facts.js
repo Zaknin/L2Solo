@@ -1,6 +1,7 @@
 'use strict';
 // Task 2: finite farm and spoil facts read by the rules the bot hunts and spoils by.
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 require('../src/Global');
 const Data = invoke('GameServer/DataCache'); Data.init();
 const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
@@ -190,7 +191,7 @@ try {
     for (const order of [mixedRewards, mixedRewards.slice().reverse()]) {
         Data.npcRewards = order;
         for (const rate of ['x1', 'x50']) {
-            process.env.L2NODE_PROGRESSION_RATE = rate;
+            useRate(rate);
             for (const state of [warsmith, noSpoil]) {
                 checkMixed(state);
                 checkMixed(state, { economicLower: true });
@@ -216,7 +217,7 @@ try {
     // The party verdict of a record is the old rule: soloSafeForSource on the
     // target object the planner built per record (npcLevel from the record,
     // else the spot's average level; SourceCatalog stores Number(level || 0)).
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     Data.npcRewards = [...saved.rewards, { selfId: 99001, template: { name: 'Facts Test Mob' },
         rewards: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 1, max: 1 }] }],
         spoils: [{ overall: 100, items: [{ selfId: 99101, chance: 100, min: 2, max: 2 }] }] }];
@@ -333,7 +334,7 @@ try {
         for (const order of [mixedRewards, mixedRewards.slice().reverse()]) {
             Data.npcRewards = order;
             for (const rate of ['x1', 'x50']) {
-                process.env.L2NODE_PROGRESSION_RATE = rate;
+                useRate(rate);
                 const selected = replaceLevels(below);
                 for (const state of [warsmith, noSpoil, { ...warsmith, inventory: {} }, healer, buffer])
                     checkBound(state, selected, true);
@@ -345,7 +346,7 @@ try {
         // Infinity rank, refused like any level above the bound; a short list
         // and Spoil-only records without Spoil are skipped as well.
         Data.npcRewards = mixedRewards;
-        process.env.L2NODE_PROGRESSION_RATE = 'x1';
+        useRate('x1');
         checkBound(warsmith, replaceLevels(effective), false);
         // The band's exact edge: minGap levels below is walked, one further is banded.
         checkBound(warsmith, replaceLevels(warsmith.level - 7), false);
@@ -364,6 +365,5 @@ try {
     console.log('test_source_facts: ok');
 } finally {
     Data.items = saved.items; Data.npcs = saved.npcs; Data.npcRewards = saved.rewards;
-    if (saved.rate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = saved.rate;
+    useRate(saved.rate);
 }

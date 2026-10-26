@@ -12,13 +12,15 @@ const Profit = require('./CraftProfitPolicy');
 const BidPurchaseAlternative = require('./BidPurchaseAlternative');
 const { npcOwnsPurchase } = require('./TradeIntent');
 const { MAX_INSPECTED } = require('./ReadyTradeChoice');
+const ColdEconomyDecision = require('../Population/ColdEconomyDecision');
+const BoardLook = require('./BoardLook');
 
 // A bot as a trader: its persona's parameters, its hour and its money, its
 // trips, and what its thread knows of the board. deps: { board, persona,
 // npcOffersFor(selfId), findSpot(spotId), timestamp }.
 function traderContext(state, deps = {}) {
     const timestamp = Number(deps.timestamp || Date.now());
-    const economy = deps.economy || require('../Population/ColdEconomyDecision').economyFor(state, { ...deps, timestamp });
+    const economy = deps.economy || ColdEconomyDecision.economyFor(state, { ...deps, timestamp });
     const hour = economy.hourAdena;
     const adena = Math.max(0, Number(state?.adena ?? state?.inventory?.[57]?.amount ?? 0));
     const origin = deps.findSpot ? OfferOrder.farmingOrigin(state, deps.findSpot) : null;
@@ -377,7 +379,7 @@ function look(state, lines, ctx) {
 }
 
 function lookOwn(state, lines, ctx, lookSeen) {
-    return require('./BoardLook').review(state, lines, ctx, lookSeen);
+    return BoardLook.review(state, lines, ctx, lookSeen);
 }
 
 module.exports = { beliefFor, traderContext, priceForSale, lineState, bestAnswer, disposition, bid, look, lookOwn };

@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('fs');
 const path = require('path');
 
@@ -27,7 +28,7 @@ const service = createKnowledgeBaseService({
 });
 
 try {
-    process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    useRate('x1');
     const meta = service.meta();
     assert.strictEqual(meta.counts.items, require('../data/KnowledgeBase/manifest.json').counts.items);
     assert.strictEqual(meta.counts.mobs, require('../data/KnowledgeBase/manifest.json').counts.mobs);
@@ -149,7 +150,7 @@ try {
     assert.strictEqual(gremlinX1.drops[1].items[0].chancePercent, 6.99759273);
     assert.ok(gremlinX1.spawns.flatMap((spawn) => spawn.mapPoints).length > 0);
 
-    process.env.L2NODE_PROGRESSION_RATE = 'x50';
+    useRate('x50');
     const gremlinX50 = service.npcDetail(1);
     assert.strictEqual(gremlinX50.rateProfile.drop, 50);
     assert.strictEqual(gremlinX50.drops[1].items[0].chancePercent, 33.49182068);
@@ -203,8 +204,7 @@ try {
     assert.deepEqual({ items: DataCache.items, npcs: DataCache.npcs, spawns: DataCache.npcSpawns, recipes: NativeRecipes.loadedSource() }, beforeNative,
         'standalone exported reference never initializes the native datapack/recipe source');
 } finally {
-    if (previousPreset === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = previousPreset;
+    useRate(previousPreset);
 }
 
 console.log('World observer knowledge base checks passed');

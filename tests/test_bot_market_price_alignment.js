@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('node:fs');
 require('./helpers/databaseIsolation');
 const isolated = require('./helpers/isolatedSocialDatabase')('market-price-alignment');
@@ -265,7 +266,7 @@ function noAuthoredComponentWish(buyer) {
 
 try {
     for (const rate of ['x1', 'x10', 'x50']) {
-        process.env.L2NODE_PROGRESSION_RATE = rate;
+        useRate(rate);
         const rich = { ...state, adena: 1000000000 };
         const native = purchaseFor(rich);
         const item = pricingItem(439);
@@ -280,7 +281,7 @@ try {
         assert(preferred < npcPrice, 'the initial sale valuation must also account for NPC alternatives');
     }
 
-    process.env.L2NODE_PROGRESSION_RATE = 'x10';
+    useRate('x10');
     const native = purchaseFor(state);
     assert.strictEqual(Pricing.referencePrice(pricingItem(439)), 3790000,
         'Karmian Tunic reference has no ordinary NPC alternative');
@@ -433,8 +434,7 @@ try {
     console.log('Bot market price alignment checks passed');
 } finally {
     DataCache.npcSpawns = originalSpawns;
-    if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = originalRate;
+    useRate(originalRate);
     for (const id of quoteIds) board.remove(id);
     for (const id of gearQuoteIds) board.remove(id);
     fs.rmSync(isolated.directory, { recursive: true, force: true });

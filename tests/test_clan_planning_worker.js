@@ -1,5 +1,6 @@
 process.env.BOT_DEVELOPER_DIAGNOSTICS = 'true'; // This fixture inspects optional developer metrics.
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -185,13 +186,12 @@ async function parityAndIntegration() {
         }
         const oldRate = process.env.L2NODE_PROGRESSION_RATE;
         try {
-            process.env.L2NODE_PROGRESSION_RATE = 'x10';
+            useRate('x10');
             const member = { characterId: 990002, level: 40, classId: 4, phase: 'cold', stats: { classId: 4 }, inventory: {} };
             const result = await worker.plan({ member, spots: [], warehouseRows: [], options: {} }, DataCache);
             assert.deepEqual(result, planForMember(member), 'resolved runtime rates must be refreshed in an already running worker');
         } finally {
-            if (oldRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-            else process.env.L2NODE_PROGRESSION_RATE = oldRate;
+            useRate(oldRate);
         }
         await assert.rejects(worker.plan({}, DataCache));
         assert.equal(worker.metrics().failures, 1, 'worker calculation failures must be observable');

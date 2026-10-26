@@ -21,36 +21,18 @@ function normalizePreset(value) {
     return Object.prototype.hasOwnProperty.call(PRESETS, key) ? key : 'x1';
 }
 
-function selectedPreset() {
-    return normalizePreset(process.env.L2NODE_PROGRESSION_RATE || options.default.General?.progressionPreset);
-}
-
-// The profile is a pure function of the rate variable and the [General] rate
-// keys, both changeable at runtime (the clan planning worker, tests). Keep the
-// last answer while those raw inputs are equal; it is frozen because every
-// caller shares it.
-const PROFILE_KEYS = ['progressionPreset', 'expRate', 'spRate', 'adenaRate', 'dropChanceRate', 'spoilRate',
-    'questRewardRate', 'questAdenaRate', 'questExpRate', 'questSpRate'];
-let lastProfile = null, lastEnv, lastGeneral = null;
-const NO_GENERAL = Object.freeze({});
-const lastValues = new Array(PROFILE_KEYS.length);
+// Rates are a restart input: the profile is built once per process from the
+// rate variable and the [General] rate keys, frozen because every caller shares
+// it. Whoever changes those inputs at runtime (the clan planning worker on a new
+// context, the generator scripts, tests) calls reset() after the change.
+let held = null;
 
 function profile() {
-    const env = process.env.L2NODE_PROGRESSION_RATE;
-    const general = options.default.General || NO_GENERAL;
-    if (lastProfile && env === lastEnv && general === lastGeneral && sameProfileValues(general)) return lastProfile;
-    lastProfile = Object.freeze(buildProfile(env, general));
-    lastEnv = env;
-    lastGeneral = general;
-    for (let index = 0; index < PROFILE_KEYS.length; index++) lastValues[index] = general[PROFILE_KEYS[index]];
-    return lastProfile;
+    return held ||= Object.freeze(buildProfile(process.env.L2NODE_PROGRESSION_RATE, options.default.General || {}));
 }
 
-function sameProfileValues(general) {
-    for (let index = 0; index < PROFILE_KEYS.length; index++) {
-        if (general[PROFILE_KEYS[index]] !== lastValues[index]) return false;
-    }
-    return true;
+function reset() {
+    held = null;
 }
 
 function buildProfile(env, general) {
@@ -251,8 +233,8 @@ function scaleAmount(amount, amountMultiplier, rng = Math.random) {
 module.exports = {
     PRESETS,
     normalizePreset,
-    selectedPreset,
     profile,
+    reset,
     groupRate,
     rollGroup,
     dropItemBaseChance,

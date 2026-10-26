@@ -2,6 +2,7 @@ const assert = require('assert');
 const { Worker } = require('worker_threads');
 
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 
 const DataCache = invoke('GameServer/DataCache');
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
@@ -97,7 +98,7 @@ const fundedIds = packet => Array.from({ length: Math.floor((packet.length - 4) 
 
     const epoch = 'escrow-test';
     const worker = new Worker(require.resolve('../src/GameServer/Bot/Population/ColdSimulationWorker'), {
-        workerData: { workerEpoch: epoch }
+        workerData: { sharedGeodata: Geodata.sharedDescriptor(), workerEpoch: epoch }
     });
     const received = [];
     let workerError;

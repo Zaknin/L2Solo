@@ -3,6 +3,7 @@ const path = require('path');
 const { Worker } = require('worker_threads');
 
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 
 const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
 
@@ -59,6 +60,7 @@ invoke('GameServer/Bot/AI/GearAcquisitionPlanner').safeFallbackForPlan = (state)
         workerData: {
             workerPath: path.resolve(__dirname, '../src/GameServer/Bot/Population/ColdSimulationWorker.js'),
             workerEpoch: epoch,
+            sharedGeodata: Geodata.sharedDescriptor(),
             scenarios
         }
     });

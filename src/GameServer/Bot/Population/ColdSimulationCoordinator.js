@@ -2,6 +2,7 @@ const DiagnosticConfig = require('./PopulationConfig');
 const { collectionPagesWithBytes, PAGE_BYTES } = require('./ColdMessagePages');
 const StateWire = require('./ColdStateWire');
 const path = require('path');
+const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { Worker } = require('worker_threads');
 const { performance } = require('perf_hooks');
@@ -49,6 +50,7 @@ const RecomputeGeneration = require('./RecomputeGeneration');
 
 const ClanRaidRoster = require('../../Clan/ClanRaidRoster');
 const BotRoute = require('./BotRoute');
+const GeodataEngine = require('../../Geodata/GeodataEngine');
 // Private main-thread provenance survives the queue's shallow clone but is
 // excluded from JSON/wire sizing and cannot be supplied by a Worker message.
 const PROPOSAL_SOURCE = Symbol('cold-proposal-source');
@@ -80,6 +82,25 @@ function npcPlanningCatalogRows() {
     });
 }
 
+const HEAP_SNAPSHOT_DIR = path.join(__dirname, '..', '..', '..', '..', 'tmp', 'heap');
+
+// Diagnostics (coldWorkerHeapSnapshot): Node writes one snapshot of the worker's heap as it nears
+// its cap (Heap.<date>.<time>.<pid>.<thread>.<seq>.heapsnapshot). Armed until this process has
+// written one, so a restarted worker does not write another. The worker's execArgv carries only
+// these flags: the server's own --openssl-legacy-provider is process-wide and a worker rejects it.
+function heapSnapshotOptions() {
+    if (Config.coldWorkerHeapSnapshot !== true) return {};
+    try {
+        fs.mkdirSync(HEAP_SNAPSHOT_DIR, { recursive: true });
+        const own = `.${process.pid}.`;
+        if (fs.readdirSync(HEAP_SNAPSHOT_DIR).some(name => name.includes(own) && name.endsWith('.heapsnapshot'))) return {};
+    } catch (error) {
+        utils.infoWarn('ColdWorker', 'heap snapshot disabled: %s', error.message);
+        return {};
+    }
+    return { execArgv: ['--heapsnapshot-near-heap-limit=1', `--diagnostic-dir=${HEAP_SNAPSHOT_DIR}`] };
+}
+
 class ColdSimulationCoordinator {
     constructor(options = {}) {
         this.WorkerClass = options.WorkerClass || Worker;
@@ -95,6 +116,8 @@ class ColdSimulationCoordinator {
         this.ready = false;
         this.snapshotsLoaded = false;
         this.lastHeartbeatAt = 0;
+        this.lastWorkerMessage = null;
+        this.terminateCause = null;
         this.lastWatchdogAt = 0;
         this.lastWorkerSnapshot = {};
         this.workerDiagnostics = null;
@@ -107,6 +130,7 @@ class ColdSimulationCoordinator {
         this.nearDecisions = { accepted: 0, refused: 0, dropped: 0 };
         this.workerMaxInFlight = null;
         this.restartCount = 0;
+        this.loadedAt = 0;
         this.restartTimer = null;
         this.watchdogTimer = null;
         this.reconcileTimer = null;
@@ -343,10 +367,14 @@ class ColdSimulationCoordinator {
         this.ready = false;
         this.snapshotsLoaded = false;
         this.lastHeartbeatAt = Date.now();
+        this.lastWorkerMessage = null;
+        this.terminateCause = null;
         const worker = new this.WorkerClass(this.workerPath, {
-            workerData: { workerEpoch: this.workerEpoch, developerDiagnostics: Config.developerDiagnostics === true },
+            workerData: { workerEpoch: this.workerEpoch, developerDiagnostics: Config.developerDiagnostics === true,
+                sharedGeodata: GeodataEngine.sharedDescriptor() },
             name: 'l2node-cold-simulation',
-            resourceLimits: { maxOldGenerationSizeMb: Math.max(128, Number(Config.coldWorkerHeapMb) || 512) }
+            resourceLimits: { maxOldGenerationSizeMb: Math.max(128, Number(Config.coldWorkerHeapMb) || 512) },
+            ...heapSnapshotOptions()
         });
         this.worker = worker;
         Metrics.beginColdSafetyEpoch(this.workerEpoch);
@@ -409,6 +437,9 @@ class ColdSimulationCoordinator {
 
     post(type, payload = {}, msgId = null, bytes = null) {
         if (!this.worker || !this.workerEpoch) return null;
+        // The worker has no kernel before it reports `running`: a snapshot page sent earlier only faults
+        // (kernel_not_initialized). Every page sender funnels here, so this is the one gate; dropped, not queued.
+        if (type === 'snapshot_page' && !this.ready) return null;
         const entries = type === 'snapshot_page' ? payload.rows
             : ['commit_ack', 'command_ack'].includes(type) ? payload.results : [];
         // Table changes reach the worker before the states that read them
@@ -666,6 +697,7 @@ class ColdSimulationCoordinator {
         try {
             const payload = StateWire.unpackPayload(message.type, message.payload);
             if (payload !== message.payload) message = { ...message, payload };
+            this.lastWorkerMessage = message.type === 'ready' ? `ready:${payload?.phase}` : message.type;
         } catch (error) {
             this.recordInvalid(`in_${message.type}_${error.message}`);
             return;
@@ -706,7 +738,7 @@ class ColdSimulationCoordinator {
                     // Native source setup failed; use the existing Worker exit
                     // path rather than leave a running child without its feed.
                     this.onWorkerError(error);
-                    worker.terminate?.()?.catch(failure => this.recordError(failure));
+                    this.terminateWorker('table_channel_setup_failed');
                 }
             } else if (payload.phase === 'running') {
                 this.ready = true;
@@ -717,6 +749,7 @@ class ColdSimulationCoordinator {
                 await this.sendSnapshots(true);
             } else if (payload.phase === 'snapshots_loaded') {
                 this.snapshotsLoaded = true;
+                this.loadedAt = Date.now();
                 this.storeWorkerSnapshot(payload, false);
                 utils.infoSuccess('ColdWorker', 'ready states=%d queueHead=%s', Number(payload.states || 0), payload.queueHead?.kind || 'unknown');
             } else if (payload.phase === 'state_loaded') {
@@ -1459,7 +1492,8 @@ class ColdSimulationCoordinator {
         let resolve;
         const promise = new Promise(done => { resolve = done; });
         // One small waiter per admitted queue owner; no retained state copy.
-        this.commitAcknowledgements.set(id, { proposalId: proposal.proposalId, source, promise, resolve });
+        this.commitAcknowledgements.set(id, { proposalId: proposal.proposalId, source, promise, resolve,
+            memberIds: proposal.atomicGroup?.memberIds });
     }
 
     finishCommitAcknowledgements(results, acknowledged = true) {
@@ -1781,6 +1815,8 @@ class ColdSimulationCoordinator {
                 ...(result.detail ? { detail: result.detail } : {}),
                 revision: result.revision,
                 raidStepId: result.proposal?.raidStepId,
+                ...(result.ok && Number.isFinite(result.eventWaitMs) && result.eventWaitMs > 0
+                    ? { eventWaitMs: result.eventWaitMs } : {}),
                 ...(numbers || { state }),
                 ...(result.ok ? this.reviewSteps(result.proposal, state) : {})
             }];
@@ -2019,8 +2055,18 @@ class ColdSimulationCoordinator {
         this.economyDecisions.forget(id);
         EconomyContext.forget(id);
         if (!this.worker || !this.ready) return { ok: true, reason: 'worker_not_ready' };
+        const worker = this.worker, epoch = this.workerEpoch;
         this.fencedBots.add(id);
         DiagnosticConfig.developerDiagnostics && (this.counters.fences += 1);
+        const commitAcks = new Set();
+        const captureCommitAcks = () => {
+            for (const [ownerId, held] of this.commitAcknowledgements) {
+                if (ownerId === id || held.memberIds?.includes(id)) commitAcks.add(held.promise);
+            }
+        };
+        // The member may already be acked while its leader's deferred work
+        // still precedes handoff. Keep those exact promises across both waits.
+        captureCommitAcks();
         const msgId = this.post('fence', { characterId: id, deadlineAt: Date.now() + timeoutMs });
         if (!msgId) return { ok: false, reason: 'fence_send_failed' };
         let timer = null;
@@ -2031,11 +2077,14 @@ class ColdSimulationCoordinator {
         try {
             const fenced = await response;
             if (fenced.proposal) {
-                this.queue.enqueue({ ...fenced.proposal, priority: 'P0' });
+                this.handleProposalBatch({ payload: { proposals: [{ ...fenced.proposal, priority: 'P0' }] } }, worker, epoch);
             }
+            // A proposal can arrive before the fence reply, including in it.
+            captureCommitAcks();
             const command = this.commandInflight.get(id);
             if (command) await Promise.race([command.catch(() => null), wait(timeoutMs)]);
             await this.queue.flushCharacter(id);
+            await Promise.all(commitAcks);
             return { ok: true, reason: 'fenced', ...fenced };
         } catch (error) {
             DiagnosticConfig.developerDiagnostics && (this.counters.fenceTimeouts += 1);
@@ -2059,10 +2108,8 @@ class ColdSimulationCoordinator {
         if (!this.ready) {
             // Boot (module load, datapack load, catalog transfer, init) sends no heartbeat and
             // slows with the Mac's load ('running after N ms boot'); a restart would only boot again.
-            if (age > Math.max(10000, Number(Config.coldWorkerBootMs) || 60000)) {
-                utils.infoWarn('ColdWorker', 'boot still running after %d ms: terminating the worker', age);
-                this.worker.terminate().catch(() => null);
-            }
+            const bootLimit = Math.max(10000, Number(Config.coldWorkerBootMs) || 60000);
+            if (age > bootLimit) this.terminateWorker('watchdog_boot', age, bootLimit);
             return;
         }
         if (age <= Math.max(5000, Number(Config.coldWorkerUnhealthyMs) || 5000)) {
@@ -2070,9 +2117,18 @@ class ColdSimulationCoordinator {
             return;
         }
         this.setPauseReason('heartbeat_stale', true, { age });
-        if (age > Math.max(10000, Number(Config.coldWorkerDeadMs) || 10000)) {
-            this.worker.terminate().catch(() => null);
-        }
+        const deadLimit = Math.max(10000, Number(Config.coldWorkerDeadMs) || 10000);
+        if (age > deadLimit) this.terminateWorker('watchdog_dead', age, deadLimit);
+    }
+
+    // Every kill main decides is logged before it happens and named again by the exit line;
+    // an exit with no cause set is the worker's own (crash, OOM, resourceLimits).
+    terminateWorker(cause, ageMs = null, limitMs = null) {
+        if (!this.worker || this.terminateCause) return;
+        this.terminateCause = cause;
+        utils.infoWarn('ColdWorker', 'terminating the worker: %s, heartbeat age %s ms (limit %s ms), last message %s, restarts so far %d',
+            cause, ageMs === null ? '-' : ageMs, limitMs === null ? '-' : limitMs, this.lastWorkerMessage || 'none', this.restartCount);
+        this.worker.terminate().catch(() => null);
     }
 
     desiredWorkerPressure() {
@@ -2154,11 +2210,15 @@ class ColdSimulationCoordinator {
         this.waiters.clear();
         this.pauseReasons.delete('heartbeat_stale');
         if (this.stopping) return;
+        // A run that stayed up 30 s after loading its world was healthy: back off from the first delay again.
+        if (this.loadedAt && Date.now() - this.loadedAt > 30000) this.restartCount = 0;
+        this.loadedAt = 0;
         const delays = [1000, 2000, 5000, 10000, 30000];
         const restartDelay = delays[Math.min(this.restartCount, delays.length - 1)];
         this.restartCount += 1;
         DiagnosticConfig.developerDiagnostics && (this.counters.workerRestarts += 1);
-        utils.infoWarn('ColdWorker', 'worker exited code=%d; restarting in %dms', Number(code || 0), restartDelay);
+        utils.infoWarn('ColdWorker', 'worker exited code=%d cause=%s last message %s; restarting in %dms',
+            Number(code || 0), this.terminateCause || 'worker_own_exit', this.lastWorkerMessage || 'none', restartDelay);
         this.restartTimer = setTimeout(() => this.startWorker(), restartDelay);
         this.restartTimer.unref?.();
     }

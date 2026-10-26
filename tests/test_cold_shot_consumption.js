@@ -1,6 +1,7 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const originalRate = process.env.L2NODE_PROGRESSION_RATE;
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 require('../src/Global');
 const Cache = invoke('GameServer/DataCache'); Cache.init();
 const Cold = invoke('GameServer/Bot/Population/ColdCombatProfile');
@@ -184,6 +185,5 @@ async function checkStockRunsOut() {
         + 'the debit equals the shots used');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
     Cold.npcForSpot = original;
-    if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
-    else process.env.L2NODE_PROGRESSION_RATE = originalRate;
+    useRate(originalRate);
 });

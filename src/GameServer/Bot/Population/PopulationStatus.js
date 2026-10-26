@@ -28,6 +28,7 @@ const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
 const PathfindingWorkerPool = invoke('GameServer/Geodata/PathfindingWorkerPool');
 const SpotProfiles = invoke('GameServer/Bot/Population/SpotProfiles');
 const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
+const GeodataEngine = invoke('GameServer/Geodata/GeodataEngine');
 let lastMoneyPacketMissing = 0;
 // The body's fact posts (BotLifeState.notifyNearFacts reasons); any other
 // near post reason is a named raise.
@@ -109,9 +110,13 @@ const PopulationStatus = {
         const mainElu = performance.eventLoopUtilization(mainEluMark);
         mainEluMark = performance.eventLoopUtilization();
         const pvp = PvpEncounterRuntime.passPeak();
+        const geodata = GeodataEngine.storageStats();
         return `coldDue=${queue.overdue || 0} coldDueAll=${queue.due || 0} coldDueAge=${Math.round((queue.oldestAgeMs || 0) / 1000)}s`
             + ` workerElu=${Number(worker.eventLoopUtilization || 0).toFixed(2)} mainElu=${mainElu.utilization.toFixed(2)} workerHeapGc=${mb(worker.heapAfterGc)}/${mb(worker.heapAfterGcMax10)}MB`
-            + ` stepLead=${worker.stepLeadMs || 0}ms pvp=${pvp.live}/${pvp.steps}/${pvp.ms}ms/${pvp.left}`;
+            + ` stepLead=${worker.stepLeadMs || 0}ms pvp=${pvp.live}/${pvp.steps}/${pvp.ms}ms/${pvp.left}`
+            + ` geo=${mb(geodata.loadedBytes)}MB/${geodata.loadedRegions} geoViews=${mb(geodata.attachedBytes)}+${mb(worker.geodata?.attachedBytes)}MB`
+            + ` geoRaw=${geodata.rawRegions || 0} geoIndexOnly=${geodata.indexOnlyRegions || 0}`
+            + ` geoHeightReads=${geodata.heightFileReads || 0}+${worker.geodata?.heightFileReads || 0}`;
     },
 
     summary() {

@@ -36,6 +36,7 @@ const childProcess = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const ProgressionRates = require('../src/GameServer/ProgressionRates');
 
 const root = path.resolve(__dirname, '..');
 process.chdir(root);
@@ -490,6 +491,7 @@ function lootRateResponse(spot) {
     const NpcSellRules = invoke('GameServer/Items/NpcSellRules');
     const lootAt = (preset) => {
         process.env.L2NODE_PROGRESSION_RATE = preset;
+        ProgressionRates.reset();
         let value = 0;
         for (const entry of spot.npcEntries || []) {
             const reward = ItemTemplateIndex.find(DataCache.npcRewards, entry.selfId);
@@ -509,6 +511,7 @@ function lootRateResponse(spot) {
     const x1 = lootAt('x1');
     const out = x1 > 0 ? [round(lootAt('x10') / (10 * x1)), round(lootAt('x50') / (50 * x1))] : [1, 1];
     process.env.L2NODE_PROGRESSION_RATE = 'x1';
+    ProgressionRates.reset();
     return out;
 }
 

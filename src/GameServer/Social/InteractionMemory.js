@@ -2,6 +2,11 @@ const Policy = require('./InteractionMemoryPolicy');
 const PackedRows = require('./PackedInteractionRows');
 const EMPTY_VIEW = Policy.view(null);
 
+// A row's social counts as a fresh object (the packed row lends its stored one).
+function counts(row) {
+    return row?.social ? { ...row.social } : {};
+}
+
 // Main process owns persistence. Worker instances only accept versioned snapshots
 // and evaluate: they cannot overwrite durable memory with their stale life state.
 class InteractionMemory {
@@ -35,9 +40,14 @@ class InteractionMemory {
         // ARCH-NOTE: snapshots and views share one private numeric/reason store.
         // Public snapshots decode fresh plain rows; unusual reason shapes keep
         // the old JSON clone as a lossless fallback. No wire or SQL shape changes.
-        // PERF: 54,046 native rows retain 14.54 MB including numeric backing,
-        // versus 33.93 MB before; snapshots and social decisions compare exactly.
-        const copy = new PackedRows(snapshot);
+        // PERF: 54,046 native rows retained 14.54 MB including numeric backing,
+        // versus 33.93 MB before, measured before help clocks and traits became
+        // columns and the worker dropped social counts (not re-measured).
+        // Main's copy (the one with the repository) exports snapshots exactly
+        // as accepted; the worker's copy keeps no per-type social counts, so
+        // only main's snapshots and socialCounts() carry them. Views carry no
+        // social counts on either thread: every decision answers the same.
+        const copy = new PackedRows(snapshot, { keepSocial: !!this.repository });
         if (snapshot.fast) this.fastLayers.set(copy.ownerId, new Map(snapshot.fast));
         this.snapshots.set(copy.ownerId, copy);
         this.views.set(copy.ownerId, Policy.view(copy, () => this.playingHours(copy.ownerId), this.fastLayers.get(copy.ownerId), copy));
@@ -123,7 +133,10 @@ class InteractionMemory {
 
     snapshot(ownerId) {
         const snapshot = this.snapshots.get(ownerId);
-        return snapshot ? JSON.parse(JSON.stringify({ ...snapshot.plain(), ...(this.fastLayers.has(ownerId) ? { fast: [...this.fastLayers.get(ownerId)] } : {}) })) : null;
+        if (!snapshot) return null;
+        const copy = snapshot.plain();
+        if (this.fastLayers.has(ownerId)) copy.fast = JSON.parse(JSON.stringify([...this.fastLayers.get(ownerId)]));
+        return copy;
     }
 
     // The accepted snapshot's relation rows and revision, read-only (a row of
@@ -131,6 +144,12 @@ class InteractionMemory {
     relationRows(ownerId) {
         const snapshot = this.snapshots.get(ownerId);
         return snapshot ? { revision: snapshot.revision, relations: snapshot.mapRows(row => row) } : null;
+    }
+
+    // The owner's per-type social event counts toward a character (a fresh
+    // object). Main only: the worker's copy keeps none and answers {}.
+    socialCounts(ownerId, targetId) {
+        return counts(this.snapshots.get(ownerId)?.row('character', targetId));
     }
 
     // The accepted snapshot's revision, without the deep copy snapshot() makes.
@@ -164,7 +183,8 @@ class InteractionMemory {
         const view = this.views.get(ownerId);
         return { ready: !!snapshot, revision: snapshot?.revision || 0,
             relations: snapshot ? snapshot.mapRows(row => ({ kind: row.kind, targetId: row.targetId,
-                at: row.at, ageMs: Math.max(0, now - row.at), ...view.relation(row.kind, row.targetId, now) })) : [] };
+                at: row.at, ageMs: Math.max(0, now - row.at), ...view.relation(row.kind, row.targetId, now),
+                ...(row.social ? { social: counts(row) } : {}) })) : [] };
     }
 
     forget(ownerId) {

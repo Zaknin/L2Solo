@@ -64,33 +64,45 @@ function statValues(actor, stat) {
 // What the actor wears, from its backpack. Each field is read on first use
 // and kept for the rest of the lookup.
 function gearOf(actor) {
-    const backpack = actor?.backpack;
-    const cache = {};
-    const armors = () => cache.armors ??= backpack?.fetchEquippedArmors?.() || [];
-    const kindAt = (slot) => armors().find((item) => Number(item?.fetchSlot?.()) === slot)?.fetchKind?.();
-    return {
-        get weaponKind() { return cache.weaponKind ??= backpack?.fetchTotalWeaponKind?.() || ''; },
-        get armorKinds() { return cache.armorKinds ??= armors().map((item) => item?.fetchKind?.()); },
-        get setKind() { return cache.setKind ??= SkillRequirements.wornSetKind(kindAt(15), kindAt(10), kindAt(11)); },
-        get shield() { return cache.shield ??= Number(backpack?.fetchTotalShieldPDef?.()) > 0; }
-    };
+    return new GearContext(actor?.backpack);
 }
 
 function situationOf(actor) {
-    const state = actor?.state;
-    return {
-        get hp() { return Number(actor?.fetchHp?.()) || 0; },
-        get maxHp() { return Number(actor?.fetchMaxHp?.()) || 0; },
-        get moving() { return !!state?.inMotion?.(); },
-        get walking() { return !!state?.fetchWalkin?.(); },
-        get seated() { return !!state?.fetchSeated?.(); },
-        get night() {
-            const clock = actor?.gameTime || actor?.world?.gameTime;
-            if (typeof clock?.isNight === 'function') return !!clock.isNight();
-            if (typeof actor?.isNight === 'function') return !!actor.isNight();
-            return GameTime.isNight();
-        }
-    };
+    return new SituationContext(actor, actor?.state);
+}
+
+class GearContext {
+    constructor(backpack) {
+        this.backpack = backpack;
+        this.cache = {};
+    }
+
+    armors() { return this.cache.armors ??= this.backpack?.fetchEquippedArmors?.() || []; }
+    kindAt(slot) { return this.armors().find((item) => Number(item?.fetchSlot?.()) === slot)?.fetchKind?.(); }
+    get weaponKind() { return this.cache.weaponKind ??= this.backpack?.fetchTotalWeaponKind?.() || ''; }
+    get armorKinds() { return this.cache.armorKinds ??= this.armors().map((item) => item?.fetchKind?.()); }
+    get setKind() { return this.cache.setKind ??= SkillRequirements.wornSetKind(this.kindAt(15), this.kindAt(10), this.kindAt(11)); }
+    get shield() { return this.cache.shield ??= Number(this.backpack?.fetchTotalShieldPDef?.()) > 0; }
+}
+
+class SituationContext {
+    constructor(actor, state) {
+        this.actor = actor;
+        this.state = state;
+    }
+
+    get hp() { return Number(this.actor?.fetchHp?.()) || 0; }
+    get maxHp() { return Number(this.actor?.fetchMaxHp?.()) || 0; }
+    get moving() { return !!this.state?.inMotion?.(); }
+    get walking() { return !!this.state?.fetchWalkin?.(); }
+    get seated() { return !!this.state?.fetchSeated?.(); }
+    get night() {
+        const actor = this.actor;
+        const clock = actor?.gameTime || actor?.world?.gameTime;
+        if (typeof clock?.isNight === 'function') return !!clock.isNight();
+        if (typeof actor?.isNight === 'function') return !!actor.isNight();
+        return GameTime.isNight();
+    }
 }
 
 module.exports = {

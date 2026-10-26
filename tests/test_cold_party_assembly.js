@@ -1,5 +1,6 @@
 const assert = require('assert');
 require('../src/Global');
+const Geodata = require('../src/GameServer/Geodata/GeodataEngine');
 invoke('GameServer/DataCache').init();
 const Resolver = invoke('GameServer/Bot/Population/BackgroundPartyResolver');
 const { ColdSimulationKernel, finishPartyRouteTravelState } = require('../src/GameServer/Bot/Population/ColdSimulationKernel');
@@ -116,7 +117,7 @@ async function main() {
     const { Worker } = require('worker_threads');
     const Protocol = require('../src/GameServer/Bot/Population/ColdSimulationProtocol');
     const worker = new Worker(require.resolve('../src/GameServer/Bot/Population/ColdSimulationWorker'), {
-        workerData: { workerEpoch: 'assembly-test' }
+        workerData: { workerEpoch: 'assembly-test', sharedGeodata: Geodata.sharedDescriptor() }
     });
     const received = [];
     let workerError;

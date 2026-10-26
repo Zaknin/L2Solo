@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const path = require('path');
 
 require('../src/Global');
@@ -14,7 +15,7 @@ const near = (actual, expected, message) => assert(Math.abs(actual - expected) <
     `${message}: ${actual} != ${expected}`);
 // The hand-made table of test_spot_value_table: spot S (level 18) is rated at 24 for its dps and spoiler.
 Table.useFile(path.join(__dirname, 'fixtures', 'spot_table.json'));
-process.env.L2NODE_PROGRESSION_RATE = 'x1';
+useRate('x1');
 
 // Spot S holds 3 Scavenger Wererats (39) and 1 Sukar Wererat (40), level 18.
 const spots = [{ id: 'S', avgLevel: 18, density: 30, npcEntries: [

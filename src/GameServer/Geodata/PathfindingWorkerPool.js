@@ -2,6 +2,7 @@ const DiagnosticConfig = require('../Bot/Population/PopulationConfig');
 const os = require('os');
 const path = require('path');
 const { Worker } = require('worker_threads');
+const GeodataEngine = require('./GeodataEngine');
 
 function taskError(message, code) {
     const error = new Error(message);
@@ -15,7 +16,10 @@ class BoundedPathfindingWorkerPool {
         this.size = Math.max(1, Math.min(2, Number(options.size) || Math.max(1, available - 1)));
         this.queueLimit = Math.max(this.size, Number(options.queueLimit) || 128);
         this.workerPath = options.workerPath || path.join(__dirname, 'PathfindingWorker.js');
-        this.workerFactory = options.workerFactory || ((workerPath) => new Worker(workerPath, { workerData: { developerDiagnostics: invoke('GameServer/Bot/Population/PopulationConfig').developerDiagnostics === true } }));
+        this.workerFactory = options.workerFactory || ((workerPath) => new Worker(workerPath, { workerData: {
+            developerDiagnostics: DiagnosticConfig.developerDiagnostics === true,
+            sharedGeodata: GeodataEngine.sharedDescriptor()
+        } }));
         this.restartLimit = Math.max(0, Number(options.restartLimit) || 3);
         this.workers = [];
         this.restartAttempts = [];

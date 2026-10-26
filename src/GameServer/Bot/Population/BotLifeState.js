@@ -1057,8 +1057,10 @@ function writeHeldOnRevision(member, { stats = {}, columns = {} }, reason) {
 // and so does lastResolvedAt: the step's length is now - lastResolvedAt
 // (ColdSimulationKernel), so an unmoved stamp would credit the downtime as
 // hunting time (fights, mob share, regen) the bot never lived.
-// Downtime = this process start - the last row write before it, measured once
-// per boot; BackgroundPartyState moves its party due times by the same value.
+// Downtime = the moment the shift runs - the last row write before this
+// process start, measured once per boot: the pause ends at the shift, so the
+// boot time before it is neither credited as lived time nor makes bots due.
+// BackgroundPartyState moves its party due times by the same value.
 let bootPause = null;
 function measureBootPause() {
     const startedAt = Math.floor(Uptime.SERVER_STARTED_AT);
@@ -1066,14 +1068,15 @@ function measureBootPause() {
         `SELECT MAX(updatedAt) AS lastWriteAt FROM ${TABLE} WHERE updatedAt < ?`, [startedAt]
     ]).then(([row] = []) => {
         const lastWriteAt = Number(row?.lastWriteAt);
-        return { startedAt, downtimeMs: lastWriteAt > 0 ? startedAt - lastWriteAt : 0 };
+        return { startedAt, downtimeMs: lastWriteAt > 0 ? now() - lastWriteAt : 0 };
     });
 }
 
-// Rows the boot repairs already rewrote carry fresh timers and keep them. The
-// row moves with the cache: the worker's first command checkpoint
+// Runs first in init, before the boot repairs, so a row they rewrite (a stale
+// hot row keeps its old due) is moved too; a row written after this process
+// start keeps its timers. The row moves with the cache: the worker's first command checkpoint
 // (nextResolveAt included) is fenced against the row (NativeWriteCheckpoint).
-// updatedAt moves by the same delta, so the next boot measures from this start
+// updatedAt moves by the same delta, so the next boot measures from this shift
 // even if no bot commits before it (a crash loop would compound otherwise).
 function shiftDueTimesByDowntime() {
     return measureBootPause().then(({ startedAt, downtimeMs }) => {
@@ -1091,7 +1094,7 @@ function shiftDueTimesByDowntime() {
 }
 
 function hydrateCache() {
-    return shiftDueTimesByDowntime().then(() => Database.execute([
+    return Database.execute([
         `SELECT states.*, (SELECT json_group_array(json_object('slot', slot, 'symbolId', symbolId))
             FROM character_hennas WHERE characterId = states.characterId) AS nativeHennas,
             EXISTS(SELECT 1 FROM character_quests WHERE characterId = states.characterId AND questId = 350 AND state = 'started') AS nativeCrystalQuest,
@@ -1102,7 +1105,7 @@ function hydrateCache() {
                     FROM skills WHERE characterId = states.characterId) END AS nativeLearnedSkills
             FROM ${TABLE} states`,
         []
-    ])).then(async (rows) => {
+    ]).then(async (rows) => {
         for (const row of rows) {
             let state = normalize(row);
             const storedHennas = state.stats.hennas;
@@ -1779,6 +1782,7 @@ const BotLifeState = {
         initStarted = true;
 
         initPromise = Database.execute(['SELECT 1', []], 'schema:bot-life')
+            .then(() => shiftDueTimesByDowntime())
             .then(() => Database.fetchBotMarketCounts()).then((rows) => {
                 marketCounts.clear();
                 for (const row of rows) {

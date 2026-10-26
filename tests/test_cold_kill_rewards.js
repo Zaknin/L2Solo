@@ -5,11 +5,12 @@
 // solo or party, rolls its drop and spoil. The spoiler's
 // Spoil landing roll comes after exp, SP and adena, so only loot depends on it.
 const assert = require('assert');
+const { useRate } = require('./helpers/progressionRate');
 const fs = require('node:fs');
 require('./helpers/databaseIsolation');
 const fixture = require('./helpers/isolatedSocialDatabase')('cold-kill-rewards');
 
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 require('../src/Global');
 fixture.assertConfigured(options.default);
 process.on('exit', () => fs.rmSync(fixture.directory, { recursive: true, force: true }));

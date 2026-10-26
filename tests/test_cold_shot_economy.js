@@ -1,10 +1,11 @@
 'use strict';
 const assert = require('node:assert/strict');
+const { useRate } = require('./helpers/progressionRate');
 require('./helpers/databaseIsolation');
 const fixture = require('./helpers/isolatedSocialDatabase')('cold-shot-economy');
 require('../src/Global');
 fixture.assertConfigured(options.default);
-process.env.L2NODE_PROGRESSION_RATE = 'x10';
+useRate('x10');
 const Database = invoke('Database'), Data = invoke('GameServer/DataCache');
 const Life = invoke('GameServer/Bot/Population/BotLifeState');
 const Afk = invoke('GameServer/AfkTrade/AfkTradeService');

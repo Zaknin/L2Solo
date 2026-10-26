@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { useRate, useGeneral } = require('./helpers/progressionRate');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -11,8 +12,8 @@ const Service = invoke('GameServer/Quest/QuestService');
 const Definitions = require('../src/GameServer/Quest/LowLevelDefinitions');
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'l2-c4-definitions-'));
 options.default.Database.path = path.join(directory, 'test.sqlite');
-process.env.L2NODE_PROGRESSION_RATE = 'x1';
-Object.assign(options.default.General, { questExpRate:1,questSpRate:1,questAdenaRate:1 });
+useRate('x1');
+useGeneral({ questExpRate:1,questSpRate:1,questAdenaRate:1 });
 async function sessionFor(id) {
     const [row] = await Database.execute(['SELECT * FROM characters WHERE id = ?', [id]]);
     const actor = { ...row, fetchId: () => id, fetchName: () => `Quest${id}`, fetchClanId: () => 0,
