@@ -140,6 +140,38 @@ try {
     assert.strictEqual(reloadingBow.actor.backpack.fetchItemFromSelfId(17), undefined,
         'the queued attack should consume and remove its last arrow only after bow reload completes');
 
+    const repeated = fixture('Weapon.DualFist', 40);
+    repeated.attack.meleeHit(repeated.session, repeated.target);
+    repeated.attack.meleeHit(repeated.session, repeated.target);
+    assert.strictEqual(repeated.packets.length, 1, 'a repeated melee request during a swing must not swing again');
+    assert.strictEqual(repeated.timers.length, 2, 'a repeated melee request during a swing must not start a second loop');
+    repeated.timers[0]();
+    repeated.timers[1]();
+    assert.strictEqual(repeated.packets.length, 2, 'the running loop still swings again after the swing ends');
+
+    const switched = fixture('Weapon.DualFist', 40);
+    const other = { ...switched.target, fetchId: () => 2000003 };
+    switched.attack.meleeHit(switched.session, switched.target);
+    switched.attack.meleeHit(switched.session, other);
+    switched.timers[0]();
+    switched.timers[1]();
+    assert.strictEqual(switched.packets.length, 2, 'a target switch during a swing waits for the swing end');
+    assert.strictEqual(switched.damage[0].victim, switched.target, 'the first swing keeps its target');
+    assert.strictEqual(switched.timers.length, 4, 'the next swing starts once');
+    switched.timers[2]();
+    assert.strictEqual(switched.damage.at(-1).victim, other, 'the next swing hits the latest requested target');
+
+    const groundClick = fixture('Weapon.DualFist', 40);
+    let dequeued = 0;
+    groundClick.attack.dequeueEvent = () => { dequeued++; groundClick.attack.resetQueuedEvent(); };
+    groundClick.attack.meleeHit(groundClick.session, groundClick.target);
+    groundClick.attack.meleeHit(groundClick.session, groundClick.target);
+    groundClick.attack.queueEvent('move', {});
+    groundClick.timers.forEach(timer => timer());
+    assert.strictEqual(dequeued, 1, 'a ground click queued during the swing runs at the swing end');
+    assert.strictEqual(groundClick.packets.length, 1, 'no loop swings again after the ground click');
+    assert.strictEqual(groundClick.timers.length, 2, 'no loop is left to override the ground click');
+
     const missed = fixture('Weapon.Bow', 600);
     Formulas.calcHitChance = () => false;
     missed.attack.meleeHit(missed.session, missed.target);

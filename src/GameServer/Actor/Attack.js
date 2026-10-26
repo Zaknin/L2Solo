@@ -21,7 +21,7 @@ class Attack {
     constructor() {
         this.timers = new Set();
         this.bowReloading = false;
-        this.bowRepeatTarget = null;
+        this.repeatTarget = null;
         this.resetQueuedEvent();
     }
 
@@ -73,7 +73,7 @@ class Attack {
         this.timers.forEach((timer) => clearTimeout(timer));
         this.timers.clear();
         this.bowReloading = false;
-        this.bowRepeatTarget = null;
+        this.repeatTarget = null;
     }
 
     abortCast(session, actor) {
@@ -104,6 +104,14 @@ class Attack {
         const actor = session.actor;
         const raidParty = invoke('GameServer/Clan/ClanRaidRoster').offensiveParty(session);
 
+        // A swing is already in flight: its end timer owns the next swing and
+        // takes the latest requested target. Repeated target clicks handled in
+        // one network chunk would otherwise start a second loop that a ground
+        // click cannot stop.
+        if (actor.state.fetchHits?.()) {
+            this.repeatTarget = creature;
+            return;
+        }
         if (this.blockedPvpDefense(session, actor, creature) || this.checkParticipants(actor, creature)) {
             return;
         }
@@ -113,7 +121,7 @@ class Attack {
         if (rangedAttack && this.bowReloading) {
             // Movement and other actions are legal after the arrow is released,
             // but another arrow must still wait for the weapon reuse phase.
-            this.bowRepeatTarget = creature;
+            this.repeatTarget = creature;
             return;
         }
         if (!AttackRange.isWithinRange(actor, creature, attackRange)
@@ -157,10 +165,8 @@ class Attack {
             : { drawMs: Formulas.calcMeleeAtkTime(attackSpeed) * 0.644,
                 cycleMs: Formulas.calcMeleeAtkTime(attackSpeed) };
         const movementGeneration = Number(session.moveRouteGeneration || 0);
-        if (rangedAttack) {
-            this.bowReloading = true;
-            this.bowRepeatTarget = null;
-        }
+        this.repeatTarget = null;
+        if (rangedAttack) this.bowReloading = true;
         const attackWeapon = WeaponSA.equipped(actor);
         let secondaryDamageMultiplier = 0.85;
         const hits = this.resolveMeleeTargets(actor, creature).map((target, index) => {
@@ -245,12 +251,10 @@ class Attack {
         }, timing.drawMs); // Until hit point
 
         this.queueTimer(() => {
-            const repeatTarget = rangedAttack ? this.bowRepeatTarget : null;
+            const repeatTarget = this.repeatTarget;
             const nextTarget = repeatTarget || creature;
-            if (rangedAttack) {
-                this.bowReloading = false;
-                this.bowRepeatTarget = null;
-            }
+            this.repeatTarget = null;
+            if (rangedAttack) this.bowReloading = false;
             if (this.blockedPvpDefense(session, actor, nextTarget) || this.checkParticipants(actor, nextTarget)) {
                 return;
             }
@@ -265,7 +269,7 @@ class Attack {
                 return;
             }
 
-            if (rangedAttack && repeatTarget) {
+            if (repeatTarget) {
                 this.meleeHit(session, nextTarget);
                 return;
             }

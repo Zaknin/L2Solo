@@ -1,3 +1,4 @@
+const { isDeepStrictEqual } = require('node:util');
 const StarterItemCatalog = invoke('GameServer/Knowledge/StarterItemCatalog');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 const Database = invoke('Database');
@@ -606,13 +607,23 @@ const GeneratedColdSeeder = {
                         || existingState?.activity !== 'crafting'
                         || existingState?.currentRegion !== 'Giran';
                     return CraftShopService.ensureRecipes(state.characterId, craftShop)
-                        .then(() => (shouldSeedState || needsStationRefresh || needsServiceProfile
-                            ? LifeState.upsertState({
-                                ...state,
-                                loc: state.phase === 'cold' ? { ...craftShop.loc } : state.loc,
-                                stats: { ...(state.stats || {}), craftStationId: craftShop.stationId, craftShop }
-                            }, 'generated_craft_service')
-                            : state))
+                        // A cold crafter never resolves, so nothing else drops a
+                        // summary entry it holds no item row for: the seed pass
+                        // rebuilds its bag from the rows when the two disagree.
+                        // A hot one's bag belongs to its session.
+                        .then(() => (state.phase === 'cold' ? Database.fetchItems(state.characterId, 'generated_craft_service') : null))
+                        .then((items) => {
+                            const held = items ? LifeState.inventoryStateFromItems(state, items) : state;
+                            const needsBagRefresh = held !== state && !isDeepStrictEqual(
+                                LifeState.normalizeInventoryStackability(held.inventory),
+                                LifeState.normalizeInventoryStackability(state.inventory));
+                            if (!(shouldSeedState || needsStationRefresh || needsServiceProfile || needsBagRefresh)) return state;
+                            return LifeState.upsertState({
+                                ...held,
+                                loc: held.phase === 'cold' ? { ...craftShop.loc } : held.loc,
+                                stats: { ...(held.stats || {}), craftStationId: craftShop.stationId, craftShop }
+                            }, 'generated_craft_service');
+                        })
                         // The station publishes its workshop to bots (E212);
                         // review writes only when its entries change.
                         .then((saved) => (saved?.phase === 'cold' && LifeState.cachedState(saved.characterId)

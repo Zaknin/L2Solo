@@ -182,14 +182,6 @@ function rewardGroup(group) {
     };
 }
 
-function spoilSelectionChance(group, itemIndex) {
-    const items = group?.items || [];
-    const start = items.slice(0, itemIndex)
-        .reduce((total, item) => total + Math.max(0, Number(item?.chance) || 0), 0);
-    const end = start + Math.max(0, Number(items[itemIndex]?.chance) || 0);
-    return Math.max(0, Math.min(100, end) - Math.min(100, start)) / 100;
-}
-
 function scaledRewardGroups(groups, kind, npcLevel, progressionRates, iconFor) {
     return (groups || []).map((sourceGroup) => {
         const group = rewardGroup(sourceGroup);
@@ -207,7 +199,7 @@ function scaledRewardGroups(groups, kind, npcLevel, progressionRates, iconFor) {
                 const rawItem = group.items[itemIndex];
                 const selectionChance = kind === 'drop'
                     ? progressionRates.dropItemSelectionChance(group, rawItem, roll.itemRate)
-                    : spoilSelectionChance(group, itemIndex);
+                    : progressionRates.spoilItemChance(rawItem);
                 const expectedConditionalAmount = kind === 'drop'
                     ? progressionRates.expectedDropAmount(group, rawItem, roll.itemRate)
                     : ((Number(rawItem.min || 1) + Number(rawItem.max || rawItem.min || 1)) / 2)

@@ -1654,10 +1654,10 @@ function itemDropYield(reward, itemId, kind = 'drop', context = {}) {
 
         const selectionChance = (group.items || [])
             .filter((item) => Number(item.selfId) === Number(itemId))
-            .reduce((itemSum, item) => itemSum + Number(item.chance || 0) / 100, 0);
+            .reduce((itemSum, item) => itemSum + ProgressionRates.spoilItemChance(item), 0);
         const averageAmount = (group.items || [])
             .filter((item) => Number(item.selfId) === Number(itemId))
-            .reduce((itemSum, item) => itemSum + (Number(item.chance || 0) / 100) * ((Number(item.min || 1) + Number(item.max || item.min || 1)) / 2), 0);
+            .reduce((itemSum, item) => itemSum + ProgressionRates.spoilItemChance(item) * ((Number(item.min || 1) + Number(item.max || item.min || 1)) / 2), 0);
         return {
             chance: sum.chance + groupChance * selectionChance,
             expectedYield: sum.expectedYield + groupChance * averageAmount * Number(roll.amountMultiplier || 1)

@@ -535,6 +535,7 @@ const tests = [
     'tests/test_bot_background_drops.js',
     'tests/test_cold_kill_rewards.js',
     'tests/test_spoil_landing.js',
+    'tests/test_spoil_selection.js',
     'tests/test_bot_background_rest.js',
     'tests/test_bot_background_party_rest.js',
     'tests/test_cold_party_assembly.js',

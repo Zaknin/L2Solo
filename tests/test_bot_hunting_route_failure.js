@@ -199,6 +199,34 @@ try {
         TownTravel.request = savedPurchase.travel;
     }
 
+    // A solo hunter with expired newbie buffs whose guide trip was abandoned
+    // waits for the retry time instead of walking the same route next tick.
+    const Buffs = invoke('GameServer/Bot/AI/BotBuffs');
+    const guideAt = offset => ({ ...ai,
+        getClosestNewbieGuide: () => ({ locX: start.locX + offset, locY: start.locY, locZ: start.locZ }) });
+    const buffTrip = (retryAt, BotAI) => {
+        const f = fixture(true);
+        f.session.spotRelocation = undefined;
+        f.session.townRoutePlan = null;
+        f.session.newbieGuideRetryAt = retryAt;
+        f.bot.automation = { abortAll() {} };
+        Hunting.tick(f.session, f.bot, {}, BotAI);
+        return f.session.plan;
+    };
+    Buffs.needsNewbieRefresh = () => true;
+    try {
+        assert.strictEqual(buffTrip(Date.now() + 60000, guideAt(2000)), 'hunting',
+            'expired buffs do not restart a guide trip before its retry time');
+        assert.strictEqual(buffTrip(Date.now() - 1, guideAt(2000)), 'getting_buffed',
+            'expired buffs send the hunter to the guide once the retry time passed');
+        assert.strictEqual(buffTrip(undefined, guideAt(7600)), 'hunting',
+            'expired buffs do not send a hunter to a guide beyond its town radius');
+        assert.strictEqual(buffTrip(undefined, guideAt(7400)), 'getting_buffed',
+            'expired buffs send a hunter to a guide within its town radius');
+    } finally {
+        Buffs.needsNewbieRefresh = () => false;
+    }
+
     console.log('Bot hunting route failure checks passed');
 } finally {
     Math.random = originalRandom;

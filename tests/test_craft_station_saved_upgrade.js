@@ -16,6 +16,12 @@ async function run() {
     await Database.init(); await Life.init();
     const oldIds = new Map();
     const oldLoc = { locX: 1, locY: 2, locZ: 3 };
+    // A summary-only stack: the bag names shots the crafter holds no item row for.
+    const phantomShots = { 1835: { selfId: 1835, name: 'Soulshot: No Grade', amount: 1000 } };
+    const persistedBag = async (characterId) => Life.normalizeInventoryStackability(JSON.parse((await Database.execute([
+        'SELECT inventorySummary FROM bot_life_state WHERE characterId = ?', [characterId]]))[0].inventorySummary));
+    const physicalBag = async (characterId) => Life.normalizeInventoryStackability(
+        Life.inventorySummaryFromItems(await Database.fetchItems(characterId)));
     for (let slot = 0; slot < 32; slot++) {
         const accountName = `bot_craft_${String(slot + 1).padStart(2, '0')}`;
         const name = `OldCraft${String(slot + 1).padStart(2, '0')}`;
@@ -26,7 +32,7 @@ async function run() {
         oldIds.set(accountName, characterId);
         await Life.upsertState({ characterId, accountName, name, level: 70, exp: Data.experience[69],
             phase: 'cold', activity: 'crafting', currentRegion: 'Giran', loc: oldLoc,
-            vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 }, inventory: {}, timing: {},
+            vitals: { hp: 1000, maxHp: 1000, mp: 1000, maxMp: 1000 }, inventory: slot === 0 ? phantomShots : {}, timing: {},
             stats: { classId: 57, generatedCold: true, generatedIndex: 10000 + slot,
                 craftStationId: 'd_heavy', craftShop: { stationId: 'd_heavy', title: 'Old station',
                     loc: oldLoc, entries: [{ recipeId: 79, price: 1 }] } } }, 'old_craft_station_fixture');
@@ -48,7 +54,17 @@ async function run() {
         assert.deepEqual(state.stats.craftShop.loc, station.loc);
         assert.deepEqual(state.stats.craftShop.entries.map(row => row.recipeId),
             Shops.profileFor(state).entries.map(row => row.recipeId), 'saved service publishes the current recipes');
+        assert.deepEqual(await persistedBag(character.id), await physicalBag(character.id),
+            `service ${slot + 1} persists the bag its item rows hold`);
     }
+
+    // A crafter already at its current stall: the bag alone moves the row.
+    const firstId = oldIds.get('bot_craft_01');
+    const settled = await Life.findByCharacterId(firstId);
+    await Life.upsertState({ ...settled, inventory: { ...settled.inventory, ...phantomShots } }, 'phantom_fixture');
+    assert.equal((await persistedBag(firstId))[1835]?.amount, 1000, 'fixture stores the summary-only stack');
+    await Seeder.ensureCraftServices();
+    assert.deepEqual(await persistedBag(firstId), await physicalBag(firstId), 'the seed pass drops the summary-only stack');
     console.log('PASS saved craft stations: 32 account identities refreshed, 3 appended services created');
 }
 
