@@ -453,7 +453,7 @@ async function buyAdNeedChanged(record, line) {
         invoke('GameServer/Bot/Economy/HotBoardReviewService').ownerChanged(record.ownerId, 'line');
     }
     // A request the worker dropped (not ready yet) is asked again on the next refusal.
-    if (!asked) refusedAds.delete(record.id);
+    if (!asked) refusedAds.delete(key);
 }
 async function cancel(characterId) {
     const rows = db().fetchTradeMeetingsForOwner ? await db().fetchTradeMeetingsForOwner(Number(characterId))
