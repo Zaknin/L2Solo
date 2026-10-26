@@ -35,6 +35,7 @@ Optional but recommended for a better experience
 
 
 ## Latest updates
+- **2026-10-26** Server stability, better AI, spoil, hunting, bug fixes
 - **2026-10-18** A living world economy, market board, better bot progression
 - **2026-10-03** Bot and performance fixes, player-led raids, better observer, quests and more
 - **2026-09-29** Market, recipes, bot shoulshots craft, paid buffs, fixes and improvements
@@ -54,11 +55,11 @@ Optional but recommended for a better experience
 - **2026-08-28** Skills, bot behavior, gear planning, and seeder fixes and improvements
 - **2026-08-27** Add LLM-driven clan management
 - **2026-08-26** Observer update, better and faster, player clan crest control, player clan goal control
-- **2026-08-25** Bot clans update follow-up, bug fixes
 
 <details>
 <summary>Earlier</summary>
 
+- **2026-08-25** Bot clans update follow-up, bug fixes
 - **2026-08-24** Bot clans, better cold/hot performance, bug fixes, and more
 - **2026-08-20** Loot and mob skills bug fixes, bot social graph base
 - **2026-08-19** Runtime optimization, cold bot progression bottlenecks fix, bot equipment enchantment
