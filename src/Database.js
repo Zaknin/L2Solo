@@ -6162,6 +6162,24 @@ const Database = {
         }, 'bot-life:party-lifecycle');
     },
 
+    pauseConstPartyActivity(request = {}) {
+        return inTransaction(() => require('./GameServer/Bot/Population/ConstPartyActivity').native({
+            one, all, write, row: coldSimulationRow, now
+        }).pause(request), 'bot-life:const-party-pause');
+    },
+
+    releaseConstPartyActivity(request = {}) {
+        return inTransaction(() => require('./GameServer/Bot/Population/ConstPartyActivity').native({
+            one, all, write, row: coldSimulationRow, now
+        }).release(request), 'bot-life:const-party-resume');
+    },
+
+    recoverConstPartyActivities() {
+        return inTransaction(() => require('./GameServer/Bot/Population/ConstPartyActivity').native({
+            one, all, write, row: coldSimulationRow, now
+        }).recover(), 'bot-life:const-party-recovery');
+    },
+
     takeOverBackgroundParty(request = {}) {
         const members = request.members || [];
         const ids = members.map((member) => Number(member.characterId));

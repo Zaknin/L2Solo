@@ -934,8 +934,9 @@ function save(row, options = {}) {
             -- Native takeover/release/restore owns player membership. A late
             -- actor snapshot cannot revive or remove that ownership marker.
             statsJson = json_set(json_patch(json_remove(${EconomyCommit.preserveLeafSql(
-                "json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs')")}, '$.playerPartyTakeover'),
-                json_object('playerPartyTakeover', json_extract(bot_life_state.statsJson, '$.playerPartyTakeover'))),
+                "json_remove(excluded.statsJson, '$.marketTrades', '$.priceBeliefs')")}, '$.playerPartyTakeover', '$.constPartySession'),
+                json_object('playerPartyTakeover', json_extract(bot_life_state.statsJson, '$.playerPartyTakeover'),
+                    'constPartySession', json_extract(bot_life_state.statsJson, '$.constPartySession'))),
                 '$.hennas', json_array(
                     (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 1),
                     (SELECT symbolId FROM character_hennas WHERE characterId = excluded.characterId AND slot = 2),
@@ -1797,7 +1798,7 @@ const BotLifeState = {
                     (SELECT karma FROM characters WHERE id = characterId))
                 WHERE COALESCE(json_extract(statsJson, '$.karma'), 0)
                     <> (SELECT karma FROM characters WHERE id = characterId)`, []]))
-            .then(() => Database.reconcileBotClanGoals?.()).then(() => removeRetiredStaticMerchantStates()).then(() => recoverStaleHotStates()).then(() => recoverDissolvedPartyMembers()).then(() => recoverStaleCraftWaits()).then(() => migrateAcquisitionPartyWaits()).then(() => clearPassivePartyRequests()).then(() => expireStalePartyRequests()).then(() => discardInvalidEquipmentPlans()).then(() => discardFulfilledEquipmentPlans()).then(() => hydrateCache()).then((count) => {
+            .then(() => Database.reconcileBotClanGoals?.()).then(() => removeRetiredStaticMerchantStates()).then(() => Database.recoverConstPartyActivities()).then(() => recoverStaleHotStates()).then(() => recoverDissolvedPartyMembers()).then(() => recoverStaleCraftWaits()).then(() => migrateAcquisitionPartyWaits()).then(() => clearPassivePartyRequests()).then(() => expireStalePartyRequests()).then(() => discardInvalidEquipmentPlans()).then(() => discardFulfilledEquipmentPlans()).then(() => hydrateCache()).then((count) => {
             const repairs = [...cache.values()]
                 .map(canonicalizeAreaState)
                 .map(recoverOrphanedGiranState)

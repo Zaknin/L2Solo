@@ -34,6 +34,7 @@ module.exports = async function nativeFriends(session, parts) {
     const operation = session.nativeFriendsBusy = {};
     const current = () => session.actor === actor && session.nativeFriendsBusy === operation;
     let message = '';
+    let formation, formationComplete = false;
     try {
         if (action === 'request') {
             const Life = invoke('GameServer/Bot/Population/BotLifeState');
@@ -52,16 +53,22 @@ module.exports = async function nativeFriends(session, parts) {
         } else {
             const World = invoke('GameServer/World/World');
             const bots = await Friends.selected(session);
+            if (!current()) return;
+            formation = await invoke('GameServer/Bot/AI/ConstPartySession').prepareFormation(session, actor, bots, current);
             let joined = 0;
             for (const bot of bots) {
                 if (!current()) return;
                 if (await World.inviteFriendByName(session, actor, bot.characterName || bot.name, undefined, 'friend_const')) joined++;
             }
+            formationComplete = true;
             message = `Party invitations processed: ${joined} / ${bots.length}.`;
         }
         if (current()) await Menu.renderNative(session, false, message);
     } catch (error) {
         utils.infoWarn('BotFriends', 'native action failed: %s', error.message);
         if (current()) await Menu.renderNative(session, false, 'Action failed. Please refresh.');
-    } finally { if (session.nativeFriendsBusy === operation) session.nativeFriendsBusy = false; }
+    } finally {
+        try { if (formation && (!formationComplete || !current())) await formation.rollback(); }
+        finally { if (session.nativeFriendsBusy === operation) session.nativeFriendsBusy = false; }
+    }
 };

@@ -644,6 +644,11 @@ async function confirmMarkedRaidStart(party) {
 }
 
 module.exports = {
+    snapshotForConstPause(party, session) {
+        const snapshot = captureHotRaidHp(party);
+        pauseRaidWorld(snapshot, session);
+        return snapshot;
+    },
     abandonRaid: (session, reason, timestamp) => failRaidOnDeath(session, timestamp, { reason }),
     openMarkedRaid,
     openMarkedRaidAtImpact,

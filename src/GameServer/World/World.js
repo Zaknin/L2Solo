@@ -812,7 +812,7 @@ const World = {
         const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
         const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
         const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
-        let capacityReservation = null;
+        let capacityReservation = options.capacityReservation || null;
 
         const hotSession = BotManager.findSessionByName(lookup);
         if (hotSession) {
@@ -844,7 +844,7 @@ const World = {
                 return false;
             }
 
-            capacityReservation = state;
+            capacityReservation ||= state;
             if (!PartyCompanionService.reserveCapacity(session, capacityReservation)) {
                 BotSocialMemory.recordEvent(session, state, 'party_refused', 'party_full');
                 session.dataSendToMe(ServerResponse.actionFailed());
@@ -868,7 +868,8 @@ const World = {
             return PopulationService.requestActivation(state, 'remote_invite', {
                 playerLoc: actorLoc(actor),
                 forceNearPlayer: true,
-                interruptBackgroundActivity: true
+                interruptBackgroundActivity: true,
+                constParty: options.constParty === true
             }).then((result) => {
                 if (session.actor !== actor) {
                     PartyCompanionService.releaseCapacity(session, capacityReservation);
@@ -1061,7 +1062,7 @@ const World = {
         const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
         const PartyCompanionService = invoke('GameServer/Bot/AI/PartyCompanionService');
         if (!actor || session?.actor !== actor) return Promise.resolve(false);
-        if (!PartyCompanionService.hasCapacity(session)) {
+        if (source !== 'friend_const' && !PartyCompanionService.hasCapacity(session)) {
             session.dataSendToMe(ServerResponse.actionFailed());
             return Promise.resolve(false);
         }
@@ -1069,6 +1070,9 @@ const World = {
             if (!state || session.actor !== actor) return false;
             return BotFriendship.isFriend(session, state.characterId).then((friend) => {
                 if (!friend || session.actor !== actor) return false;
+                if (source === 'friend_const') {
+                    return invoke('GameServer/Bot/AI/ConstPartySession').invite(session, actor, state, distribution);
+                }
                 return this.inviteBotByName(session, actor, name, distribution, source);
             });
         });

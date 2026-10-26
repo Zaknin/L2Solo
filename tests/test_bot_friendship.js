@@ -80,13 +80,13 @@ Promise.all([
     requestSocial = { trust: 20, insults: 0, recentlyAbandonedAt: Date.now() - 1000 };
     const coolingDown = await BotFriendship.request({ characterId: 42 }, { characterId: 101, name: 'CoolingFriend' });
     assert.strictEqual(coolingDown.reason, 'recently_abandoned', 'a recent abandonment must still be respected');
-    // Friendship needs a trusted relationship, no insults and no abandonment in the last five minutes.
+    // Friendship needs six trust, no insults and no abandonment in the last five minutes.
     const requestReason = async (social) => {
         requestSocial = social;
         return (await BotFriendship.request({ characterId: 42 }, { characterId: 105, name: 'PinFriend' })).reason;
     };
-    assert.strictEqual(await requestReason({ trust: 7, familiarity: 20, insults: 0 }), 'low_trust');
-    assert.strictEqual(await requestReason({ trust: 8, familiarity: 0, insults: 0 }), 'accepted');
+    assert.strictEqual(await requestReason({ trust: 5.999, familiarity: 20, insults: 0 }), 'low_trust');
+    assert.strictEqual(await requestReason({ trust: 6, familiarity: 0, insults: 0 }), 'accepted');
     assert.strictEqual(await requestReason({ trust: 8, insults: 1 }), 'insults');
     assert.strictEqual(await requestReason({ trust: 8, insults: 0, recentlyAbandonedAt: Date.now() - 5 * 60 * 1000 + 2000 }),
         'recently_abandoned');

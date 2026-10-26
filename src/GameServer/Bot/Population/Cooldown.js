@@ -72,6 +72,7 @@ const Cooldown = {
 
     canCooldown(session, options = {}) {
         if (!session || !session.actor) return { ok: false, reason: 'missing_actor' };
+        if (session.constActivityPaused) return { ok: false, reason: 'const_activity_paused' };
         if (session.hotCompetitionCommit) return { ok: false, reason: 'social_party_commit' };
         const encounterHandoff = options.encounterKey && session.pvpEncounter?.key === options.encounterKey;
         if (!encounterHandoff && (session.pvpDefense || session.pvpRevenge || session.pendingPvpProvocation)) return { ok: false, reason: 'pvp_active' };

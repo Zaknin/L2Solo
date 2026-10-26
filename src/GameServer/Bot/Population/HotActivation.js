@@ -101,7 +101,7 @@ const HotActivation = {
             if (state.stats?.coldCompetition?.wait?.combat && state.stats.coldCompetition.wait.until > Date.now()) {
                 return { ok: false, reason: 'cold_pvp_settling' };
             }
-            if (state.phase === 'hot') return { ok: false, reason: 'already_hot', state };
+            if (state.phase === 'hot' && !(options.constParty && state.stats?.constPartySession)) return { ok: false, reason: 'already_hot', state };
             if (state.party?.partyId && options.interruptBackgroundActivity !== true
                 && !['remote_invite', 'party_invite'].includes(reason)) {
                 return invoke('GameServer/Bot/Population/HotPartyLifecycle').activate(state.party.partyId, reason, options);

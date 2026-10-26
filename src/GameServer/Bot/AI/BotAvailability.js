@@ -126,6 +126,7 @@ const BotAvailability = {
 
         let reason = 'available';
         if (staticService) reason = 'merchant_duty';
+        else if (options.constParty === true) reason = 'available';
         else if (botSession.hotBackgroundPartyId || botSession.hotCompetitionCommit || botSession.coldLifeState?.party?.partyId
             || botSession.partyCompanion || botSession.followPlayerSession) reason = 'already_grouped';
         else if (result.relationshipReason) reason = result.relationshipReason;
@@ -153,6 +154,7 @@ const BotAvailability = {
 
         let reason = 'available';
         if (staticService) reason = 'merchant_duty';
+        else if (options.constParty === true) reason = 'available';
         else if (state.party?.partyId || state.partyId || state.stats?.backgroundPartyId
             || state.stats?.playerPartyTakeover?.playerId) reason = 'already_grouped';
         else if (result.relationshipReason) reason = result.relationshipReason;

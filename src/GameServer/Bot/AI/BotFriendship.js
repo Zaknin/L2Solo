@@ -4,8 +4,8 @@ const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
 const BotServiceIdentity = invoke('GameServer/Bot/AI/BotServiceIdentity');
 const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
 
-// Friendship needs a trusted relationship; the friends window shows this trust.
-const FRIEND_TRUST = BotSocialMemory.TRUSTED_TRUST;
+// Friendship has its own threshold; other trusted-relationship policies stay unchanged.
+const FRIEND_TRUST = 6;
 const MAX_CONST_MEMBERS = 8;
 const PAGE_SIZE = 12;
 const rosterWrites = new Map();
@@ -109,7 +109,7 @@ const BotFriendship = {
             const now = Date.now();
             const trust = Number(social.trust || 0);
             const insults = Number(social.insults || 0);
-            const reason = BotSocialMemory.relationship(social) !== 'trusted' ? 'low_trust'
+            const reason = trust < FRIEND_TRUST ? 'low_trust'
                 : insults > 0 ? 'insults'
                     : BotSocialMemory.recentlyAbandoned(social, now) ? 'recently_abandoned' : null;
             const accepted = !reason;
