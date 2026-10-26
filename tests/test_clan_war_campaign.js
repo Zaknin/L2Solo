@@ -68,6 +68,25 @@ async function run() {
     assert(!Policy.grievance({ ...social.relations[0], evidence: social.relations[0].evidence.slice(0, 1) }, traits, at, Config).ready);
     await Life.init(); await Parties.init(); await Clans.reload(); await Social.refresh(true);
     await Memory.ensureMany(Array.from({ length: 31 }, (_, i) => i + 1));
+    const Population = invoke('GameServer/Bot/Population/PopulationService');
+    const Coordinator = invoke('GameServer/Bot/Population/ColdSimulationCoordinator');
+    const priorActions = Coordinator.competitionActions;
+    try {
+        Population.started = true;
+        Coordinator.competitionActions = { canRun: () => true, apply: async () => ({ ok: true }) };
+        await Population.startClanWars();
+        await new Promise(resolve => setImmediate(resolve));
+        assert(Population.clanWars.active, 'native population startup must start the military director');
+        assert.strictEqual(Population.clanWars.memory, Memory, 'native startup supplies the shared memory owner');
+        assert(Population.clanWars.canWork(), 'the real admission callback must be callable after startup');
+        assert.equal(Population.clanWars.states.size, 31);
+        const started = Population.clanWars;
+        await Population.startClanWars();
+        assert.strictEqual(Population.clanWars, started, 'duplicate startup does not attach a second publication subscriber');
+    } finally {
+        Population.clanWars?.stop(); Population.clanWars = null; Population.started = false;
+        Coordinator.competitionActions = priorActions;
+    }
     director = new ClanWarDirector({ database: DB, life: Life, parties: Parties, clans: Clans, war: War,
         social: Social.view, memory: Memory, personaFor, form: async () => null, actions: { apply: async () => ({ ok: true }) }, now: () => at });
     await director.start(); await new Promise(resolve => setImmediate(resolve)); at = Date.now();

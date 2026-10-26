@@ -1494,7 +1494,7 @@ const PopulationService = {
         const service = new (require('../../Clan/ClanWarDirector').ClanWarDirector)({
             database: Database, life: LifeState, parties: BackgroundPartyState,
             clans: invoke('GameServer/Clan/ClanService'), war: invoke('GameServer/Clan/ClanWarRuntime'),
-            social: invoke('GameServer/Clan/ClanSocialRuntime').view, memory: Memory,
+            social: invoke('GameServer/Clan/ClanSocialRuntime').view, memory: invoke('GameServer/Social/InteractionMemoryRuntime'),
             personaFor: state => BotPersona.of(state), form: (members, operation) => this.formClanWarParty(members, operation),
             actions: ColdSimulationCoordinator.competitionActions,
             canWork: () => this.started && ClanSimulationConfig.enabled !== false && !this.resolving && !this.partyFormationRunning
