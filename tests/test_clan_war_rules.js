@@ -26,6 +26,14 @@ const clan = { id: 10, level: 3, members: 15, allyId: 0 };
 assert.equal(Rules.declaration(clan, { ...clan, id: 20 }), null);
 assert.equal(Rules.declaration(clan, { ...clan, id: 20, level: 2 }), 'clan_level');
 assert.equal(Rules.declaration(clan, { ...clan, id: 20, members: 14 }), 'clan_members');
+assert.equal(Rules.declaration({ ...clan, members: 1 }, { ...clan, id: 20, members: 1 }, 0, { manual: true }), null,
+    'manual player commands have no member minimum on either clan');
+assert.equal(Rules.declaration(clan, { ...clan, id: 20, members: 1 }, 0, { replying: true }), null,
+    'a ready bot clan may answer a declaration from a small clan');
+assert.equal(Rules.declaration({ ...clan, members: 14 }, { ...clan, id: 20 }, 0, { replying: true }), 'clan_members',
+    'answering a declaration does not waive the bot clan own member minimum');
+assert.equal(Rules.declaration({ ...clan, members: 1 }, { ...clan, id: 20, level: 2 }, 0, { manual: true }), 'clan_level',
+    'the player exception does not waive the clan level requirement');
 
 require('../src/Global');
 const DB = invoke('Database');
@@ -60,7 +68,8 @@ async function run() {
     assert.equal((await command(1, 20)).code, 'same_alliance');
     await DB.execute(['UPDATE clans SET allyId=0']);
     await DB.execute(['UPDATE characters SET clanId=0 WHERE id=30']);
-    assert.equal((await command(1, 20)).code, 'clan_members');
+    await DB.execute(["INSERT INTO clan_simulation_clans(clanId,version,mode,createdAt,updatedAt,stateJson) VALUES (10,1,'autonomous',?,?,?)", [Date.now(), Date.now(), '{}']]);
+    assert.equal((await command(1, 20, 'declare', { autonomous: true })).code, 'clan_members');
     assert.equal((await DB.fetchClanWars()).filter(r => r.active).length, 0);
     assert.equal((await DB.execute(['SELECT COUNT(*) AS n FROM clan_war_events']))[0].n, 4, 'only accepted changes enter history');
     await DB.execute(['UPDATE characters SET clanId=20 WHERE id=30']);

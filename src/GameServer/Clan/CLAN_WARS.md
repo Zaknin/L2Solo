@@ -119,6 +119,12 @@ releases the supply ticket instead of assigning an unrelated clan duty.
 
 ## Inspection and tests
 
+Manual player declarations have no minimum member count on either clan and do
+not use the autonomous hostility threshold. Other declaration checks still
+apply. Autonomous clans retain their own fifteen-member minimum; when starting
+a new war the target also needs fifteen members. An autonomous clan may answer
+an existing declaration from a smaller player clan.
+
 GET /observer/api/clans/wars returns declarations and campaign decisions,
 sightings, operation references and the last attempted encounter. It is a
 read-only Observer endpoint.

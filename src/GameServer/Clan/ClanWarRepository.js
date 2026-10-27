@@ -94,7 +94,9 @@ function create({ one, all, write, enqueue, inTransaction, withCharacterFlushes,
                 if (request.expectedRevision !== undefined && request.expectedRevision !== state.revision) return { ok: false, code: 'war_changed' };
                 if ((outgoing?.active || 0) === active) return { ok: true, changed: false, row: outgoing || null, state };
                 if (active) {
-                    const reason = Rules.declaration(own, target, Number(one('SELECT COUNT(*) AS n FROM clan_war_declarations WHERE fromClanId=? AND active=1', [own.id]).n));
+                    const reason = Rules.declaration(own, target,
+                        Number(one('SELECT COUNT(*) AS n FROM clan_war_declarations WHERE fromClanId=? AND active=1', [own.id]).n),
+                        { manual: !request.autonomous, replying: incoming?.active === 1 });
                     if (reason) return { ok: false, code: reason };
                 } else if (one(`SELECT characterId FROM bot_life_state WHERE characterId IN (SELECT id FROM characters WHERE clanId=?)
                     AND json_extract(statsJson,'$.pvpEncounter.expiresAt')>? LIMIT 1`, [own.id, now()])) return { ok: false, code: 'clan_in_combat' };

@@ -11,13 +11,15 @@ function relation(outgoing, incoming) {
         revision: Math.max(outgoing?.revision || 0, incoming?.revision || 0),
         status: sent && received ? 'mutual' : sent ? 'outgoing' : received ? 'incoming' : 'neutral' };
 }
-function declaration(clan, target, outgoingCount = 0) {
+function declaration(clan, target, outgoingCount = 0, { manual = false, replying = false } = {}) {
     if (!clan || !target) return 'clan_not_found';
     if (clan.id === target.id) return 'own_clan';
     if (clan.dissolvingExpiryTime > 0 || target.dissolvingExpiryTime > 0) return 'clan_dissolving';
     if (clan.allyId > 0 && clan.allyId === target.allyId) return 'same_alliance';
     if (clan.level < MIN_LEVEL || target.level < MIN_LEVEL) return 'clan_level';
-    if (clan.members < MIN_MEMBERS || target.members < MIN_MEMBERS) return 'clan_members';
+    // Player commands do not need a full roster. A bot answering an existing
+    // declaration still needs its own roster, but may answer a small player clan.
+    if (!manual && (clan.members < MIN_MEMBERS || !replying && target.members < MIN_MEMBERS)) return 'clan_members';
     if (outgoingCount >= MAX_DECLARATIONS) return 'war_limit';
     return null;
 }

@@ -25,13 +25,15 @@ const messages = session => session.packets.filter(p => p[0] === 0x4a)
 async function run() {
     DB.init();
     await DB.execute(["INSERT INTO accounts(username,password) VALUES ('player_war_client','test')"]);
-    for (let id = 1; id <= 30; id++) await DB.execute([`INSERT INTO characters
+    for (const id of [1, 2, 3, 4, 16]) await DB.execute([`INSERT INTO characters
         (id,username,name,classId,race,level,maxHp,maxMp,sex,face,hair,hairColor,locX,locY,locZ,clanId)
-        VALUES (?,'player_war_client',?,0,0,40,1000,500,0,0,0,0,1,1,1,?)`, [id, `Player${id}`, id <= 15 ? 10 : 20]]);
+        VALUES (?,'player_war_client',?,0,0,40,1000,500,0,0,0,0,1,1,1,?)`, [id, `Player${id}`, id <= 4 ? 10 : 20]]);
     await DB.execute(["INSERT INTO clans(id,name,leaderId,level) VALUES (10,'PlayerWarA',1,3),(20,'PlayerWarB',16,3)"]);
     await Clans.reload(); await War.refresh(true);
     assert.equal((await DB.execute(['SELECT COUNT(*) AS n FROM clan_simulation_clans']))[0].n, 0,
         'these are player clans, without autonomous authority');
+    assert.equal(Clans.findById(10).members.length, 4, 'reproduce the live BornToKill roster size');
+    assert.equal(Clans.findById(20).members.length, 1, 'a manual target may also have fewer than fifteen members');
     const leader = player(1, 10), opponent = player(16, 20), member = player(2, 10);
     const sessions = [leader, opponent, member];
     patch(Clans, 'onlineSessions', clan => sessions.filter(s => s.actor.fetchClanId() === clan.id && s.online));
@@ -78,9 +80,30 @@ async function run() {
     assert.deepEqual(events.map(e => [e.actorId, e.action, e.reason]),
         [[1, 'declare', 'manual'], [16, 'declare', 'manual'], [1, 'withdraw', 'manual'], [16, 'withdraw', 'manual']],
         'only accepted native client commands enter persistent diplomacy');
+    await DB.execute(["INSERT INTO clans(id,name,leaderId,level) VALUES (30,'BotWarC',31,3)"]);
+    await DB.execute(["INSERT INTO clan_simulation_clans(clanId,version,mode,createdAt,updatedAt,stateJson) VALUES (30,1,'autonomous',?,?,?)", [Date.now(), Date.now(), '{}']]);
+    for (let id = 31; id <= 45; id++) await DB.execute([`INSERT INTO characters
+        (id,username,name,classId,race,level,maxHp,maxMp,sex,face,hair,hairColor,locX,locY,locZ,clanId)
+        VALUES (?,'player_war_client',?,0,0,40,1000,500,0,0,0,0,1,1,1,30)`, [id, `Bot${id}`]]);
+    await Clans.reload();
+    const botLeader = player(31, 30);
+    const botCommand = action => War.transition(botLeader.actor, 10, action, { autonomous: true, reason: 'accept_war' });
+    assert.equal((await botCommand('declare')).code, 'clan_members',
+        'a new autonomous war still needs the target member minimum');
+    assert((await send(leader, 0x4d, 'BotWarC')).ok, 'the small player clan may declare against an autonomous clan');
+    assert((await botCommand('declare')).state.mutual,
+        'an autonomous clan may accept the player declaration instead of failing on the small enemy roster');
+    assert((await send(leader, 0x4f, 'BotWarC')).ok);
+    assert((await botCommand('withdraw')).ok);
+    await DB.execute(['UPDATE characters SET clanId=0 WHERE id=45']);
+    await Clans.reload();
+    assert((await send(leader, 0x4d, 'BotWarC')).ok);
+    assert.equal((await botCommand('declare')).code, 'clan_members',
+        'the responding bot clan must still have fifteen members of its own');
+    assert((await send(leader, 0x4f, 'BotWarC')).ok);
     await DB.close(); DB.init(); await War.refresh(true);
     assert((await DB.fetchClanWars()).every(row => row.active === 0), 'stopping the war survives reopening SQLite');
-    console.log('Player clan client: C4 declare/stop opcodes, leader authority, client feedback, mutual/one-sided transitions, combat refusal, malformed packets and persisted peace passed');
+    console.log('Player clan client: small player clans, C4 declare/stop opcodes, leader authority, client feedback, autonomous replies, combat refusal, malformed packets and persisted peace passed');
 }
 run().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
     changes.reverse().forEach(restore => restore()); War.view.replace([]);
