@@ -22,6 +22,7 @@ const tests = [
     'tests/test_clan_war_queue.js',
     'tests/test_world_observer_clan_wars.js',
     'tests/test_clan_war_rules.js',
+    'tests/test_clan_war_player_client.js',
     'tests/test_clan_war_campaign.js',
     'tests/test_clan_war_operations.js',
     'tests/test_clan_war_native.js',
