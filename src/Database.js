@@ -417,6 +417,7 @@ function flushJournals() {
         if (DiagnosticConfig.developerDiagnostics) metrics.transactions += 1;
         connection.exec('BEGIN IMMEDIATE');
         try {
+            require('./GameServer/Clan/ClanWarCombat').persist(write, conflicts, now());
             historyOutboxUnsafe('journal', { rows, conflicts });
             connection.exec('COMMIT');
         } catch (error) {
@@ -1888,6 +1889,7 @@ function applySchemaMigrations() {
     // Older progress inferred time between kills, including offline gaps.
     migrations.push([78, () => connection.exec('DELETE FROM recommendation_hunts')]);
     migrations.push([79, () => require('./GameServer/Clan/ClanWarRepository').install(connection)]);
+    migrations.push([80, () => require('./GameServer/Clan/ClanWarCombat').install(connection)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -11075,7 +11077,7 @@ const Database = {
 };
 
 const ClanLevelSp = require('./GameServer/Clan/ClanLevelSpRepository')({ one, write, run, withCharacterFlushes });
-Object.assign(Database, require('./GameServer/Clan/ClanWarRepository').create({ one, all, write, enqueue, inTransaction, withCharacterFlushes, now }));
+Object.assign(Database, require('./GameServer/Clan/ClanWarRepository').create({ one, all, write, enqueue, inTransaction, withCharacterFlushes, flushJournals, now }));
 const Recommendations = require('./DatabaseRecommendations').create({ one, all, write, enqueue, inTransaction, withCharacterFlushes, now });
 for (const name of ['refreshRecommendations', 'giveRecommendation', 'fetchRecommendationEvents', 'recommendationHead', 'pruneRecommendations']) {
     Database[name] = Recommendations[name];

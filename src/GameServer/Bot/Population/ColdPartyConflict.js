@@ -196,8 +196,8 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
     if (!encounter) Journal.coldConflict({ key: event.key, revenge, reason: pvp?.reason || event.action,
         spotId: event.spotId, npcId: event.npcId, partyIds,
         sideSizes: sides.map(s => s.members.length), outcome, fought: !!pvp?.started,
-        principals: sides.map(s => s.principal), personaFor, at: timestamp,
-        ...(pvp?.started ? { losingSide: pvp.losingSide, kills: pvp.fighters.flatMap(f => f.kills),
+        principals: sides.map(s => s.principal), combatants: states, personaFor, at: timestamp,
+        ...(pvp?.started ? { losingSide: pvp.losingSide, kills: pvp.fighters.flatMap(f => f.kills.map(k => ({ ...k, killerId: f.id }))),
             durationMs: Math.min(combatAt + pvp.durationMs, step?.expiresAt ?? Infinity) - startedAt,
             actions: (resume?.actions || 0) + pvp.actions } : {}) });
     return { ok: true, deescalated, outcome, pvp: !!pvp?.started,

@@ -20,7 +20,7 @@ function authorisedEvidence(one, event) {
         one('SELECT action FROM clan_war_events WHERE fromClanId=? AND toClanId=? AND id<=? AND createdAt<=? ORDER BY id DESC LIMIT 1',
             [a, b, fact.warRevision, event.at])?.action === 'declare');
 }
-function create({ one, all, write, enqueue, inTransaction, withCharacterFlushes, now }) {
+function create({ one, all, write, enqueue, inTransaction, withCharacterFlushes, flushJournals, now }) {
     const row = (from, to) => one('SELECT * FROM clan_war_declarations WHERE fromClanId=? AND toClanId=?', [from, to]);
     const clan = id => one(`SELECT c.*, (SELECT COUNT(*) FROM characters p WHERE p.clanId=c.id) AS members FROM clans c WHERE c.id=?`, [id]);
     return {
@@ -41,6 +41,14 @@ function create({ one, all, write, enqueue, inTransaction, withCharacterFlushes,
         },
         fetchClanWarPlans() {
             return enqueue(() => all('SELECT * FROM clan_war_plans'), { operation: 'clan-war:plans', read: true });
+        },
+        fetchClanWarPressure(clanId, since, until = now()) {
+            // A just-ended battle must be visible before deciding that the war
+            // was quiet. Flush only when this clan has pending actual combat.
+            const pending = require('../../PvpJournal').snapshot().some(r => r.warFacts?.some(f => f.fromClanId === clanId || f.toClanId === clanId));
+            return (pending ? flushJournals() : Promise.resolve()).then(() =>
+                enqueue(() => require('./ClanWarCombat').pressure(all, clanId, since, until),
+                    { operation: 'clan-war:pressure', read: true }));
         },
         saveClanWarPlan(clanId, expectedRevision, state) {
             const json = JSON.stringify(state);

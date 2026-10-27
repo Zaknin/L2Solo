@@ -3,6 +3,8 @@
 Clan feelings, formal declarations and military operations are separate state.
 All formal changes use the queued SQLite writer. Migration 79 installs directed
 declarations, their append-only history and versioned autonomous campaign plans.
+Migration 80 adds indexed recent inter-clan combat facts, committed with the
+existing PvP journal flush and retained for 24 hours.
 
 ## Native rules
 
@@ -50,9 +52,30 @@ current position; a military expedition requires witnessed position information.
 
 The recipient can accept based on its leader's character, available force,
 reported enemies and existing hostility, or retain an incoming-only declaration.
-Its own hostility need not cross the declaration threshold. Quiet campaigns and
-repeated unsuccessful operations can cause withdrawal. Active combat refreshes
-the campaign clock. After withdrawal, automatic redeclaration is held for six
+Its own hostility need not cross the declaration threshold. One hour without
+fresh harm or actual combat causes a withdrawal attempt. Actual cold battles
+refresh both clans' clocks, including battles without a kill. Native kills and
+committed cold kills also feed a per-enemy, one-hour casualty window, including
+deaths outside military parties and one-sided-war PK. Captured clan identities
+survive later membership changes; repeated journal facts are idempotent. Rejected
+attacks, previews, PvE deaths, roster changes and retreats without deaths add no
+casualties.
+
+At least three deaths across three different members trigger a loss response.
+Leader assertiveness, commitment, ambition and caution are weighed against the
+fraction of the clan lost and the exchange of kills. Cautious leaders, clans
+without three ready fighters, and clans left with only a unilateral declaration
+attempt withdrawal. Aggressive leaders in mutual war prioritize fresh sightings
+of that enemy and shorten the normal ten-minute expedition cooldown to two
+minutes. All roster, healer, visibility, travel, queue and capacity checks remain
+in force. A losing exchange of at least 3:1 forces a withdrawal attempt even for
+an aggressive leader when half the roster (at least six distinct members) falls,
+or deaths reach the roster size (at least twelve). Repeated deaths of a single
+member cannot impersonate a clan-wide slaughter. An operation timeout alone
+cannot force peace. Combat restrictions can defer withdrawal; the next review
+retries it while the pressure remains. Neither decision removes the opponent's
+own declaration or grants first-strike rights against white neutral targets.
+After withdrawal, automatic redeclaration is held for six
 hours. Player-managed clans are never given autonomous diplomatic commands.
 
 The director runs as a bounded background registry job under existing admission
@@ -145,6 +168,7 @@ the last snapshot with a stale-data notice. The endpoint shares a two-second cac
 and reads at most eighty recent diplomatic events per build.
 
 The default suite includes test_clan_war_rules.js, test_clan_war_native.js,
+test_clan_war_casualties.js,
 test_clan_war_operations.js and test_clan_war_campaign.js. They cover eligibility,
 directionality, persistence, white-target kill classification, neutral parties,
 independent acceptance, raised hostility, stale impact rollback, discipline,

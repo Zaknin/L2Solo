@@ -105,9 +105,29 @@ class ClanWarDirector {
             target: this.clans.findById(row.targetId), feeling: Policy.grievance({ ...row,
                 evidence: [...(row.evidence || []), ...histories.filter(e => e.subjectClanId === row.targetId)] }, traits, at, Config) }))
             .filter(r => r.target).sort((a, b) => b.feeling.hostility - a.feeling.hostility);
+        const pressure = await this.database.fetchClanWarPressure?.(clan.id, at - Config.lossWindowMs, at) || [];
+        plan.warPressure = pressure.filter(p => this.war.view.between(clan.id, p.enemyClanId).status !== 'neutral');
+        plan.lossResponse = null;
+        const readyMembers = clan.members.map(m => this.states.get(m.id)).filter(s => Policy.available(s, at, { allowHot: true })).length;
+        const responses = new Map(plan.warPressure.map(p => [p.enemyClanId, Policy.lossResponse({ pressure: p, traits,
+            members: clan.members.length, readyMembers, mutual: this.war.view.between(clan.id, p.enemyClanId).mutual })]));
         const incoming = this.war.view.all().filter(r => r.active && r.toClanId === clan.id && !this.war.view.between(clan.id, r.fromClanId).outgoing);
         let decision = null;
-        if (at >= Number(plan.ceasefireUntil || 0)) for (const row of incoming) {
+        for (const p of plan.warPressure.sort((a, b) => b.losses - a.losses)) {
+            const action = responses.get(p.enemyClanId);
+            if (!action) continue;
+            const state = this.war.view.between(clan.id, p.enemyClanId);
+            if (action === 'withdraw' && state.outgoing) {
+                decision = { target: this.clans.findById(p.enemyClanId), action: 'withdraw', reason: 'war_casualties' };
+                plan.lossResponse = { ...p, action, at, until: p.combatAt + Config.lossWindowMs }; break;
+            }
+            if (action === 'counterattack' && !plan.lossResponse) {
+                plan.lossResponse = { ...p, action, at, until: p.combatAt + Config.lossWindowMs };
+                plan.nextOperationAt = Math.min(Number(plan.nextOperationAt || at), at + Config.counterattackCooldownMs);
+            }
+        }
+        if (!decision && at >= Number(plan.ceasefireUntil || 0)) for (const row of incoming) {
+            if (responses.get(row.fromClanId) === 'withdraw') continue;
             const target = this.clans.findById(row.fromClanId), feeling = relations.find(r => r.target.id === row.fromClanId)?.feeling;
             const sighting = plan.intel.find(r => r.enemyClanId === row.fromClanId);
             if (target && Policy.accepts({ traits, ownMembers: members.length, enemyMembers: sighting?.enemyIds.length || 0,
@@ -117,18 +137,19 @@ class ClanWarDirector {
         }
         if (!decision && at >= Number(plan.ceasefireUntil || 0) && members.length >= Config.minMembers) for (const entry of relations) {
             const state = this.war.view.between(clan.id, entry.target.id);
-            if (!entry.feeling.ready || state.outgoing
+            if (!entry.feeling.ready || state.outgoing || responses.get(entry.target.id) === 'withdraw'
                 || Rules.declaration({ ...clan, members: clan.members.length }, { ...entry.target, members: entry.target.members.length })) continue;
             decision = { target: entry.target, action: 'declare', reason: 'repeated_clan_aggression' }; break;
         }
         if (!decision) for (const row of this.war.view.all()) {
             if (!row.active || row.fromClanId !== clan.id || at - row.declaredAt < Config.reviewMs) continue;
             const feeling = relations.find(r => r.target.id === row.toClanId)?.feeling;
-            const combatAt = Math.max(plan.combatAt?.[row.toClanId] || 0, this.war.combatAt(clan.id, row.toClanId));
+            const combatAt = Math.max(plan.combatAt?.[row.toClanId] || 0, this.war.combatAt(clan.id, row.toClanId),
+                pressure.find(p => p.enemyClanId === row.toClanId)?.combatAt || 0);
             if (combatAt) plan.combatAt = { ...(plan.combatAt || {}), [row.toClanId]: combatAt };
             const quiet = at - Math.max(row.declaredAt, feeling?.lastHarmAt || 0, combatAt) >= Config.quietWithdrawMs;
-            if (quiet || Number(plan.defeats || 0) >= 3) {
-                decision = { target: this.clans.findById(row.toClanId), action: 'withdraw', reason: quiet ? 'conflict_cooled' : 'war_losses' }; break;
+            if (quiet) {
+                decision = { target: this.clans.findById(row.toClanId), action: 'withdraw', reason: 'conflict_cooled' }; break;
             }
         }
         if (decision?.target && this.active && this.canWork()) {
@@ -139,9 +160,13 @@ class ClanWarDirector {
                 admit: () => this.active && Config.enabled && this.canContinue() && this.autonomous.has(clan.id) });
             plan.lastDecision = { at, targetClanId: decision.target.id, action: decision.action, reason: decision.reason,
                 accepted: result.ok, code: result.code || null };
-            if (result.ok && decision.action === 'withdraw') { plan.ceasefireUntil = at + Config.redeclareCooldownMs; plan.defeats = 0; }
+            if (result.ok && decision.action === 'withdraw') { plan.ceasefireUntil = at + Config.redeclareCooldownMs; plan.defeats = 0; plan.lossResponse = null; }
         }
         await this.save(clan.id, plan);
+    }
+    operationCooldown(plan, enemyClanId, at) {
+        return plan.lossResponse?.action === 'counterattack' && plan.lossResponse.enemyClanId === enemyClanId
+            && plan.lossResponse.until > at ? Config.counterattackCooldownMs : Config.operationCooldownMs;
     }
     async setOperation(party, operation, spotId = null) {
         const result = await this.database.setClanWarPartyOperation(party.partyId, party.revision, operation, spotId);
@@ -173,7 +198,7 @@ class ClanWarDirector {
         if (ended) {
             await this.setOperation(party, { ...op, status: 'returning', outcome: ended, expiresAt: at + Config.operationMs });
             const plan = this.plans.get(op.clanId) || { revision: 0, intel: [] };
-            await this.save(op.clanId, { ...plan, nextOperationAt: at + Config.operationCooldownMs,
+            await this.save(op.clanId, { ...plan, nextOperationAt: at + this.operationCooldown(plan, op.enemyClanId, at),
                 defeats: Number(plan.defeats || 0) + Number(ended === 'losses'), lastOperation: { id: op.id, at, outcome: ended } });
             return;
         }
@@ -194,7 +219,7 @@ class ClanWarDirector {
             else if (at - op.clearSince >= 60000) {
                 await this.setOperation(party, { ...op, status: 'returning', outcome: 'spot_cleared', expiresAt: at + Config.operationMs });
                 const plan = this.plans.get(op.clanId) || { revision: 0, intel: [] };
-                await this.save(op.clanId, { ...plan, nextOperationAt: at + Config.operationCooldownMs,
+                await this.save(op.clanId, { ...plan, nextOperationAt: at + this.operationCooldown(plan, op.enemyClanId, at),
                     defeats: Math.max(0, Number(plan.defeats || 0) - 1), lastOperation: { id: op.id, at, outcome: 'spot_cleared' } });
             }
             return;
@@ -222,7 +247,9 @@ class ClanWarDirector {
         if (operations.length >= Config.maxActiveOperations) return { reason: 'operation_capacity' };
         if (operations.some(p => p.stats.warOperation.clanId === clan.id)) return { reason: 'operation_active' };
         if (at < Number(plan.nextOperationAt || 0)) return { reason: 'operation_cooldown' };
-        const intel = (plan.intel || []).find(i => at - i.at < Config.intelTtlMs && this.war.view.between(clan.id, i.enemyClanId).mutual);
+        const sightings = (plan.intel || []).filter(i => at - i.at < Config.intelTtlMs && this.war.view.between(clan.id, i.enemyClanId).mutual);
+        const intel = (plan.lossResponse?.action === 'counterattack' && plan.lossResponse.until > at
+            && sightings.find(i => i.enemyClanId === plan.lossResponse.enemyClanId)) || sightings[0];
         if (!intel) return { reason: 'no_fresh_intel' };
         const available = this.ownMembers(clan, at);
         const role = s => invoke('GameServer/Bot/AI/BotRoles').inferRole(s);
@@ -249,7 +276,7 @@ class ClanWarDirector {
         op.homeLoc = Home.point(op);
         if (!op.homeLoc) return null;
         const party = existing ? await this.setOperation(existing, op) : await this.form(selected, op);
-        if (party) await this.save(clan.id, { ...plan, nextOperationAt: at + Config.operationCooldownMs,
+        if (party) await this.save(clan.id, { ...plan, nextOperationAt: at + this.operationCooldown(plan, intel.enemyClanId, at),
             lastOperation: { id: op.id, partyId: party.partyId, at, outcome: 'assembled' } });
         return party || null;
     }
@@ -337,7 +364,9 @@ class ClanWarDirector {
         return this.running;
     }
     inspect() {
-        return { active: this.active, plans: [...this.plans].map(([clanId, plan]) => ({ clanId, ...plan })), lastCombat: this.lastCombat,
+        return { active: this.active, policy: { quietWithdrawMs: Config.quietWithdrawMs, lossWindowMs: Config.lossWindowMs,
+            operationCooldownMs: Config.operationCooldownMs, counterattackCooldownMs: Config.counterattackCooldownMs },
+            plans: [...this.plans].map(([clanId, plan]) => ({ clanId, ...plan })), lastCombat: this.lastCombat,
             assembly: { ...this.assemblyMetrics, readiness: [...this.assemblyChecks.values()],
                 queue: [...this.assemblyQueue].map(([clanId, r]) => ({ clanId, enemyClanId: r.intel.enemyClanId,
                     targetSpotId: r.intel.spotId, queuedAt: r.queuedAt, members: r.selected.length, reason: r.reason })) },

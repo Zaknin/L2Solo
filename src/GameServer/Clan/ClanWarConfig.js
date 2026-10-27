@@ -1,7 +1,8 @@
 'use strict';
 const defaults = { enabled: true, hostilityThreshold: 40, minHarmEpisodes: 3,
     reviewMs: 60000, intelTtlMs: 15 * 60000, operationMs: 15 * 60000, operationCooldownMs: 10 * 60000,
-    quietWithdrawMs: 6 * 3600000, redeclareCooldownMs: 6 * 3600000, minMembers: 3, maxMembers: 9, maxActiveOperations: 4 };
+    quietWithdrawMs: 3600000, redeclareCooldownMs: 6 * 3600000, lossWindowMs: 3600000, counterattackCooldownMs: 2 * 60000,
+    minMembers: 3, maxMembers: 9, maxActiveOperations: 4 };
 const config = { ...defaults };
 function reload() {
     const source = global.options?.default?.ClanWars || {};

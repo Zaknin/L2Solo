@@ -8,7 +8,7 @@
     const phases = { assembling: 'Gathering the party', traveling: 'Traveling to the target', searching: 'Searching the area',
         engaging: 'Engaging the enemy', fighting: 'Fighting', holding: 'Holding the spot', returning: 'Returning home' };
     const reasons = { accept_war: 'Answering a war declaration', repeated_clan_aggression: 'Repeated aggression against the clan',
-        conflict_cooled: 'The conflict has cooled', war_losses: 'Repeated military losses', manual: 'Clan command', clan_dissolved: 'Clan dissolved' };
+        conflict_cooled: 'The conflict has cooled', war_losses: 'Repeated military losses', war_casualties: 'Heavy clan casualties', manual: 'Clan command', clan_dissolved: 'Clan dissolved' };
     const outcomes = { assembled: 'War party formed', spot_cleared: 'Enemy spot cleared', losses: 'Retreat after losses',
         time_limit: 'Expedition time elapsed', war_ended: 'War ended; returning home', roster_changed: 'Party changed; returning home' };
     const assemblyReasons = { waiting_slot: 'Waiting for a shared party slot', party_capacity_wait: 'Waiting for a shared party slot',
@@ -56,6 +56,8 @@
             <div class="clan-war-relations">${rows.length ? rows.map(r => `<article class="clan-war-relation ${r.status}"><div>${link(r.id)}<span class="clan-war-badge ${r.status}">${labels[r.status]}</span></div><p>${r.status === 'mutual' ? 'Both clans have declared war.' : r.status === 'outgoing' ? 'The other clan has not declared back.' : 'This clan has not declared back.'}</p>${r.since ? age(r.since) : ''}</article>`).join('') : '<p class="clan-war-note">No active war declarations.</p>'}</div>
             ${decision ? `<p class="clan-war-decision"><strong>${decision.accepted ? decision.action === 'withdraw' ? 'Withdrew war' : decision.reason === 'accept_war' ? 'Accepted war' : 'Declared war' : 'Decision deferred'}</strong> · ${link(decision.targetClanId)}<span>${escape(reasons[decision.reason] || 'Clan diplomatic review')} · ${escape(relative(decision.at))}</span></p>` : ''}
             ${plan?.ceasefireUntil > now ? `<p class="clan-war-note">Cooling off before another declaration · ${escape(time(plan.ceasefireUntil))}</p>` : ''}
+            ${(plan?.warPressure || []).map(p => `<p class="clan-war-note">Last hour against ${link(p.enemyClanId)}: ${Number(p.losses)} deaths across ${Number(p.victims)} members · ${Number(p.kills)} enemy kills</p>`).join('')}
+            ${plan?.lossResponse?.until > now ? `<p class="clan-war-note"><strong>${plan.lossResponse.action === 'counterattack' ? 'Preparing a counterattack' : 'Seeking to end the war'}</strong> · ${link(plan.lossResponse.enemyClanId)}${plan.lossResponse.action === 'counterattack' ? '<br>Expedition cooldown reduced; a fresh sighting and a ready roster are still required.' : ''}</p>` : ''}
             <div class="clan-war-operation-heading"><strong>Expeditions</strong><span>${operations.length} active</span></div>
             ${queued ? `<p class="clan-war-note"><strong>Roster ready · ${Number(queued.members)} members</strong> → ${link(queued.enemyClanId)}<br>${escape(assemblyReasons[queued.reason] || 'Waiting for formation')} · Priority held since ${escape(time(queued.queuedAt))}</p>`
                 : readiness && readiness.reason !== 'operation_active' ? `<p class="clan-war-note">${escape(assemblyReasons[readiness.reason] || 'Military readiness is being checked')}</p>` : ''}

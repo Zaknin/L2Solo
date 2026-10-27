@@ -18,9 +18,22 @@ function accepts({ traits = {}, ownMembers, enemyMembers = 0, hostility = 0 }) {
         + clamp(traits.ambition ?? 0.5) * 0.25 - clamp(traits.caution ?? 0.5) * 0.4 + Math.min(0.4, hostility / 100);
     return will >= 0.35;
 }
-function available(state, at) {
+function lossResponse({ pressure, traits = {}, members, readyMembers, mutual }) {
+    const { losses = 0, kills = 0, victims = 0 } = pressure || {};
+    // Repeatedly killing one revived member does not impersonate a clan wipe.
+    if (losses < 3 || victims < 3) return null;
+    const share = victims / Math.max(1, members);
+    const overwhelmed = (victims >= Math.max(6, Math.ceil(members / 2)) || losses >= Math.max(12, members))
+        && losses >= Math.max(1, kills) * 3;
+    const resolve = clamp(traits.assertiveness ?? 0.5) * 0.45 + clamp(traits.commitment ?? 0.5) * 0.3
+        + clamp(traits.ambition ?? 0.5) * 0.25 - clamp(traits.caution ?? 0.5) * 0.4
+        - share * 0.5 + (kills - losses) / Math.max(losses, kills, 1) * 0.3;
+    // A unilateral declaration cannot grant first-strike rights against white targets.
+    return !mutual || overwhelmed || readyMembers < 3 || resolve < 0.3 ? 'withdraw' : 'counterattack';
+}
+function available(state, at, { allowHot = false } = {}) {
     const s = state?.stats || {};
-    return state?.phase === 'cold' && String(state.accountName || '').startsWith('bot_')
+    return (state?.phase === 'cold' || allowHot && state?.phase === 'hot') && String(state.accountName || '').startsWith('bot_')
         && ['hunting', 'grouped', 'resting', 'party_wait'].includes(state.activity)
         && state.vitals?.hp >= Math.max(1, Number(state.vitals.maxHp) * 0.7)
         && state.vitals?.mp >= Math.max(0, Number(state.vitals.maxMp) * 0.35)
@@ -46,4 +59,4 @@ function roster(candidates, role, min = 3, max = 9) {
     }
     return [];
 }
-module.exports = { threshold, grievance, accepts, available, operationOutcome, roster };
+module.exports = { threshold, grievance, accepts, lossResponse, available, operationOutcome, roster };

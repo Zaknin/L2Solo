@@ -142,6 +142,10 @@ async function run() {
     assert.equal(kills.length, 2, 'war continues past the first casualty to the remaining tagged enemy');
     assert(kills.every(k => k.pvp), 'white mutual-war victims grant PvP without PK');
     assert.equal(state(31).vitals.hp, 1000, 'a neutral party companion is not a war target');
+    await DB.flushJournals();
+    const pressure = await DB.fetchClanWarPressure(20, at - 60000, at + 1);
+    assert.equal(pressure[0].losses, 2, 'only the accepted cold battle reports its committed party casualties');
+    assert.equal(pressure[0].victims, 2, 'preview resolutions and the refused stale impact report no deaths');
     const counts = await DB.execute(['SELECT SUM(pk) AS pk,SUM(karma) AS karma,SUM(pvp) AS pvp FROM characters']);
     assert.equal(counts[0].pk, 0); assert.equal(counts[0].karma, 0); assert.equal(counts[0].pvp, 2);
     const savedSocial = JSON.parse((await DB.execute(['SELECT snapshotJson FROM clan_social_memory WHERE clanId=20']))[0]?.snapshotJson || '{"relations":[]}');

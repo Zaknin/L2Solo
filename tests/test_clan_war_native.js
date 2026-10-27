@@ -27,7 +27,8 @@ try {
     patch(invoke('GameServer/Bot/AI/BotEnemyMemory'), 'record', () => {});
     patch(invoke('GameServer/Bot/AI/BotPvpThreats'), 'record', () => false);
     patch(invoke('GameServer/Social/CombatHelpMemory'), 'recordDefeat', () => {});
-    patch(invoke('PvpJournal'), 'hotKill', row => kills.push(row));
+    const journal = invoke('PvpJournal'), hotKill = journal.hotKill;
+    patch(journal, 'hotKill', row => { kills.push(row); hotKill(row); });
     War.view.replace([{ fromClanId: 10, toClanId: 20, active: 1, revision: 1 }]);
     let killer = actor(1, 10), victim = actor(2, 20);
     ReceivedHit(killer.session, victim, 30);
@@ -38,6 +39,10 @@ try {
     ReceivedHit(killer.session, victim, 30);
     assert.equal(killer.pk, 0); assert.equal(killer.karma, 0); assert.equal(killer.pvp, 1);
     assert.equal(kills[1].pk, false, 'live PvP journal agrees with the actual kill classification');
+    assert.deepEqual(journal.snapshot().map(r => r.warFacts[0]).map(r => [r.fromClanId, r.toClanId, r.victimId, r.killed]),
+        [[10, 20, 2, 1], [10, 20, 4, 1]], 'both unilateral PK and mutual PvP report actual clan casualties');
+    ReceivedHit(killer.session, victim, 30);
+    assert.equal(kills.length, 2, 'a late hit on an already dead character cannot report another casualty');
     killer = actor(5, 10); victim = actor(6, 30);
     ReceivedHit(killer.session, victim, 30);
     assert.equal(killer.pk, 1, 'a third clan remains neutral during someone else’s war');
@@ -45,6 +50,16 @@ try {
     killer = actor(7, 10); victim = actor(8, 20);
     ReceivedHit(killer.session, victim, 30);
     assert.equal(killer.pk, 1, 'war withdrawal takes effect at the native impact');
+    const beforeExcluded = kills.length, npc = actor(99, 0);
+    npc.fetchKind = () => 'Monster';
+    ReceivedHit(npc.session, actor(100, 20), 30);
+    assert.equal(kills.length, beforeExcluded, 'ordinary PvE deaths never enter clan casualty accounting');
+    const arena = invoke('GameServer/World/ArenaCombatRules'), suppress = arena.suppressConsequences;
+    try {
+        arena.suppressConsequences = () => true;
+        ReceivedHit(killer.session, actor(101, 20), 30);
+        assert.equal(kills.length, beforeExcluded, 'arena deaths do not become clan casualties');
+    } finally { arena.suppressConsequences = suppress; }
     const Start = invoke('GameServer/Bot/AI/BotClanWar'), Threats = invoke('GameServer/Bot/AI/BotPvpThreats');
     const Risk = invoke('GameServer/Bot/AI/BotPvpRisk'), World = invoke('GameServer/World/World');
     const attacker = actor(9, 10), enemy = actor(10, 20), tagged = actor(11, 10), neutral = actor(12, 30), human = actor(13, 10);
