@@ -46,6 +46,10 @@ async function run() {
     const html = Ui.render(snapshot, 10, { now: at, relative: () => '1m ago', time: () => '12:30' });
     assert(html.includes('At war') && html.includes('Traveling to the target') && html.includes('Arrival in 25s'));
     assert(html.includes('Enemy farm') && html.includes('2/3') && html.includes('War history'));
+    const cooling = Ui.render({ ...snapshot, campaigns: { ...snapshot.campaigns, plans: [{ clanId: 10,
+        ceasefires: { 20: { until: at + 3600000 }, 30: { until: at - 1 } } }] } }, 10, { now: at, time: () => '16:29' });
+    assert(cooling.includes('Cooling off against') && cooling.includes('New declarations can still be answered.'));
+    assert(cooling.includes('/observer/clans/20') && !cooling.includes('/observer/clans/30'), 'only the relevant unexpired opponent pause is shown');
     assert(Ui.render(snapshot, 20).includes('Incoming raid'), 'the defender sees an approaching expedition');
     assert(Ui.render(snapshot, 10, { error: 'offline' }).includes('Showing the last received'));
     const waiting = { ...snapshot, campaigns: { ...snapshot.campaigns, operations: [], assembly: {

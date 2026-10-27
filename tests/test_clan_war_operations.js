@@ -44,6 +44,26 @@ try {
     const expired = admission.reserve([{}], budget, { now: at + 60003 });
     assert.equal(typeof expired, 'function', 'abandoned demand expires without blocking ordinary formation'); expired();
     assert(Policy.available(members[0], at));
+    const Validation = require('../src/GameServer/Bot/Population/ColdCompetitionValidation');
+    const oldMarket = { ...members[0], stats: { ...members[0].stats, marketReturn: { spotId: 'previous-farm' } } };
+    const participant = { id: 1, partyId: party.partyId };
+    const warEvent = { action: 'clan_war', spotId: spot.id };
+    const validation = { party, at, memory: { revision: () => 1 }, participantAllowed: () => true, contestContextAllowed: () => true };
+    assert.equal(Validation.member(oldMarket, 1, participant, warEvent, validation), null,
+        'a present military member old shopping anchor is not a live errand');
+    for (const current of [
+        { ...oldMarket, stats: { ...oldMarket.stats, clanId: 20 } },
+        { ...oldMarket, stats: { ...oldMarket.stats, tradeMeeting: { id: 'purchase' } } },
+        { ...oldMarket, stats: { ...oldMarket.stats, partyMarketReturn: { warOperationId: op.id } } },
+        { ...oldMarket, stats: { ...oldMarket.stats, warehouseErrand: {} } },
+    ]) assert.equal(Validation.member(current, 1, participant, warEvent, validation).detail, 'member_market_return',
+        'a different clan or active errand cannot use the stale military anchor exception');
+    const supplyOnly = { ...oldMarket, stats: { ...oldMarket.stats, marketReturn: null, partyMarketReturn: { warOperationId: op.id } } };
+    assert.equal(Validation.member(supplyOnly, 1, participant, warEvent, validation).detail, 'member_market_return',
+        'the live supply ticket remains a blocker even after the ordinary return anchor clears');
+    assert.equal(Validation.member(oldMarket, 1, participant, warEvent,
+        { ...validation, party: { ...party, stats: {} } }).detail, 'member_market_return',
+    'ordinary parties do not acquire the military exception');
     assert(!Policy.available({ ...members[0], stats: { ...members[0].stats, partyMarketReturn: {
         partyId: 'another-war-party', warOperationId: 'another-operation', until: at + 60000 } } }, at),
     'a member returning from supplies cannot be stolen by a different war roster');

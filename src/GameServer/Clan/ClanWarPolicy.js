@@ -18,6 +18,20 @@ function accepts({ traits = {}, ownMembers, enemyMembers = 0, hostility = 0 }) {
         + clamp(traits.ambition ?? 0.5) * 0.25 - clamp(traits.caution ?? 0.5) * 0.4 + Math.min(0.4, hostility / 100);
     return will >= 0.35;
 }
+function ceasefires(plan, at) {
+    const result = { ...(plan.ceasefires || {}) }, last = plan.lastDecision;
+    // Older plans stored one clan-wide pause. Its withdrawal identifies the
+    // opponent; never turn an unidentifiable legacy pause into a global veto.
+    if (plan.ceasefireUntil > at && last?.accepted && last.action === 'withdraw' && !result[last.targetClanId]) {
+        result[last.targetClanId] = { until: plan.ceasefireUntil, withdrawnAt: last.at };
+    }
+    return Object.fromEntries(Object.entries(result).filter(([, value]) => value.until > at));
+}
+function canDeclare(plan, enemyClanId, at, incoming = null) {
+    const pause = ceasefires(plan, at)[enemyClanId];
+    return !pause || !!incoming && (incoming.declaredAt > pause.withdrawnAt
+        || pause.incomingRevision != null && incoming.revision > pause.incomingRevision);
+}
 function lossResponse({ pressure, traits = {}, members, readyMembers, mutual }) {
     const { losses = 0, kills = 0, victims = 0 } = pressure || {};
     // Repeatedly killing one revived member does not impersonate a clan wipe.
@@ -59,4 +73,4 @@ function roster(candidates, role, min = 3, max = 9) {
     }
     return [];
 }
-module.exports = { threshold, grievance, accepts, lossResponse, available, operationOutcome, roster };
+module.exports = { threshold, grievance, accepts, ceasefires, canDeclare, lossResponse, available, operationOutcome, roster };

@@ -30,7 +30,8 @@ function event(key) {
 }
 async function party(ids) {
     const prepared = Parties.prepareCommit({ partyId: `war-test-${ids[0]}`, leaderId: ids[0], memberIds: ids,
-        spotId: 'test', startedAt: at, status: 'active', nextResolveAt: at + 30000, stats: {} });
+        spotId: 'test', startedAt: at, status: 'active', nextResolveAt: at + 30000,
+        stats: ids[0] === 1 ? { warOperation: { id: 'operation-1', clanId: 10, enemyClanId: 20 } } : {} });
     const assigned = ids.map(id => Life.preparePartyAssignment(state(id), prepared.row.partyId, 'dps', ids[0], at + 30000));
     const result = await DB.commitBackgroundPartyMembership({ party: prepared.row, members: assigned });
     assert(result.ok, result.reason); Life.acceptPartyAssignments(assigned, result.lifeRows); return Parties.acceptRow(result.partyRow);
@@ -42,6 +43,7 @@ async function run() {
         const clanId = id <= 15 ? 10 : id <= 30 ? 20 : 0;
         const strong = clanId === 10;
         const stats = { clanId, classId: 0, generatedCold: true,
+            ...([2, 3].includes(id) ? { marketReturn: { spotId: 'old-farm', loc: { locX: 1, locY: 2, locZ: 3 } } } : {}),
             coldCombat: { version: 1, classId: 0, cp: 0, cpAt: at,
                 base: { str: 40, dex: 30, con: 43, int: 21, wit: 11, men: 25 },
                 equipment: { weaponKind: 'Weapon.Sword', pAtk: strong ? 5000 : 1, pAtkRnd: 0, mAtk: 0,
@@ -111,6 +113,7 @@ async function run() {
     assert(Memory.assess({ id: 1 }, { id: 16 }, {}, at).diplomaticEnemy);
     const p = await party([1, 2, 3]); await party([16, 17, 31]);
     const defenderBefore = JSON.stringify(state(16));
+    const staleReturnBefore = JSON.stringify(state(2));
     const staleOwner = { ...Owner, commitBatch: async entries => {
         const withdrawal = await DB.transitionClanWar({ actorId: 16, targetClanId: 10, action: 'withdraw' });
         assert(withdrawal.ok); War.accept(withdrawal.row);
@@ -120,8 +123,21 @@ async function run() {
     const stale = await Conflict.apply({ ...base, owner: staleOwner, event: event('war-stale') });
     assert(!stale.ok, 'a withdrawal before impact refuses the entire battle commit');
     assert.equal(JSON.stringify(state(16)), defenderBefore, 'rejected war has no HP, XP or memory effects');
+    assert.equal(JSON.stringify(state(2)), staleReturnBefore, 'a refused impact cannot clear even an obsolete market return');
     const renewed = await DB.transitionClanWar({ actorId: 16, targetClanId: 10, action: 'declare' }); War.accept(renewed.row);
     at = Date.now();
+    for (const patch of [
+        { activity: 'shopping' },
+        { stats: { ...state(2).stats, travel: { arrivalAt: at + 10000 } } },
+        { stats: { ...state(2).stats, partyMarketReturn: { warOperationId: 'operation-1', until: at + 10000 } } },
+        { stats: { ...state(2).stats, tradeMeeting: { id: 'active-purchase' } } },
+    ]) {
+        const before = JSON.stringify(state(2));
+        const refused = await Conflict.apply({ ...base, event: event('war-member-shopping'),
+            life: { cachedState: id => id === 2 ? { ...state(id), ...patch } : state(id) } });
+        assert(!refused.ok && !refused.pvp, 'a real market activity or supply ticket still prevents the battle');
+        assert.equal(JSON.stringify(state(2)), before, 'refused market activity has no side effects');
+    }
     const Resolver = require('../src/GameServer/Bot/Population/ColdPvpResolver');
     const sides = [1, 16].map(id => ({ principal: state(id), members: Parties.find(state(id).party.partyId).memberIds.map(state) }));
     const roles = new Map([[1, 'initiator'], [2, 'support'], [3, 'support'], [16, 'target'], [17, 'support'], [31, 'stand_aside']]);
@@ -138,6 +154,10 @@ async function run() {
         'the campaign can engage the surviving tagged enemy while dead party members remain outside combat');
     const result = await Conflict.apply({ ...base, event: event('war-accepted') });
     assert(result.ok && result.pvp, JSON.stringify(result));
+    assert.equal(state(2).stats.marketReturn, null, 'accepted war combat clears the present military member obsolete return');
+    assert.equal(state(3).stats.marketReturn, null, 'another present military supporter uses the same rule');
+    const persisted = await DB.execute(['SELECT statsJson FROM bot_life_state WHERE characterId IN(2,3)']);
+    assert(persisted.every(r => JSON.parse(r.statsJson).marketReturn === null), 'cleanup commits atomically with the battle');
     const kills = result.combat.fighters.flatMap(f => f.kills);
     assert.equal(kills.length, 2, 'war continues past the first casualty to the remaining tagged enemy');
     assert(kills.every(k => k.pvp), 'white mutual-war victims grant PvP without PK');

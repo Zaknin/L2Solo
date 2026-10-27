@@ -35,7 +35,10 @@ class ClanWarDirector {
             "SELECT clanId FROM clan_simulation_clans WHERE mode='autonomous'"])]);
         this.autonomous = new Set(autonomous.map(r => r.clanId));
         this.membershipRevision = this.clans.membershipRevision();
-        rows.forEach(r => this.plans.set(r.clanId, { revision: r.revision, ...JSON.parse(r.stateJson) }));
+        rows.forEach(r => {
+            const saved = JSON.parse(r.stateJson), { ceasefireUntil, ...plan } = saved;
+            this.plans.set(r.clanId, { revision: r.revision, ...plan, ceasefires: Policy.ceasefires(saved, this.now()) });
+        });
         this.active = true;
         this.unsubscribe = this.life.subscribePublications(packet => {
             if (!this.active) return;
@@ -98,7 +101,9 @@ class ClanWarDirector {
         at = Math.max(at, this.now());
         const previous = this.plans.get(clan.id) || { revision: 0, intel: [] };
         if (at < Number(previous.nextReviewAt || 0)) return;
-        const plan = { ...previous, intel: this.observe(clan, previous.intel, at), nextReviewAt: at + Config.reviewMs };
+        const plan = { ...previous, ceasefires: Policy.ceasefires(previous, at),
+            intel: this.observe(clan, previous.intel, at), nextReviewAt: at + Config.reviewMs };
+        delete plan.ceasefireUntil;
         const members = this.ownMembers(clan, at), leader = this.states.get(clan.leaderId);
         const traits = this.personaFor(leader || { characterId: clan.leaderId })?.traits || {};
         const snapshot = this.social.clans.get(clan.id);
@@ -132,8 +137,8 @@ class ClanWarDirector {
                 plan.nextOperationAt = Math.min(Number(plan.nextOperationAt || at), at + Config.counterattackCooldownMs);
             }
         }
-        if (!decision && at >= Number(plan.ceasefireUntil || 0)) for (const row of incoming) {
-            if (responses.get(row.fromClanId) === 'withdraw') continue;
+        if (!decision) for (const row of incoming) {
+            if (!Policy.canDeclare(plan, row.fromClanId, at, row) || responses.get(row.fromClanId) === 'withdraw') continue;
             const target = this.clans.findById(row.fromClanId), feeling = relations.find(r => r.target.id === row.fromClanId)?.feeling;
             const sighting = plan.intel.find(r => r.enemyClanId === row.fromClanId);
             if (target && Policy.accepts({ traits, ownMembers: members.length, enemyMembers: sighting?.enemyIds.length || 0,
@@ -141,9 +146,9 @@ class ClanWarDirector {
                 decision = { target, action: 'declare', reason: 'accept_war' }; break;
             }
         }
-        if (!decision && at >= Number(plan.ceasefireUntil || 0) && members.length >= Config.minMembers) for (const entry of relations) {
+        if (!decision && members.length >= Config.minMembers) for (const entry of relations) {
             const state = this.war.view.between(clan.id, entry.target.id);
-            if (!entry.feeling.ready || state.outgoing || responses.get(entry.target.id) === 'withdraw'
+            if (!Policy.canDeclare(plan, entry.target.id, at) || !entry.feeling.ready || state.outgoing || responses.get(entry.target.id) === 'withdraw'
                 || Rules.declaration({ ...clan, members: clan.members.length }, { ...entry.target, members: entry.target.members.length })) continue;
             decision = { target: entry.target, action: 'declare', reason: 'repeated_clan_aggression' }; break;
         }
@@ -166,7 +171,12 @@ class ClanWarDirector {
                 admit: () => this.active && Config.enabled && this.canContinue() && this.autonomous.has(clan.id) });
             plan.lastDecision = { at, targetClanId: decision.target.id, action: decision.action, reason: decision.reason,
                 accepted: result.ok, code: result.code || null };
-            if (result.ok && decision.action === 'withdraw') { plan.ceasefireUntil = at + Config.redeclareCooldownMs; plan.defeats = 0; plan.lossResponse = null; }
+            if (result.ok && decision.action === 'withdraw') {
+                const incoming = this.war.view.all().find(r => r.fromClanId === decision.target.id && r.toClanId === clan.id);
+                plan.ceasefires[decision.target.id] = { until: at + Config.redeclareCooldownMs,
+                    withdrawnAt: Math.max(at, Number(result.row?.updatedAt || 0)), incomingRevision: incoming?.revision || 0 };
+                plan.defeats = 0; plan.lossResponse = null;
+            }
         }
         await this.save(clan.id, plan);
     }

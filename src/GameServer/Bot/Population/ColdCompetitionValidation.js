@@ -1,6 +1,8 @@
 const BotErrands = require('./BotErrands');
 // Errands a member keeps through a contest; a retreat also waits out a PvP fight.
 const MEMBER_BUSY_FLAGS = ['supplyErrand', 'warehouseWorkflow', 'marketReturn'];
+const WAR_BUSY_FLAGS = [...MEMBER_BUSY_FLAGS, 'partyMarketReturn'];
+const WAR_PRESENT_BUSY_FLAGS = WAR_BUSY_FLAGS.filter(flag => flag !== 'marketReturn');
 const RETREAT_BUSY_FLAGS = ['pvpEncounter'];
 const BUSY_DETAILS = {
     pvp: 'member_pvp_encounter',
@@ -59,8 +61,9 @@ function member(state, characterId, participant, event, { party: group, resume =
     if (state.stats?.travel) return fail('member_travelling');
     const wait = state.stats?.coldCompetition?.wait;
     if (!resume && wait) return fail('member_competition_wait', { until: wait.until ?? null, expired: Number(wait.until) <= at });
+    const flags = war ? BotErrands.staleWarMarketReturn(state, group) ? WAR_PRESENT_BUSY_FLAGS : WAR_BUSY_FLAGS : MEMBER_BUSY_FLAGS;
     const busy = (retreat && BotErrands.busyWith(state, RETREAT_BUSY_FLAGS))
-        || (!resume && BotErrands.busyWith(state, MEMBER_BUSY_FLAGS));
+        || (!resume && BotErrands.busyWith(state, flags));
     if (busy) return fail(BUSY_DETAILS[busy]);
     if (!participantAllowed(state.characterId)) return fail('member_handoff_fenced');
     if (!resume && !contestContextAllowed(state, event)) return fail('member_contest_context_changed');

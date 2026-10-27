@@ -3,6 +3,7 @@ const InventorySummary = require('./InventorySummary');
 const Episode = require('./ColdCompetitionEpisode');
 const EncounterBudget = require('./PvpEncounterBudget');
 const Journal = require('../../../PvpJournal');
+const BotErrands = require('./BotErrands');
 // Main-process execution of one bounded encounter (at most two C4 parties).
 // Membership alone never makes a bot an aggressor or creates a memory edge.
 const { seeded } = require('../AI/TendencyRoll');
@@ -117,6 +118,7 @@ async function apply({ event, life, owner, memory, parties, personaFor, particip
         const delayed = pvp?.started || !deescalated && index === losingIndex;
         const result = pvp?.updates?.get(state.characterId) || state;
         return { ...result, stats: { ...result.stats,
+            ...(war && pvp?.started && BotErrands.staleWarMarketReturn(state, side.party) ? { marketReturn: null } : {}),
             ...(revenge && !war ? { revengeUntil: Math.max(Number(state.stats?.revengeUntil || 0), (resume?.startedAt || timestamp) + RevengePolicy.RETRY_MS) } : {}),
             ...(incrementalPvp ? { pvpEncounter: encounter } : {}), coldCompetition: Episode.begin(state.stats?.coldCompetition, { ...episode,
             peerId: sides[1 - index].principal.characterId, role: roles.get(state.characterId),
