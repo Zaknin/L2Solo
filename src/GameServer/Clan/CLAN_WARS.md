@@ -110,6 +110,13 @@ an overdue return, and the queued writer rechecks this protection atomically.
 Only physical arrival of the whole roster lets the director remove the order
 and restore ordinary party-capacity rules.
 
+While an order exists, market breaks may only refill combat consumables: shots,
+arrows, potions and escape/resurrection scrolls. Gear, crafting inputs and loot
+sales wait until the order is cleared, including during an overdue return.
+Only one supply absence is reserved at a time; the returning member rejoins the
+same operation and its military roster limit. An ended/replaced operation
+releases the supply ticket instead of assigning an unrelated clan duty.
+
 ## Inspection and tests
 
 GET /observer/api/clans/wars returns declarations and campaign decisions,

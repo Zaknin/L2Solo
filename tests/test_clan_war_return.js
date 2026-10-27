@@ -92,9 +92,14 @@ async function run() {
 
     director = new ClanWarDirector({ database: DB, life: Life, parties: Parties, war: War });
     const oldRevision = Parties.find(partyId).revision;
+    const staleSupplySave = Parties.find(partyId);
     await director.maintain(Parties.find(partyId), at);
     assert.deepEqual(Parties.find(partyId).stats.warOperation.homeLoc, home.center, 'a legacy order is repaired once in durable state');
     assert.equal((await DB.setClanWarPartyOperation(partyId, oldRevision, op)).reason, 'party_changed', 'stale arrival/operation writes cannot undo the repair');
+    const afterLateSupply = await Parties.createOrUpdate({ ...staleSupplySave,
+        stats: { ...staleSupplySave.stats, lastMarketBreakAt: at } }, { preserveWarOperation: true });
+    assert.deepEqual(afterLateSupply.stats.warOperation.homeLoc, home.center,
+        'a delayed supply-roster save cannot undo the current return anchor');
     const repairedRevision = Parties.find(partyId).revision;
     await director.maintain(Parties.find(partyId), at + 1);
     assert.equal(Parties.find(partyId).revision, repairedRevision, 'waiting for a real arrival does not write repeatedly');
@@ -117,6 +122,10 @@ async function run() {
     await director.maintain(Parties.find(partyId), arrivalAt + 1);
     assert.equal(Parties.find(partyId).stats.warOperation, null, 'the native owner closes the order after physical return');
     assert.equal(Parties.find(partyId).spotId, home.id);
+    const completed = Parties.find(partyId);
+    const afterCompletionSave = await Parties.createOrUpdate({ ...completed,
+        stats: { ...completed.stats, warOperation: op, lastMarketBreakAt: arrivalAt } }, { preserveWarOperation: true });
+    assert.equal(afterCompletionSave.stats.warOperation, null, 'a delayed supply-roster save cannot resurrect a completed operation');
     assert(Capacity.elective(Parties.find(partyId), arrivalAt + 2));
     assert(await Capacity.reclaim(objective, { parties: Parties, life: Life, database: DB,
         metrics: { recordPartyDissolution() {} } }, arrivalAt + 2), 'ordinary capacity rules resume after the military order has finished');

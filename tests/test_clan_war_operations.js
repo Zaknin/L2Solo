@@ -44,6 +44,9 @@ try {
     const expired = admission.reserve([{}], budget, { now: at + 60003 });
     assert.equal(typeof expired, 'function', 'abandoned demand expires without blocking ordinary formation'); expired();
     assert(Policy.available(members[0], at));
+    assert(!Policy.available({ ...members[0], stats: { ...members[0].stats, partyMarketReturn: {
+        partyId: 'another-war-party', warOperationId: 'another-operation', until: at + 60000 } } }, at),
+    'a member returning from supplies cannot be stolen by a different war roster');
     assert(!Policy.available({ ...members[0], stats: { ...members[0].stats, tradeMeeting: {} } }, at));
     assert(!Policy.available({ ...members[0], phase: 'hot' }, at));
     const role = s => s.stats.role;

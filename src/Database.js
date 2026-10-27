@@ -5524,11 +5524,18 @@ const Database = {
         return enqueue(() => ids.map(id => require('./GameServer/Social/InteractionMemoryRows').load({ one, all }, id)), { operation: 'social-memory:load', read: true });
     },
 
-    saveBackgroundParty(row) {
+    saveBackgroundParty(row, { preserveWarOperation = false } = {}) {
         return inTransaction(() => {
             const previous = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [row.partyId]);
             const proof = jsonObject(row.statsJson).raidAdmission;
             const previousStats = jsonObject(previous?.statsJson), nextStats = jsonObject(row.statsJson);
+            // A supply departure may await its member handoff while the
+            // director repairs or closes the order. That owner wins here.
+            if (preserveWarOperation && previous) {
+                if (Object.hasOwn(previousStats, 'warOperation')) nextStats.warOperation = previousStats.warOperation;
+                else delete nextStats.warOperation;
+                row = { ...row, statsJson: JSON.stringify(nextStats) };
+            }
             if ((proof || previousStats.raidAdmission) && (JSON.stringify(proof) !== JSON.stringify(previousStats.raidAdmission)
                 || !require('./GameServer/Clan/ClanRaidRoster').same(previousStats.objective?.fullRoster, nextStats.objective?.fullRoster)))
                 return { affectedRows: 0, reason: 'raid_admission' };

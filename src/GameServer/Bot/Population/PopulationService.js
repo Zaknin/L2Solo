@@ -380,6 +380,9 @@ function canResumeWarehouseMarketSale(state) {
 // cleanupNeed: the member's bag need when the caller already has it.
 function canTakePartyMarketBreak(party, members, member, timestamp = Date.now(), cleanupNeed = undefined, goal = null) {
     if (!PartyMarketBreak.allowed(party, member, timestamp, cleanupNeed, goal)) return false;
+    if (PartyMarketBreak.warDuty(party)) return members.length > Math.max(1, Config.partyMinSize)
+        && !party.stats?.travel && !party.stats?.pveEncounter && !member.stats?.pvpEncounter && !member.stats?.travel
+        && !members.some(state => state.stats?.pvpEncounter || state.stats?.travel);
     if (PartyMarketBreak.clanDuty(party)) return members.length > 1;
     if (!PartyMarketBreak.sessionReady(party, member, goal, timestamp, Config)) return false;
     const role = PartyComposition.roleForState(member);
@@ -464,6 +467,10 @@ async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
             : cachedGoal;
         if (due || cleanupNeeded) reviewed += 1;
         await BotAfkMarketService.reconcile(current, goalSnapshot?.current, goalSnapshot?.candidates);
+        // Goal/market review yields to campaign maintenance. Its current order
+        // decides whether this is a supply break or ordinary shopping now.
+        party = BackgroundPartyState.find(party.partyId) || party;
+        if (party.status !== 'active') return { party, reviewed, departed };
         if (departed || !canTakePartyMarketBreak(party, members, current, timestamp, cleanupNeeded, goalSnapshot?.current)) continue;
 
         // Goal review can overlap the next worker claim. Re-read the reflected
@@ -477,12 +484,17 @@ async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
             PartyMarketBreak.goal(party, currentMember, goalSnapshot?.current, timestamp, need), timestamp,
             { economy: currentMember === current ? goalSnapshot?.economy : null });
         if (!travel) continue;
-        const detached = await LifeState.leaveParty(PartyMarketBreak.departure(party, currentMember, travel, timestamp, need),
+        const departure = PartyMarketBreak.departure(party, currentMember, travel, timestamp, need, goalSnapshot?.current);
+        if (!departure) continue;
+        const detached = await LifeState.leaveParty(departure,
             'market_break', { ownerHandoff: true });
         if (detached) departed = detached;
     }
 
     if (!departed) {
+        party = BackgroundPartyState.find(party.partyId) || party;
+        // An economic preference cannot replace a live military assignment.
+        if (PartyMarketBreak.warDuty(party)) return { party, reviewed, departed: null };
         const currentMembers = members.map(member => LifeState.cachedState(member.characterId) || member);
         const joint = await jointPartyGoals(party, currentMembers, timestamp);
         if (!joint) return { party, reviewed, departed: null };
@@ -519,7 +531,10 @@ async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
         }
         return { party, reviewed, departed: null };
     }
-    const activeMembers = members.filter((member) => Number(member.characterId) !== Number(departed.characterId));
+    party = BackgroundPartyState.find(party.partyId) || party;
+    if (party.status !== 'active') return { party, reviewed, departed, dissolved: party.status === 'dissolved' };
+    const activeMembers = party.memberIds.filter(id => Number(id) !== Number(departed.characterId))
+        .map(id => LifeState.cachedState(id)).filter(Boolean);
     if (activeMembers.length < Config.partyMinSize && !departed.stats?.partyMarketReturn) {
         const dissolved = await dissolveBackgroundParty(party, 'market_break', activeMembers.length);
         return { party: dissolved.party || party, reviewed, departed, dissolved: true };
@@ -539,17 +554,25 @@ async function reconcileWorkerPartyGoals(party, timestamp = Date.now()) {
             ...PartyMarketBreak.stats(party, departed)
         },
         updatedAt: timestamp
-    });
+    }, { preserveWarOperation: !!departed.stats?.partyMarketReturn?.warOperationId });
     return { party: updatedParty || party, reviewed, departed, dissolved: false };
 }
 
 async function resumePartyMarketBreak(state, timestamp) {
     const token = state.stats.partyMarketReturn;
     const party = BackgroundPartyState.find(token.partyId);
+    const war = !!token.warOperationId;
+    const matching = war ? party?.stats?.warOperation?.id === token.warOperationId
+        : party?.stats?.objective?.clanGoalKey === token.objective.clanGoalKey;
+    if (war && (!matching || !['active', 'hot'].includes(party?.status))) {
+        const saved = await LifeState.upsertState({ ...state, activity: 'hunting', stats: { ...state.stats,
+            partyMarketReturn: null, clanPartyObjective: null, partyRequest: null } }, 'war_supply_operation_ended');
+        return { ok: !!saved, state: saved || state, reason: 'war_supply_operation_ended' };
+    }
     const prepared = { ...state, activity: 'party_wait', stats: { ...state.stats,
-        partyMarketReturn: null, clanPartyObjective: token.objective, partyRequest: token.objective } };
-    if (party?.status === 'active' && party.stats?.objective?.clanGoalKey === token.objective.clanGoalKey
-        && party.memberIds.length < partyLimitsForObjective(party.stats.objective).maxSize) {
+        partyMarketReturn: null, clanPartyObjective: war ? null : token.objective, partyRequest: war ? null : token.objective } };
+    const maxSize = war ? require('../../Clan/ClanWarConfig').maxMembers : partyLimitsForObjective(party?.stats?.objective).maxSize;
+    if (party?.status === 'active' && matching && party.memberIds.length < maxSize) {
         const members = await LifeState.statesForParty(party.partyId);
         if (members.length !== party.memberIds.length) return { ok: false, state, reason: 'party_return_retry' };
         const absences = { ...party.stats?.marketAbsences };
@@ -559,10 +582,12 @@ async function resumePartyMarketBreak(state, timestamp) {
             memberIds: roster.map(member => member.characterId),
             roleCoverage: PartyComposition.roleCoverage(roster),
             nextResolveAt: timestamp, stats: { ...party.stats, marketAbsences: absences,
-                memberNames: roster.map(member => member.name) } }, roster);
+                memberNames: roster.map(member => member.name) } }, roster, null,
+            war ? { expectedPartyRevision: party.revision } : {});
         return { ok: !!result.party, state: LifeState.cachedState(state.characterId) || state,
             reason: result.party ? 'returned_to_clan_party' : 'party_return_retry' };
     }
+    if (war) return { ok: false, state, reason: 'party_return_retry' };
     // A dissolved or full party must not turn the clan assignment into solo combat.
     const saved = await LifeState.upsertState(prepared, 'clan_party_return_wait');
     return { ok: !!saved, state: saved || state, reason: 'clan_party_return_wait' };

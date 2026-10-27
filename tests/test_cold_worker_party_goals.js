@@ -21,6 +21,7 @@ const originals = {
     ensure: SpotProfiles.ensure,
     withMaterialFarmEffort: GearAcquisitionPlanner.withMaterialFarmEffort,
     createOrUpdate: PartyState.createOrUpdate,
+    findParty: PartyState.find,
     snapshotGoal: GoalService.snapshot,
     reviewGoal: GoalService.review,
     beginMarketTravel: GoalExecutor.beginMarketTravel,
@@ -141,6 +142,55 @@ const originals = {
     assert.strictEqual(members[0].stats.equipmentPlan.materials[0].farmEffort, 100,
         'a retained clan craft plan in a party must acquire a market comparison cost');
     assert(reviewed.includes(1), 'newly costed party plans must refresh their market goals immediately');
+    let currentParty = { ...party, stats: { ...party.stats, warOperation: {
+        id: 'live-campaign', status: 'returning', expiresAt: now - 1 } } };
+    PartyState.find = () => currentParty;
+    PartyState.createOrUpdate = async next => (savedParty = currentParty = next);
+    GoalService.snapshot = () => null;
+    const gearGoal = { type: 'upgrade_gear', status: 'active', target: { itemId: 166, amount: 1 },
+        plan: { expectedBenefit: 'market_search_for_gear', sourceType: 'npc' } };
+    GoalService.review = async () => ({ current: gearGoal });
+    GoalExecutor.beginMarketTravel = () => { throw new Error('war gear shopping must never start a trip'); };
+    departed.length = 0;
+    await PopulationService.reconcileWorkerPartyGoals(currentParty, now);
+    assert.strictEqual(departed.length, 0, 'even an expired return keeps the war roster together despite a full bag');
+    const shotGoal = { type: 'buy_craft_material', status: 'active', target: { itemId: 1463, amount: 100 },
+        plan: { expectedBenefit: 'market_buy_craft_material', wishKey: 'stock:shots' } };
+    GoalService.review = async member => ({ current: member.characterId === 2 ? shotGoal : gearGoal });
+    members[0].stats.pvpEncounter = { id: 'fight-in-progress' };
+    await PopulationService.reconcileWorkerPartyGoals(currentParty, now);
+    assert.strictEqual(departed.length, 0, 'even a supply exception must not interrupt a live fight');
+    delete members[0].stats.pvpEncounter;
+    GoalExecutor.beginMarketTravel = (member, goal) => {
+        assert.strictEqual(goal, shotGoal, 'cleanup cannot replace the permitted supply goal with a sale');
+        return { ...member, activity: 'traveling', stats: { ...member.stats, travel: { reason: 'market_buy_craft_material' } } };
+    };
+    const supply = await PopulationService.reconcileWorkerPartyGoals(currentParty, now);
+    assert.strictEqual(departed.length, 1);
+    assert.strictEqual(supply.departed.stats.partyMarketReturn.warOperationId, 'live-campaign');
+    assert.strictEqual(savedParty.stats.marketAbsences[2].supplyItemId, 1463);
+    assert.deepStrictEqual(savedParty.memberIds, [1, 3]);
+    // The campaign starts while an ordinary member's goal review awaits.
+    currentParty = { ...party, stats: { ...party.stats, objective: null, warOperation: null } };
+    GoalService.review = async () => {
+        currentParty = { ...currentParty, stats: { ...currentParty.stats,
+            warOperation: { id: 'new-campaign', status: 'assembling' } } };
+        return { current: gearGoal };
+    };
+    GoalExecutor.beginMarketTravel = () => { throw new Error('new campaign must revoke the stale ordinary shopping decision'); };
+    departed.length = 0;
+    await PopulationService.reconcileWorkerPartyGoals(currentParty, now);
+    assert.strictEqual(departed.length, 0, 'departure rechecks the live operation after asynchronous goal review');
+    // The operation can also end during review, restoring the ordinary rules.
+    GoalService.review = async () => {
+        currentParty = { ...currentParty, stats: { ...currentParty.stats, warOperation: null } };
+        return { current: gearGoal };
+    };
+    GoalExecutor.beginMarketTravel = member => ({ ...member, activity: 'traveling', stats: { ...member.stats,
+        travel: { reason: 'market_search_for_gear' } } });
+    const afterWar = await PopulationService.reconcileWorkerPartyGoals(currentParty, now);
+    assert(afterWar.departed, 'ordinary shopping resumes immediately after the order is removed');
+    assert(!afterWar.departed.stats.partyMarketReturn, 'completed operations create no military supply reservation');
     console.log('Cold worker party goal reconciliation checks passed');
 })().catch((error) => {
     console.error(error);
@@ -153,6 +203,7 @@ const originals = {
     SpotProfiles.ensure = originals.ensure;
     GearAcquisitionPlanner.withMaterialFarmEffort = originals.withMaterialFarmEffort;
     PartyState.createOrUpdate = originals.createOrUpdate;
+    PartyState.find = originals.findParty;
     GoalService.snapshot = originals.snapshotGoal;
     GoalService.review = originals.reviewGoal;
     GoalExecutor.beginMarketTravel = originals.beginMarketTravel;

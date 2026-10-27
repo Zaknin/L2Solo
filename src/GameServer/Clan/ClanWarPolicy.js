@@ -25,7 +25,7 @@ function available(state, at) {
         && state.vitals?.hp >= Math.max(1, Number(state.vitals.maxHp) * 0.7)
         && state.vitals?.mp >= Math.max(0, Number(state.vitals.maxMp) * 0.35)
         && !s.travel && !s.pvpEncounter && !s.tradeMeeting && !s.supplyErrand && !s.warehouseWorkflow
-        && !s.warehouseErrand && !s.raidSupplyPreparation && !s.playerPartyTakeover && !s.clanPartyObjective
+        && !s.warehouseErrand && !s.raidSupplyPreparation && !s.playerPartyTakeover && !s.clanPartyObjective && !s.partyMarketReturn
         && !s.craftShop && !s.pkProfile && !(s.karma > 0) && !(s.coldCompetition?.wait?.until > at);
 }
 function operationOutcome(operation, members, war, at) {
