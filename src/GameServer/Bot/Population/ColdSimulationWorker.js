@@ -741,6 +741,11 @@ tables.watch('memory', {
     put: (key, row) => { if (kernel?.interactionMemory.accept(row)) kernel.decisionEvents?.memoryChanged(Number(key)); },
     remove() {}
 }, { retain: false });
+tables.watch('clan_wars', {
+    reset: () => kernel?.interactionMemory.clanWars.replace([]),
+    put: (_key, row) => kernel?.interactionMemory.clanWars.accept(row),
+    remove() {}
+}, { retain: false });
 tables.watch('pressure', {
     reset: () => { if (kernel) kernel.pressureRow = null; },
     put: (_key, row) => { if (kernel) kernel.pressureRow = row; },
@@ -1350,8 +1355,13 @@ function startKernel(config = {}) {
         partyArrival,
         // The party's spot search skips a spot with no room for the whole
         // party (its own members not counted against it).
-        partyRoute: ({ leader, party, members, spot, timestamp }) => BotRoute.route(leader, spot, party, members,
-            { spots: planningSpots, timestamp, hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, members) }),
+        partyRoute: ({ leader, party, members, spot, timestamp }) => {
+            if (party.stats?.warOperation && !tables.ready('clan_wars')) return null;
+            const war = require('./ClanWarMovement').route({ leader, party, members, spot, timestamp,
+                spots: planningSpots, wars: kernel.interactionMemory.clanWars });
+            return war.active ? war.route : BotRoute.route(leader, spot, party, members,
+                { spots: planningSpots, timestamp, hasRoom: SpotProfiles.roomFilterFor(kernel.occupancy, planningSpots, members) });
+        },
         // writtenAt: the row's write stamp, the real now (timestamp is the
         // round's time, the bot's due for a step started its lead early).
         projectResolve: async (state, result, timestamp, lifecyclePlan = null, writtenAt = timestamp) => {

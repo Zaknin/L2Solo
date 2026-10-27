@@ -417,6 +417,7 @@ function flushJournals() {
         if (DiagnosticConfig.developerDiagnostics) metrics.transactions += 1;
         connection.exec('BEGIN IMMEDIATE');
         try {
+            require('./GameServer/Clan/ClanWarCombat').persist(write, conflicts, now());
             historyOutboxUnsafe('journal', { rows, conflicts });
             connection.exec('COMMIT');
         } catch (error) {
@@ -1887,6 +1888,8 @@ function applySchemaMigrations() {
     migrations.push([77, () => require('./DatabaseRecommendations').install(connection)]);
     // Older progress inferred time between kills, including offline gaps.
     migrations.push([78, () => connection.exec('DELETE FROM recommendation_hunts')]);
+    migrations.push([79, () => require('./GameServer/Clan/ClanWarRepository').install(connection)]);
+    migrations.push([80, () => require('./GameServer/Clan/ClanWarCombat').install(connection)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -2437,6 +2440,15 @@ function equipColdPurchaseUnsafe(characterId, step, itemId, autoEquip, heldItemI
         else if (Object.hasOwn(stats, key)) patch[key] = null;
     }
     return { ids: [...ids], patch };
+}
+
+function checkWarSupplyPurchaseUnsafe(characterId, itemId, source = null) {
+    const row = source || one('SELECT statsJson,mindJson FROM bot_life_state WHERE characterId=?', [characterId]);
+    if (!row) return;
+    const reason = require('./GameServer/Bot/Population/PartyMarketBreak').warSupplyPurchaseBlocker({
+        stats: SavedStats.merge(row.statsJson, row.mindJson)
+    }, itemId, now());
+    if (reason) throw Error(reason);
 }
 
 function checkEconomyFundingUnsafe(characterId, step, amount, funding = {}, walletOverride = null, packetOverride = null) {
@@ -4151,6 +4163,7 @@ function commitClanSocialUnsafe(batch, timestamp) {
             const previous = clanSnapshots.get(clanId);
             const previousRevision = previous.revision;
             const next = ClanSocialPolicy.apply(previous, event, timestamp, {
+                authorisedWar: require('./GameServer/Clan/ClanWarRepository').authorisedEvidence(one, event),
                 leaderTraits: jsonObject(clan.traitsJson), targetLeaderId: targetLeader?.leaderId,
                 currentTargetClanId: Number(currentMember?.clanId || 0), mutable: true
             });
@@ -5269,6 +5282,7 @@ const Database = {
             if (!line || Number(line.count) < quantity) throw new Error('afk_trade_stock_changed');
             if (details.expectedPrice !== undefined && Number(details.expectedPrice) !== Number(line.price)) throw new Error('afk_trade_price_changed');
             if (details.expectedRevision !== undefined && Number(details.expectedRevision) !== Number(shop.revision)) throw new Error('afk_trade_shop_changed');
+            checkWarSupplyPurchaseUnsafe(buyerId, line.selfId, step?.row);
             const total = Number(line.price) * quantity;
             if (!Number.isSafeInteger(total) || total < 0) throw new Error('invalid_afk_trade_total');
             checkEconomyFundingUnsafe(buyerId, step, total, { ...details.funding, itemId: line.selfId });
@@ -5522,11 +5536,18 @@ const Database = {
         return enqueue(() => ids.map(id => require('./GameServer/Social/InteractionMemoryRows').load({ one, all }, id)), { operation: 'social-memory:load', read: true });
     },
 
-    saveBackgroundParty(row) {
+    saveBackgroundParty(row, { preserveWarOperation = false } = {}) {
         return inTransaction(() => {
             const previous = one('SELECT * FROM bot_background_parties WHERE partyId = ?', [row.partyId]);
             const proof = jsonObject(row.statsJson).raidAdmission;
             const previousStats = jsonObject(previous?.statsJson), nextStats = jsonObject(row.statsJson);
+            // A supply departure may await its member handoff while the
+            // director repairs or closes the order. That owner wins here.
+            if (preserveWarOperation && previous) {
+                if (Object.hasOwn(previousStats, 'warOperation')) nextStats.warOperation = previousStats.warOperation;
+                else delete nextStats.warOperation;
+                row = { ...row, statsJson: JSON.stringify(nextStats) };
+            }
             if ((proof || previousStats.raidAdmission) && (JSON.stringify(proof) !== JSON.stringify(previousStats.raidAdmission)
                 || !require('./GameServer/Clan/ClanRaidRoster').same(previousStats.objective?.fullRoster, nextStats.objective?.fullRoster)))
                 return { affectedRows: 0, reason: 'raid_admission' };
@@ -5602,6 +5623,14 @@ const Database = {
         if (jsonObject(party.statsJson).raidAdmission) return Promise.resolve({ ok: false, reason: 'raid_roster_not_opened' });
 
         return inTransaction(() => {
+            const warOperation = jsonObject(party.statsJson).warOperation;
+            if (warOperation && !review) {
+                const from = one('SELECT * FROM clan_war_declarations WHERE fromClanId=? AND toClanId=?', [warOperation.clanId, warOperation.enemyClanId]);
+                const to = one('SELECT * FROM clan_war_declarations WHERE fromClanId=? AND toClanId=?', [warOperation.enemyClanId, warOperation.clanId]);
+                if (!require('./GameServer/Clan/ClanWarRules').relation(from, to).mutual
+                    || !one("SELECT clanId FROM clan_simulation_clans WHERE clanId=? AND mode='autonomous'", [warOperation.clanId])
+                    || characterIds.some(id => one('SELECT clanId FROM characters WHERE id=?', [id])?.clanId !== warOperation.clanId)) return { ok: false, reason: 'war_changed' };
+            }
             if (!['cold', 'hot'].includes(expectedPhase)) return { ok: false, reason: 'invalid_membership_phase' };
             if (expectedPhase === 'hot') {
                 const declared = JSON.parse(party.memberIdsJson || '[]').map(Number);
@@ -5618,7 +5647,11 @@ const Database = {
                     || typeof canCommitHot !== 'function' || !canCommitHot()) return { ok: false, reason: 'hot_party_context_changed' };
             }
             if (review) {
-                const existing = one('SELECT status, memberIdsJson, revision FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
+                const existing = one('SELECT status, memberIdsJson, revision, statsJson FROM bot_background_parties WHERE partyId = ?', [party.partyId]);
+                // Capacity reclamation must also respect a military order
+                // attached after its cached candidate was selected.
+                if (preserveClanOperations && jsonObject(existing?.statsJson).warOperation)
+                    return { ok: false, reason: 'clan_war_in_progress' };
                 const ids = existing ? JSON.parse(existing.memberIdsJson || '[]').map(Number) : [];
                 const retained = JSON.parse(party.memberIdsJson || '[]').map(Number);
                 if (existing?.status !== 'active' || Number(existing.revision) !== Number(expectedPartyRevision)
@@ -5800,6 +5833,7 @@ const Database = {
                 || [...expectedIds].some((id) => !presentIds.has(id));
             let reason = failure ? 'party_group_incomplete' : null;
             const pvpContext = group[0]?.atomicGroup?.pvpContext;
+            const warContext = group[0]?.atomicGroup?.warContext;
             const raidCommit = group[0]?.atomicGroup?.raidCommit;
             if (!failure && raidCommit) {
                 const saved = one('SELECT revision FROM bot_raid_encounters WHERE raidKey = ?', [raidCommit.key]);
@@ -5819,6 +5853,13 @@ const Database = {
                         || Number(rows[i].clanId || 0) !== m.clanId || Number(rows[i].karma || 0) !== m.karma)
                     || pvpContext[0].some(a => pvpContext[1].some(b => a.clanId > 0 && a.clanId === b.clanId));
                 if (failure) reason = 'pvp_context_changed';
+            }
+            if (!failure && warContext) {
+                const forward = one('SELECT * FROM clan_war_declarations WHERE fromClanId=? AND toClanId=?', [warContext.fromClanId, warContext.toClanId]);
+                const reverse = one('SELECT * FROM clan_war_declarations WHERE fromClanId=? AND toClanId=?', [warContext.toClanId, warContext.fromClanId]);
+                const war = require('./GameServer/Clan/ClanWarRules').relation(forward, reverse);
+                failure = !war.mutual || war.revision !== warContext.revision;
+                if (failure) reason = 'war_context_changed';
             }
             const memberRows = new Map();
             if (!failure) {
@@ -7635,6 +7676,7 @@ const Database = {
                     if (!quote || Number(quote.price) !== price
                         || !require('./GameServer/Bot/Economy/ProductionPolicy').allowsNpcShot(itemId)) throw Error('npc_quote_changed');
                 }
+                checkWarSupplyPurchaseUnsafe(characterId, itemId, step?.row);
                 const stackable = line.stackable === undefined ? !!template?.etc?.stackable : !!line.stackable;
                 const slot = line.slot === undefined ? Number(template?.etc?.slot || 0) : Number(line.slot);
                 // Stack quantities come from the funded missing need. They use
@@ -11046,6 +11088,7 @@ const Database = {
 };
 
 const ClanLevelSp = require('./GameServer/Clan/ClanLevelSpRepository')({ one, write, run, withCharacterFlushes });
+Object.assign(Database, require('./GameServer/Clan/ClanWarRepository').create({ one, all, write, enqueue, inTransaction, withCharacterFlushes, flushJournals, now }));
 const Recommendations = require('./DatabaseRecommendations').create({ one, all, write, enqueue, inTransaction, withCharacterFlushes, now });
 for (const name of ['refreshRecommendations', 'giveRecommendation', 'fetchRecommendationEvents', 'recommendationHead', 'pruneRecommendations']) {
     Database[name] = Recommendations[name];
@@ -11065,6 +11108,7 @@ const TradeMeetings = require('./GameServer/AfkTrade/TradeMeeting').create({
         if (!Number.isSafeInteger(bag + pending + count)) throw Error('trade_meeting_integer');
         return creditRecordOwnerUnsafe(owner, item, count, at);
     }, funding: checkEconomyFundingUnsafe,
+    canReceive: (id, life, itemId) => checkWarSupplyPurchaseUnsafe(id, itemId, life),
     protection: (id, step, selfId, used) => checkEconomyMaterialProtectionUnsafe(id, step, selfId, used, true),
     position: tradeMeetingPositionUnsafe,
     canStartTrade: (id, state) => require('./GameServer/Bot/Population/PartyAdmission').partyTradeAllowed(

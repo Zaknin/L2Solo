@@ -199,6 +199,7 @@ const NO_FACTS = Object.freeze({ leaderParty: () => null, partyMembers: () => []
 
 // party: the party row this bot leads, or null.
 function partySessionExpiryAt(state = {}, party = null, partySession = {}) {
+    if (party?.stats?.warOperation) return 0;
     const partyId = party?.partyId || state.party?.partyId || state.partyId || '';
     if (!partyId) return 0;
 
@@ -302,7 +303,7 @@ function partyTransitionProposals(run, memberStates, party, timestamp, enqueuedA
     };
     // Material travel changes the collection contract, and evacuation returns
     // funded help. Fence that party row in the same transaction as every leg.
-    if (fence || (CraftMaterialParty.isObjective(run.party.stats?.objective)
+    if (fence || run.party.stats?.warOperation || (CraftMaterialParty.isObjective(run.party.stats?.objective)
         && ['party_travel', 'party_travel_wait', 'party_arrival'].includes(activity))) {
         party = { ...party, updatedAt: Math.max(enqueuedAt, Number(run.party.updatedAt || 0) + 1) };
         atomicGroup.partyChanges = [{ ...fencedPartyChange(run, party), ...(party.spotId ? { spotId: party.spotId } : {}) }];
@@ -652,6 +653,7 @@ class ColdSimulationKernel {
         this.spotOf = typeof options.spotOf === 'function' ? options.spotOf : () => null;
         this.interactionMemory.playingHours = id => this.states.get(id)?.state?.stats?.playedHours;
         this.interactionMemory.clanSocial = new (require('../../Clan/ClanSocialView'))();
+        this.interactionMemory.clanWars = new (require('../../Clan/ClanWarView'))();
         this.versions = new Map();
         this.heap = new DueHeap();
         this.scheduleTokens = new Map();
@@ -1689,9 +1691,9 @@ class ColdSimulationKernel {
 
             const meetingPending = require('./PartyHuntingAssembly').meetingPending(run.members);
             const rescuing = run.members.some(s => s.vitals?.hp <= 0);
-            const equipmentBridgeReview = !meetingPending && !rescuing && !BackgroundPartyLifecycle.raidStarted(run.party)
+            const equipmentBridgeReview = !run.party.stats?.warOperation && !meetingPending && !rescuing && !BackgroundPartyLifecycle.raidStarted(run.party)
                 && run.members.some(member => this.equipmentBridgeReason?.(member) || this.requiresWeaponBridge?.(member));
-            if (!meetingPending && !rescuing && !CraftMaterialPartyRoute.evacuating(run.party)
+            if (!meetingPending && !rescuing && !run.party.stats?.warOperation && !CraftMaterialPartyRoute.evacuating(run.party)
                 && (BackgroundPartyLifecycle.sessionExpired(run.party, startedAt, this.partySession)
                 || ClanEquipment.needsReview(run.party, run.members)
                 || equipmentBridgeReview)) {

@@ -16,6 +16,18 @@ const notRunTests = new Map([
 ]);
 
 const tests = [
+    'tests/test_clan_war_home.js',
+    'tests/test_clan_war_return_geodata.js',
+    'tests/test_clan_war_return.js',
+    'tests/test_clan_war_queue.js',
+    'tests/test_world_observer_clan_wars.js',
+    'tests/test_clan_war_rules.js',
+    'tests/test_clan_war_casualties.js',
+    'tests/test_clan_war_ceasefire.js',
+    'tests/test_clan_war_player_client.js',
+    'tests/test_clan_war_campaign.js',
+    'tests/test_clan_war_operations.js',
+    'tests/test_clan_war_native.js',
     'tests/test_recommendations.js',
     'tests/test_recommendation_lifecycle.js',
     'tests/test_clan_strategy.js',
@@ -71,6 +83,7 @@ const tests = [
     'tests/test_npc_wander.js',
     'tests/test_town_npc_immortality.js',
     'tests/test_player_transition_recovery.js',
+    'tests/test_ti_magic_shop_transition.js',
     'tests/test_trade_meeting_scheduling.js',
     'tests/test_trade_meeting_chat.js',
     'tests/test_player_meeting_notifications.js',
@@ -725,6 +738,7 @@ const tests = [
     'tests/test_c4_cruma_tower_teleports.js',
     'tests/test_geodata_bootstrap.js',
     'tests/test_geodata_regions.js',
+    'tests/test_npc_interaction_geometry.js',
     'tests/test_day_night_spawns.js',
     'tests/test_c4_seven_signs_dungeon_teleports.js',
     'tests/test_c4_swamp_of_screams.js',
@@ -1184,6 +1198,7 @@ const tests = [
 // Real map loading and worker pathfinding are kept in an explicit integration run.
 // Tests with optional map assertions still run their ordinary checks in npm test.
 const geodataTests = new Set([
+    'tests/test_clan_war_return_geodata.js',
     'tests/test_companion_equipment_shopping.js',
     'tests/test_path_obstacle.js',
     'tests/test_companion_pathfinding_worker.js',
@@ -1210,8 +1225,10 @@ const optionalGeodataTests = new Set([
     'tests/test_c4_valley_of_saints.js',
     'tests/test_c4_varka_silenos_stronghold.js',
     'tests/test_npc_geodata_visibility.js',
+    'tests/test_npc_interaction_geometry.js',
     'tests/test_player_move_destination_height.js',
     'tests/test_player_transition_recovery.js',
+    'tests/test_ti_magic_shop_transition.js',
     'tests/test_town_npc_approach.js',
     'tests/test_town_transit_policy.js',
     'tests/test_pathfinding_worker_pool.js'

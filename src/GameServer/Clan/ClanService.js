@@ -201,6 +201,7 @@ const ClanService = {
             .then(() => this.reload())
             .then(() => ClanCrestService.ensureAutonomousClans())
             .then((result) => result.assigned ? this.reload() : this.all())
+            .then(() => invoke('GameServer/Clan/ClanWarRuntime').refresh(true))
             .then(() => utils.infoSuccess('Clan', 'loaded %d clans', state.clans.size))
             .catch((err) => {
                 utils.infoWarn('Clan', 'clan tables unavailable: %s', err.message);

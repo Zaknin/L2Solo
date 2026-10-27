@@ -268,6 +268,13 @@ function tick(session, bot, Generics, AI, now = Date.now()) {
     }
     const members = roster(session).filter(s => Threats.alive(s.actor) && !s.hotRaidCasualtyAt);
     if (!members.length) return true;
+    if (party.stats?.warOperation && require('../../Clan/ClanWarConfig').enabled
+        && !session.pvpDefense && !session.pvpRevenge && !session.pvpEncounter && !Awareness.npcThreateningActor(session)) {
+        const owner = leader(session) || members[0];
+        if (prepareBuffs(session, owner, members, Generics, now)) return true;
+        if (Tactics.support(session, bot, { owner, members, threats: [] }, Generics, now)) return true;
+        return invoke('GameServer/Bot/AI/BotClanWarOperation').tick(session, bot, party, now);
+    }
     // The party is anchored on its spot (raid parties keep the clan raid's own roster rules): the
     // leader leads while at the spot, otherwise the first member at it; a member restarted in town
     // is neither waited for nor followed.

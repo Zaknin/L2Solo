@@ -39,10 +39,8 @@ verifyGeodataWhenAvailable(GeodataEngine, [[21, 24]], "Devil's Isle", () => {
     const heightDeltas = spawnCoords.map((coord) => Math.abs(
         GeodataEngine.getHeight(coord.locX, coord.locY, coord.locZ) - coord.locZ
     ));
-    assert.ok(heightDeltas.filter((delta) => delta <= 128).length >= 449,
-        'at least 449 source coordinates must agree with geodata within 128 Z');
-    assert.strictEqual(Math.max(...heightDeltas), 4432,
-        'the audited multi-level ship coordinate must retain its exact source/geodata delta');
+    assert.ok(heightDeltas.every((delta) => delta <= 128),
+        'every ship-deck spawn must have a nearby floor, including the lower deck');
 });
 assert.ok(spawnArea.spawns.find((spawn) => spawn.selfId === 847).coords.some((coord) =>
     coord.locX === 52196 && coord.locY === 213895 && coord.locZ === -4032),

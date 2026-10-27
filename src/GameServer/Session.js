@@ -214,15 +214,24 @@ class Session {
     }
 
     dataSendToMe(data) {
+        if (data?.__relationActor && this.actor) data = invoke('GameServer/Network/Response').relationChanged(data.__relationActor, this.actor);
         NpcVisibility.trackNpcPacket(this, data);
         this.recordOutboundPacket(data);
         const packet = this.packData(data);
         this.socket.write(packet);
+        if (data?.__characterActor && this.actor && invoke('GameServer/Clan/ClanWarRuntime').between(this.actor, data.__characterActor).status !== 'neutral') {
+            this.dataSendToMe(invoke('GameServer/Network/Response').relationChanged(data.__characterActor, this.actor));
+        }
         GroundItemVisibility.trackPacket(this, data);
         NpcVisibility.sendNpcMotionAfterInfo(this, data);
     }
 
     dataSendToOthers(data, creature) {
+        if (data?.__relationActor) {
+            const recipients = typeof World.fetchVisibleRealPlayers === 'function' ? World.fetchVisibleRealPlayers(this, creature) : World.fetchVisibleUsers(this, creature);
+            recipients.forEach(user => user.dataSendToMe(data));
+            return;
+        }
         const packet = this.packData(data);
         const visibleUsers = typeof World.fetchVisibleRealPlayers === 'function'
             ? World.fetchVisibleRealPlayers(this, creature)
@@ -233,6 +242,9 @@ class Session {
                 user.recordOutboundPacket(data);
             }
             user.socket.write(packet);
+            if (data?.__characterActor && user.actor && invoke('GameServer/Clan/ClanWarRuntime').between(user.actor, data.__characterActor).status !== 'neutral') {
+                user.dataSendToMe(invoke('GameServer/Network/Response').relationChanged(data.__characterActor, user.actor));
+            }
             GroundItemVisibility.trackPacket(user, data);
             NpcVisibility.sendNpcMotionAfterInfo(user, data);
         });

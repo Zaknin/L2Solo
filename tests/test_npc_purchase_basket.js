@@ -33,6 +33,12 @@ async function native(state, settings) {
 }
 async function run() {
     await DB.init();
+    let military = await seed(9599, 5000, { partyMarketReturn: { warOperationId: 'war', supplyItemId: 2509, until: Date.now() + 900000 } });
+    await assert.rejects(native(military), /war_supply_only/, 'a military supply basket cannot sneak unrelated items into a shot refill');
+    assert.equal(await amount(9599, 57), 5000); assert.equal(await amount(9599, 2509), 0, 'the whole mixed basket rolls back');
+    military = Life.cachedState(9599) || military;
+    await native(military, { lines: [lines[0]] });
+    assert.equal(await amount(9599, 2509), 100, 'the reserved shot refill still commits through the native writer');
     const at = Date.now(), first = { selfId: 2509, town: 'Dion', amount: 120, at, purpose: 'shots', money: 2160 };
     const unrelated = { selfId: 736, town: 'Giran', amount: 2, at, purpose: 'scrolls' };
     let state = await seed(9511, 5000, { marketErrands: [first, unrelated], marketErrand: first });
