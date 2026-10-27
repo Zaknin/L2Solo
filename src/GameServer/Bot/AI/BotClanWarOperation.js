@@ -1,4 +1,5 @@
 'use strict';
+const Home = require('../Population/ClanWarHome');
 function tick(session, bot, party, now = Date.now()) {
     const op = party?.stats?.warOperation;
     if (!op || !require('../../Clan/ClanWarConfig').enabled) return false;
@@ -8,10 +9,12 @@ function tick(session, bot, party, now = Date.now()) {
         || !invoke('GameServer/Clan/ClanWarRuntime').view.between(op.clanId, op.enemyClanId).mutual;
     const spotId = returning ? op.homeSpotId : op.targetSpotId;
     const template = invoke('GameServer/Bot/AI/SpotService').findById(spotId) || invoke('GameServer/Bot/Population/SpotProfiles').findById(spotId);
-    const point = returning ? require('../Population/ClanWarHome').point(op, template) : op.targetLoc;
+    const point = returning ? Home.point(op, template) : op.targetLoc;
     if (!point || !template) return true;
-    const atPoint = Math.hypot(bot.fetchLocX() - point.locX, bot.fetchLocY() - point.locY) <= 600
-        && Math.abs(bot.fetchLocZ() - point.locZ) <= 200;
+    const loc = { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() };
+    const atPoint = returning ? Home.reached(loc, point, 600)
+        : Math.hypot(loc.locX - point.locX, loc.locY - point.locY) <= 600
+            && Math.abs(loc.locZ - point.locZ) <= 200;
     if (atPoint) {
         invoke('GameServer/Bot/AI/BotPvpTactics').stop(session, bot);
         session.lastDecision = { action: returning ? 'clan_war_home' : 'clan_war_hold', operationId: op.id, at: now };

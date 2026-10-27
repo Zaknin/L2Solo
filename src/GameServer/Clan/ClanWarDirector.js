@@ -165,7 +165,7 @@ class ClanWarDirector {
             // Repair old persisted orders once, using the same anchor as the
             // workers and visible actors. Mere timeout never completes a trip.
             if (!Home.same(op.homeLoc, homeLoc)) { await this.setOperation(party, { ...op, homeLoc }); return; }
-            if (members.every(s => (hot || s.spotId === op.homeSpotId) && near(s.loc, homeLoc, 1200))) {
+            if (members.every(s => (hot || s.spotId === op.homeSpotId) && Home.reached(s.loc, homeLoc, 1200))) {
                 await this.setOperation(party, null, op.homeSpotId);
             }
             return;

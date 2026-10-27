@@ -16,6 +16,8 @@ const notRunTests = new Map([
 ]);
 
 const tests = [
+    'tests/test_clan_war_home.js',
+    'tests/test_clan_war_return_geodata.js',
     'tests/test_clan_war_return.js',
     'tests/test_clan_war_queue.js',
     'tests/test_world_observer_clan_wars.js',
@@ -1191,6 +1193,7 @@ const tests = [
 // Real map loading and worker pathfinding are kept in an explicit integration run.
 // Tests with optional map assertions still run their ordinary checks in npm test.
 const geodataTests = new Set([
+    'tests/test_clan_war_return_geodata.js',
     'tests/test_companion_equipment_shopping.js',
     'tests/test_path_obstacle.js',
     'tests/test_companion_pathfinding_worker.js',
