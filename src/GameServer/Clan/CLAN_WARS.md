@@ -6,9 +6,10 @@ declarations, their append-only history and versioned autonomous campaign plans.
 
 ## Native rules
 
-Both clans require level 3 and 15 members when declaring. This follows the
-historical C4 server and Lisvus request handlers; unlike some patch-note copies,
-the same admission checks apply to a return declaration. An existing war does
+Both clans require level 3 when declaring. Manual player commands have no
+minimum member count or hostility threshold. Autonomous declarations require
+fifteen members on each side; an autonomous reply to an existing declaration
+requires fifteen members only in the responding clan. An existing war does
 not disappear if the roster later shrinks. Leaders or members with privilege
 1024 can declare or withdraw. Allied and dissolving clans cannot start a war.
 At most 30 outgoing declarations may be active. Each side owns its declaration;
@@ -22,6 +23,11 @@ Accepting means declaring back. User commands 88, 89 and 90 display outgoing,
 incoming and mutual lists. RelationChanged is built separately for each viewer,
 including first visibility and later broadcasts. The white-target force-attack
 behavior is retained; attackability is not a global purple flag.
+The C4 declaration bit is `0x10000` from the viewer's perspective; mutual war
+adds `0x08000`, giving `0x18000` for the war portion of the mask. `0x04000`
+is not the C4 declaration bit. These values and their combination follow the
+[C4 RelationChanged](https://gitlab.com/MobiusDevelopment/L2J_Mobius/-/blob/master/L2J_Mobius_C4_ScionsOfDestiny/java/org/l2jmobius/gameserver/network/serverpackets/RelationChanged.java)
+and `Player.getRelation` implementation in the same C4 source tree.
 
 Only mutual war exempts a white victim kill from PK/karma. Ordinary purple and
 chaotic targets retain their existing rules. Native and cold deaths derive the

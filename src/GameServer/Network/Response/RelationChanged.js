@@ -2,6 +2,8 @@ const SendPacket = invoke('Packet/Send');
 
 const RELATION_CLAN_MEMBER = 0x00040;
 const RELATION_LEADER = 0x00080;
+const RELATION_MUTUAL_WAR = 0x08000;
+const RELATION_1SIDED_WAR = 0x10000;
 
 function relationFor(actor, viewer = null) {
     const clanId = Number(actor?.fetchClanId?.() || 0);
@@ -17,8 +19,9 @@ function relationFor(actor, viewer = null) {
 
     if (viewer) {
         const war = invoke('GameServer/Clan/ClanWarRuntime').between(viewer, actor);
-        if (war.outgoing) relation |= 0x04000;
-        if (war.mutual) relation |= 0x08000;
+        // C4 keeps the viewer's declaration bit set for mutual war as well.
+        if (war.outgoing) relation |= RELATION_1SIDED_WAR;
+        if (war.mutual) relation |= RELATION_MUTUAL_WAR;
     }
 
     return relation;
@@ -43,6 +46,8 @@ function relationChanged(actor, viewer = null) {
 
 relationChanged.RELATION_CLAN_MEMBER = RELATION_CLAN_MEMBER;
 relationChanged.RELATION_LEADER = RELATION_LEADER;
+relationChanged.RELATION_MUTUAL_WAR = RELATION_MUTUAL_WAR;
+relationChanged.RELATION_1SIDED_WAR = RELATION_1SIDED_WAR;
 relationChanged.relationFor = relationFor;
 
 module.exports = relationChanged;
