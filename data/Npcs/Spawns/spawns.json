@@ -1637,7 +1637,7 @@
 },{
     "selfId": "20_22_NPC_08",
     "bounds": [{ "locX": 17249, "locY": 147383, "minZ": -3217, "maxZ": -3017 }, { "locX": 17619, "locY": 147351, "minZ": -3217, "maxZ": -3017 }, { "locX": 17544, "locY": 147682, "minZ": -3217, "maxZ": -3017 }, { "locX": 17243, "locY": 147636, "minZ": -3217, "maxZ": -3017 }],
-    "spawns": [{ "selfId": 7072, "name": "Metty", "coords": [{ "locX": 17503, "locY": 147575, "locZ": -3124, "head": 20480 }], "total": 1, "respawn": 60, "bias": 0 }, { "selfId": 7071, "name": "Lucas", "coords": [{ "locX": 17282, "locY": 147500, "locZ": -3119, "head": 20480 }], "total": 1, "respawn": 60, "bias": 0 }]
+    "spawns": [{ "selfId": 7072, "name": "Metty", "coords": [{ "locX": 17322, "locY": 147500, "locZ": -3119, "head": 20480 }], "total": 1, "respawn": 60, "bias": 0 }, { "selfId": 7071, "name": "Lucas", "coords": [{ "locX": 17282, "locY": 147500, "locZ": -3119, "head": 20480 }], "total": 1, "respawn": 60, "bias": 0 }]
 },{
     "selfId": "20_22_NPC_09",
     "bounds": [{ "locX": 21403, "locY": 145660, "minZ": -3276, "maxZ": -3076 }, { "locX": 21590, "locY": 145688, "minZ": -3276, "maxZ": -3076 }, { "locX": 21608, "locY": 146008, "minZ": -3276, "maxZ": -3076 }, { "locX": 21413, "locY": 146018, "minZ": -3276, "maxZ": -3076 }],
