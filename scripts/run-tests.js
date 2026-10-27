@@ -80,6 +80,7 @@ const tests = [
     'tests/test_npc_wander.js',
     'tests/test_town_npc_immortality.js',
     'tests/test_player_transition_recovery.js',
+    'tests/test_ti_magic_shop_transition.js',
     'tests/test_trade_meeting_scheduling.js',
     'tests/test_trade_meeting_chat.js',
     'tests/test_player_meeting_notifications.js',
@@ -1222,6 +1223,7 @@ const optionalGeodataTests = new Set([
     'tests/test_npc_geodata_visibility.js',
     'tests/test_player_move_destination_height.js',
     'tests/test_player_transition_recovery.js',
+    'tests/test_ti_magic_shop_transition.js',
     'tests/test_town_npc_approach.js',
     'tests/test_town_transit_policy.js',
     'tests/test_pathfinding_worker_pool.js'

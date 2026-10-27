@@ -109,7 +109,7 @@ try {
         assert.deepStrictEqual(f.packets.map(p => p[0]), [0x61, 1]);
     } finally { Date.now = clock; global.setTimeout = timeout; global.clearTimeout = clear; }
 } finally { Object.assign(Geo, originals); }
-require('./helpers/verify_geodata_when_available')(Geo, [[24, 18], [23, 20]], 'Five transition recovery destinations', () => {
+require('./helpers/verify_geodata_when_available')(Geo, [[24, 18], [23, 20], [17, 25]], 'Town transition recovery destinations', () => {
     for (const t of Recovery.transitions) {
         const f = fixture(t); Recovery.command(f.s, f, 10000);
         assert.deepStrictEqual(f.packets.map(p => p[0]), [0x61, 1], t.id);
