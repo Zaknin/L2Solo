@@ -144,6 +144,26 @@ function autoSweepSpoiledCorpse(npc, Generics) {
     return invoke('GameServer/Bot/BotAI').trySweep(spoilerSession, spoiler, npc, Generics);
 }
 
+function shouldAwardPassiveWolfExperience(pet, ownerActor, npc) {
+    return Boolean(
+        pet?.fetchSelfId?.() === 12077 &&
+        pet.petData?.version === 1 &&
+        !pet.state?.fetchDead?.() &&
+        !pet.petData.expired &&
+        pet.controlMode === 'follow' &&
+        !ownerActor?.mounted &&
+        !(npc.petDamage?.has(pet.fetchId())) &&
+        Math.hypot(
+            pet.fetchLocX() - npc.fetchLocX(),
+            pet.fetchLocY() - npc.fetchLocY()
+        ) <= PARTY_REWARD_RADIUS
+    );
+}
+
+function passiveWolfExperienceAward(exp, expRate) {
+    return exp * 0.15 / (expRate || 1);
+}
+
 function npcDied(session, actor, npc) {
     const Generics = invoke(path.actor);
 
@@ -224,6 +244,12 @@ function npcDied(session, actor, npc) {
         const share = pet?.petData?.version === 1 && !pet.state.fetchDead() && !memberSession.actor.mounted
             ? invoke('GameServer/Pets/PetRules').typeForNpc(pet.fetchSelfId())?.ownerShare || 0 : 0;
         if (share) PetRuntime.award(pet, exp * share, sp * share);
+
+        if (shouldAwardPassiveWolfExperience(pet, memberSession.actor, npc)) {
+            const expRate = invoke('GameServer/ProgressionRates').profile().exp || 1;
+            PetRuntime.award(pet, passiveWolfExperienceAward(exp, expRate), 0);
+        }
+
         Generics.experienceReward(memberSession, memberSession.actor, exp * (1 - share), sp * (1 - share));
     });
     for (const reward of rewards) if (reward.session?.accountId?.startsWith('bot_')) {
@@ -245,3 +271,5 @@ module.exports.PARTY_EXP_SP_BONUS = PartyRewardMath.PARTY_EXP_SP_BONUS;
 module.exports.partyRewardShares = partyRewardShares;
 module.exports.validPartyMembers = validPartyMembers;
 module.exports.autoSweepSpoiledCorpse = autoSweepSpoiledCorpse;
+module.exports.shouldAwardPassiveWolfExperience = shouldAwardPassiveWolfExperience;
+module.exports.passiveWolfExperienceAward = passiveWolfExperienceAward;
