@@ -20,10 +20,12 @@ git push origin main
 
 Merge the updated baseline into the customization branch. This preserves the customization commits and avoids rewriting published history:
 
+The upstream repository currently has no `package-lock.json`; the install command therefore resolves the package ranges in `package.json` and is not an exact dependency-version lock. It avoids running dependency install scripts and does not write a lockfile.
+
 ```powershell
 git switch production-customizations
 git merge --no-ff main
-npm ci
+npm install --ignore-scripts --no-save --package-lock=false --no-audit --no-fund
 npm run check
 node --require tests/helpers/databaseIsolation.js tests/test_wolf_follow_experience.js
 ```
