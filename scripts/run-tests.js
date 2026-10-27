@@ -667,6 +667,7 @@ const tests = [
     'tests/test_town_gate_routing.js',
     'tests/test_c4_buff_modifiers.js',
     'tests/test_c4_protocol_packets.js',
+    'tests/test_player_movement_speed_packets.js',
     'tests/test_auth_server_advertised_hostname.js',
     'tests/test_account_name_sanitization.js',
     'tests/test_character_create_failure.js',
