@@ -79,7 +79,27 @@ try {
     assert.equal(Policy.operationOutcome(op, [members[0], members[1], { ...members[2], vitals: { hp: 0 } }], { mutual: true }, at), 'losses');
     assert.equal(Policy.operationOutcome(op, members, { mutual: true }, op.expiresAt), 'time_limit');
     assert(!Policy.accepts({ traits: { caution: 1, assertiveness: 0 }, ownMembers: 3, enemyMembers: 9, hostility: 90 }));
-    assert(Policy.threshold({}, Config.hostilityThreshold) > 30);
+    assert.equal(Config.hostilityThreshold, 25);
+    assert.equal(Config.minHarmEpisodes, 3);
+    assert.equal(Policy.threshold(), 25, 'the policy fallback uses the configured default base');
+    const aggressive = { caution: 0, assertiveness: 1 }, cautious = { caution: 1, assertiveness: 0 };
+    assert.equal(Policy.threshold(aggressive, Config.hostilityThreshold), 20);
+    assert.equal(Policy.threshold(cautious, Config.hostilityThreshold), 30);
+    const evidence = [1, 2, 3].map(id => ({ episode: `threshold-${id}`, category: 'harm', weight: 1, at }));
+    const grievance = (hostility, traits, episodes = evidence) => Policy.grievance({ at, halfLife: 86400000,
+        hostility, trust: 0, fear: 0, familiarity: 0, evidence: episodes }, traits, at, Config);
+    for (const [traits, boundary] of [[aggressive, 20], [{}, 25], [cautious, 30]]) {
+        assert(grievance(boundary, traits).ready, 'three distinct harm episodes admit a declaration at the leader threshold');
+        assert(!grievance(boundary - 0.01, traits).ready, 'hostility below the leader threshold still refuses');
+        assert(!grievance(100, traits, evidence.slice(0, 2)).ready, 'even maximal hostility cannot replace the third episode');
+        assert(!grievance(100, traits, evidence.map(e => ({ ...e, episode: 'same-fight' }))).ready,
+            'multiple reports of one fight cannot impersonate three episodes');
+    }
+    const sourceConfig = options.default.ClanWars;
+    try {
+        options.default.ClanWars = { ...sourceConfig, hostilityThreshold: 25 };
+        assert.equal(Config.reload().hostilityThreshold, 25, 'configuration no longer clamps the new base back to thirty');
+    } finally { options.default.ClanWars = sourceConfig; Config.reload(); }
     assert.equal(Policy.threshold({}, 70), 70, 'a configured threshold is not silently clamped back to the default personality band');
     const Runtime = invoke('GameServer/Clan/ClanWarRuntime');
     const NativeMove = invoke('GameServer/Bot/AI/BotClanWarOperation');

@@ -370,7 +370,8 @@ class ClanWarDirector {
         return this.running;
     }
     inspect() {
-        return { active: this.active, policy: { quietWithdrawMs: Config.quietWithdrawMs, lossWindowMs: Config.lossWindowMs,
+        return { active: this.active, policy: { hostilityThreshold: Config.hostilityThreshold, minHarmEpisodes: Config.minHarmEpisodes,
+            quietWithdrawMs: Config.quietWithdrawMs, lossWindowMs: Config.lossWindowMs,
             operationCooldownMs: Config.operationCooldownMs, counterattackCooldownMs: Config.counterattackCooldownMs },
             plans: [...this.plans].map(([clanId, plan]) => ({ clanId, ...plan })), lastCombat: this.lastCombat,
             assembly: { ...this.assemblyMetrics, readiness: [...this.assemblyChecks.values()],

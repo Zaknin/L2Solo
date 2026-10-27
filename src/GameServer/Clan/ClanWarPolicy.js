@@ -1,8 +1,8 @@
 'use strict';
 const Social = require('./ClanSocialPolicy');
 const clamp = n => Math.max(0, Math.min(1, Number(n) || 0));
-function threshold(traits = {}, base = 40) {
-    return Math.max(30, Math.min(95, base + 5 * (clamp(traits.caution ?? 0.5) - clamp(traits.assertiveness ?? 0.5))));
+function threshold(traits = {}, base = 25) {
+    return Math.max(20, Math.min(95, base + 5 * (clamp(traits.caution ?? 0.5) - clamp(traits.assertiveness ?? 0.5))));
 }
 function grievance(row, traits, at, config) {
     const value = Social.relation(row, at);

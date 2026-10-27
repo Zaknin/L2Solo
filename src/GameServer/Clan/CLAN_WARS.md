@@ -43,8 +43,8 @@ previously lawful memory event into a disciplinary offense.
 
 ## Autonomous decisions
 
-[ClanWars] configures the system. The default declaration threshold is 40/100,
-shifted within 35–45 by leader caution and assertiveness. At least three distinct
+[ClanWars] configures the system. The default declaration threshold is 25/100,
+shifted within 20–30 by leader caution and assertiveness. At least three distinct
 harm episodes within three days are also required. The leader needs available
 generated members, while the native level, roster, alliance and authority checks
 remain authoritative. A declaration is possible without knowing the enemy's
