@@ -60,6 +60,9 @@ deaths outside military parties and one-sided-war PK. Captured clan identities
 survive later membership changes; repeated journal facts are idempotent. Rejected
 attacks, previews, PvE deaths, roster changes and retreats without deaths add no
 casualties.
+Diplomatic reviews refresh their clock after military processing and evaluate
+the combat query's time window when the queued read actually runs, including
+newly flushed battles. Arena participants never refresh the world-war clock.
 
 At least three deaths across three different members trigger a loss response.
 Leader assertiveness, commitment, ambition and caution are weighed against the
@@ -145,6 +148,11 @@ sales wait until the order is cleared, including during an overdue return.
 Only one supply absence is reserved at a time; the returning member rejoins the
 same operation and its military roster limit. An ended/replaced operation
 releases the supply ticket instead of assigning an unrelated clan duty.
+The ticket also fences the item at town selection and at the NPC, store and
+meeting transaction boundaries. A supplier buys only its reserved consumable;
+changed gear/material goals and expired tickets are refused before debit. Once
+the purchase finishes or is unavailable, the member returns physically instead
+of continuing town errands, listings, crafting or a second shopping batch.
 
 ## Inspection and tests
 

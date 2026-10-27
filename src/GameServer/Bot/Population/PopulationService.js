@@ -3387,7 +3387,9 @@ const PopulationService = {
             return { ok: true, state: updatedState, debug: result.debug };
         }
         const tripEdge = CombinedErrands.edge(state, updatedState, result);
-        return invoke('GameServer/Bot/Economy/CraftWorkshopService').review(updatedState)
+        const preparation = updatedState.stats?.partyMarketReturn?.warOperationId
+            ? Promise.resolve({ state: updatedState })
+            : invoke('GameServer/Bot/Economy/CraftWorkshopService').review(updatedState)
             .then(workshopState => ColdShotEconomyService.review(workshopState, Date.now(), { edge: tripEdge }))
             .then((shotEconomy) => ColdWealthCraftService.tryCraft(shotEconomy.state || updatedState))
             .then(async (wealthCraft) => {
@@ -3395,8 +3397,8 @@ const PopulationService = {
                 const released = invoke('GameServer/Bot/Economy/BotImprovementService').inTown(current)
                     ? await BotWarehouse.releaseCold(current, { inTown: true }) : { state: current };
                 return ColdMarketListingService.resolve(LifeState.cachedState(current.characterId) || released.state || current);
-            })
-            .then((marketLifecycle) => GoalService.currentForMarket(marketLifecycle.state, {
+            });
+        return preparation.then((marketLifecycle) => GoalService.currentForMarket(marketLifecycle.state, {
                 spot: SpotProfiles.findById(marketLifecycle.state.stats?.marketReturn?.spotId) || spot
             })
                 .then((goalSnapshot) => (heldVisit(marketLifecycle.state)
@@ -3427,6 +3429,10 @@ const PopulationService = {
         // 500 ms at most): its row is the actor's now; nothing cold is written over it.
         const hotRow = LifeState.hotRow(purchasedState.characterId);
         if (hotRow) return hotRow;
+        if (purchasedState.stats?.partyMarketReturn?.warOperationId) {
+            const returning = GoalExecutor.finishMarketVisit(purchasedState, Date.now(), { recoverMissingReturn: true });
+            return returning ? LifeState.upsertState(returning, 'war_supply_return').then(saved => saved || returning) : purchasedState;
+        }
         if (marketResult.purchased) {
             exchangeWaits.delete(Number(purchasedState.characterId));
             const batchState = {

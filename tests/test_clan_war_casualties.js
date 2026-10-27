@@ -9,7 +9,7 @@ const { ClanWarDirector } = require('../src/GameServer/Clan/ClanWarDirector');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'l2-war-casualties-'));
 options.default.Database.path = path.join(dir, 'world.sqlite');
 const at = Date.now(), HOUR = 3600000;
-let director, traits = { assertiveness: 1, commitment: 1, ambition: 1, caution: 0 };
+let director, clock = at, traits = { assertiveness: 1, commitment: 1, ambition: 1, caution: 0 };
 const aggressive = { ...traits }, cautious = { assertiveness: 0, commitment: 0.2, ambition: 0, caution: 1 };
 const actor = (id, clanId) => ({ fetchId: () => id, fetchClanId: () => clanId, fetchLevel: () => 40, fetchKarma: () => 0 });
 const casualty = (victimId, stamp = at) => Journal.hotKill({ attacker: actor(51, 20), victim: actor(victimId, 10),
@@ -47,6 +47,10 @@ async function run() {
     await DB.flushJournals();
     let pressure = await DB.fetchClanWarPressure(10, at - HOUR, at);
     assert.deepEqual(pressure, [{ enemyClanId: 20, losses: 3, kills: 0, victims: 3, combatAt: at }]);
+    let queryAt = at;
+    const delayedRead = DB.fetchClanWarPressure(10, () => queryAt - HOUR, () => queryAt);
+    queryAt = at + HOUR + 1;
+    assert.deepEqual(await delayedRead, [], 'queued combat reads evaluate the rolling window when the read executes');
     assert.equal((await DB.fetchClanWarPressure(20, at - HOUR, at))[0].kills, 3, 'both clans see the same committed deaths');
     await DB.execute(['UPDATE characters SET clanId=0 WHERE id=3']);
     assert.equal((await DB.fetchClanWarPressure(10, at - HOUR, at))[0].victims, 3, 'later membership changes cannot reassign casualties');
@@ -68,7 +72,7 @@ async function run() {
     director = new ClanWarDirector({ database: DB, clans: Clans, war: War, social: { clans: new Map() },
         life: { cachedState: id => states.find(s => s.characterId === id), subscribePublications: () => () => {} },
         parties: { admitted: () => [], active: () => [] }, personaFor: () => ({ traits }), form: async () => assert.fail('no unwitnessed deployment'),
-        now: () => at, memory: {}, actions: {} });
+        now: () => clock, memory: {}, actions: {} });
     await director.start();
     assert.equal(director.inspect().policy.quietWithdrawMs, HOUR, 'Observer exposes the actual running withdrawal interval');
     states.forEach(s => director.index(s, s.characterId));
@@ -123,12 +127,14 @@ async function run() {
     director.plans.get(10).combatAt = {}; resetReview();
     Journal.coldConflict({ key: 'no-kill-battle', fought: true, partyIds: [null, null], sideSizes: [1, 1],
         principals: [{ characterId: 51, stats: { clanId: 20 } }, { characterId: 1, stats: { clanId: 10 } }],
-        outcome: 'retreated', actions: 12, at: at + HOUR / 2 });
+        outcome: 'retreated', actions: 12, at: at + HOUR + 1001 });
+    clock = at + HOUR + 1001;
     await director.review(Clans.findById(10), at + HOUR + 1000);
-    assert(War.view.between(10, 20).outgoing, 'a recent actual battle postpones quiet withdrawal');
+    assert(War.view.between(10, 20).outgoing, 'a battle completed after pulse start postpones quiet withdrawal for the defending clan');
     assert.equal(Journal.snapshot().length, 0, 'the review includes a just-ended battle before the periodic journal flush');
     assert.equal(director.plans.get(10).warPressure[0].losses, 0, 'no-kill battles and retreats are not casualties');
-    resetReview(); await director.review(Clans.findById(10), at + HOUR * 1.5 + 1000);
+    clock += HOUR + 1;
+    resetReview(); await director.review(Clans.findById(10), clock);
     assert.equal(director.plans.get(10).lastDecision.reason, 'conflict_cooled');
     assert.equal(War.view.between(10, 20).outgoing, false, 'one hour of actual quiet ends the declaration');
     const UI = require('../src/WorldObserver/public/clanWars');

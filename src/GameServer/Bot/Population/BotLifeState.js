@@ -506,6 +506,8 @@ function inventoryAdena(inventory) {
 
 function marketPurchaseBlocker(state = {}, offer = {}, qty = 1) {
     const selfId = Number(offer?.selfId || 0);
+    const warBlocker = require('./PartyMarketBreak').warSupplyPurchaseBlocker(state, selfId);
+    if (warBlocker) return warBlocker;
     const count = Number(qty);
     const template = itemTemplate(selfId);
     if (!template || !Number.isSafeInteger(count) || count <= 0) return null;

@@ -94,6 +94,8 @@ class ClanWarDirector {
     ownMembers(clan, at) { return clan.members.map(m => this.states.get(m.id)).filter(s => Policy.available(s, at)); }
     actor(clan) { return { fetchId: () => clan.leaderId, fetchClanId: () => this.clans.clanOfMember(clan.leaderId)?.id || 0 }; }
     async review(clan, at) {
+        // maintain() may have finished a fight since this pulse started.
+        at = Math.max(at, this.now());
         const previous = this.plans.get(clan.id) || { revision: 0, intel: [] };
         if (at < Number(previous.nextReviewAt || 0)) return;
         const plan = { ...previous, intel: this.observe(clan, previous.intel, at), nextReviewAt: at + Config.reviewMs };
@@ -105,7 +107,11 @@ class ClanWarDirector {
             target: this.clans.findById(row.targetId), feeling: Policy.grievance({ ...row,
                 evidence: [...(row.evidence || []), ...histories.filter(e => e.subjectClanId === row.targetId)] }, traits, at, Config) }))
             .filter(r => r.target).sort((a, b) => b.feeling.hostility - a.feeling.hostility);
-        const pressure = await this.database.fetchClanWarPressure?.(clan.id, at - Config.lossWindowMs, at) || [];
+        const currentTime = () => Math.max(at, this.now());
+        const pressure = await this.database.fetchClanWarPressure?.(clan.id,
+            () => currentTime() - Config.lossWindowMs, currentTime) || [];
+        at = currentTime();
+        plan.nextReviewAt = at + Config.reviewMs;
         plan.warPressure = pressure.filter(p => this.war.view.between(clan.id, p.enemyClanId).status !== 'neutral');
         plan.lossResponse = null;
         const readyMembers = clan.members.map(m => this.states.get(m.id)).filter(s => Policy.available(s, at, { allowHot: true })).length;

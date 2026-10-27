@@ -2442,6 +2442,15 @@ function equipColdPurchaseUnsafe(characterId, step, itemId, autoEquip, heldItemI
     return { ids: [...ids], patch };
 }
 
+function checkWarSupplyPurchaseUnsafe(characterId, itemId, source = null) {
+    const row = source || one('SELECT statsJson,mindJson FROM bot_life_state WHERE characterId=?', [characterId]);
+    if (!row) return;
+    const reason = require('./GameServer/Bot/Population/PartyMarketBreak').warSupplyPurchaseBlocker({
+        stats: SavedStats.merge(row.statsJson, row.mindJson)
+    }, itemId, now());
+    if (reason) throw Error(reason);
+}
+
 function checkEconomyFundingUnsafe(characterId, step, amount, funding = {}, walletOverride = null, packetOverride = null) {
     if (!step) return;
     const stats = SavedStats.merge(step.row.statsJson, step.row.mindJson), packet = packetOverride || stats.money;
@@ -5273,6 +5282,7 @@ const Database = {
             if (!line || Number(line.count) < quantity) throw new Error('afk_trade_stock_changed');
             if (details.expectedPrice !== undefined && Number(details.expectedPrice) !== Number(line.price)) throw new Error('afk_trade_price_changed');
             if (details.expectedRevision !== undefined && Number(details.expectedRevision) !== Number(shop.revision)) throw new Error('afk_trade_shop_changed');
+            checkWarSupplyPurchaseUnsafe(buyerId, line.selfId, step?.row);
             const total = Number(line.price) * quantity;
             if (!Number.isSafeInteger(total) || total < 0) throw new Error('invalid_afk_trade_total');
             checkEconomyFundingUnsafe(buyerId, step, total, { ...details.funding, itemId: line.selfId });
@@ -7666,6 +7676,7 @@ const Database = {
                     if (!quote || Number(quote.price) !== price
                         || !require('./GameServer/Bot/Economy/ProductionPolicy').allowsNpcShot(itemId)) throw Error('npc_quote_changed');
                 }
+                checkWarSupplyPurchaseUnsafe(characterId, itemId, step?.row);
                 const stackable = line.stackable === undefined ? !!template?.etc?.stackable : !!line.stackable;
                 const slot = line.slot === undefined ? Number(template?.etc?.slot || 0) : Number(line.slot);
                 // Stack quantities come from the funded missing need. They use
@@ -11097,6 +11108,7 @@ const TradeMeetings = require('./GameServer/AfkTrade/TradeMeeting').create({
         if (!Number.isSafeInteger(bag + pending + count)) throw Error('trade_meeting_integer');
         return creditRecordOwnerUnsafe(owner, item, count, at);
     }, funding: checkEconomyFundingUnsafe,
+    canReceive: (id, life, itemId) => checkWarSupplyPurchaseUnsafe(id, itemId, life),
     protection: (id, step, selfId, used) => checkEconomyMaterialProtectionUnsafe(id, step, selfId, used, true),
     position: tradeMeetingPositionUnsafe,
     canStartTrade: (id, state) => require('./GameServer/Bot/Population/PartyAdmission').partyTradeAllowed(

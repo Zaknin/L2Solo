@@ -67,5 +67,16 @@ Risk.backoffForStates = () => { throw new Error('must not apply solo bans to a c
     const held = await Service.resolveColdState(warArrival);
     assert.strictEqual(held.reason, 'party_return_retry', 'an existing hot military party keeps its supply return pending');
     assert.strictEqual(held.state.stats.partyMarketReturn.warOperationId, 'active-war');
+    party.status = 'active';
+    const shopping = { ...returning, stats: { ...returning.stats, partyMarketReturn: warToken, townVisit: { completed: false } } };
+    for (const marketResult of [{ purchased: true }, { purchased: false, reason: 'war_supply_only' }]) {
+        const home = await Service.finishColdMarketStep(shopping, null, null, null, { state: shopping }, { ...marketResult, state: shopping }, null);
+        assert.strictEqual(home.activity, 'traveling', 'a military supply visit returns instead of continuing gear purchases or town errands');
+        assert.deepStrictEqual(home.stats.travel.to, leader.loc);
+        assert.strictEqual(home.stats.travel.arrivalActivity, 'party_wait');
+        assert.strictEqual(home.stats.partyMarketReturn.warOperationId, 'active-war');
+    }
+    assert.strictEqual(Service.finishColdMarketStep(shopping, null, null, null, { state: shopping }, { state: shopping, pending: true }, null), shopping,
+        'a supply deal already in progress retains ownership until it completes');
     console.log('Clan market return: live rendezvous, solo risk isolation, same-party return and dissolved-party waiting passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

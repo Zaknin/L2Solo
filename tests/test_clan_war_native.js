@@ -60,6 +60,23 @@ try {
         ReceivedHit(killer.session, actor(101, 20), 30);
         assert.equal(kills.length, beforeExcluded, 'arena deaths do not become clan casualties');
     } finally { arena.suppressConsequences = suppress; }
+    {
+        const Service = invoke('GameServer/World/ArenaDuelService'), original = Service.duelForActor, previous = War.view.all();
+        const human = actor(501, 10), clone = actor(502, 20), stamp = Date.now() - 1000;
+        const duel = { state: 'FIGHTING', player: human, bot: clone };
+        try {
+            War.view.accept({ fromClanId: 20, toClanId: 10, active: 1, revision: 4 });
+            War.recordCombat(human, clone, stamp);
+            clone.session.arenaEphemeral = true; human.session.arenaDuelId = 'war-clock-test';
+            Service.duelForActor = a => [human, clone].includes(a) ? duel : null;
+            assert(arena.canInteract(human, clone) && arena.suppressConsequences(human, clone));
+            ReceivedHit(human.session, clone, 30);
+            assert.equal(War.combatAt(10, 20), stamp, 'an actual arena hit cannot extend the world war clock');
+            War.recordCombat(human, clone, stamp + 500);
+            assert.equal(War.combatAt(10, 20), stamp, 'the war runtime also rejects direct arena contacts');
+            assert.equal(kills.length, beforeExcluded);
+        } finally { Service.duelForActor = original; War.view.replace(previous); }
+    }
     const Start = invoke('GameServer/Bot/AI/BotClanWar'), Threats = invoke('GameServer/Bot/AI/BotPvpThreats');
     const Risk = invoke('GameServer/Bot/AI/BotPvpRisk'), World = invoke('GameServer/World/World');
     const attacker = actor(9, 10), enemy = actor(10, 20), tagged = actor(11, 10), neutral = actor(12, 30), human = actor(13, 10);

@@ -37,16 +37,24 @@ function clanDuty(party) {
 }
 // The order owns the roster through its physical return, even after expiry.
 const warDuty = party => !!party?.stats?.warOperation;
-function warSupplyGoal(current) {
-    const purchase = current?.type === 'buy_craft_material' && current.plan?.expectedBenefit === 'market_buy_craft_material'
-        || current?.type === 'market_errand' && current.plan?.expectedBenefit === 'market_errand';
-    const id = Number(current?.target?.itemId), amount = Number(current?.target?.amount);
-    if (!purchase || !Number.isSafeInteger(amount) || amount <= 0) return false;
+function warSupplyItem(id) {
     // Check the actual item, never a wish/errand label that can name crafting
     // inputs or equipment. Enchant scrolls are not combat supplies.
     if (invoke('GameServer/Inventory/ShotStock').SHOT_IDS.includes(id) || id === 736 || id === 737) return true;
     const item = require('../../Item/ItemTemplateIndex').find(invoke('GameServer/DataCache').items, id);
     return ['Other.Arrow', 'Other.Potion'].includes(item?.template?.kind);
+}
+function warSupplyGoal(current) {
+    const purchase = current?.type === 'buy_craft_material' && current.plan?.expectedBenefit === 'market_buy_craft_material'
+        || current?.type === 'market_errand' && current.plan?.expectedBenefit === 'market_errand';
+    const id = Number(current?.target?.itemId), amount = Number(current?.target?.amount);
+    return !!purchase && Number.isSafeInteger(amount) && amount > 0 && warSupplyItem(id);
+}
+function warSupplyPurchaseBlocker(state, itemId, now = Date.now()) {
+    const ticket = state?.stats?.partyMarketReturn;
+    if (!ticket?.warOperationId) return null;
+    if (!(Number(ticket.until) > now)) return 'war_supply_expired';
+    return Number(ticket.supplyItemId) === Number(itemId) && warSupplyItem(Number(itemId)) ? null : 'war_supply_only';
 }
 function pending(party, now = Date.now()) {
     return Object.values(party?.stats?.marketAbsences || {}).filter(value => Number(value.until) > now);
@@ -118,5 +126,5 @@ function ready(state) {
         && !state.stats?.travel && !state.stats?.marketReturn
         && ['hunting', 'party_wait', 'grouped'].includes(state.activity);
 }
-module.exports = { cleanupNeed, forcedCleanupNeed, withoutStartedTrip, clanDuty, warDuty, warSupplyGoal, pending, sessionReady, memberNeed,
+module.exports = { cleanupNeed, forcedCleanupNeed, withoutStartedTrip, clanDuty, warDuty, warSupplyGoal, warSupplyPurchaseBlocker, pending, sessionReady, memberNeed,
     allowed, goal, departure, stats, ready };

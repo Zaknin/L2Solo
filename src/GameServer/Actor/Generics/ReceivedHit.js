@@ -113,7 +113,8 @@ function receivedHit(session, actor, hit, options = {}) {
     const ArenaCombatRules = invoke('GameServer/World/ArenaCombatRules');
     if (source && source !== actor && !ArenaCombatRules.canInteract(source, actor)) return;
     if (Number(hit) > 0) {
-        if (Number(actor.fetchClanId?.()) > 0 && (Number(source?.fetchClanId?.()) > 0 || Number(source?.fetchOwnerId?.()) > 0)) {
+        if (!ArenaCombatRules.suppressConsequences(source, actor) && Number(actor.fetchClanId?.()) > 0
+            && (Number(source?.fetchClanId?.()) > 0 || Number(source?.fetchOwnerId?.()) > 0)) {
             invoke('GameServer/Clan/ClanWarRuntime').recordCombat(source, actor);
         }
         const threats = invoke('GameServer/Bot/AI/BotPvpThreats');

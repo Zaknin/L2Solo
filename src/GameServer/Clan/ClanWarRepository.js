@@ -47,7 +47,8 @@ function create({ one, all, write, enqueue, inTransaction, withCharacterFlushes,
             // was quiet. Flush only when this clan has pending actual combat.
             const pending = require('../../PvpJournal').snapshot().some(r => r.warFacts?.some(f => f.fromClanId === clanId || f.toClanId === clanId));
             return (pending ? flushJournals() : Promise.resolve()).then(() =>
-                enqueue(() => require('./ClanWarCombat').pressure(all, clanId, since, until),
+                enqueue(() => require('./ClanWarCombat').pressure(all, clanId,
+                    typeof since === 'function' ? since() : since, typeof until === 'function' ? until() : until),
                     { operation: 'clan-war:pressure', read: true }));
         },
         saveClanWarPlan(clanId, expectedRevision, state) {

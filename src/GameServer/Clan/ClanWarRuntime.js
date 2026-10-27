@@ -34,6 +34,8 @@ function clanId(subject) {
 }
 const between = (a, b) => view.between(clanId(a), clanId(b));
 function recordCombat(a, b, at = Date.now()) {
+    if (invoke('GameServer/World/ArenaCombatRules').isArenaParticipant(a)
+        || invoke('GameServer/World/ArenaCombatRules').isArenaParticipant(b)) return;
     const from = clanId(a), to = clanId(b);
     if (!view.between(from, to).mutual) return;
     const key = Rules.pairKey(from, to);
