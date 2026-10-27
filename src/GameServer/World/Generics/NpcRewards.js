@@ -37,6 +37,15 @@ function spawnGroundDrop(world, session, npc, selfId, amount) {
         // group's nearby drop as its own recovery work.
         partyLootLeaderId: Number(leaderSession?.actor?.fetchId?.() || 0)
     }, (item) => {
+        if (!isBotSession(session) && session?.actor && typeof world.pickupItem === 'function') {
+            try {
+                if (world.pickupItem(session, session.actor, item) === true) {
+                    return;
+                }
+            } catch (error) {
+                utils.infoWarn('GameServer', 'Auto loot: %s', error.message);
+            }
+        }
         PartyCompanionService.queueRandomGroundPickup(session, item);
     });
 }
@@ -64,3 +73,4 @@ function npcRewards(session, npc) {
 }
 
 module.exports = npcRewards;
+module.exports.spawnGroundDrop = spawnGroundDrop;
