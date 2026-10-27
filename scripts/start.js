@@ -382,6 +382,9 @@ async function runLlmInferenceTest() {
 }
 
 function observerUrl() {
+    if (process.env.L2NODE_OBSERVER_PUBLIC_URL) {
+        return process.env.L2NODE_OBSERVER_PUBLIC_URL;
+    }
     const config = readConfig().WorldObserver || {};
     const observerHost = config.hostname === '0.0.0.0' ? '127.0.0.1' : (config.hostname || '127.0.0.1');
     const observerPort = Number(config.port || 8088);
