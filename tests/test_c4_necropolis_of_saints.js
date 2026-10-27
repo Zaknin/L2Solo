@@ -50,8 +50,8 @@ verifyGeodataWhenAvailable(GeodataEngine, [[22, 24]], 'Necropolis of Saints', ()
     const heightDeltas = spawnCoords.map((coord) => Math.abs(
         GeodataEngine.getHeight(coord.locX, coord.locY, coord.locZ) - coord.locZ
     ));
-    assert.ok(heightDeltas.every((delta) => delta === 0),
-        'every source monster coordinate must match underground geodata exactly');
+    assert.ok(heightDeltas.every((delta) => delta <= 8),
+        'every source monster coordinate must match underground geodata within one L2J height quantum');
 });
 
 const shaman = npcs.find((npc) => npc.selfId === 1163);

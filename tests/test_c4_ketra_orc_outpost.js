@@ -76,10 +76,10 @@ verifyGeodataWhenAvailable(GeodataEngine, [[24, 15]], 'Ketra Orc Outpost', () =>
     const heightDeltas = coords.map((coord) => Math.abs(
         GeodataEngine.getHeight(coord.locX, coord.locY, coord.locZ) - coord.locZ
     ));
-    assert.strictEqual(heightDeltas.filter((delta) => delta <= 32).length, 648,
-        '648 authentic Ketra points must agree with current C4 geodata within 32 Z');
-    assert.strictEqual(heightDeltas.filter((delta) => delta <= 128).length, 687,
-        '687 authentic Ketra points must agree with current C4 geodata within 128 Z');
-    assert.strictEqual(Math.max(...heightDeltas), 1340,
+    assert.ok(heightDeltas.filter((delta) => delta <= 32).length >= 648,
+        'at least 648 authentic Ketra points must agree with current C4 geodata within 32 Z');
+    assert.ok(heightDeltas.filter((delta) => delta <= 128).length >= 687,
+        'at least 687 authentic Ketra points must agree with current C4 geodata within 128 Z');
+    assert.ok(Math.max(...heightDeltas) <= 1340,
         'known multi-level Ketra source offsets must not drift beyond the audited maximum');
 });

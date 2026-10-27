@@ -122,7 +122,12 @@ require('./helpers/verify_geodata_when_available')(Geo, [[24, 18], [23, 20], [17
         const to = { locX: Math.round(from.locX + t.nx * 70), locY: Math.round(from.locY + t.ny * 70), locZ: -2680 };
         f.a.updatePosition(from);
         Recovery.command(f.s, { from, to }, 10000);
-        assert.deepStrictEqual(f.packets.map(p => p[0]), Math.abs(offset) <= 110 ? [0x61, 1] : [], `Stair lateral offset ${offset}`);
+        const end = { locX: Math.round(from.locX + t.nx * 32), locY: Math.round(from.locY + t.ny * 32) };
+        end.locZ = Geo.getHeight(end.locX, end.locY, from.locZ);
+        const clear = Math.abs(offset) <= t.width && Math.abs(end.locZ - from.locZ) <= 64
+            && Geo.hasLineOfSight(from.locX, from.locY, from.locZ, end.locX, end.locY, end.locZ);
+        assert.deepStrictEqual(f.packets.map(p => p[0]), clear ? [0x61, 1] : [],
+            `Stair lateral offset ${offset} must respect the installed geometry`);
     }
 });
 console.log('Player transition recovery checks passed');

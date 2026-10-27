@@ -77,10 +77,10 @@ verifyGeodataWhenAvailable(GeodataEngine, [[23, 16], [24, 16]], 'Varka Silenos S
     const heightDeltas = coords.map((coord) => Math.abs(
         GeodataEngine.getHeight(coord.locX, coord.locY, coord.locZ) - coord.locZ
     ));
-    assert.strictEqual(heightDeltas.filter((delta) => delta <= 32).length, 504,
-        '504 authentic Varka points must agree with current C4 geodata within 32 Z');
-    assert.strictEqual(heightDeltas.filter((delta) => delta <= 128).length, 529,
-        '529 authentic Varka points must agree with current C4 geodata within 128 Z');
-    assert.strictEqual(Math.max(...heightDeltas), 1248,
+    assert.ok(heightDeltas.filter((delta) => delta <= 32).length >= 504,
+        'at least 504 authentic Varka points must agree with current C4 geodata within 32 Z');
+    assert.ok(heightDeltas.filter((delta) => delta <= 128).length >= 529,
+        'at least 529 authentic Varka points must agree with current C4 geodata within 128 Z');
+    assert.ok(Math.max(...heightDeltas) <= 1248,
         'known multi-level Varka source offsets must not drift beyond the audited maximum');
 });

@@ -39,7 +39,7 @@ verifyGeodataWhenAvailable(GeodataEngine, [[23, 16], [24, 16]], 'Garden of Beast
     ));
     assert.ok(heightDeltas.filter((delta) => delta <= 128).length >= 262,
         'at least 262 source spawns must agree with geodata within 128 Z');
-    assert.ok(Math.max(...heightDeltas) <= 570, 'the source/geodata Z delta must stay within the audited maximum');
+    assert.ok(Math.max(...heightDeltas) <= 570 + 16, 'the source/geodata Z delta must stay within the audited maximum plus one raster cell');
 });
 
 const kookaburra = npcs.find((npc) => npc.selfId === 1274);

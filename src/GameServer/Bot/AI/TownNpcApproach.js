@@ -1,5 +1,6 @@
 const GeodataEngine = invoke('GameServer/Geodata/GeodataEngine');
 const Slots = invoke('GameServer/Bot/AI/TownNpcSlots');
+const InteractionGeometry = invoke('GameServer/Geodata/NpcInteractionGeometry');
 
 const STAGING_DISTANCE = 240;
 const INTERACTION_DISTANCE = 72;
@@ -18,6 +19,7 @@ const OPEN_APPROACH_SPREAD_STEPS = 9;
 const OPEN_APPROACH_SPREAD_ANGLE = Math.PI / 12;
 const MAX_INTERACTION_DISTANCE = 300;
 const INTERACTION_SEARCH_DISTANCES = Object.freeze([INTERACTION_DISTANCE, 48, 32]);
+const COUNTER_SEARCH_DISTANCES = Object.freeze([INTERACTION_DISTANCE, 96, 120, 48, 32]);
 const INTERACTION_SEARCH_STEPS = 32;
 const POINT_CACHE_LIMIT = 256;
 
@@ -76,6 +78,28 @@ function hasLineOfSight(from, to) {
     );
 }
 
+// A blocked NSWE edge is opaque unless matching client collision triangles
+// independently prove a clear conversation ray over the counter.
+function hasInteractionLineOfSight(from, to) {
+    if (hasLineOfSight(from, to)) return true;
+    if (!from || !to || distance2d(from, to) > 144
+        || Math.abs(from.locZ - to.locZ) > 16
+        || !GeodataEngine.hasGeo(from.locX, from.locY)
+        || !GeodataEngine.hasGeo(to.locX, to.locY)) return false;
+    const steps = Math.max(1, Math.ceil(distance2d(from, to) / 4));
+    for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const x = from.locX + (to.locX - from.locX) * t;
+        const y = from.locY + (to.locY - from.locY) * t;
+        const z = from.locZ + (to.locZ - from.locZ) * t;
+        const region = `${(x >> 15) + 20}_${(y >> 15) + 18}`;
+        if (GeodataEngine.checkVirtualObstacles(x, y, region)) return false;
+        const floor = GeodataEngine.getCellData(x, y, z).z;
+        if (floor >= z + 48 || floor < z - 64) return false;
+    }
+    return InteractionGeometry.canSee(from, to);
+}
+
 function reachableCounterSlot(staging, interaction) {
     // NPC visibility may start inside the counter. Validate the actual A*
     // arrival cells from the accessible staging side, not from that endpoint.
@@ -132,17 +156,26 @@ function pointsFor(target) {
     const cached = pointCache.get(key);
     if (cached) return cached;
 
-    for (const distance of INTERACTION_SEARCH_DISTANCES) {
+    let visibleFallback = null;
+    for (const distance of COUNTER_SEARCH_DISTANCES) {
         for (const angleOffset of SEARCH_OFFSETS) {
             const interaction = projectedPoint(target, distance, angleOffset);
-            if (!hasLineOfSight(interaction, target)) continue;
+            if (!hasInteractionLineOfSight(interaction, target)) continue;
+            const staging = projectedPoint(target, STAGING_DISTANCE, angleOffset);
+            visibleFallback ||= { staging: Object.freeze({ ...staging }), interaction: Object.freeze({ ...interaction }) };
+            // Visibility alone can select a roof or a disconnected counter side.
+            const stagingZ = GeodataEngine.getHeight(staging.locX, staging.locY, staging.locZ);
+            if (Math.abs(stagingZ - staging.locZ) > 64) continue;
+            staging.locZ = stagingZ;
+            if (!reachableCounterSlot(staging, interaction)) continue;
             return cachePoints(key, Object.freeze({
-                staging: Object.freeze(projectedPoint(target, STAGING_DISTANCE, angleOffset)),
+                staging: Object.freeze(staging),
                 interaction: Object.freeze(interaction)
             }));
         }
     }
 
+    if (visibleFallback) return cachePoints(key, Object.freeze(visibleFallback));
     return cachePoints(key, Object.freeze({
         staging: Object.freeze(projectedPoint(target, STAGING_DISTANCE)),
         interaction: Object.freeze(projectedPoint(target, INTERACTION_DISTANCE))
@@ -253,23 +286,23 @@ function plan(session, bot, target, kind = 'town_npc') {
                     locY: Math.round(point.locY + dx / length * offset), locZ: point.locZ
                 });
                 const interaction = shift(base.interaction), staging = shift(base.staging);
-                if (hasLineOfSight(interaction, target) && hasLineOfSight(base.interaction, interaction)
+                if (hasInteractionLineOfSight(interaction, target) && hasLineOfSight(base.interaction, interaction)
                     && hasLineOfSight(base.staging, staging)
                     && reachableCounterSlot(staging, interaction)) candidates.push({ interaction, staging });
             }
             return candidates;
-        }, actorId);
+        }, distance2d(botPoint, base.interaction) <= INTERACTION_READY_RADIUS ? 0 : actorId);
         if (!points) return { ready: false, waiting: true };
     } else Slots.release(session);
 
     const interactionDistance = distance2d(botPoint, points.interaction);
-    const targetVisible = hasLineOfSight(botPoint, target);
+    const targetVisible = hasInteractionLineOfSight(botPoint, target);
     // Shop counters often end on the next geodata cell: A* can reach the cell
     // beside a validated front-side interaction point, while LOS from that
     // cell still clips the counter edge. Accept only that tight final gap;
     // the wider conversational tolerance continues to require direct LOS.
     const reachedValidatedCounterEdge = interactionDistance <= INTERACTION_ARRIVAL_RADIUS
-        && hasLineOfSight(points.interaction, target);
+        && hasInteractionLineOfSight(points.interaction, target);
     const ready = state.phase === 'interaction'
         && interactionDistance <= INTERACTION_READY_RADIUS
         && Math.abs(botPoint.locZ - points.interaction.locZ) <= 64
@@ -367,6 +400,7 @@ module.exports = {
     STAGING_READY_RADIUS,
     normalizedHeading,
     hasLineOfSight,
+    hasInteractionLineOfSight,
     plan,
     planOpen,
     openPointFor,
